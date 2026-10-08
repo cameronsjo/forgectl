@@ -10,6 +10,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -382,7 +383,10 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("resolve codex binary: %w", err)
 	}
-	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
+	resolved, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile := launch.Profile{
 		Harness:        "codex",
 		ApprovalPolicy: "never",
@@ -506,7 +510,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// mode) would let the review agent ignore the deny-by-default allowlist
 	// passed with --settings — the whole clean-room control. Force the safe
 	// posture here.
-	profile := launch.Resolve(cfg.Launch, sess.Workspace)
+	profile, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
 	// Refuse every DISCOVERED MCP configuration. The workspace is a third
@@ -780,7 +787,14 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 // interactive form); PostReview only calls it when isTTY reports true.
 func confirmReview(review string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := confirmReviewForm(review, th, &ok).Run()
+	return ok, err
+}
+
+// confirmReviewForm builds the form, split out so a test can feed it keys. It takes
+// keymap.Cancel so Esc cancels it as Ctrl+C does.
+func confirmReviewForm(review string, th theme.Theme, ok *bool) *huh.Form {
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Drafted review — approve before posting?").
@@ -789,8 +803,7 @@ func confirmReview(review string, th theme.Theme) (bool, error) {
 				Title("Post this review to the PR?").
 				Affirmative("Post").
 				Negative("Cancel").
-				Value(&ok),
+				Value(ok),
 		),
-	).WithTheme(th.Huh()).Run()
-	return ok, err
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }

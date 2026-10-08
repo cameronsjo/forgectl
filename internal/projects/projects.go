@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	neturl "net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/redact"
@@ -109,7 +111,11 @@ func sortProjects(projects []Project) {
 // Client discovers and opens local project directories.
 type Client struct {
 	Dir string
-	run exec.Runner
+	// rootErr is why Dir is empty when New could not resolve the projects
+	// root, so discovery and name lookup can say why instead of reporting an
+	// empty directory missing.
+	rootErr error
+	run     exec.Runner
 
 	// gitBin is resolved once when New constructs the client. Every status
 	// probe and the pull it authorizes use this same value, so a later PATH
@@ -231,18 +237,28 @@ func withGitLookPath(fn func(string) (string, error)) Option {
 
 // ResolveRoot returns the projects root: $PROJECTS_DIR (a leading ~/ is
 // expanded), else ~/Projects. It is what [New] uses, exported so a caller that
-// only needs the directory does not build a Client.
-func ResolveRoot() string {
+// only needs the directory does not build a Client. The home directory is
+// looked up only when the answer needs it, so an absolute $PROJECTS_DIR
+// resolves even where no home exists; when the lookup is needed and fails it
+// returns an error rather than a root relative to the working directory.
+func ResolveRoot() (string, error) {
+	return resolveRoot(os.UserHomeDir)
+}
+
+// resolveRoot is ResolveRoot with the home lookup injected.
+func resolveRoot(userHome func() (string, error)) (string, error) {
 	dir := os.Getenv("PROJECTS_DIR")
-	home, _ := os.UserHomeDir()
-	switch {
-	case dir == "":
-		return filepath.Join(home, "Projects")
-	case strings.HasPrefix(dir, "~/"):
-		return filepath.Join(home, dir[2:])
-	default:
-		return dir
+	if dir != "" && !strings.HasPrefix(dir, "~/") {
+		return dir, nil
 	}
+	home, err := userHome()
+	if err != nil {
+		return "", fmt.Errorf("resolving projects root: %w", err)
+	}
+	if dir == "" {
+		return filepath.Join(home, "Projects"), nil
+	}
+	return filepath.Join(home, dir[2:]), nil
 }
 
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
@@ -250,13 +266,25 @@ func ResolveRoot() string {
 // It also resolves git exactly once to an absolute path; a lookup failure is
 // retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
-	c := &Client{Dir: ResolveRoot(), run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
+	return newWithRoot(run, ResolveRoot, opts...)
+}
+
+// newWithRoot is New with the root resolution injected.
+func newWithRoot(run exec.Runner, resolve func() (string, error), opts ...Option) *Client {
+	// A failed root resolution leaves Dir empty and keeps the cause: discovery
+	// and name lookup report it, and Placement refuses an empty root, so
+	// nothing resolves against the working directory.
+	root, rootErr := resolve()
+	if rootErr != nil {
+		slog.Warn("Failed to resolve projects root.", "error", rootErr)
+	}
+	c := &Client{Dir: root, rootErr: rootErr, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}
 	if !c.gitPinned {
 		c.gitPinned = true
-		if path, err := c.lookPath("git"); err == nil {
+		if path, err := c.lookPath(gitenv.Bin); err == nil {
 			if abs, err := filepath.Abs(path); err == nil {
 				c.gitBin = abs
 			}
@@ -304,8 +332,50 @@ type discoverCandidate struct {
 // discoverConcurrency() workers. Splitting it this way keeps the cheap walk
 // serial and simple while parallelizing only the part that's actually slow.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
-	if _, err := os.Stat(dir); err != nil {
-		return nil, fmt.Errorf("projects directory not found: %s", termsafe.QuotePath(dir))
+	if dir == "" && c.rootErr != nil {
+		return nil, termsafe.Error(c.rootErr)
+	}
+	candidates, err := discoverCandidates(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	projects := fanOut(candidates, func(cand discoverCandidate) Project {
+		return c.discoverProject(ctx, cand.name, cand.dir)
+	})
+
+	sortProjects(projects)
+	return projects, nil
+}
+
+// LocalNames returns the name of every project Discover would list under dir,
+// sorted and de-duplicated, from discovery's filesystem walk alone: no git
+// status probe, no subprocess, no network. It is the hub's argument-picker
+// source (forgectl#730), which must open instantly and stay local. A missing
+// or unreadable dir yields nil.
+func LocalNames(dir string) []string {
+	candidates, err := discoverCandidates(dir)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(candidates))
+	names := make([]string, 0, len(candidates))
+	for _, cand := range candidates {
+		if seen[cand.name] {
+			continue
+		}
+		seen[cand.name] = true
+		names = append(names, cand.name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// discoverCandidates is discovery's phase 1: the serial filesystem walk that
+// resolves every project's (name, dir) without spawning anything.
+func discoverCandidates(dir string) ([]discoverCandidate, error) {
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("projects directory not found: %s (set PROJECTS_DIR to the folder that holds your repos, or create it)", termsafe.QuotePath(dir))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -356,13 +426,7 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 		// which is what keeps a scratch notes folder listed.
 		candidates = append(candidates, discoverCandidate{e.Name(), top})
 	}
-
-	projects := fanOut(candidates, func(cand discoverCandidate) Project {
-		return c.discoverProject(ctx, cand.name, cand.dir)
-	})
-
-	sortProjects(projects)
-	return projects, nil
+	return candidates, nil
 }
 
 // isWingMember is THE definition of a wing member, and it is deliberately a
@@ -506,8 +570,13 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 		// A non-repo has no origin of its own — `git -C` walks up to find one,
 		// which would misattribute it to an ancestor repo's origin (and then
 		// dedup it away). Skip the spawn entirely for that case.
-		if p.Status.State != StatusNotRepo {
-			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
+		// A repository git would block on (a FIFO HEAD) is left
+		// unattributed at once rather than after the deadline (#1005).
+		if p.Status.State != StatusNotRepo && !gitenv.Blocks(p.Dir) {
+			// Bounded (#1005): a FIFO HEAD blocks get-url as it does status.
+			bctx, cancel := gitenv.Bounded(ctx)
+			url, err := gitenv.Run(bctx, c.run, gitenv.Local, "-C", p.Dir, "remote", "get-url", "origin")
+			cancel()
 			if err == nil {
 				url = strings.TrimSpace(url)
 				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
@@ -524,6 +593,11 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 	return out, nil
 }
 
+// ErrNoSourceReadable is Inventory's error when no source answered: the local
+// walk, GitHub, and an installed Gitea all failed. An empty list then would
+// read as "you have no projects" when nothing was actually searched.
+var ErrNoSourceReadable = errors.New("no project source could be read (local, GitHub, Gitea); the notes above say why")
+
 // Inventory builds the unified cross-host project list: local clones merged with
 // every repo on GitHub and Gitea, deduped by Repo.Key() with the local clone
 // winning (it carries LocalPath + Status). The two remote lists are fetched
@@ -531,9 +605,10 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 // contributes no rows and a human-readable note instead of failing the whole
 // call — so a partial outage still answers "where's my project?".
 //
-// Returns (repos, notes, err). err is non-nil only for a catastrophic local
-// failure that isn't a missing projects dir; notes carries per-host degradation
-// messages for the caller to surface on stderr.
+// Returns (repos, notes, err). err is ErrNoSourceReadable when no source
+// answered, and otherwise non-nil only for a catastrophic local failure that
+// isn't a missing projects dir; notes carries per-host degradation messages
+// for the caller to surface on stderr, and is returned with the error too.
 func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	slog.Debug("Preparing to build inventory.", "projectsDir", c.Dir)
 	start := time.Now()
@@ -571,6 +646,9 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		ch <- hostResult{sourceGitea, r, nil, e}
 	}()
 
+	// readable counts the sources that answered. An empty inventory from
+	// sources that all failed is not "you have no projects" (forgectl#1149).
+	readable := 0
 	local, err := c.localRepos(ctx)
 	if err != nil {
 		// A missing/unreadable projects dir shouldn't suppress the remote view —
@@ -583,6 +661,8 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		slog.Warn("Failed to enumerate local repos.", "projectsDir", c.Dir, "error", err)
 		notes = append(notes, fmt.Sprintf("local: %v", err))
 		local = nil
+	} else {
+		readable++
 	}
 
 	// Collect first, fold second: the two fetches finish in whatever order the
@@ -615,7 +695,16 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 			continue
 		}
 		slog.Debug("Host succeeded.", "host", host, "count", len(res.repos))
+		readable++
 		remote = append(remote, res.repos...)
+	}
+	if readable == 0 {
+		slog.Warn("Every project source failed.", "notes", len(notes))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Keep the cancel or deadline visible to errors.Is.
+			return nil, notes, errors.Join(ErrNoSourceReadable, ctxErr)
+		}
+		return nil, notes, ErrNoSourceReadable
 	}
 
 	seen := make(map[string]bool, len(local))
@@ -805,6 +894,9 @@ func Placement(root string, r Repo, wing string) (string, error) {
 	// would still reach that argv on the wing path, where a leading '-' is
 	// flag injection. Re-homing only the segments the path happens to use is
 	// the classic "removal keeps the consumer, drops the control" downgrade.
+	if root == "" {
+		return "", fmt.Errorf("refusing to place a repo: no projects root")
+	}
 	name := strings.ToLower(r.Name)
 	if !validRepoSegment(name) {
 		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")
@@ -907,7 +999,15 @@ func (c *Client) otherPlacements(r Repo, dest string) []string {
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
 func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
-	url, err := c.run.Run(ctx, "git", "-C", dir, "remote", "get-url", "origin")
+	// Bounded (#1005): dir may be any checkout already at the placement, and
+	// a FIFO HEAD there blocks get-url for good; one Blocks sees is refused
+	// at once.
+	if gitenv.Blocks(dir) {
+		return false
+	}
+	ctx, cancel := gitenv.Bounded(ctx)
+	defer cancel()
+	url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "remote", "get-url", "origin")
 	if err != nil {
 		return false
 	}

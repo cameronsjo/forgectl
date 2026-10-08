@@ -106,11 +106,11 @@ func forgectlAPI() fakeAPI {
 			{"tag_name": "v0.19.0", "published_at": "2026-09-30T02:48:28Z"},
 			{"tag_name": "v0.18.0", "published_at": "2026-09-08T22:43:26Z"},
 		},
-		"repos/cameronsjo/forgectl/compare/v0.19.0...main": map[string]any{
+		"repos/cameronsjo/forgectl/compare/v0.19.0...main?per_page=100": map[string]any{
 			"ahead_by": 2,
 			"commits": []map[string]any{
-				{"commit": map[string]any{"committer": map[string]any{"date": "2026-09-30T03:00:00Z"}}},
-				{"commit": map[string]any{"committer": map[string]any{"date": "2026-09-30T04:00:00Z"}}},
+				{"commit": map[string]any{"message": "chore: bump deps", "committer": map[string]any{"date": "2026-09-30T03:00:00Z"}}},
+				{"commit": map[string]any{"message": "refactor: tidy\n\nBREAKING CHANGE: drops the old flag", "committer": map[string]any{"date": "2026-09-30T04:00:00Z"}}},
 			},
 		},
 		"repos/cameronsjo/forgectl/pulls?state=open&base=main&per_page=100": []map[string]any{
@@ -129,6 +129,11 @@ func forgectlAPI() fakeAPI {
 				{"id": 1, "event": "schedule", "status": "completed", "conclusion": "failure", "created_at": "2026-09-28T11:00:00Z"},
 			},
 		},
+		"repos/cameronsjo/forgectl/actions/workflows/release-please.yml/runs?status=waiting&per_page=100&exclude_pull_requests=true": map[string]any{
+			"workflow_runs": []map[string]any{{"id": 91, "event": "push", "status": "waiting", "created_at": "2026-09-30T11:30:00Z"}},
+		},
+		"repos/cameronsjo/forgectl/actions/workflows/release-please.yml/runs?status=queued&per_page=100&exclude_pull_requests=true":  map[string]any{"workflow_runs": []any{}},
+		"repos/cameronsjo/forgectl/actions/workflows/release-please.yml/runs?status=pending&per_page=100&exclude_pull_requests=true": map[string]any{"workflow_runs": []any{}},
 		"repos/cameronsjo/forgectl/actions/runs/3/jobs":                   map[string]any{"jobs": []map[string]any{{"id": 30, "name": "Gate", "conclusion": "success"}, {"id": 31, "name": "Merge", "conclusion": "skipped"}}},
 		"repos/cameronsjo/forgectl/actions/runs/2/jobs":                   map[string]any{"jobs": []map[string]any{{"id": 20, "name": "Gate", "conclusion": "success"}}},
 		"repos/cameronsjo/forgectl/actions/runs/1/jobs":                   map[string]any{"jobs": []map[string]any{{"id": 10, "name": "Gate", "conclusion": "failure"}}},
@@ -151,6 +156,12 @@ func TestCollect_ReleasePR(t *testing.T) {
 	}
 	if f.Unreleased == nil || *f.Unreleased != 2 || f.OldestUnreleasedAt == nil || f.OldestUnreleasedAt.Hour() != 3 {
 		t.Errorf("unreleased = %v oldest = %v", f.Unreleased, f.OldestUnreleasedAt)
+	}
+	if len(f.UnreleasedCommits) != 2 || f.UnreleasedCommits[0].Releasable() || !f.UnreleasedCommits[1].Releasable() || !f.UnreleasedCommits[1].BreakingFooter {
+		t.Errorf("unreleased log = %+v, want chore (not releasable) then a refactor with a BREAKING CHANGE footer", f.UnreleasedCommits)
+	}
+	if len(f.PendingReleaseRuns) != 1 || f.PendingReleaseRuns[0].ID != 91 || f.PendingReleaseRuns[0].Status != "waiting" {
+		t.Errorf("pending release runs = %+v, want only the waiting run 91", f.PendingReleaseRuns)
 	}
 	if len(f.ReleasePRs) != 1 || f.ReleasePRs[0].Number != 752 {
 		t.Errorf("release PRs = %+v, want only #752", f.ReleasePRs)
@@ -245,8 +256,8 @@ func TestCollect_Testflight(t *testing.T) {
 			{"created_at": "2026-09-29T11:12:26Z", "workflow_run": map[string]any{"id": 2, "head_sha": sha}},
 			{"created_at": "2026-06-01T11:12:26Z", "expired": true, "workflow_run": map[string]any{"id": 1, "head_sha": sha}},
 		}},
-		"repos/cameronsjo/app/compare/" + sha + "...main":     map[string]any{"ahead_by": 0, "commits": []any{}},
-		"repos/cameronsjo/app/actions/variables?per_page=100": map[string]any{"variables": []map[string]any{{"name": "TESTFLIGHT_NIGHTLY", "value": "on"}}},
+		"repos/cameronsjo/app/compare/" + sha + "...main?per_page=100": map[string]any{"ahead_by": 0, "commits": []any{}},
+		"repos/cameronsjo/app/actions/variables?per_page=100":          map[string]any{"variables": []map[string]any{{"name": "TESTFLIGHT_NIGHTLY", "value": "on"}}},
 		"repos/cameronsjo/app/actions/workflows/testflight.yml/runs?per_page=50&exclude_pull_requests=true": map[string]any{"workflow_runs": []map[string]any{
 			{"id": 3, "event": "workflow_dispatch", "status": "in_progress", "conclusion": nil, "created_at": "2026-09-30T11:00:00Z"},
 			{"id": 2, "event": "schedule", "status": "completed", "conclusion": "success", "created_at": "2026-09-29T11:04:15Z"},
@@ -486,5 +497,29 @@ func scrubFacts(f RepoFacts, alias string, n int) RepoFacts {
 		runs[i] = r
 	}
 	f.Runs = runs
+	// A private repo's commit subjects are private: keep the type and any
+	// breaking marker, which are all the releasable rule reads.
+	log := make([]CommitFact, len(f.UnreleasedCommits))
+	for i, c := range f.UnreleasedCommits {
+		log[i] = scrubCommit(c)
+	}
+	f.UnreleasedCommits = log
+	pending := make([]RunFact, len(f.PendingReleaseRuns))
+	for i, r := range f.PendingReleaseRuns {
+		r.ID = int64(1000 + i)
+		pending[i] = r
+	}
+	f.PendingReleaseRuns = pending
 	return f
+}
+
+// scrubCommit reduces a subject to its type and bang, which is all the
+// releasable rule reads; scope and description may name private work.
+func scrubCommit(c CommitFact) CommitFact {
+	subject := "redacted"
+	if m := reConventional.FindStringSubmatch(c.Subject); m != nil {
+		subject = strings.ToLower(m[1]) + m[3] + ": redacted"
+	}
+	c.Subject = subject
+	return c
 }

@@ -197,3 +197,58 @@ func TestSeshPick_RefusalEchoIsCapped(t *testing.T) {
 		t.Fatalf("refusal message is %d bytes; the echoed name must be capped", n)
 	}
 }
+
+// TestSeshResolvedPaths_HomeLookup pins forgectl#972: home is looked up only
+// for a "~" candidate, and a failed lookup there is an error, not a skipped
+// '#' check.
+//
+// Mutation that turns it red: make seshResolvedPaths return (nil, nil) on the
+// lookup error, or look the home directory up unconditionally.
+func TestSeshResolvedPaths_HomeLookup(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("no $HOME") }
+	if _, err := seshResolvedPaths("~/proj", failing); err == nil {
+		t.Fatal("a ~ candidate with no home directory must be an error")
+	}
+	paths, err := seshResolvedPaths("/tmp/a#b", failing)
+	if err != nil || len(paths) == 0 || !strings.Contains(paths[0], "#") {
+		t.Fatalf("non-~ candidate must resolve without home: paths=%v err=%v", paths, err)
+	}
+	ok := func() (string, error) { return "/home/u#x", nil }
+	paths, err = seshResolvedPaths("~/proj", ok)
+	if err != nil || len(paths) == 0 || paths[0] != "/home/u#x/proj" {
+		t.Fatalf("paths=%v err=%v", paths, err)
+	}
+}
+
+// TestSeshResolvedPaths_DeletedCwdStillChecksExpansion pins the round-2 fix for
+// forgectl#972: when filepath.Abs fails (cwd deleted), the env-expanded path is
+// still returned for the '#' check instead of skipping it.
+//
+// Mutation that turns it red: return nil, nil from the filepath.Abs error
+// branch in seshResolvedPaths.
+func TestSeshResolvedPaths_DeletedCwdStillChecksExpansion(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("cannot delete the cwd on this platform: %v", err)
+	}
+	if _, err := filepath.Abs("x"); err == nil {
+		t.Skip("filepath.Abs still succeeds with a deleted cwd here")
+	}
+	t.Setenv("PROBE972", "a#b")
+	ok := func() (string, error) { return "/home/u", nil }
+	paths, err := seshResolvedPaths("$PROBE972/x", ok)
+	if err != nil || len(paths) != 1 || !strings.Contains(paths[0], "#") {
+		t.Fatalf("paths=%v err=%v, want the expanded path with '#'", paths, err)
+	}
+	fake := liveServer()
+	if err := seshPick(context.Background(), seshPickClient(fake), "$PROBE972/x"); !errors.Is(err, errSeshUnsafeCandidate) {
+		t.Fatalf("seshPick err = %v, want errSeshUnsafeCandidate", err)
+	}
+	if paths, err := seshResolvedPaths("foo", ok); err != nil || len(paths) != 1 || paths[0] != "foo" {
+		t.Fatalf("plain name: paths=%v err=%v", paths, err)
+	}
+}

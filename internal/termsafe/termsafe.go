@@ -23,6 +23,7 @@
 package termsafe
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,6 +40,36 @@ import (
 func IsUnsafeTerminalRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
 }
+
+// IsInvisibleRune reports whether r renders as nothing or as a blank rather
+// than as a glyph: a Unicode format character (category Cf), a line or
+// paragraph separator (Zl, Zp), a variation selector, any other
+// Default_Ignorable_Code_Point, or U+2800 BRAILLE PATTERN BLANK. U+200B,
+// U+FEFF, U+2060, the soft hyphen, and the tag characters in U+E0001..U+E007F
+// are Cf. U+FE0F, U+E0100..U+E01EF and U+034F are Mn, and the Hangul fillers
+// U+115F, U+1160, U+3164 and U+FFA0 are Lo (#948). U+2800 is So and not
+// default-ignorable, but it displays as a space that strings.TrimSpace keeps,
+// so a value made of it passes a blank check. The Zs spaces stay out: they
+// render as the space they are, and TrimSpace trims them. Nothing else in Mn
+// is included, so decomposed accented text (e + U+0301) still passes.
+//
+// It is for VALIDATORS of a value that becomes an identifier or an argv
+// element, where an invisible rune makes two values that look identical
+// compare unequal (#916). Pair it with IsUnsafeTerminalRune there. It is kept
+// out of IsUnsafeTerminalRune on purpose: that classifier also drives the
+// JSON filter and the text renderers, and broadening it would rewrite --json
+// output and every rendered value holding a ZWJ emoji sequence (see
+// TestVisibleQuotingDoesNotBroadenSharedClassifier). The renderers quote the
+// Cf, Zl and Zp runes visibly, because they are not graphic; the variation
+// selectors, the other default-ignorables and U+2800 are graphic, so the
+// renderers show them as is.
+func IsInvisibleRune(r rune) bool {
+	return r == brailleBlank ||
+		unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
+}
+
+// brailleBlank is U+2800 BRAILLE PATTERN BLANK (see IsInvisibleRune).
+const brailleBlank = '\u2800'
 
 // SafeLine turns arbitrary text into one inert physical terminal line. Go's
 // graphic quoting escapes C0/C1 controls, DEL, tabs/newlines, and Unicode
@@ -94,23 +125,135 @@ const TruncatedMarker = " … [truncated]"
 // whole escapes: a \u202e is kept or dropped entire, never split into text
 // that reads as something else. A cut value ends in TruncatedMarker, which
 // is not counted against maxRunes. maxRunes < 1 means no cap.
+//
+// Printable ASCII is its own one-rune rendering, so when the first
+// maxRunes bytes (or all of s, if shorter) are all of it the result is s
+// itself, or those bytes and the marker, without visiting a rune (#963):
+// whatever follows them renders as at least one rune, so it is cut. Anything
+// else takes the per-rune loop.
 func SafeLineMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		return SafeLine(s)
 	}
+	limit := min(len(s), maxRunes)
+	i := 0
+	for i < limit && isPlainASCII(s[i]) {
+		i++
+	}
+	if i == limit {
+		if len(s) <= maxRunes {
+			return s
+		}
+		return s[:maxRunes] + TruncatedMarker
+	}
+	return safeLineCapped(s, maxRunes, 0)
+}
+
+// SafeLineMaxJSON is SafeLineMax whose result also takes at most
+// maxJSONBytes bytes once encoding/json writes it as a string value (between
+// the quotes, with json.Marshal's default HTML escaping), TruncatedMarker
+// included. It is for a field of a JSON document with a byte limit (#963): a
+// rune cap alone lets '<', which encoding/json writes as the six bytes
+// \u003c, or a 4-byte emoji multiply a field several times over. Like
+// SafeLineMax it cuts only between whole escapes. maxRunes < 1 means no rune
+// cap and maxJSONBytes < 1 no byte cap; a byte cap smaller than the marker's
+// own size keeps nothing of a value it has to cut.
+func SafeLineMaxJSON(s string, maxRunes, maxJSONBytes int) string {
+	return safeLineCapped(s, maxRunes, maxJSONBytes)
+}
+
+// safeLineCapped is SafeLine cut at maxRunes runes of output (the marker not
+// counted) or at maxBytes JSON-encoded bytes (the marker counted), whichever
+// comes first; a limit below 1 is no limit.
+func safeLineCapped(s string, maxRunes, maxBytes int) string {
+	markerBytes := 0
+	if maxBytes > 0 {
+		markerBytes = jsonStringBytes(TruncatedMarker)
+	}
 	var safe strings.Builder
-	used := 0
-	for _, r := range s {
-		piece := safeRune(r)
-		n := utf8.RuneCountInString(piece)
-		if used+n > maxRunes {
-			safe.WriteString(TruncatedMarker)
-			return safe.String()
+	runes, size := 0, 0
+	// fit is the output length at the last escape boundary where the text
+	// plus the marker still fits the byte cap.
+	fit := 0
+	for i, r := range s {
+		var piece string
+		n, b := 1, 1
+		if isPlainASCII(s[i]) {
+			// One byte, one rune, rendered as itself: slice it rather than
+			// allocate it through safeRune. JSON writes it in one byte
+			// unless it is one of the five it escapes.
+			piece = s[i : i+1]
+			if maxBytes > 0 && jsonEscapesASCII(s[i]) {
+				b = jsonStringBytes(piece)
+			}
+		} else {
+			piece = safeRune(r)
+			n = utf8.RuneCountInString(piece)
+			if maxBytes > 0 {
+				b = jsonStringBytes(piece)
+			}
+		}
+		if (maxRunes > 0 && runes+n > maxRunes) || (maxBytes > 0 && size+b > maxBytes) {
+			if maxBytes > 0 && markerBytes > maxBytes {
+				return ""
+			}
+			return safe.String()[:fit] + TruncatedMarker
 		}
 		safe.WriteString(piece)
-		used += n
+		runes += n
+		size += b
+		if maxBytes < 1 || size+markerBytes <= maxBytes {
+			fit = safe.Len()
+		}
 	}
 	return safe.String()
+}
+
+// jsonEscapesASCII reports whether encoding/json's default encoder writes
+// the printable ASCII byte c as more than one byte: the quote and backslash
+// short escapes, and the three HTML characters it writes as \u00XX.
+func jsonEscapesASCII(c byte) bool {
+	return c == '"' || c == '\\' || c == '<' || c == '>' || c == '&'
+}
+
+// invalidByteJSONBytes is how many bytes encoding/json writes for one invalid
+// UTF-8 byte between the quotes. It is measured rather than hardcoded because
+// it changed: Go 1.26 writes the six-byte escape \ufffd, and Go 1.27 writes
+// U+FFFD's three raw bytes.
+var invalidByteJSONBytes = func() int {
+	// termsafe:allow-raw-json measures the encoder's width, never output
+	b, err := json.Marshal("\xff")
+	if err != nil {
+		return len(`\ufffd`)
+	}
+	return len(b) - 2
+}()
+
+// jsonStringBytes is how many bytes encoding/json's default (HTML-escaping)
+// string encoder writes for s between the quotes.
+func jsonStringBytes(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		r, width := utf8.DecodeRuneInString(s[i:])
+		i += width
+		switch {
+		case r == '"' || r == '\\':
+			n += 2
+		case r == '\n' || r == '\r' || r == '\t' || r == '\b' || r == '\f':
+			// encoding/json's two-byte short escapes.
+			n += 2
+		case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029':
+			n += 6
+		case r == utf8.RuneError && width == 1:
+			// An invalid byte is written as a replacement character,
+			// whose width depends on the Go release; a valid U+FFFD is
+			// its three bytes, which the default arm counts.
+			n += invalidByteJSONBytes
+		default:
+			n += utf8.RuneLen(r)
+		}
+	}
+	return n
 }
 
 // isSafeGraphic reports whether safeRune renders r as itself.
@@ -165,14 +308,29 @@ func QuoteArgMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		maxRunes = ArgEchoMaxRunes
 	}
+	return QuoteTextMax(s, maxRunes)
+}
+
+// QuoteTextMax is QuoteText over at most maxRunes runes of text, followed by
+// an ellipsis outside the closing quote when text was longer (#928). It is
+// the capped form of QuoteText for a quoted value in a line of text output;
+// QuoteArgMax is it with the argv-echo default.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
+// means no cap.
+func QuoteTextMax(text string, maxRunes int) string {
+	if maxRunes < 1 {
+		return QuoteText(text)
+	}
 	n := 0
-	for i := range s {
+	for i := range text {
 		if n == maxRunes {
-			return QuoteText(s[:i]) + argEchoEllipsis
+			return QuoteText(text[:i]) + argEchoEllipsis
 		}
 		n++
 	}
-	return QuoteText(s)
+	return QuoteText(text)
 }
 
 // QuotePath is QuoteText named for filesystem sinks, where the surrounding
@@ -204,13 +362,47 @@ const PathEchoMaxRunes = 512
 // Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
 // means PathEchoMaxRunes.
 func QuotePathMax(path string, maxRunes int) string {
+	head, tail, cut := pathCut(path, maxRunes)
+	if !cut {
+		return QuoteText(path)
+	}
+	if tail == "" {
+		return QuoteText(head) + argEchoEllipsis
+	}
+	return QuoteText(head) + argEchoEllipsis + QuoteText(tail)
+}
+
+// SafePathMax is QuotePathMax's cut without the quotes: SafeLine over the
+// kept head and tail, with the ellipsis between them. It is for a path in a
+// fixed-width text column (`docs list`), where quoting every row would shift
+// the column and a cut must still keep the file name (#913). The ellipsis is
+// not distinguishable from a path that contains one; a caller that must be
+// unambiguous quotes with QuotePathMax instead.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// maxRunes < 1 means PathEchoMaxRunes.
+func SafePathMax(path string, maxRunes int) string {
+	head, tail, cut := pathCut(path, maxRunes)
+	if !cut {
+		return SafeLine(path)
+	}
+	return SafeLine(head) + argEchoEllipsis + SafeLine(tail)
+}
+
+// pathCut is the middle cut QuotePathMax and SafePathMax share. cut is false
+// when path fits in maxRunes input runes, and head and tail are then unset.
+// Otherwise head is the kept prefix and tail the kept suffix, which is the
+// final path element (from its separator on, trailing separators included)
+// when that fits in three quarters of the budget, and the last half of the
+// budget otherwise. maxRunes < 1 means PathEchoMaxRunes.
+func pathCut(path string, maxRunes int) (head, tail string, cut bool) {
 	if maxRunes < 1 {
 		maxRunes = PathEchoMaxRunes
 	}
 	// A path holds at least one byte per rune, so one no longer in bytes than
 	// the budget fits it, and skips the rune-offset slice below.
 	if len(path) <= maxRunes {
-		return QuoteText(path)
+		return "", "", false
 	}
 	// starts[i] is the byte offset of input rune i, as range yields them.
 	starts := make([]int, 0, len(path))
@@ -219,23 +411,23 @@ func QuotePathMax(path string, maxRunes int) string {
 	}
 	total := len(starts)
 	if total <= maxRunes {
-		return QuoteText(path)
+		return "", "", false
 	}
-	tail := maxRunes / 2
+	tailRunes := maxRunes / 2
 	// Trailing separators belong to the final element, so a directory path
 	// ending in `/` keeps its name rather than a bare "/".
 	if sep := strings.LastIndexAny(strings.TrimRight(path, `/\`), `/\`); sep >= 0 {
 		// The separator is ASCII, so it starts a rune; count the runes from it.
 		elem := total - sort.SearchInts(starts, sep)
 		if elem <= maxRunes-maxRunes/4 {
-			tail = elem
+			tailRunes = elem
 		}
 	}
-	head := maxRunes - tail
-	if tail == 0 {
-		return QuoteText(path[:starts[head]]) + argEchoEllipsis
+	headRunes := maxRunes - tailRunes
+	if tailRunes == 0 {
+		return path[:starts[headRunes]], "", true
 	}
-	return QuoteText(path[:starts[head]]) + argEchoEllipsis + QuoteText(path[starts[total-tail]:])
+	return path[:starts[headRunes]], path[starts[total-tailRunes]:], true
 }
 
 // QuotePathIfUnsafe returns path verbatim when quoting would have changed

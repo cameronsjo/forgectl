@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -68,7 +69,9 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
-		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
+		// A partial clone's checkout may lazy-fetch from its promisor
+		// remote, so ext:: and fd:: are refused here as at the clone below.
+		if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
 			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#711), as the clone leg: git's stderr is not echoed.
@@ -79,11 +82,20 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
+		//
+		// repo comes from a shared workflow file, so the ext:: and fd::
+		// transports, which run a command or read a descriptor the URL names,
+		// are refused. git already refuses ext:: by default, but an
+		// operator's protocol.ext.allow (or protocol.allow) would admit it,
+		// and so would an inherited GIT_ALLOW_PROTOCOL naming it.
+		// RunRefusing outranks the first with -c and drops the two names from
+		// the second. Every other transport the operator allows stays, so an
+		// alwaysClone of a local path works.
 		args := []string{"clone", "--", repo, dir}
 		if ref != "" {
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
-		if _, err := run.Run(ctx, "git", args...); err != nil {
+		if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, args...); err != nil {
 			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#658): the CommandError renders git's argv, whose

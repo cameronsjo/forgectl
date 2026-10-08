@@ -117,21 +117,63 @@ func TestBuildPlan_TwoTabsIntoOneMissingWorkspace(t *testing.T) {
 }
 
 func TestBuildPlan_DuplicateLabelsPickLowestNumber(t *testing.T) {
+	// Two workspaces are labeled forge; w2 has the lower Number, so it is the
+	// canonical one. Tabs in the duplicate w9 are planned as moves into it, and
+	// the tab already in w2 stays put.
 	snap := mkSnapshot(
 		[]herdr.Workspace{ws("w9", "forge", 5), ws("w2", "forge", 2), ws("w3", "misc", 3)},
 		[]tabSpec{
+			{"w9", "t5", "term5", "/r/forge/x", "x"},
+			{"w9", "t6", "term6", "/r/forge/y", "y"},
+			{"w2", "t4", "term4", "/r/forge/w", "w"},
 			{"w3", "t1", "term1", "/r/forge/a", "a"},
 			{"w3", "t2", "term2", "/r/other/b", "b"},
 		})
 	p := BuildPlan(testConfig(), snap, testRoot)
-	if len(p.Moves) != 1 {
-		t.Fatalf("Moves = %+v, want 1", p.Moves)
+	var moved []string
+	for _, m := range p.Moves {
+		if m.Blocked {
+			continue
+		}
+		moved = append(moved, m.TerminalID)
+		if m.To != "forge" {
+			t.Errorf("move %+v, want every move to go to forge", m)
+		}
 	}
-	if p.Moves[0].ToWorkspaceID != "w2" {
-		t.Errorf("ToWorkspaceID = %q, want w2 (lowest Number)", p.Moves[0].ToWorkspaceID)
+	// term5 would be blocked with a lone tab; w9 holds two, so one leaves and
+	// the last one is blocked (herdr will not empty w9).
+	if want := []string{"term5", "term1"}; !reflect.DeepEqual(moved, want) {
+		t.Errorf("unblocked moves = %v, want %v: w9's tabs join the canonical w2, w2's own tab stays", moved, want)
 	}
 	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "forge") || !strings.Contains(p.Warnings[0], "w9") {
 		t.Errorf("Warnings = %v, want one naming the duplicate label and the ignored id", p.Warnings)
+	}
+}
+
+// TestBuildPlan_EqualCWDTabsKeepTheirOrderAcrossRenumbering: two tabs with the
+// same cwd tie on wing, repo, and cwd. The tie breaks on the terminal id, which
+// no move changes, so the order the layout asks for does not flip when a move
+// renumbers the tabs (#732).
+func TestBuildPlan_EqualCWDTabsKeepTheirOrderAcrossRenumbering(t *testing.T) {
+	cfg := Config{Default: "forge", Rules: []Rule{{Glob: "*", Workspace: "forge"}}}
+	before := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1)},
+		[]tabSpec{
+			{"w1", "t1", "termB", "/r/forge/a", "b"},
+			{"w1", "t2", "termA", "/r/forge/a", "a"},
+		})
+	// The same two tabs after a move gave them fresh ids in the other order.
+	after := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1)},
+		[]tabSpec{
+			{"w1", "t9", "termB", "/r/forge/a", "b"},
+			{"w1", "t3", "termA", "/r/forge/a", "a"},
+		})
+	want := []string{"termA", "termB"}
+	for name, snap := range map[string]Snapshot{"before": before, "after": after} {
+		if got := layoutTerms(BuildPlan(cfg, snap, testRoot).Layout, "forge"); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s renumbering: forge layout = %v, want %v", name, got, want)
+		}
 	}
 }
 
@@ -308,7 +350,7 @@ func TestBuildPlan_MoveCarriesIdentityFields(t *testing.T) {
 	}
 	m := p.Moves[0]
 	if m.TerminalID != "term1" || m.TabID != "t1" || m.Title != "alpha" || m.CWD != "/r/forge/a" ||
-		m.From != "misc" || m.To != "forge" || m.FromWorkspaceID != "w1" || m.ToWorkspaceID != "" {
+		m.From != "misc" || m.To != "forge" {
 		t.Errorf("move = %+v", m)
 	}
 }
@@ -323,5 +365,36 @@ func TestMissingFromOrder(t *testing.T) {
 	want := []string{"home", "misc"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("MissingFromOrder = %v, want %v", got, want)
+	}
+}
+
+// TestBuildPlan_ATabWithNoTerminalIDIsSkipped: a terminal id is a tab's
+// identity across moves, so two tabs without one would tie and merge. Each is
+// skipped with a warning, as a tab with no panes is (#945).
+func TestBuildPlan_ATabWithNoTerminalIDIsSkipped(t *testing.T) {
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "misc", 1)},
+		[]tabSpec{
+			{"w1", "t1", "", "/r/forge/a", "a"},
+			{"w1", "t2", "", "/r/forge/a", "a"},
+			{"w1", "t3", "term3", "/r/other/c", "c"},
+		})
+	plan := BuildPlan(testConfig(), snap, testRoot)
+	for _, a := range plan.Assignments {
+		if a.TerminalID == "" {
+			t.Errorf("assignment %+v has no terminal id", a)
+		}
+	}
+	if len(plan.Moves) != 0 {
+		t.Errorf("Moves = %+v, want none", plan.Moves)
+	}
+	n := 0
+	for _, w := range plan.Warnings {
+		if strings.Contains(w, "has no terminal id and was skipped") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("Warnings = %q, want one skip warning per tab without a terminal id", plan.Warnings)
 	}
 }

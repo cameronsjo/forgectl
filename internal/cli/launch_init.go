@@ -63,7 +63,7 @@ usage_stats = false
 harness         = "claude"   # "claude" (default), "codex", or "pi"
 model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # Claude starts in plan
+permission_mode = "plan"     # Claude starts in plan; plan|default|manual|acceptEdits|auto|dontAsk|bypassPermissions, anything else is refused
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex-native settings (used when harness = "codex"):
@@ -81,6 +81,14 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # effort  = "xhigh"          # omit to take sonnet's derived "high"
 # env     = { OTEL_EXPORTER = "otlp" }
 # add_dir = ["~/Projects/minute/shared"]
+
+# Coordinator workers (surface launch --worktree) do not read [launch.defaults].
+# They take [launch.worker], each field made stricter by the matched project
+# block, and capped at auto / workspace-write / on-request.
+# [launch.worker]
+# permission_mode = "acceptEdits"   # "plan" keeps workers read-only; "auto" runs them unattended
+# sandbox         = "workspace-write"
+# approval_policy = "on-request"
 `
 
 func newLaunchInitCmd(boundary *config.LegacyMigrationBoundary) *cobra.Command {
@@ -194,7 +202,7 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 			// from boundary.Source: one source for the list, and no second
 			// dereference of a snapshot this arm does not otherwise touch.
 			return fmt.Errorf("legacy claunch.conf carries settings forgectl cannot represent, not importing: %s",
-				termsafe.SafeLine(result.Err.Error()))
+				safeText(result.Err.Error()))
 		}
 		return result.Err
 	}

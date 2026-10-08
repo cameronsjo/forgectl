@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
@@ -100,8 +101,8 @@ reads its own (empty) task list, so snapshotted tasks are reported rather than
 restored. Pass it in response to the live-session error, not defensively.
 
 Exit codes: 0 resumed; 1 no session matched, the filter was ambiguous and there
-was no way to pick, or the pick was cancelled; 2 the target is still running
-(recoverable — use --fork). Note that ` + "`resume ls`" + ` exits 0 with an empty
+was no way to pick; 2 the target is still running
+(recoverable — use --fork); 130 the pick was cancelled (Esc or Ctrl+C). Note that ` + "`resume ls`" + ` exits 0 with an empty
 list when nothing matches, so ` + "`resume ls X && resume X`" + ` is NOT a valid
 guard; test the ls output instead.`,
 		Args:          cobra.MaximumNArgs(1),
@@ -159,9 +160,9 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 	}
 	if len(sessions) == 0 {
 		if filter != "" {
-			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", safeTerm(filter)), 1)
+			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", safeTitle(filter)), exitFailed)
 		}
-		return WithExitCode(fmt.Errorf("no recent sessions found"), 1)
+		return WithExitCode(fmt.Errorf("no recent sessions found"), exitFailed)
 	}
 
 	picked := sessions[0]
@@ -185,8 +186,8 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
-		if picked, err = pickSessionFn(sessions, th); err != nil {
-			return WithExitCode(err, 1)
+		if picked, err = pickSessionFn(sessions, th, sessionPickerNote(len(sessions), limit)); err != nil {
+			return WithExitCode(err, exitFailed)
 		}
 	}
 	return resumeSession(cmd, cfg, boundary, picked, fork, dryRun)
@@ -216,7 +217,7 @@ func ambiguousMatch(cmd *cobra.Command, sessions []resume.Session, filter string
 
 	matched := "recent sessions to choose from"
 	if filter != "" {
-		matched = fmt.Sprintf("sessions matched %q", safeTerm(filter))
+		matched = fmt.Sprintf("sessions matched %q", safeTitle(filter))
 	}
 	reason := "there is no terminal to pick on"
 	if dryRun {
@@ -241,30 +242,35 @@ var pickSessionFn = pickSession
 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
-func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, error) {
-	w := layoutFor(sessions, terminalWidth())
-	dimStyle := th.Styles().Muted
+// note is a line about what the list leaves out (sessionPickerNote), or empty.
+func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume.Session, error) {
+	w, h := terminalSize()
+	layout := layoutPicker(sessions, w)
+	// The label stays plain text: huh's `/` filter matches against it, so an
+	// SGR escape in it would be matchable (`m`, `[`). A running session shows
+	// `(running)` in its row, which says it cannot be continued without
+	// colour, so no dimming is needed.
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		label := sessionRowWidth(s, w)
-		// A running session cannot be continued, only forked — dimming says
-		// so before the selection does, the same way `pr pick` dims a PR it
-		// will skip.
-		if s.Live {
-			label = dimStyle.Render(label)
-		}
-		opts[i] = huh.NewOption(label, s.ID)
+		opts[i] = huh.NewOption(sessionPickerLabel(s, layout), s.ID)
 	}
 
+	sel := sessionSelect{shown: len(sessions), note: note, width: w, muted: th.Styles().Muted.Render}
 	var chosen string
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Recent sessions — enter to resume, esc to cancel").
-				Options(opts...).
-				Value(&chosen),
-		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	sel.Select = huh.NewSelect[string]().
+		Title("Recent sessions").
+		Description(sel.placeholderDescription()).
+		Options(opts...).
+		Value(&chosen)
+	km := keymap.Cancel()
+	km.Select.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "resume"))
+	form := keymap.Suspendable(huh.NewForm(huh.NewGroup(sel))).WithKeyMap(km).WithTheme(th.Huh())
+	// Without a height the list is as tall as the history and the title
+	// scrolls off the top of a short terminal; with one huh scrolls the rows.
+	if h > 0 {
+		form = form.WithHeight(h - 1)
+	}
+	err := form.Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
@@ -326,6 +332,20 @@ func writerWidth(w io.Writer) int {
 // writer we hand it.
 func terminalWidth() int { return writerWidth(os.Stdout) }
 
+// terminalSize reports the process's own stdout as columns and rows, or 0, 0
+// when it is not a terminal.
+func terminalSize() (cols, rows int) {
+	fd := int(os.Stdout.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, 0
+	}
+	cols, rows, err := term.GetSize(fd)
+	if err != nil || cols <= 0 || rows <= 0 {
+		return 0, 0
+	}
+	return cols, rows
+}
+
 // layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
 //
 // Fixed widths were wrong in both directions at once: they clipped names that
@@ -379,16 +399,16 @@ func sessionRow(s resume.Session) string {
 }
 
 // sessionRowWidth renders one row at an explicit layout. Every field is
-// disk-sourced, so every field goes through safeTerm.
+// disk-sourced, so every field goes through a capped helper (termcap.go).
 func sessionRowWidth(s resume.Session, l rowLayout) string {
 	name := s.Name
 	if name == "" {
 		name = s.ID
 	}
 	row := fmt.Sprintf("%s %s %s %s",
-		cell(safeTerm(name), l.name),
-		cell(safeTerm(s.Repo), l.repo),
-		cell(safeTerm(s.Branch), l.branch),
+		cell(safeTitle(name), l.name),
+		cell(safeTitle(s.Repo), l.repo),
+		cell(safeLabel(s.Branch), l.branch),
 		relativeTime(s.LastActive))
 	switch {
 	case s.Live:
@@ -433,7 +453,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	if s.Live && !fork {
 		blocked = WithExitCode(fmt.Errorf(
 			"session %s (%s) is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
-			safeName(s), safeTerm(s.ID), s.Pid), 2)
+			safeName(s), safeLabel(s.ID), s.Pid), 2)
 	}
 	// Refuse immediately unless this is a dry-run. Deferring it would make the
 	// refusal depend on claude being installed and the cwd still existing,
@@ -442,7 +462,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return blocked
 	}
 	if s.Cwd == "" {
-		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", safeTerm(s.ID)), 1)
+		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", safeLabel(s.ID)), exitFailed)
 	}
 
 	// Confirm the target is a real directory BEFORE anything writes. Task
@@ -457,17 +477,30 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// would have left the hole open.
 	if fi, err := os.Stat(s.Cwd); err != nil || !fi.IsDir() {
 		return WithExitCode(fmt.Errorf("session %s records a working directory that is not there: %s",
-			safeTerm(s.ID), safeTerm(s.Cwd)), 1)
+			safeLabel(s.ID), safeColumnPath(s.Cwd)), 1)
 	}
 
 	lc, _ := resolveLaunchConfig(boundary, cfg, "")
 	// Resolve is a pure function of the config and an arbitrary cwd, so
 	// resuming into another repo gets that repo's profile for free — no
 	// per-project config loading.
-	profile := launch.Resolve(lc, s.Cwd)
+	profile, err := launch.Resolve(lc, s.Cwd)
+	if err != nil {
+		return termsafe.Error(err)
+	}
 	claudePath, err := launch.ClaudePath(lc.Defaults)
 	if err != nil {
 		return err
+	}
+	// claude inherits this stdout through the exec. Off a terminal it runs as
+	// if given --print, so `echo task | forgectl resume <filter> | tee log`
+	// resumes unattended. The resume therefore withholds the one flag print
+	// mode withholds for safety, as `forgectl launch` does: allow_danger never
+	// makes bypass reachable in an unattended run (forgectl#899). Everything
+	// else ResumeArgs sets stays. --dry-run reports the argv a run with the
+	// same stdout would get.
+	if !launchStdoutIsTerminal() {
+		profile.AllowDanger = false
 	}
 	args := launch.ResumeArgs(profile, s.ID, fork)
 
@@ -482,7 +515,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// code `launch` and `surface launch` give for this same config.
 	injected, unset, err := injectedLaunchEnv(cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
 	// --dry-run is the headless escape. Resuming exec-replaces this process
@@ -492,10 +525,12 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// `workflow run --dry-run`.
 	if dryRun {
 		out := cmd.OutOrStdout()
-		_, _ = fmt.Fprintf(out, "session %s\n", safeTerm(s.ID))
+		_, _ = fmt.Fprintf(out, "session %s\n", safeLabel(s.ID))
 		_, _ = fmt.Fprintf(out, "name    %s\n", safeName(s))
-		_, _ = fmt.Fprintf(out, "cwd     %s\n", safeTerm(s.Cwd))
-		_, _ = fmt.Fprintf(out, "exec    %s %s\n", safeTerm(claudePath), safeTerm(strings.Join(args, " ")))
+		_, _ = fmt.Fprintf(out, "cwd     %s\n", safeColumnPath(s.Cwd))
+		// Escaped and NOT capped: this line is the review of what resume would
+		// exec, and a cut would hide the tail of the argv (#782's rule).
+		_, _ = fmt.Fprintf(out, "exec    %s %s\n", termsafe.SafeLine(claudePath), termsafe.SafeLine(strings.Join(args, " ")))
 		_, _ = fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
 		if blocked != nil {
 			_, _ = fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)
@@ -528,7 +563,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 			case err != nil:
 				// A failed rescue must not block the resume — the
 				// session itself is the thing being recovered.
-				_, _ = fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", termsafe.Error(err))
+				_, _ = fmt.Fprintf(errOut, "forgectl: could not restore tasks: %s\n", safeText(termsafe.Error(err).Error()))
 			case res.Written > 0:
 				_, _ = fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
 			}
@@ -536,7 +571,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), exitFailed)
 	}
 
 	// Same layering BuildInvocation does: removals hit the inherited snapshot
@@ -559,7 +594,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 	recordUsageSilently(cfg.Launch.UsageStats,
 		newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, launch.UsagePostureDefault))
-	return execHarness(claudePath, args, env)
+	return execHarness("", claudePath, args, env)
 }
 
 // forkTaskNote annotates the dry-run task line so a fork's task behavior is
@@ -648,7 +683,7 @@ type sessionDTO struct {
 // Every field is disk-sourced and untrusted — a session name is whatever was
 // typed at /rename, and an ai-title is model-generated — so each path applies
 // the control built for its own sink. The text path quotes the row cells and
-// the cwd through safeTerm, and the prompt line through safePrompt, which also
+// the cwd through the capped helpers in termcap.go, and the prompt line through safePrompt, which also
 // caps its length.
 // The JSON path passes the stored value through and lets writeJSON's
 // termsafe.JSONEncoder escape it, because a `resume ls --json | jq -r .cwd`
@@ -676,7 +711,7 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
 		_, _ = fmt.Fprintln(out, sessionRowWidth(s, l))
-		_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(s.Cwd))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeColumnPath(s.Cwd))
 		if s.LastPrompt != "" {
 			_, _ = fmt.Fprintf(out, "\t%s\n", safePrompt(s))
 		}
@@ -733,12 +768,12 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 	errOut := cmd.ErrOrStderr()
 	paths, err := resumePaths()
 	if err != nil {
-		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot skipped: %v\n", termsafe.Error(err))
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot skipped: %s\n", safeText(termsafe.Error(err).Error()))
 		return
 	}
 	res := resume.Snapshot(paths, time.Now())
 	for _, e := range res.Errs {
-		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", termsafe.Error(e))
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot: %s\n", safeText(termsafe.Error(e).Error()))
 	}
 	slog.Debug("Successfully completed resume snapshot.",
 		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned,

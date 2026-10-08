@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/sockstat"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Output caps. stdoutCap is written as the seam's ceiling rather than the
@@ -103,7 +108,19 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// the service would have nothing to close. RefKnown-with-cause is the
 	// contract's answer — the launch failed AND we know exactly what to clean
 	// up.
-	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrCreate,
+	//
+	// The root pane must be an idle shell before anything is typed into it. A
+	// layout plugin can start an agent in a new workspace's root pane, and
+	// `pane run` would then submit the bootstrap line, nonce included, to that
+	// agent as a prompt. The check reads process state only. It refuses a pane
+	// already taken, but it does not prove the shell has reached its prompt:
+	// typed input waits in the terminal queue for whatever reads it next, and a
+	// shell still loading its rc files passes. A prompt-ready signal is
+	// forgectl#1051; binding the handshake to the pane is forgectl#1041.
+	if cause := a.rootPaneIdle(ctx, created.PaneID); cause != nil {
+		return backend.NewRefKnownWithCause(ref, *cause)
+	}
+	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrBootstrap,
 		exec.MustFixed("pane"),
 		// `pane run` sends the text and Enter in one call. The protocol has no
 		// run method — it is a client-side composition of send_text and
@@ -147,6 +164,171 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// the launch, which is the service's job and not this adapter's.
 	return backend.NewRefKnown(ref)
 }
+
+// rootPaneIdle reports nil when pane's foreground belongs to its own shell.
+//
+// "Idle" is the shell owning the terminal's foreground process group. It is
+// not "the shell is the only process listed": prompt hooks (direnv, env) run
+// as short-lived children inside the shell's own group, and a fresh pane shows
+// them for a moment. A job the shell starts — an agent, an editor — gets a
+// process group of its own and takes the foreground, which is the case this
+// refuses.
+func (a *Adapter) rootPaneIdle(ctx context.Context, pane string) *backend.StartCause {
+	var info processInfo
+	for attempt := 0; attempt < idleAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				cause := backend.NewStartCause(backend.FailureCanceled, ctx.Err())
+				return &cause
+			case <-time.After(a.idleInterval):
+			}
+		}
+		res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrPaneInspect,
+			exec.MustFixed("pane"),
+			exec.MustFixed("process-info"),
+			exec.MustFixed("--pane"),
+			exec.Opaque(pane),
+		))
+		if runErr != nil {
+			cause := a.classifyRunError(runErr, res)
+			return &cause
+		}
+		var err error
+		if info, err = parseProcessInfo(res.Stdout); err != nil {
+			cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
+			return &cause
+		}
+		if info.idle() {
+			return nil
+		}
+	}
+	if info.ShellPID <= 0 || info.ForegroundGroup <= 0 {
+		cause := backend.NewStartCause(backend.FailureMalformedResponse, errNoShell)
+		return &cause
+	}
+	// The process name comes from herdr and ultimately from whatever runs in
+	// the pane, so it is quoted for the terminal. Only the name: the full
+	// command line can carry arguments the operator never meant to print.
+	_, _ = fmt.Fprintf(a.warnings,
+		"herdr: the new workspace's root pane is running %s, not an idle shell; forgectl will not type into it\n",
+		termsafe.QuoteTextMax(info.foregroundName(), 64))
+	cause := backend.NewStartCause(backend.FailureTargetBusy, ErrRootPaneBusy)
+	return &cause
+}
+
+// idleAttempts and defaultIdleInterval bound the wait for a busy root pane:
+// about 1.5 s. A shell's prompt hooks can briefly hold the foreground as a job
+// of their own (measured: 1 sample in 75 on herdr 0.9.1), and that clears
+// within one interval; an agent a layout started does not.
+const (
+	idleAttempts        = 10
+	defaultIdleInterval = 150 * time.Millisecond
+)
+
+// ErrRootPaneBusy reports a root pane that something other than its shell
+// holds.
+var ErrRootPaneBusy = errors.New("herdradapter: the root pane is not an idle shell")
+
+// processInfo is the part of `pane process-info` this package reads.
+type processInfo struct {
+	ForegroundGroup int           `json:"foreground_process_group_id"`
+	ShellPID        int           `json:"shell_pid"`
+	Processes       []paneProcess `json:"foreground_processes"`
+}
+
+// paneProcess is one foreground process. Argv is what tells an interactive
+// shell from one running a command string.
+type paneProcess struct {
+	Name string   `json:"name"`
+	PID  int      `json:"pid"`
+	Argv []string `json:"argv"`
+}
+
+// knownShells are the process names an idle root pane may show. herdr's
+// shell_pid is the pane's direct child, whatever binary that is, so a pane a
+// layout started an agent in directly, or a shell that exec'd into one, owns
+// its own foreground with the agent as leader. The name check refuses that.
+var knownShells = []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "xonsh", "elvish", "pwsh"}
+
+// idle reports a pane whose foreground group is its own process alone, and
+// that process is a shell. A leader missing from the listing is not idle.
+//
+// "Alone" is what refuses a wrapper: `bash -lc 'source env.sh; claude'` has no
+// job control, so the agent runs as a child inside the shell's own group, led
+// by a shell name. A prompt hook (direnv, starship) is also a child in that
+// group, but only for a moment; rootPaneIdle re-reads the pane, so a hook
+// delays the launch while an agent child refuses it.
+func (p processInfo) idle() bool {
+	if p.ShellPID <= 0 || p.ForegroundGroup != p.ShellPID {
+		return false
+	}
+	leaderIsShell := false
+	for _, proc := range p.Processes {
+		if proc.PID != p.ShellPID {
+			return false
+		}
+	}
+	for _, proc := range p.Processes {
+		if proc.PID == p.ShellPID {
+			// A login shell can show as "-zsh".
+			leaderIsShell = slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-")) &&
+				interactiveArgv(proc.Argv)
+		}
+	}
+	return leaderIsShell
+}
+
+// foregroundName names what holds the pane: the first process that is not
+// the shell when there is one (an agent behind a shell wrapper), else the
+// group leader, else the first listed process.
+func (p processInfo) foregroundName() string {
+	for _, proc := range p.Processes {
+		if proc.PID != p.ShellPID && proc.PID != p.ForegroundGroup {
+			return proc.Name
+		}
+	}
+	for _, proc := range p.Processes {
+		if proc.PID == p.ForegroundGroup {
+			return proc.Name
+		}
+	}
+	if len(p.Processes) > 0 {
+		return p.Processes[0].Name
+	}
+	return "an unknown process"
+}
+
+type processInfoReply struct {
+	Result struct {
+		ProcessInfo *processInfo `json:"process_info"`
+	} `json:"result"`
+}
+
+// parseProcessInfo fails closed: a reply without a shell pid or a foreground
+// group is one this adapter cannot judge, and an unjudged pane is not idle.
+func parseProcessInfo(out exec.BoundedOutput) (processInfo, error) {
+	raw, complete := out.CopyBytesForParse()
+	if !complete {
+		return processInfo{}, errors.New("the herdr process-info reply was truncated")
+	}
+	var reply processInfoReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return processInfo{}, errors.New("the herdr process-info reply was not readable JSON")
+	}
+	info := reply.Result.ProcessInfo
+	if info == nil {
+		return processInfo{}, errors.New("the herdr process-info reply had no process_info")
+	}
+	// A zero shell pid or foreground group is a pane whose shell has not
+	// started yet. It is not idle (idle refuses it) and it is re-read; only a
+	// pane still without a shell when the reads run out is refused as
+	// malformed.
+	return *info, nil
+}
+
+// errNoShell reports a pane that never showed a shell within the re-reads.
+var errNoShell = errors.New("the herdr process-info reply named no shell or foreground group")
 
 // reconcile runs EXACTLY ONE listing to settle whether the create landed.
 //
@@ -255,6 +437,19 @@ type serverInfo struct {
 // (forgectl#364).
 func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
 	return a.readinessAtPin(ctx, "", true)
+}
+
+// CheckReady runs the readiness check Start runs first, and nothing else: the
+// pinned session is running, its socket is ours, and it speaks a protocol
+// this build knows. `surface drain` asks it before claiming, so a herdr that
+// is down pauses claiming instead of failing a launch after its worktree
+// exists. The error is a backend.StartCause; FailureUnavailable means the
+// session is not running or cannot be reached.
+func (a *Adapter) CheckReady(ctx context.Context) error {
+	if _, cause := a.readiness(ctx); cause != nil {
+		return *cause
+	}
+	return nil
 }
 
 // freshReadiness resolves the original named session again but refuses a new
@@ -592,36 +787,28 @@ type createdWorkspace struct {
 	PaneID      string
 }
 
-type createReply struct {
-	Result struct {
-		Workspace struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"workspace"`
-		Tab struct {
-			TabID string `json:"tab_id"`
-		} `json:"tab"`
-		RootPane struct {
-			PaneID string `json:"pane_id"`
-		} `json:"root_pane"`
-	} `json:"result"`
+// createResult and listResult are the "result" members of herdr's
+// {"id","result"} replies, which wire.DecodeResult unwraps; the envelope itself
+// is decoded in one place for this adapter and internal/herdr (#722).
+type createResult struct {
+	Workspace struct {
+		WorkspaceID string `json:"workspace_id"`
+	} `json:"workspace"`
+	Tab struct {
+		TabID string `json:"tab_id"`
+	} `json:"tab"`
+	RootPane struct {
+		PaneID string `json:"pane_id"`
+	} `json:"root_pane"`
 }
 
-type listReply struct {
-	Result struct {
-		Workspaces []struct {
-			WorkspaceID string `json:"workspace_id"`
-			Label       string `json:"label"`
-		} `json:"workspaces"`
-	} `json:"result"`
-}
-
-// errorReply is herdr's refusal envelope. The CODE is the field worth reading —
-// it is machine-readable and stable in a way the message is not, which is the
-// thing the cmux adapter had to approximate with a substring match on prose.
-type errorReply struct {
-	Error struct {
-		Code string `json:"code"`
-	} `json:"error"`
+// listResult's list is a pointer so a missing or null member is told apart
+// from an empty listing: absence is what a false empty reads as.
+type listResult struct {
+	Workspaces *[]struct {
+		WorkspaceID string `json:"workspace_id"`
+		Label       string `json:"label"`
+	} `json:"workspaces"`
 }
 
 // parseSessions reads the session roster, keyed by exact name.
@@ -658,14 +845,17 @@ func parseCreated(out exec.BoundedOutput) (createdWorkspace, error) {
 	if !complete {
 		return createdWorkspace{}, errors.New("the herdr create reply was truncated")
 	}
-	var reply createReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	reply, err := wire.DecodeResult[createResult](raw)
+	switch {
+	case errors.Is(err, wire.ErrNoResult):
+		return createdWorkspace{}, errors.New("the herdr create reply had no result")
+	case err != nil:
 		return createdWorkspace{}, errors.New("the herdr create reply was not readable JSON")
 	}
 	out2 := createdWorkspace{
-		WorkspaceID: reply.Result.Workspace.WorkspaceID,
-		TabID:       reply.Result.Tab.TabID,
-		PaneID:      reply.Result.RootPane.PaneID,
+		WorkspaceID: reply.Workspace.WorkspaceID,
+		TabID:       reply.Tab.TabID,
+		PaneID:      reply.RootPane.PaneID,
 	}
 	if out2.WorkspaceID == "" || out2.TabID == "" || out2.PaneID == "" {
 		return createdWorkspace{}, errors.New("the herdr create reply named no complete workspace identity")
@@ -680,7 +870,9 @@ func parseCreated(out exec.BoundedOutput) (createdWorkspace, error) {
 // A reply we could not read is not an empty reply; the completeness flag is
 // checked as well as the JSON parse, because a document that happened to be
 // valid at its truncation point would otherwise present as a SHORTER listing,
-// which is exactly a false absence.
+// which is exactly a false absence. For the same reason a reply with no
+// "result", or a result with no "workspaces" member, is refused rather than
+// read as an empty listing (#722): that is the shape of a renamed envelope.
 //
 // internal/tmux and the cmux adapter DROP an unusable row and refuse only when
 // every row is unusable, and they are right to: a tmux session name is chosen by
@@ -700,12 +892,17 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 	if !complete {
 		return nil, errors.New("the herdr workspace listing was truncated")
 	}
-	var reply listReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	reply, err := wire.DecodeResult[listResult](raw)
+	switch {
+	case errors.Is(err, wire.ErrNoResult):
+		return nil, errors.New("the herdr workspace listing had no result")
+	case err != nil:
 		return nil, errors.New("the herdr workspace listing was not readable JSON")
+	case reply.Workspaces == nil:
+		return nil, errors.New("the herdr workspace listing had no workspaces member")
 	}
-	rows := make(map[string]workspaceRow, len(reply.Result.Workspaces))
-	for _, w := range reply.Result.Workspaces {
+	rows := make(map[string]workspaceRow, len(*reply.Workspaces))
+	for _, w := range *reply.Workspaces {
 		if _, err := backend.NewHerdrIdentity(w.WorkspaceID, "", ""); err != nil {
 			return nil, errors.New("a row of the herdr workspace listing was not usable")
 		}
@@ -714,19 +911,21 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 	return rows, nil
 }
 
-// errorCode reads herdr's structured refusal code, or "" when the stream is not
-// one. Matching the code rather than the message is what makes a reworded
-// diagnostic harmless.
+// errorCode reads herdr's structured refusal code through wire.DecodeError, or
+// "" when the stream is not one. The CODE is the field worth reading — it is
+// machine-readable and stable in a way the message is not, which is the thing
+// the cmux adapter had to approximate with a substring match on prose; matching
+// it is what makes a reworded diagnostic harmless.
 func errorCode(out exec.BoundedOutput) string {
 	raw, complete := out.CopyBytesForParse()
 	if !complete {
 		return ""
 	}
-	var reply errorReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	r, ok := wire.DecodeError(raw)
+	if !ok {
 		return ""
 	}
-	return reply.Error.Code
+	return r.Code
 }
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.
@@ -760,3 +959,27 @@ func (a *Adapter) classifyRunError(err error, res exec.SensitiveResult) backend.
 	}
 	return backend.NewStartCause(backend.FailureUnavailable, err)
 }
+
+// interactiveArgv reports a shell started to read commands from its terminal:
+// argv present, and every argument after the program name a flag that does not
+// take a command string. `bash -lc '...; claude'` sits at its own setup with
+// only the shell in the foreground, but it never reads the pane; a line typed
+// there waits in the terminal buffer for the agent the string starts. A
+// missing argv cannot be judged and is not interactive.
+func interactiveArgv(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if !slices.Contains(interactiveShellFlags, arg) {
+			return false
+		}
+	}
+	return true
+}
+
+// interactiveShellFlags are the only arguments an idle shell may carry. Every
+// other flag is refused, because shells disagree on which ones take a command
+// string (bash -c, fish -C and --init-command, nu --commands, pwsh -Command)
+// and a list of the dangerous ones is never finished.
+var interactiveShellFlags = []string{"-l", "-i", "-il", "-li", "--login", "--interactive"}

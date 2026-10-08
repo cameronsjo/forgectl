@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -46,6 +47,12 @@ const (
 	// the Vikunja UI — and up to 200 of those arrive in one list_tasks result,
 	// each of them untrusted text.
 	maxTitleShowRunes = 300
+	// maxLastLineShowRunes bounds the last line get_task shows separately
+	// when it truncates a description. A closed-by trailer with the longest
+	// closer and evidence this client writes is under 460 runes; a "last
+	// line" far past that is a description with no line breaks, not a
+	// trailer.
+	maxLastLineShowRunes = 500
 )
 
 // delimiterPrefix is the substring that opens or closes a fence, with the
@@ -184,7 +191,8 @@ func clampLimit(n int) int {
 // without a reserve a caller who sized their description exactly to the limit
 // is refused by CreateTask with a rune count they did not author — an error
 // that describes the server's own addition and reads as a caller mistake.
-// The trailer is a fixed ~60 runes plus a client name callerName caps at 100.
+// The trailer is a fixed ~60 runes plus a client name sanitizeCloser caps at
+// 100.
 const maxTrailerRunes = 200
 
 // createDescription appends the provenance trailer every create_task write
@@ -192,13 +200,20 @@ const maxTrailerRunes = 200
 // per agent is that a row can be traced back to the call that made it — the
 // trailer is what lets an operator go from a task in the UI to a gateway log
 // line without a second lookup.
-func createDescription(description, client string) string {
-	trailer := fmt.Sprintf("created-by: %s via forgectl tasks mcp %s",
-		sanitizeBoardText(client), time.Now().UTC().Format(time.RFC3339))
-	if strings.TrimSpace(description) == "" {
-		return trailer
+//
+// The client name goes through trailerLine, and so through sanitizeCloser.
+// sanitizeBoardText is the wrong tool for it: that one keeps newlines by
+// design, and a client name holding one wrote a second line into the
+// description that could itself read as a trailer.
+func createDescription(description, client string) (string, error) {
+	trailer, err := trailerLine(trailerCreatedBy, client, SurfaceMCP, time.Now(), "")
+	if err != nil {
+		return "", err
 	}
-	return description + "\n\n" + trailer
+	if strings.TrimSpace(description) == "" {
+		return trailer, nil
+	}
+	return description + "\n\n" + trailer, nil
 }
 
 // toolError renders a handler failure as a TOOL error (IsError) rather than a
@@ -253,17 +268,34 @@ type (
 		TaskID int    `json:"task_id" jsonschema:"the task id to comment on"`
 		Body   string `json:"body" jsonschema:"the comment text; must not be blank"`
 	}
+	completeTaskInput struct {
+		TaskID   int    `json:"task_id" jsonschema:"the global task id to mark done, as create_task, get_task, and list_tasks return it"`
+		Evidence string `json:"evidence" jsonschema:"One line, at most 300 characters: the merged PR or commit as owner/repo#N or a URL; for work with no PR, the command run and its result."`
+	}
 )
 
-// NewMCPServer builds the MCP server over client. defaultClientName is the
-// created-by trailer's fallback, used only when the connected client declared
-// no name of its own at initialize — see callerName.
-//
-// Six tools, raw names. The names matter beyond this file: the estate gateway
-// prefixes them for clients (`vikunja_create_task`) while its authorization
-// rules match the RAW name, so renaming one here silently changes what a
-// gateway rule does or does not cover.
-// callerName resolves who to name in a created-by trailer.
+// MCPConfig is what NewMCPServer needs besides the client.
+type MCPConfig struct {
+	// DefaultClientName is the trailer's fallback closer, used only when the
+	// connected client declared no name of its own at initialize — see
+	// callerName.
+	DefaultClientName string
+	// Records receives one close-record line per complete_task call that
+	// sent an update or was refused by the session cap, and one board-write
+	// line per create_task or add_comment call that sent a write or was
+	// refused by the session's write cap. On the stdio
+	// transport it must not be stdout, which is the JSON-RPC stream. A nil
+	// writer is not a way to turn records off: every record then fails to
+	// write, and each affected result says so.
+	Records io.Writer
+	// CredentialSource and Host are written into each close record: the name
+	// of the place the token was read from (a keychain service name, or
+	// CredentialSourceTokenFile) and the instance it is sent to. Neither is
+	// used to make a request.
+	CredentialSource, Host string
+}
+
+// callerName resolves who to name in a created-by or closed-by trailer.
 //
 // The transport-level fallback alone cannot do this job: one HTTP container
 // serves every agent behind the gateway, so a compile-time string would put
@@ -273,7 +305,7 @@ type (
 //
 // It is untrusted — a client declares whatever it likes — which is exactly why
 // it belongs in a provenance trailer rather than in an authorization decision,
-// and why createDescription sanitizes it. A row's real attribution is the bot
+// and why trailerLine sanitizes it. A row's real attribution is the bot
 // identity the token belongs to; this narrows it further when it can.
 func callerName(req *mcp.CallToolRequest, fallback string) string {
 	if req == nil || req.Session == nil {
@@ -305,8 +337,23 @@ func listTasksSchema() *jsonschema.Schema {
 	return schema
 }
 
-func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
+// NewMCPServer builds the MCP server over client.
+//
+// Seven tools, raw names. The names matter beyond this file: the estate
+// gateway prefixes them for clients (`vikunja_create_task`) while its
+// authorization rules match the RAW name, so renaming one here silently
+// changes what a gateway rule does or does not cover.
+func NewMCPServer(client *Client, cfg MCPConfig) *mcp.Server {
+	// One lock for every record line this server writes, whichever tool
+	// writes it. A nil writer stays nil, so a missing one still fails each
+	// record and each result still says so.
+	if cfg.Records != nil {
+		cfg.Records = &serialWriter{w: cfg.Records}
+	}
 	server := mcp.NewServer(&mcp.Implementation{Name: MCPServerName, Version: MCPServerVersion}, nil)
+	// The two tools that add rows share one per-session budget, so they are
+	// one value and not two closures.
+	writes := newBoardWriteTool(client, cfg, server.Sessions)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:         "list_projects",
@@ -420,7 +467,16 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 		var b strings.Builder
 		fmt.Fprintf(&b, "#%d [%s] project %d\ntitle: %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 		if task.Description != "" {
-			fmt.Fprintf(&b, "description: %s\n", f.wrapOrDrop(truncateRunes(task.Description, maxDescriptionRunes)))
+			shown := truncateRunes(task.Description, maxDescriptionRunes)
+			fmt.Fprintf(&b, "description: %s\n", f.wrapOrDrop(shown))
+			// Truncation cuts from the end, and the end is where a closed-by
+			// trailer sits. Without this a reader of a long description sees
+			// everything except who closed the task and why. It is board text
+			// like the rest, so it is fenced, and on one line.
+			if shown != task.Description {
+				fmt.Fprintf(&b, "description last line (the description above is truncated): %s\n",
+					f.wrapLine(truncateRunes(lastLine(strings.TrimRight(task.Description, "\r\n")), maxLastLineShowRunes)))
+			}
 		}
 		// Sorted, so the same task renders identically on every call. Go
 		// randomises map iteration, and an agent diffing two get_task results
@@ -486,67 +542,26 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "create_task",
+		Name:         "create_task",
+		OutputSchema: outputSchema[createTaskOutput](),
 		Description: "File a new task in a project. Refuses a blank title. The credential's grant decides " +
 			"which projects accept a write; a project it cannot read is refused before the write is attempted.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, in createTaskInput) (*mcp.CallToolResult, any, error) {
-		f, errResult := fenceOrError()
-		if errResult != nil {
-			return errResult, nil, nil
-		}
-		if strings.TrimSpace(in.Title) == "" {
-			return toolError("create_task: title is required and must not be blank"), nil, nil
-		}
-		// Bound the CALLER's description against the caller's own budget, before
-		// the trailer is appended. CreateTask's bound runs on the combined text,
-		// so leaving this to it reports a length that includes the server's
-		// trailer — a refusal that names a number the caller cannot reconcile
-		// with what it sent.
-		if n := len([]rune(in.Description)); n > maxDescriptionSendRunes-maxTrailerRunes {
-			return toolError("create_task: description is %d characters, over the %d limit (the remaining %d are reserved for the created-by trailer)",
-				n, maxDescriptionSendRunes-maxTrailerRunes, maxTrailerRunes), nil, nil
-		}
-		// Pre-read, fail closed. A project this credential cannot READ is one
-		// it must not write to, and the write's own 401 cannot distinguish
-		// "out of scope" from "revoked token" (ADR 0009). A passing read is
-		// what makes the write's outcome mean anything.
-		if _, err := client.FetchProject(ctx, in.ProjectID); err != nil {
-			return toolError("create_task: refusing to write to project %d because the pre-read of that project failed: %v",
-				in.ProjectID, err), nil, nil
-		}
-		created, err := client.CreateTask(ctx, in.ProjectID, in.Title,
-			createDescription(in.Description, callerName(req, defaultClientName)))
-		if err != nil {
-			return toolError("create_task: %v", err), nil, nil
-		}
-		return toolText(fmt.Sprintf("created task #%d in project %d: %s",
-			created.ID, in.ProjectID, f.wrapLine(truncateRunes(created.Title, maxTitleShowRunes)))), nil, nil
-	})
+	}, writes.createTask)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "add_comment",
 		Description: "Add a comment to a task. Refuses a blank body. The credential's grant decides which " +
 			"tasks accept a comment.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in addCommentInput) (*mcp.CallToolResult, any, error) {
-		if strings.TrimSpace(in.Body) == "" {
-			return toolError("add_comment: body is required and must not be blank"), nil, nil
-		}
-		// The same fail-closed pre-read create_task performs, for the same
-		// reason: a task this credential cannot READ is one it must not
-		// comment on, and the write's own 401 cannot distinguish "out of
-		// scope" from "revoked token". Applying the rule to only one of two
-		// write verbs would leave the ADR stating a general decision that the
-		// code half-keeps.
-		if _, err := client.FetchTask(ctx, in.TaskID); err != nil {
-			return toolError("add_comment: refusing to comment on task %d because the pre-read of that task failed: %v",
-				in.TaskID, err), nil, nil
-		}
-		comment, err := client.AddComment(ctx, in.TaskID, in.Body)
-		if err != nil {
-			return toolError("add_comment: %v", err), nil, nil
-		}
-		return toolText(fmt.Sprintf("added comment #%d to task #%d", comment.ID, in.TaskID)), nil, nil
-	})
+	}, writes.addComment)
+
+	// The one tool that changes a row that already exists. Its handler keeps
+	// state between calls (the per-session budget), so it is a value and not
+	// a closure; server.Sessions is how the budget learns a session ended.
+	mcp.AddTool(server, &mcp.Tool{
+		Name:         "complete_task",
+		OutputSchema: outputSchema[completeTaskOutput](),
+		Description:  completeTaskDescription,
+	}, newCloseTool(client, cfg, server.Sessions).handle)
 
 	return server
 }

@@ -199,6 +199,23 @@ func TestQMDSearchNonZeroExit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exit 3") || strings.Contains(err.Error(), "secretquery") {
 		t.Errorf("silent failure err = %v, want it to name exit 3", err)
 	}
+
+	// #941: qmd's stderr is redacted per line before it is escaped.
+	// Mutation: drop redact.Text around stderr in qmdFailure (the token
+	// shows), or apply it after the escaping ("kept line" disappears).
+	r = &fakeQMD{stderr: "kept line\nhttps://u:qmdtok941@example.invalid/x: 401\n", err: &forgexec.CommandError{Name: "qmd", Args: args, ExitCode: 1}} //nolint:gosec // G101: a fake credential the test plants
+	_, err = qmdSearcher(r, t.TempDir()).Search(context.Background(), idx, "secretquery", 5)
+	if err == nil || strings.Contains(err.Error(), "qmdtok941") || !strings.Contains(err.Error(), "kept line") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("stderr err = %v, want the credential line withheld and the other kept", err)
+	}
+
+	// #926: Err's text is redacted as CommandError.Error() redacts it.
+	// Mutation: drop redact.Text around cmdErr.Err.Error() in qmdFailure.
+	r = &fakeQMD{err: &forgexec.CommandError{Name: "qmd", Args: args, ExitCode: -1, Err: errors.New(`exec: "https://u:qmdtok@example.invalid/qmd": permission denied`)}}
+	_, err = qmdSearcher(r, t.TempDir()).Search(context.Background(), idx, "secretquery", 5)
+	if err == nil || strings.Contains(err.Error(), "qmdtok") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("never-ran err = %v, want Err's text withheld", err)
+	}
 }
 
 func TestQMDSearchMissingBinary(t *testing.T) {

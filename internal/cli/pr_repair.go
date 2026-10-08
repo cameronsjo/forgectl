@@ -255,16 +255,16 @@ func writePruneHuman(out io.Writer, report pr.PruneReport) error {
 		}
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\n", age, it.Outcome, termsafe.QuotePathIfUnsafe(it.Path))
 		if it.Reason != "" {
-			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeTerm(it.Reason))
+			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeText(it.Reason))
 		}
 		if it.Error != "" {
-			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(it.Error))
 		}
 	}
 	_, _ = fmt.Fprintf(out, "log\t%s\t%s (dropped %d, kept %d)\n",
 		report.Log.Outcome, termsafe.QuotePathIfUnsafe(report.Log.Path), report.Log.Dropped, report.Log.Kept)
 	if report.Log.Error != "" {
-		_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(report.Log.Error))
+		_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(report.Log.Error))
 	}
 	return nil
 }
@@ -285,7 +285,7 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 	// garbage, so it is counted here rather than only in a debug log.
 	if trail.Omitted > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: showing the newest %d rows; %d older rows are in %s\n",
-			len(rows), trail.Omitted, termsafe.QuotePathIfUnsafe(trail.Path))
+			len(rows), trail.Omitted, safePath(trail.Path))
 		// The unpaired intents are the rows the log exists to keep visible, and
 		// prune keeps them at any age, so they pile up in exactly this window.
 		if trail.OmittedUnpaired > 0 {
@@ -295,12 +295,12 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 			}
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 				"note: %s%d of the omitted rows are intents with no completion (a mutation that died mid-way); read %s directly to find them\n",
-				atLeast, trail.OmittedUnpaired, termsafe.QuotePathIfUnsafe(trail.Path))
+				atLeast, trail.OmittedUnpaired, safePath(trail.Path))
 		}
 	}
 	if trail.Skipped > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: %d unreadable lines skipped; they are still in %s\n",
-			trail.Skipped, termsafe.QuotePathIfUnsafe(trail.Path))
+			trail.Skipped, safePath(trail.Path))
 	}
 	if asJSON {
 		if rows == nil {
@@ -320,20 +320,20 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		// hand-editable and was written before teardown and cleanup recorded
 		// themselves, so silence there is unknown, never "this was a repair".
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeTerm(dashIfEmpty(r.Verb)), safeTerm(dashIfEmpty(r.Mode)), safeTerm(r.Outcome),
-			safeTerm(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
+			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeLabel(dashIfEmpty(r.Verb)), safeLabel(dashIfEmpty(r.Mode)), safeLabel(r.Outcome),
+			safeTitle(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
 		// The note is not optional detail. A shrunken ref or workspace stays
 		// well-formed, so without this line the default reader sees a truncated
 		// value as a complete one — the exact mistake the note exists to
 		// prevent, in the one view that was dropping it.
 		if r.RecordNote != "" {
-			_, _ = fmt.Fprintf(out, "  note: %s\n", safeTerm(r.RecordNote))
+			_, _ = fmt.Fprintf(out, "  note: %s\n", safeText(r.RecordNote))
 		}
 		// A compaction row's record_path names the log itself, so without its
 		// detail the row says only "prune touched this file" — the count of
 		// what it dropped lives nowhere else in this view.
 		if r.Detail != "" {
-			_, _ = fmt.Fprintf(out, "  detail: %s\n", safeTerm(r.Detail))
+			_, _ = fmt.Fprintf(out, "  detail: %s\n", safeText(r.Detail))
 		}
 	}
 	return nil
@@ -369,20 +369,20 @@ func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) er
 		return nil
 	}
 	for _, it := range report.Items {
-		ref := safeTerm(it.Ref)
+		ref := safeTitle(it.Ref)
 		if ref == "" {
 			// An unreadable record has no ref to print, and a blank first
 			// column would read as a row that simply lost its name.
 			ref = "(unreadable)"
 		}
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
-			ref, it.FromPhase, windowObservation(it), workspaceObservation(it),
+			ref, safeLabel(it.FromPhase), windowObservation(it), workspaceObservation(it),
 			termsafe.QuotePathIfUnsafe(it.RecordPath))
 		if it.Reason != "" {
 			_, _ = fmt.Fprintf(out, "  reason: %s\n", repairReasonLine(it.Reason))
 		}
 		if it.Error != "" {
-			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(it.Error))
 		}
 		if it.Outcome != "" && it.Outcome != "inspect" {
 			_, _ = fmt.Fprintf(out, "  %s\n", it.Outcome)
@@ -406,7 +406,7 @@ func repairExitCode(report pr.RepairReport, apply bool) error {
 	if apply || len(report.Items) == 0 {
 		return nil
 	}
-	return WithExitCode(fmt.Errorf("%d review session(s) are unsettled", len(report.Items)), 1)
+	return WithExitCode(fmt.Errorf("%d review session(s) are unsettled", len(report.Items)), exitFailed)
 }
 
 // windowObservation renders what tmux said, never what the record claims — the

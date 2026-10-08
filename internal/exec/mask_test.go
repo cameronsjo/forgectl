@@ -10,8 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/perftest"
 )
 
 // captureLogs routes the default slog logger into a buffer at debug level for
@@ -263,22 +264,29 @@ func TestMaskText_ShortValuesQualifyEachOtherToAFixpoint(t *testing.T) {
 	}
 }
 
-// TestMaskText_LongValueWithNoMatchIsNearLinear: a 4 KiB value that almost
-// matches everywhere ("aaa…ab") against 8 MiB of "a". Comparing it at every
-// byte is 32 G byte-comparisons; one strings.Index scan is linear.
+// TestMaskText_LongValueWithNoMatchIsNearLinear: a value that almost
+// matches everywhere ("aaa…ab") against a stream of "a". Comparing it at every
+// byte costs the value's length times the stream's; one strings.Index scan
+// is linear. The check is a ratio in CPU time (perftest.Linear,
+// forgectl#879): a 4 KiB value over 256 KiB, then both eight times longer.
+// The value is long enough that comparing it,
+// not the per-byte call, dominates a HasPrefix at every byte.
 //
 // Mutation: replace the long-pattern Index scan with a HasPrefix test at every
-// byte and this takes about 2.5 s (0.04 s as written, 0.19 s under -race).
+// byte, and the eight-times input costs over a hundred times as much.
 func TestMaskText_LongValueWithNoMatchIsNearLinear(t *testing.T) {
-	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4095) + "b"}))
-	s := strings.Repeat("a", 8<<20)
-	start := time.Now()
-	if got := m.text(s); got != s {
-		t.Fatal("text changed a stream with no match")
+	const k = 8
+	run := func(scale int) func() {
+		m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4096*scale-1) + "b"}))
+		s := strings.Repeat("a", scale<<18)
+		return func() {
+			if got := m.text(s); got != s {
+				t.Fatal("text changed a stream with no match")
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("text took %v on 8 MiB with no match; want well under a second", elapsed)
-	}
+	small, large := perftest.Amortize(run(1), run(k))
+	perftest.Linear(t, "text with no match", k, small, large)
 }
 
 // TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput pins #664: a
@@ -442,7 +450,7 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 				}
 			}
 			m := maskFrom(WithMaskedAssignments(context.Background(), entries))
-			covered := m.cover(text)
+			covered := m.data().cover(text)
 			for i, hid := range mainMaskedBytes(entries, text) {
 				if hid && !covered.has(i) {
 					t.Fatalf("alphabet %q case %d: entries %q\ntext %q\nmain hid byte %d, the new cover shows it: %q", alphabet, c, entries, text, i, m.text(text))
@@ -476,39 +484,55 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 // to left. The rescan-until-stable loop needed one full pass per link (26 s
 // for a 64 KiB tail on the issue's machine, 3.9 s here at 24 KiB); the
 // worklist re-checks only the matches beside newly covered bytes. The whole
-// stream must still end up covered.
+// stream must still end up covered. The check is a ratio in CPU time
+// (perftest.Linear, forgectl#919): a cascade of 21000 links against one an
+// eighth as long, in place of a 2 s wall-clock bound that host load alone
+// could fail.
 //
-// Mutation: make drain rescan every short pattern over the whole stream until
-// nothing changes (the old fixpoint) and this takes tens of seconds.
+// Mutation: make cover rescan every short pattern over the whole stream until
+// nothing changes (the old fixpoint) in place of drain, and the eight-times
+// cascade costs about 68 times as much (measured; limit 32). Unmutated it
+// measured 5.0 idle and 6.0 to 9.0 under 8 CPU burners on 4 cores.
 func TestMaskText_ShortCascadeIsLinear(t *testing.T) {
+	const links, k = 21000, 8
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=:ab:a"}))
-	s := strings.Repeat(":ab", 21000) + ":a"
-	start := time.Now()
-	if got := m.text(s); got != Redacted {
-		t.Fatalf("the cascade did not cover the stream: %.40q…", got)
+	run := func(links int) func() {
+		s := strings.Repeat(":ab", links) + ":a"
+		return func() {
+			if got := m.text(s); got != Redacted {
+				t.Fatalf("the cascade did not cover the stream: %.40q…", got)
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("text took %v on a %d-byte cascade; want milliseconds", elapsed, len(s))
-	}
+	small, large := perftest.Amortize(run(links/k), run(links))
+	perftest.Linear(t, "text on a short-value cascade", k, small, large)
 }
 
-// TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: a 16 KiB
-// "a…a" value against 16 MiB of "a" matches at every byte, and verifying
-// each match in full is 2.7e11 byte comparisons (about 10 s). eachMatch
-// carries the KMP state across overlapping matches instead (about 0.3 s).
+// TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: an "a…a"
+// value against a stream of "a" matches at every byte, and verifying each
+// match in full costs the value's length times the stream's (16 KiB over
+// 16 MiB was 2.7e11 byte comparisons, about 10 s). eachMatch carries the KMP
+// state across overlapping matches instead, which is linear. The check is a
+// ratio in CPU time (perftest.Linear, forgectl#879): a 4 KiB value over
+// 128 KiB, then both eight times longer. The value is long enough that
+// comparing it, not the per-match call, dominates re-verifying every match.
 //
 // Mutation: in eachMatch, drop the KMP carry (q starts at 0) and resume the
-// Index scan at i+1, as the old loop did, and this takes several seconds.
+// Index scan at i+1, as the old loop did, and the eight-times input costs
+// over a hundred times as much.
 func TestMaskText_SelfOverlappingLongValueIsLinear(t *testing.T) {
-	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 16<<10)}))
-	s := strings.Repeat("a", 16<<20)
-	start := time.Now()
-	if got := m.text(s); got != Redacted {
-		t.Fatalf("text left part of the stream: %.40q…", got)
+	const k = 8
+	run := func(scale int) func() {
+		m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4096*scale)}))
+		s := strings.Repeat("a", scale<<17)
+		return func() {
+			if got := m.text(s); got != Redacted {
+				t.Fatalf("text left part of the stream: %.40q…", got)
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("text took %v on 16 MiB matching at every byte; want well under a second", elapsed)
-	}
+	small, large := perftest.Amortize(run(1), run(k))
+	perftest.Linear(t, "text matching at every byte", k, small, large)
 }
 
 // TestEachMatch_FindsEveryOverlappingOccurrence checks eachMatch against a
@@ -579,7 +603,8 @@ func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 
 // straddleLenReference is straddleLen as it stood before #749: every suffix
 // length probed with HasPrefix, and no round cap.
-func straddleLenReference(m argMask, s string) int {
+func straddleLenReference(mask argMask, s string) int {
+	m := mask.data()
 	total := 0
 	for {
 		n := 0
@@ -648,21 +673,196 @@ func TestStraddleLen_MatchesTheSuffixProbe(t *testing.T) {
 // quadratic in that value's length, times one round per byte of the 64 KiB
 // tail: 24.8 s for a 4 KiB value before the fix.
 //
-// Mutation: delete the maxStraddleRounds cap and this takes about 90 s; keep
-// the cap but restore the HasPrefix probe loop in place of suffixPrefix and
-// it takes about 20 s (0.2 s as written).
+// The cost is a ratio in CPU time (perftest.Within, forgectl#919), in place
+// of a 3 s wall-clock bound that host load alone could fail: straddleLen on
+// an 8 KiB tail against a tail of exactly maxStraddleRounds bytes, which runs
+// as many rounds and so the same scans of each value, with almost no tail
+// for a round to search. Measured 1.0 to 1.7 idle and 1.0 to 1.8 under 8 CPU
+// burners on 4 cores, against a limit of 8.
+//
+// Mutations: delete the maxStraddleRounds cap, and the 8 KiB tail runs 128
+// times the rounds (ratio 157); keep the cap but restore the HasPrefix probe
+// loop in place of suffixPrefix, and each round probes 8 KiB of suffix
+// lengths where the base's probe at most 64 (ratio over 2000, and the base,
+// which no longer scans the 128 KiB value, falls under perftest.Floor).
 func TestStraddleLen_OneByteRoundsAreBounded(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"A=cb", "K=" + strings.Repeat("b", 128<<10-2) + "c"}))
-	tb := &tailBuffer{limit: maxStderrTail}
-	_, _ = tb.Write([]byte("zz" + strings.Repeat("b", 2*maxStderrTail)))
-	start := time.Now()
-	got, dropped := maskedTail(tb, m)
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("maskedTail took %v; want well under a second", elapsed)
+	straddle := func(s string) func() {
+		return func() {
+			if n := m.straddleLen(s); n != len(s) {
+				t.Fatalf("straddleLen dropped %d of a %d-byte tail of b; want all of it", n, len(s))
+			}
+		}
 	}
+	base, subject := perftest.Amortize(straddle(strings.Repeat("b", maxStraddleRounds)), straddle(strings.Repeat("b", 8<<10)))
+	perftest.Within(t, "straddleLen on a tail past the round cap", 8, base, subject)
+	if t.Failed() {
+		return // a regression the ratio caught makes the full tail below take minutes
+	}
+
 	// Past the cap the rest of the tail is dropped: every byte is gone and
 	// counted.
-	if got != "" || dropped != int64(2+2*maxStderrTail) {
+	tb := &tailBuffer{limit: maxStderrTail}
+	_, _ = tb.Write([]byte("zz" + strings.Repeat("b", 2*maxStderrTail)))
+	if got, dropped := maskedTail(tb, m); got != "" || dropped != int64(2+2*maxStderrTail) {
 		t.Errorf("got %.20q, dropped %d; want empty, %d", got, dropped, 2+2*maxStderrTail)
 	}
+}
+
+// TestStraddleLen_ValueLongerThanEveryEntry pins #925. withValues adds bare
+// values (maskFor adds every value a user span withholds) that can be longer
+// than any entry, or arrive with no entry at all. straddleLen sized its KMP
+// failure table from the entries alone, so a value longer than all of them
+// indexed past the table and panicked.
+//
+// Mutation: size longest from m.entries only (the pre-#925 loop) and every
+// row panics with index out of range.
+func TestStraddleLen_ValueLongerThanEveryEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []string
+		s       string
+		want    int
+	}{
+		{"no entries, no fragment", nil, "abcX tail text", 0},
+		{"no entries, a fragment", nil, "cdefX tail text", len("cdef")},
+		{"a shorter entry, a fragment", []string{"K=z"}, "bcdefX tail", len("bcdef")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := maskFrom(WithMaskedAssignments(context.Background(), tc.entries)).withValues([]string{"abcdef"})
+			if got := m.straddleLen(tc.s); got != tc.want {
+				t.Errorf("straddleLen(%q) = %d, want %d", tc.s, got, tc.want)
+			}
+		})
+	}
+}
+
+// fuzzAlphabet is what FuzzStraddleLen builds entries, values and streams
+// from: few enough bytes that suffix/prefix overlaps are dense, and none of
+// them in "[redacted]", so a replacement can never spell a value.
+const fuzzAlphabet = "bgkz=_ \xc3\xa9"
+
+func fuzzString(raw []byte) string {
+	b := make([]byte, len(raw))
+	for i, c := range raw {
+		b[i] = fuzzAlphabet[int(c)%len(fuzzAlphabet)]
+	}
+	return string(b)
+}
+
+// FuzzStraddleLen drives straddleLen and maskedTail over random masks built
+// from both sources (#925): WithMaskedAssignments entries and withValues
+// values, of any relative length. For every cut of the stream it asserts:
+//
+//   - nothing panics;
+//   - straddleLen never drops more than the tail it was given;
+//   - unless the round cap dropped the tail whole, what remains starts with
+//     no proper suffix of any value, and no suffix of any entry at least as
+//     long as that entry's value, each checked on its own (#926), and it
+//     matches the probe-every-suffix reference;
+//   - the masked tail never contains a whole value of minScrubLen or more,
+//     unless an entry's shown key spells it (the key is rendered by design).
+//
+// With raw unset, entries, values and the stream are mapped onto
+// fuzzAlphabet and every entry gets a "K" key, which keeps overlaps dense.
+// With raw set (#926), they are the fuzzer's bytes as given: the full byte
+// range, invalid UTF-8, and an entry with an empty key ("=value"). A value
+// holding a byte of Redacted is then exempt from the whole-value assertion,
+// since a replacement can spell it.
+//
+// Mutations: size straddleLen's longest from m.entries only and the seed
+// corpus panics; make straddleLen skip m.values and the reference disagrees;
+// make straddleLen and the reference both skip m.entries and the entry
+// check fails; make suffixPrefix compare bytes under a 0x7f mask and the
+// full-byte-range seed disagrees with the reference; make straddleLen skip
+// an entry with an empty key and the empty-key seed fails.
+func FuzzStraddleLen(f *testing.F) {
+	f.Add([]byte("k=b"), []byte("bgkzbgkz_bgkz"), []byte("gkz_bgkz tail bgkzbgkz_bgkz"), uint8(20), false)
+	f.Add([]byte(""), []byte("bbbbbbbbbbbbbbbbg"), []byte("bbbbbbbbg zz"), uint8(5), false)
+	f.Add([]byte("kb=gg"), []byte("zzzzzzzzzzzz"), []byte("zzzzzzzzzzzzzzzzzzzzzzz"), uint8(7), false)
+	f.Add([]byte("\x05\x06=\x07"), []byte("\x07\x08\x07\x08\x07\x08\x07\x08\x07"), []byte("\x08\x07\x08\x07\x08"), uint8(3), false)
+	// An empty key: the entry is "=zzqqyyww", and a cut after its '=' leaves
+	// the bare value starting the tail.
+	f.Add([]byte("=zzqqyyww"), []byte(""), []byte("xx=zzqqyyww tail"), uint8(0), true)
+	// The full byte range: a value holding every nonzero byte, and a stream
+	// starting with 'C' then the value's last 60 bytes, which only a
+	// comparison that ignores the high bit matches.
+	allBytes := make([]byte, 0, 255)
+	for c := 1; c <= 255; c++ {
+		allBytes = append(allBytes, byte(c))
+	}
+	f.Add([]byte("k=\x01\x7f\x80\xff"), allBytes, append([]byte("C"), allBytes[0xc4-1:]...), uint8(0), true)
+	// Invalid UTF-8: lone continuation bytes and bytes no encoding uses,
+	// in the value, the entry and the cut.
+	f.Add([]byte("\xff=\x80\x80zqyw\xfe"), []byte("\xff\xfe\x80\x80zqywzqyw1"), []byte("\x80zqywzqyw1 tail \xfe\x80"), uint8(0), true)
+	f.Fuzz(func(t *testing.T, rawEntries, rawValues, rawStream []byte, limit uint8, raw bool) {
+		// '\x00' separates list items before the alphabet mapping.
+		conv, key := fuzzString, "K"
+		if raw {
+			conv, key = func(b []byte) string { return string(b) }, ""
+		}
+		var entries, values []string
+		for _, r := range bytes.Split(rawEntries, []byte{0}) {
+			entries = append(entries, key+conv(r))
+		}
+		for _, r := range bytes.Split(rawValues, []byte{0}) {
+			values = append(values, conv(r))
+		}
+		stream := conv(rawStream)
+		m := maskFrom(WithMaskedAssignments(context.Background(), entries)).withValues(values)
+		d := m.data()
+		var shownKeys []string
+		for _, e := range d.entries {
+			shownKeys = append(shownKeys, d.shown[e])
+		}
+
+		for lim := 1; lim <= len(stream); lim++ {
+			if limit != 0 && lim != int(limit) && lim != len(stream) {
+				continue
+			}
+			tail := stream[len(stream)-lim:]
+			n := m.straddleLen(tail)
+			if n < 0 || n > len(tail) {
+				t.Fatalf("straddleLen(%q) = %d, outside [0, %d]", tail, n, len(tail))
+			}
+			if len(tail) < maxStraddleRounds {
+				if want := straddleLenReference(m, tail); n != want {
+					t.Fatalf("straddleLen(%q) = %d, reference %d (values %q, entries %q)", tail, n, want, d.values, d.entries)
+				}
+			}
+			if n < len(tail) {
+				rest := tail[n:]
+				for _, v := range d.values {
+					for l := 1; l < len(v) && l <= len(rest); l++ {
+						if strings.HasPrefix(rest, v[len(v)-l:]) {
+							t.Fatalf("after dropping %d of %q, the rest starts with %q, a suffix of value %q", n, tail, v[len(v)-l:], v)
+						}
+					}
+				}
+				// An entry's suffix at least as long as its value: the
+				// cut fell inside the key or right after '=' (#926).
+				for _, e := range d.entries {
+					_, v, _ := strings.Cut(e, "=")
+					for l := len(v); l < len(e) && l <= len(rest); l++ {
+						if strings.HasPrefix(rest, e[len(e)-l:]) {
+							t.Fatalf("after dropping %d of %q, the rest starts with %q, a suffix of entry %q reaching into its key", n, tail, e[len(e)-l:], e)
+						}
+					}
+				}
+			}
+
+			tb := &tailBuffer{limit: lim}
+			_, _ = tb.Write([]byte("~" + stream)) // the "~" forces a cut
+			got, _ := maskedTail(tb, m)
+			for _, v := range d.values {
+				if len(v) < minScrubLen || !strings.Contains(got, v) || raw && strings.ContainsAny(v, Redacted) {
+					continue
+				}
+				if slices.ContainsFunc(shownKeys, func(k string) bool { return strings.Contains(k, v) }) {
+					continue
+				}
+				t.Fatalf("maskedTail kept value %q whole: %q (stream %q, limit %d)", v, got, stream, lim)
+			}
+		}
+	})
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Step is one independently-scoped maintenance action. Check is always safe
@@ -244,13 +245,19 @@ func runStep(ctx context.Context, run exec.Runner, s Step, opts Options) (res Re
 }
 
 // runPhase runs one step's Check or Apply function (named by phase, for
-// logging), timing it and logging the outcome — the shared body behind
+// logging), timing it, redacting its output (redact.Stdout) and logging the
+// outcome — the shared body behind
 // runStep's CheckOnly and Apply branches, which otherwise differ only in
 // which function they call and which phase name they log.
 func runPhase(ctx context.Context, run exec.Runner, name, phase string, fn func(context.Context, exec.Runner) (string, error)) (output string, duration time.Duration, err error) {
 	slog.Debug("Preparing to run maintenance step.", "step", name, "phase", phase)
 	start := time.Now()
 	output, err = fn(ctx, run)
+	// Stored redacted (redact.Stdout, #952): every renderer of Result.Output
+	// (the transcript, --json, the debug log) shows the child's stdout, which
+	// is the step's deliverable, so only a line holding a credential shape is
+	// withheld; npm's @scope rows and brew's python@3.12 stay.
+	output = redact.Stdout(output)
 	duration = time.Since(start)
 	logStepOutcome(name, phase, Result{Name: name, Output: output, Err: err, Duration: duration})
 	return output, duration, err

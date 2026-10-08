@@ -1,0 +1,20 @@
+#  forgectl  ·  forgectl @ main · 2 tmux
+
+▌1 docs         Local markdown reader — render + serve an indexed doc set over…
+ 2 pr           Clean-room review of a pull request
+ 3 projects     Find and open projects across local, GitHub, and Gitea (clones…
+ 4 tmux         Wrangle tmux sessions, windows, and panes
+ 5 sessions     Sync local session ledgers into the operational concordance and…
+   ── recent ──
+   desk         Operator queue: scripts Claude stages for you to approve and run
+   tasks ready  List tasks that are ready to start
+   resume       Pick a recent Claude Code session in any repo and resume it…
+   ── areas · 8 commands ──
+ 6 agents ›     launch · resume · desk · tasks · surface · workflow · recipe…
+ 7 repos ›      status · review · branch · clean · audit · docker · k8s
+ 8 shell ›      env · y · pip · proxy · net
+ 9 setup ›      doctor · config · init · update · upgrade · bench · theme…
+$ forgectl docs <subcommand>
+   Local markdown reader — render + serve an indexed doc set over loopback HTTP
+
+↑↓ move · 1-9 open · enter open · / search · q/esc quit

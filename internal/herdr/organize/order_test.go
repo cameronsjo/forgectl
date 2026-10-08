@@ -98,6 +98,28 @@ func TestWorkspaceOrderChange(t *testing.T) {
 	}
 }
 
+// TestWorkspaceOrderChange_ADuplicateLabelMovesBehindTheLayout: apply puts a
+// non-canonical duplicate behind the layout's workspaces, so the dry run must
+// count that as a change rather than dedupe the label away (#732).
+func TestWorkspaceOrderChange_ADuplicateLabelMovesBehindTheLayout(t *testing.T) {
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1), ws("w2", "forge", 2), ws("w3", "misc", 3)},
+		[]tabSpec{
+			{"w1", "t1", "term1", "/r/forge/a", "a"},
+			{"w2", "t2", "term2", "/r/forge/b", "b"},
+			{"w3", "t3", "term3", "/r/other/c", "c"},
+		})
+	plan := BuildPlan(testConfig(), snap, testRoot)
+	from, to, changed := WorkspaceOrderChange(snap, plan)
+	if !changed || !reflect.DeepEqual(from, []string{"forge #1", "forge #2", "misc"}) || !reflect.DeepEqual(to, []string{"forge #1", "misc", "forge #2"}) {
+		t.Errorf("WorkspaceOrderChange = (%v, %v, %v), want forge #1,forge #2,misc -> forge #1,misc,forge #2 (a repeated label names its workspace, #945)", from, to, changed)
+	}
+	current, target := WorkspaceOrderTarget(snap.Workspaces, plan.Layout)
+	if !reflect.DeepEqual(current, []string{"w1", "w2", "w3"}) || !reflect.DeepEqual(target, []string{"w1", "w3", "w2"}) {
+		t.Errorf("WorkspaceOrderTarget = (%v, %v), want w1,w2,w3 -> w1,w3,w2 (the canonical forge is the lowest Number)", current, target)
+	}
+}
+
 func TestReorders_CountsAPanelessTabAsHoldingAPosition(t *testing.T) {
 	// [b, X (no panes), a] wants [a, b]; apply sees X as a stand-in that keeps
 	// its place at the end, so the dry run must plan the same single move.
@@ -125,5 +147,29 @@ func TestReorders_SkipsAWorkspaceWhoseMembersWillChange(t *testing.T) {
 	plan := BuildPlan(testConfig(), snap, testRoot)
 	if got := Reorders(snap, plan); len(got) != 0 {
 		t.Errorf("Reorders = %+v, want none: misc will lose a tab, so its order is not yet knowable", got)
+	}
+}
+
+// TestReorders_ABlockedTabInADuplicateDoesNotStallTheCanonicalOrder: a blocked
+// tab in a non-canonical duplicate is laid out under its current label, so it
+// sits in the canonical workspace's layout without ever arriving there. That
+// must not hide the canonical workspace's own reorder (#945).
+func TestReorders_ABlockedTabInADuplicateDoesNotStallTheCanonicalOrder(t *testing.T) {
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1), ws("w3", "misc", 2), ws("w2", "forge", 3)},
+		[]tabSpec{
+			{"w1", "t1", "term1", "/r/forge/b", "b"},
+			{"w1", "t2", "term2", "/r/forge/a", "a"},
+			{"w3", "t3", "term3", "/r/other/c", "c"},
+			{"w2", "t4", "term4", "/r/other/x", "x"},
+		})
+	plan := BuildPlan(testConfig(), snap, testRoot)
+	if len(plan.Moves) != 1 || !plan.Moves[0].Blocked {
+		t.Fatalf("Moves = %+v, want x's move blocked", plan.Moves)
+	}
+	got := Reorders(snap, plan)
+	if len(got) != 1 || got[0].Workspace != "forge" || len(got[0].Steps) != 1 ||
+		got[0].Steps[0].TerminalID != "term2" || got[0].Steps[0].Position != 0 {
+		t.Errorf("Reorders = %+v, want forge: term2 (a) to position 0", got)
 	}
 }

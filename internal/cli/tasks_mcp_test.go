@@ -3,18 +3,26 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/tasks"
 )
 
 // TestValidateMCPFlags_HTTPRequiresATokenFile is the refusal the container
@@ -115,28 +123,179 @@ func TestPingURL_RefusesAnUnparseableAddress(t *testing.T) {
 	}
 }
 
-// TestRunMCPPing_SucceedsAgainstARealStreamableHandler is the only test that
-// exercises the healthcheck end to end, and it is the one that makes the
-// Accept header a tested requirement rather than a comment. Both media types
-// are mandatory for a streamable-HTTP server: drop `text/event-stream` and
-// every probe in production fails, while every unit test stays green.
-func TestRunMCPPing_SucceedsAgainstARealStreamableHandler(t *testing.T) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "probe", Version: "1"}, nil)
+// pingBoardTitle is the one project title the ping's board serves. The ping
+// reads the board through the server and must print none of it.
+const pingBoardTitle = "PLANTED-PROJECT-TITLE-5e19"
+
+// pingBoard is a stub Vikunja for the ping: GET /projects answers status, with
+// one project when status is 200, and the number of reads is kept.
+type pingBoard struct {
+	mu     sync.Mutex
+	status int
+	reads  int
+}
+
+func (b *pingBoard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path != "/projects" || r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	// Counted only after the path check, so readCount proves the project
+	// list was read and not merely that some request arrived.
+	b.mu.Lock()
+	b.reads++
+	status := b.status
+	b.mu.Unlock()
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"token invalid"}`))
+		return
+	}
+	if page := r.URL.Query().Get("page"); page != "" && page != "1" {
+		_, _ = w.Write([]byte(`[]`))
+		return
+	}
+	_, _ = w.Write([]byte(`[{"id":1,"title":"` + pingBoardTitle + `"}]`))
+}
+
+func (b *pingBoard) readCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reads
+}
+
+// pingTarget serves the real tasks MCP server over a stub board, wrapped as
+// production wraps it, and returns its address. Mounting the bare handler
+// would let a future tightening of the origin policy pass here and 403 in the
+// container, which is the shape of test that reassures without covering.
+func pingTarget(t *testing.T, boardStatus int) (addr string, board *pingBoard, server *mcp.Server) {
+	t.Helper()
+	board = &pingBoard{status: boardStatus}
+	boardSrv := httptest.NewServer(board)
+	t.Cleanup(boardSrv.Close)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(tasksTestFakeToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := tasks.ReadTokenFile(tokenPath)
+	if err != nil {
+		t.Fatalf("ReadTokenFile: %v", err)
+	}
+	client := tasks.NewClientForTesting(boardSrv.URL, token)
+	server = tasks.NewMCPServer(client, tasks.MCPConfig{DefaultClientName: "forgectl (http)", Records: io.Discard})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout})
-	// Wrapped exactly as production wraps it. Mounting the bare handler would
-	// let a future tightening of the origin policy pass here and 403 in the
-	// container, which is the shape of test that reassures without covering.
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", http.NewCrossOriginProtection().Handler(handler))
 	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String(), board, server
+}
 
+func runPing(t *testing.T, addr string) (stdout string, err error) {
+	t.Helper()
+	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	cmd.SetOut(io.Discard)
-	if err := runMCPPing(cmd, srv.Listener.Addr().String()); err != nil {
-		t.Fatalf("--ping against a live streamable handler = %v, want nil", err)
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err = runMCPPing(cmd, addr)
+	return out.String(), err
+}
+
+// TestRunMCPPing_SucceedsAgainstARealStreamableHandler is the healthcheck end
+// to end, and it is the one that makes the Accept header a tested requirement
+// rather than a comment. Both media types are mandatory for a streamable-HTTP
+// server: drop `text/event-stream` and every probe in production fails, while
+// every unit test stays green.
+//
+// It also pins that the ping reads the board: a ping that stopped at
+// initialize reports a container healthy whose credential is dead.
+func TestRunMCPPing_SucceedsAgainstARealStreamableHandler(t *testing.T) {
+	addr, board, _ := pingTarget(t, http.StatusOK)
+	out, err := runPing(t, addr)
+	if err != nil {
+		t.Fatalf("--ping against a live server with a working credential = %v, want nil", err)
+	}
+	if out != "ok\n" {
+		t.Errorf("--ping printed %q, want exactly ok", out)
+	}
+	if board.readCount() == 0 {
+		t.Fatal("--ping succeeded without the server reading the board, so a dead credential would pass it")
+	}
+}
+
+// TestRunMCPPing_ARefusedCredentialFails is the case the read exists for: the
+// server is up, and the board refuses its token. That is unhealthy, with the
+// credential exit code, and the board's text is printed nowhere.
+func TestRunMCPPing_ARefusedCredentialFails(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		addr, _, _ := pingTarget(t, status)
+		out, err := runPing(t, addr)
+		if err == nil {
+			t.Fatalf("--ping with the board answering %d = nil, want a failure", status)
+		}
+		if ExitCode(err) != exitTasksUnauthorized {
+			t.Errorf("board %d: exit code = %d, want %d", status, ExitCode(err), exitTasksUnauthorized)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "up") || !strings.Contains(msg, "credential") {
+			t.Errorf("board %d: the message does not say the server is up and its credential was refused: %q", status, msg)
+		}
+		if strings.Contains(msg, "\n") {
+			t.Errorf("board %d: the message is more than one line: %q", status, msg)
+		}
+		for _, where := range []string{out, msg} {
+			if strings.Contains(where, pingBoardTitle) || strings.Contains(where, "token invalid") || strings.Contains(where, tasksTestFakeToken) {
+				t.Errorf("board %d: the ping printed board text or the token: %q", status, where)
+			}
+		}
+		if strings.Contains(out, "ok") {
+			t.Errorf("board %d: a failed ping printed ok: %q", status, out)
+		}
+	}
+}
+
+// TestRunMCPPing_AFailedReadFails: a read that fails for any other reason is
+// unhealthy too, under the generic exit code, and says the server is up.
+func TestRunMCPPing_AFailedReadFails(t *testing.T) {
+	addr, _, _ := pingTarget(t, http.StatusInternalServerError)
+	out, err := runPing(t, addr)
+	if err == nil {
+		t.Fatal("--ping with the board answering 500 = nil, want a failure")
+	}
+	if ExitCode(err) != 1 {
+		t.Errorf("exit code = %d, want 1", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "up") || !strings.Contains(err.Error(), "read") {
+		t.Errorf("the message does not say the server is up and the read failed: %q", err)
+	}
+	if strings.Contains(out, pingBoardTitle) || strings.Contains(err.Error(), pingBoardTitle) {
+		t.Errorf("the ping printed board text: %q / %q", out, err)
+	}
+}
+
+// TestRunMCPPing_EndsItsSession: the ping now holds its session across a tool
+// call, so it must end it when done, on success and on failure alike.
+func TestRunMCPPing_EndsItsSession(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized} {
+		addr, _, server := pingTarget(t, status)
+		_, _ = runPing(t, addr)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			n := 0
+			for range server.Sessions() {
+				n++
+			}
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("board %d: %d session(s) still open after the ping returned", status, n)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 }
 
@@ -165,16 +324,7 @@ func TestRunMCPPing_FailsAgainstAServerThatIsUpAndWrong(t *testing.T) {
 // interval that is thousands of abandoned sessions and goroutines a day in a
 // container meant to run for months.
 func TestRunMCPPing_DoesNotLeakSessions(t *testing.T) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "probe", Version: "1"}, nil)
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout})
-	// Wrapped exactly as production wraps it. Mounting the bare handler would
-	// let a future tightening of the origin policy pass here and 403 in the
-	// container, which is the shape of test that reassures without covering.
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", http.NewCrossOriginProtection().Handler(handler))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	addr, _, _ := pingTarget(t, http.StatusOK)
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -183,7 +333,7 @@ func TestRunMCPPing_DoesNotLeakSessions(t *testing.T) {
 	runtime.GC()
 	before := runtime.NumGoroutine()
 	for i := 0; i < 25; i++ {
-		if err := runMCPPing(cmd, srv.Listener.Addr().String()); err != nil {
+		if err := runMCPPing(cmd, addr); err != nil {
 			t.Fatalf("ping %d: %v", i, err)
 		}
 	}
@@ -284,5 +434,103 @@ func TestListenCause_DropsTheAddress(t *testing.T) {
 		if got := listenCause(err).Error(); strings.Contains(got, "SECRETTOK") {
 			t.Errorf("listenCause(%v) = %q, echoes the address", err, got)
 		}
+	}
+}
+
+// TestMCPServerConfig_RecordsGoToStderr: on stdio, stdout is the JSON-RPC
+// transport, so a close record written there would corrupt the session it
+// reports on. The record writer is the command's stderr on both transports.
+func TestMCPServerConfig_RecordsGoToStderr(t *testing.T) {
+	// The stdio config also appends to the close log, which must land under
+	// the test's own config directory.
+	isolateTasksConfigDir(t)
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	for _, httpAddr := range []string{"", ":3000"} {
+		stdout.Reset()
+		stderr.Reset()
+		cfg := mcpServerConfig(cmd, httpAddr, "some-entry", "board.example")
+		rec := tasks.CloseRecord{TaskID: 1, Surface: tasks.SurfaceMCP, Evidence: "x", Outcome: tasks.CloseOutcomeClosed}
+		if err := tasks.WriteCloseRecord(cfg.Records, rec); err != nil {
+			t.Fatalf("--http %q: WriteCloseRecord: %v", httpAddr, err)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("--http %q: a close record reached stdout: %s", httpAddr, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), `"outcome":"closed"`) {
+			t.Errorf("--http %q: the close record did not reach stderr: %q", httpAddr, stderr.String())
+		}
+	}
+}
+
+// TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential: a record says
+// where the token came from — the keychain entry's name on stdio, the fixed
+// word for a mounted file on HTTP — and the host it was sent to.
+func TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential(t *testing.T) {
+	cmd := &cobra.Command{}
+
+	stdio := mcpServerConfig(cmd, "", "some-entry", "board.example")
+	if stdio.CredentialSource != "some-entry" || stdio.Host != "board.example" || stdio.DefaultClientName != "forgectl (stdio)" {
+		t.Errorf("stdio config = %+v, want the keychain service name, the host, and the stdio client name", stdio)
+	}
+
+	// The keychain service flag has a default, so it is non-empty on HTTP
+	// too. It names an entry the HTTP transport never read.
+	overHTTP := mcpServerConfig(cmd, ":3000", "some-entry", "board.example")
+	if tasks.CredentialSourceTokenFile != "token-file" {
+		t.Errorf("CredentialSourceTokenFile = %q, want the literal token-file", tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.CredentialSource != tasks.CredentialSourceTokenFile {
+		t.Errorf("http credential source = %q, want %q", overHTTP.CredentialSource, tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.Host != "board.example" || overHTTP.DefaultClientName != "forgectl (http)" {
+		t.Errorf("http config = %+v, want the host and the http client name", overHTTP)
+	}
+}
+
+// TestTasksMCPHelp_NamesAllSevenTools: the help is where an operator learns
+// what the server exposes before granting it a credential.
+func TestTasksMCPHelp_NamesAllSevenTools(t *testing.T) {
+	host, service := "board.example", "some-entry"
+	long := newTasksMCPCmd(module.Deps{}, &host, &service).Long
+	if !strings.Contains(long, "Seven tools") || strings.Contains(long, "Six tools") {
+		t.Errorf("the help does not count seven tools:\n%s", long)
+	}
+	for _, tool := range []string{
+		"list_projects", "list_tasks", "get_task", "ready_tasks", "create_task", "add_comment", "complete_task",
+	} {
+		if !strings.Contains(long, tool) {
+			t.Errorf("the help does not name %s", tool)
+		}
+	}
+	if !strings.Contains(long, "stderr") || !strings.Contains(long, "close record") {
+		t.Errorf("the help does not say where close records go:\n%s", long)
+	}
+}
+
+// The refused verdict is read only from the start of the list_projects error.
+// Transport error text quoted later in the message can be shaped by a TLS
+// peer, through its certificate's names, and must not choose the exit code.
+func TestPingReadVerdict_ReadsTheRefusalOnlyAtTheStart(t *testing.T) {
+	result := func(text string) []byte {
+		body, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": 2,
+			"result": map[string]any{"isError": true, "content": []map[string]any{{"type": "text", "text": text}}},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return body
+	}
+	refused := listProjectsRefusedPrefix + tasks.ErrUnauthorized.Error() + ": /projects -> 401"
+	planted := listProjectsRefusedPrefix + tasks.ErrUnreachable.Error() + ": x509: certificate is valid for " + tasks.ErrUnauthorized.Error()
+	if got := pingReadVerdict(http.StatusOK, result(refused)); got != pingReadRefused {
+		t.Errorf("a real refusal = %v, want pingReadRefused", got)
+	}
+	if got := pingReadVerdict(http.StatusOK, result(planted)); got != pingReadFailed {
+		t.Errorf("a refusal sentence inside transport text = %v, want pingReadFailed", got)
 	}
 }

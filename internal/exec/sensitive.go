@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
@@ -106,6 +107,39 @@ const (
 	KindHerdrReconcile
 	KindHerdrProbe
 	KindHerdrCleanup
+	// KindHerdrPaneInspect reads a pane's foreground process before anything is
+	// typed into it. KindHerdrBootstrap is the `pane run` that types the
+	// trampoline line into a pane the inspection found idle.
+	KindHerdrPaneInspect
+	KindHerdrBootstrap
+	// KindHerdrNotify is `notification show`: a desktop notification whose
+	// title and body are item names and WHAT text, which is why it routes
+	// through this seam rather than the argv-logging Runner.
+	KindHerdrNotify
+	// KindHerdrPaneSplit, KindHerdrPaneRename and KindHerdrPaneRun build the desk
+	// layout. pane run types an operator-built command into a pane, and a
+	// split carries a cwd, so these stay off the argv-logging Runner too.
+	KindHerdrPaneSplit
+	KindHerdrPaneRename
+	KindHerdrPaneRun
+	// KindHerdrPaneMove is `pane move`, which `desk layout --below` uses to
+	// park the tab's other panes and bring them back. It carries only pane
+	// and tab ids, but it joins the other layout verbs on this seam.
+	KindHerdrPaneMove
+	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
+	// reads of a worker's root pane: its visible text and herdr's agent status.
+	KindHerdrScreenRead
+	KindHerdrPaneStatus
+	// KindHerdrSendText and KindHerdrSendKeys are `surface brief`'s two
+	// writes: the brief typed without Enter, then Enter as its own call once
+	// the read-back matched. Both go only to a pane the adapter has just
+	// placed in a workspace forgectl owns.
+	KindHerdrSendText
+	KindHerdrSendKeys
+	// KindHerdrPaneAgent is `pane report-agent` and `pane release-agent`: the
+	// desk marks the pane of the session that queued an item as needing the
+	// operator, and clears it when the item runs or is skipped.
+	KindHerdrPaneAgent
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -143,12 +177,24 @@ var kindNames = [kindCount]string{
 	KindCmuxProbe:     "cmux.probe",
 	KindCmuxCleanup:   "cmux.cleanup",
 
-	KindHerdrReadiness: "herdr.readiness",
-	KindHerdrSnapshot:  "herdr.snapshot",
-	KindHerdrCreate:    "herdr.create",
-	KindHerdrReconcile: "herdr.reconcile",
-	KindHerdrProbe:     "herdr.probe",
-	KindHerdrCleanup:   "herdr.cleanup",
+	KindHerdrReadiness:   "herdr.readiness",
+	KindHerdrSnapshot:    "herdr.snapshot",
+	KindHerdrCreate:      "herdr.create",
+	KindHerdrReconcile:   "herdr.reconcile",
+	KindHerdrProbe:       "herdr.probe",
+	KindHerdrCleanup:     "herdr.cleanup",
+	KindHerdrPaneInspect: "herdr.pane-inspect",
+	KindHerdrBootstrap:   "herdr.bootstrap",
+	KindHerdrNotify:      "herdr.notification-show",
+	KindHerdrPaneSplit:   "herdr.pane-split",
+	KindHerdrPaneRename:  "herdr.pane-rename",
+	KindHerdrPaneRun:     "herdr.pane-run",
+	KindHerdrPaneMove:    "herdr.pane-move",
+	KindHerdrScreenRead:  "herdr.screen-read",
+	KindHerdrPaneStatus:  "herdr.pane-status",
+	KindHerdrSendText:    "herdr.send-text",
+	KindHerdrPaneAgent:   "herdr.pane-agent",
+	KindHerdrSendKeys:    "herdr.send-keys",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
@@ -221,22 +267,15 @@ func (SecretArg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 // is the same trade == offered and is what makes adapter fakes assertable.
 func (s SecretArg) Equal(other SecretArg) bool { return s.v.Equal(other.v) }
 
-func (s SecretArg) set() bool { return s.v.Set() }
-
-func (s SecretArg) present() bool { return s.v.Present() }
-
-// argKind separates the three argv element classes the seam recognizes.
-type argKind uint8
+// argKind separates the three argv element classes the seam recognizes. It is
+// validated.ArgKind, which New checks, so the two cannot drift.
+type argKind = validated.ArgKind
 
 const (
-	argUnset argKind = iota
-	// argFixed is a backend constant, validated at construction.
-	argFixed
-	// argOpaque is a dynamic value, accepted as-is because a real path or
-	// prompt may contain anything.
-	argOpaque
-	// argEndOfOptions is the literal "--" separator.
-	argEndOfOptions
+	argUnset        = validated.ArgUnset
+	argFixed        = validated.ArgFixed
+	argOpaque       = validated.ArgOpaque
+	argEndOfOptions = validated.ArgEndOfOptions
 )
 
 // Arg is one argv element. Its payload is a sealed.Value for the same reason
@@ -363,7 +402,7 @@ const (
 	// document that its editor edits. It is not part of the editor protocol:
 	// it confines that copy to forgectl's work directory. See
 	// ReplaceSopsTmpdir.
-	envKeySopsTmpdir = "TMPDIR"
+	envKeySopsTmpdir = validated.KeySopsTmpdir
 )
 
 // The sops editor protocol's variable names, EXPORTED so the reading side
@@ -381,12 +420,12 @@ const (
 	EnvSopsNonce   = "FORGECTL_SOPS_NONCE"
 )
 
-type envOp uint8
+// envOp is validated.EnvOp, which New checks, so the two cannot drift.
+type envOp = validated.EnvOp
 
 const (
-	envOpUnspecified envOp = iota
-	envOpReplace
-	envOpUnset
+	envOpReplace = validated.EnvOpReplace
+	envOpUnset   = validated.EnvOpUnset
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -496,23 +535,6 @@ func (m EnvMutation) Equal(other EnvMutation) bool {
 	return m.key == other.key && m.op == other.op && m.value.Equal(other.value)
 }
 
-// valid requires a replacement value to be non-empty, not merely present. Most
-// CLIs treat an empty environment value as unset, so an empty pin would
-// silently reopen the auto-discovery window the mutation exists to close —
-// while looking like a successful pin in logs that record only the count.
-func (m EnvMutation) valid() bool {
-	switch m.op {
-	case envOpReplace:
-		return m.key != "" && m.value.present()
-	case envOpUnset:
-		return m.key != "" && !m.value.set()
-	case envOpUnspecified:
-		return false
-	default:
-		return false
-	}
-}
-
 // SensitiveCommand is one bounded, redacting invocation. Path and every Args
 // element are opaque; Env is drawn from the closed vocabulary above; the caps
 // may only narrow the runner-owned ceiling. There is no working-directory
@@ -588,69 +610,54 @@ func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
 	return true
 }
 
-// validate refuses before process start. Every message here is static text: a
-// validation failure must not become the rendering path that reveals what was
-// wrong with the value. It never reveals a payload: sealed answers the two
-// questions it asks, whether the path (and a TMPDIR value) is absolute and
-// whether a dynamic argument leads with a dash, as one bit each.
+// toValidated is m as validated.New checks it.
+func (m EnvMutation) toValidated() validated.Env {
+	return validated.Env{Key: m.key, Value: m.value.v, Op: m.op}
+}
+
+// validate refuses before process start; see validated.
 func (c SensitiveCommand) validate() error {
+	_, err := c.validated()
+	return err
+}
+
+// validated checks c and returns the part that reaches a process (its path,
+// argv and environment mutations) as a validated.Command, the only thing
+// startSealed accepts. The checks on that part run in validated.New, over a
+// copy it takes first, so the command started is the command checked, by
+// construction: a write to c's Args or Env backing arrays afterwards cannot
+// reach it, and no code here can build a Command any other way
+// (forgectl#888). The kind, capture mode and caps, which shape how the runner
+// reads the process rather than what the process gets, are checked here.
+//
+// Every message is static text: a validation failure must not become the
+// rendering path that reveals what was wrong with the value.
+func (c SensitiveCommand) validated() (validated.Command, error) {
 	if !c.Kind.Valid() {
-		return errors.New("command kind is not a known operation")
-	}
-	if !c.Path.present() {
-		return errors.New("command path is empty")
+		return validated.Command{}, errors.New("command kind is not a known operation")
 	}
 	if !c.StdoutMode.valid() {
-		return errors.New("stdout capture mode is not supported")
+		return validated.Command{}, errors.New("stdout capture mode is not supported")
 	}
-	// An absolute path is required so the binary is chosen by the caller and
-	// not by exec.LookPath, which reads the live process PATH rather than the
-	// runner's captured environment — the one decision where the snapshot
-	// would otherwise not apply.
-	if !c.Path.v.IsAbs() {
-		return errors.New("command path is not absolute")
+	args := make([]validated.Arg, len(c.Args))
+	for i, a := range c.Args {
+		args[i] = validated.Arg{Value: a.v, Kind: a.kind}
 	}
-	seenEndOfOptions := false
-	for i := range c.Args {
-		a := c.Args[i]
-		if !a.set() {
-			return fmt.Errorf("argument %d was never constructed", i)
-		}
-		if a.kind == argEndOfOptions {
-			seenEndOfOptions = true
-			continue
-		}
-		if a.kind == argOpaque && !seenEndOfOptions && a.v.LeadsWithDash() {
-			return fmt.Errorf("dynamic argument %d begins with a dash and no end-of-options separator precedes it", i)
-		}
+	env := make([]validated.Env, len(c.Env))
+	for i, m := range c.Env {
+		env[i] = m.toValidated()
 	}
-	seen := make(map[string]struct{}, len(c.Env))
-	for i := range c.Env {
-		m := c.Env[i]
-		if !m.valid() {
-			return fmt.Errorf("environment mutation %d is not a permitted operation", i)
-		}
-		if _, dup := seen[m.key]; dup {
-			return fmt.Errorf("environment mutation %d duplicates an earlier key", i)
-		}
-		// TMPDIR moves where sops writes its decrypted copy of a whole
-		// document, so it is bound to the one call it exists for and to an
-		// absolute path: a relative one would resolve against the child's
-		// working directory, which is not the work directory it names.
-		if m.key == envKeySopsTmpdir {
-			if c.Kind != KindSopsEdit {
-				return fmt.Errorf("environment mutation %d is not permitted for this command kind", i)
-			}
-			if !m.value.v.IsAbs() {
-				return fmt.Errorf("environment mutation %d needs an absolute path", i)
-			}
-		}
-		seen[m.key] = struct{}{}
+	cmd, err := validated.New(c.Path.v, args, env, c.Kind == KindSopsEdit)
+	if err != nil {
+		return validated.Command{}, err
 	}
 	if err := validCap("stdout", c.StdoutCap); err != nil {
-		return err
+		return validated.Command{}, err
 	}
-	return validCap("stderr", c.StderrCap)
+	if err := validCap("stderr", c.StderrCap); err != nil {
+		return validated.Command{}, err
+	}
+	return cmd, nil
 }
 
 func validCap(stream string, limit int64) error {
@@ -663,15 +670,27 @@ func validCap(stream string, limit int64) error {
 	return nil
 }
 
-// outputBuf holds captured bytes behind a pointer so that a BoundedOutput
-// reached through an unexported field renders as an address rather than as the
-// decimal byte dump reflection would otherwise produce. Same containment
-// reasoning as SecretArg's closure.
+// outputBuf holds captured bytes behind a pointer, and the bytes themselves
+// behind a closure, so that a BoundedOutput reached through an unexported
+// field renders as an address rather than as the decimal byte dump
+// reflection would otherwise produce. Same containment reasoning as
+// SecretArg's closure.
 //
-// Both the type and the field are unexported, so no importer can reach them.
-// Inside this package they can: %#v on a bare *outputBuf dumps the bytes, so
-// never hand one to slog or fmt directly — log the BoundedOutput.
-type outputBuf struct{ data []byte }
+// The closure is also what keeps the bytes from reflect's plain-data readers
+// (forgectl#897): Value.Bytes, Index and Uint read an unexported []byte field
+// without the read-only check, so a field would hand the bytes to any code
+// holding a BoundedOutput, past CopyBytesForParse. A func value's captures are
+// no field reflect can walk into. read is called only by CopyBytesForParse
+// (TestOnlyCopyBytesForParseReadsOutput); Len reads n.
+type outputBuf struct {
+	n    int
+	read func() []byte
+}
+
+// newOutputBuf seals data, which must not be modified afterwards.
+func newOutputBuf(data []byte) *outputBuf {
+	return &outputBuf{n: len(data), read: func() []byte { return data }}
+}
 
 // BoundedOutput owns at most one stream's cap worth of bytes. It renders as
 // byte-count metadata everywhere, and hands out its bytes only through
@@ -695,7 +714,7 @@ func (b BoundedOutput) Len() int {
 	if b.buf == nil {
 		return 0
 	}
-	return len(b.buf.data)
+	return b.buf.n
 }
 
 // Complete reports whether the stream was read to EOF within its cap. False
@@ -717,7 +736,7 @@ func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
 func (b BoundedOutput) CopyBytesForParse() (data []byte, complete bool) {
 	out := make([]byte, b.Len())
 	if b.buf != nil {
-		copy(out, b.buf.data)
+		copy(out, b.buf.read())
 	}
 	return out, b.Complete()
 }

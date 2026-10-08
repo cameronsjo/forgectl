@@ -191,6 +191,52 @@ func TestIntegration_Init_NetScaffoldNamesDefaultPublic(t *testing.T) {
 	}
 }
 
+// The [tasks] scaffold is the text an operator reads at the moment of adding a
+// host. The list is one list for every keychain entry, so a host added for a
+// read-only board can also be sent the write token. The scaffold has to say
+// so, and docs/configuration.md has to say the same thing.
+func TestIntegration_Init_TasksScaffoldSaysTheListCoversEveryKeychainEntry(t *testing.T) {
+	h := newInitHarness(t)
+	h.run(t)
+
+	data, err := os.ReadFile(h.configPath())
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	body := string(data)
+	idx := strings.Index(body, "\n[tasks]\n")
+	if idx == -1 {
+		t.Fatalf("config.toml missing the [tasks] section; got:\n%s", body)
+	}
+	block := body[idx+len("\n[tasks]\n"):]
+	if end := strings.Index(block, "\n\n"); end != -1 {
+		block = block[:end]
+	}
+	for _, want := range []string{
+		"applies to EVERY keychain entry, the write entry included",
+		"can be sent whichever keychain token a command names",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(strings.ReplaceAll(block, "#", " ")), " "), want) {
+			t.Errorf("the [tasks] scaffold does not say %q; got:\n%s", want, block)
+		}
+	}
+	// Every line of the block stays a comment: the scaffold must add no host.
+	for _, line := range strings.Split(strings.TrimSpace(block), "\n") {
+		if !strings.HasPrefix(line, "#") {
+			t.Errorf("the [tasks] scaffold has a line that is not a comment: %q", line)
+		}
+	}
+
+	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
+	if err != nil {
+		t.Fatalf("read docs/configuration.md: %v", err)
+	}
+	if !strings.Contains(string(docs), "The list applies to every keychain entry, the write entry included: "+
+		"a listed host can be sent whichever keychain token a command names") {
+		t.Error("docs/configuration.md does not carry the scaffold's sentence about what a listed host can be sent")
+	}
+}
+
 // TestIntegration_Init_PreservesExistingSection covers the append-if-absent
 // contract's core case: a hand-written [net] section (with its own comment)
 // must survive byte-for-byte, while every missing section — including the

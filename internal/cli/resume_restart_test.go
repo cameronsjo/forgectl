@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,18 @@ type cliRestartEnv struct {
 	relaunchErr error
 	stopped     bool
 	// status overrides the registry status ReadEntry reports; "" is idle.
-	status                           string
+	status string
+	// herdrPanes is what herdr's pane list reports; nil names no session, so
+	// the environment's pane (pane) is used.
+	herdrPanes []resume.HerdrPane
+	// relaunchPane is the pane the last Relaunch typed into; panesChecked is
+	// every pane Pane was asked about.
+	relaunchPane string
+	panesChecked []string
+	// panesErr is what herdr's pane list fails with; gone lists pane ids
+	// herdr answers pane_not_found for.
+	panesErr                         error
+	gone                             map[string]bool
 	terminated, relaunched, prepared int
 }
 
@@ -49,22 +61,31 @@ func (f *cliRestartEnv) Identity(int) (resume.ProcIdentity, error) {
 	start, err := resume.ParseProcStart(restartProcStart)
 	return resume.ProcIdentity{ExecPath: "/u/.local/bin/claude", Start: start}, err
 }
-func (f *cliRestartEnv) Pane(context.Context, string) (resume.PaneState, error) {
+func (f *cliRestartEnv) Pane(_ context.Context, pane string) (resume.PaneState, error) {
+	f.panesChecked = append(f.panesChecked, pane)
+	if f.gone[pane] {
+		return resume.PaneState{}, fmt.Errorf("pane %s: %w", pane, resume.ErrPaneGone)
+	}
 	st := resume.PaneState{Agent: "claude", AgentSession: restartSID, ForegroundPGID: f.pid, ShellPID: 7, ForegroundPIDs: []int{f.pid}}
 	if f.stopped {
 		st.ForegroundPGID = st.ShellPID
 	}
 	return st, nil
 }
-func (f *cliRestartEnv) Screen(context.Context, string) (string, error) {
+func (f *cliRestartEnv) Screen(_ context.Context, pane string) (string, error) {
+	f.panesChecked = append(f.panesChecked, pane)
 	rule := strings.Repeat("─", 40)
 	return "out\n" + rule + "\n❯\n" + rule + "\nstatus", nil
 }
-func (f *cliRestartEnv) Prepare(string) error                     { f.prepared++; return nil }
-func (f *cliRestartEnv) ClearInput(context.Context, string) error { return nil }
-func (f *cliRestartEnv) Terminate(int) error                      { f.terminated++; f.stopped = true; return nil }
-func (f *cliRestartEnv) Relaunch(context.Context, string, string) error {
+func (f *cliRestartEnv) Prepare(string) error { f.prepared++; return nil }
+func (f *cliRestartEnv) ClearInput(_ context.Context, pane string) error {
+	f.panesChecked = append(f.panesChecked, pane)
+	return nil
+}
+func (f *cliRestartEnv) Terminate(int) error { f.terminated++; f.stopped = true; return nil }
+func (f *cliRestartEnv) Relaunch(_ context.Context, pane, _ string) error {
 	f.relaunched++
+	f.relaunchPane = pane
 	return f.relaunchErr
 }
 func (f *cliRestartEnv) LiveSession(string) (resume.RegistryEntry, bool) {
@@ -102,6 +123,7 @@ func restartFixture(t *testing.T, env *cliRestartEnv) (storeDir string) {
 		r.Env = func(string) (resume.RestartEnv, error) { return env, nil }
 		r.Binary = func() (string, error) { return "/x/forgectl", nil }
 		r.Lookup = func() resume.PaneLookup { return func(int) string { return env.pane } }
+		r.Panes = func(context.Context) ([]resume.HerdrPane, error) { return env.herdrPanes, env.panesErr }
 		r.Ancestors = func() map[int]bool { return env.ancestors }
 		// The fixture pid is this test process; the real signal handling
 		// would install process-wide handlers under `go test`.
@@ -207,5 +229,66 @@ func TestResumeRestart_NeverStopsItsOwnAncestor(t *testing.T) {
 	out, err = runRestartCmd(t, "--outdated")
 	if err != nil || env.terminated != 0 || !strings.Contains(out, "this run is inside it") {
 		t.Fatalf("run: err=%v terminated=%d out=%q", err, env.terminated, out)
+	}
+}
+
+// A herdr server restart renumbers every pane, so the HERDR_PANE_ID a
+// long-running session carries goes stale. The run finds the pane by session
+// through herdr's pane list, checks and relaunches there, and says what the
+// environment claimed.
+func TestResumeRestart_FindsThePaneBySession(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999"}
+	restartFixture(t, env)
+	env.herdrPanes = []resume.HerdrPane{{ID: "w1:p1"}, {ID: "w9Z:p7", Agent: "claude", Session: restartSID}}
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.HasPrefix(out, "restart ") || !strings.Contains(out, "pane w9Z:p7 (found by session; env said w0:p999)") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
+	}
+	out, err = runRestartCmd(t, "--outdated", "--session", restartSID)
+	if err != nil || env.relaunchPane != "w9Z:p7" || !strings.Contains(out, "env said w0:p999") {
+		t.Fatalf("run: err=%v relaunched in %q out=%q", err, env.relaunchPane, out)
+	}
+	for _, p := range env.panesChecked {
+		if p != "w9Z:p7" {
+			t.Fatalf("checked pane %q; every check must run against the resolved pane (%v)", p, env.panesChecked)
+		}
+	}
+}
+
+// Two panes claiming one session (a nested session relabelling its parent's
+// pane looks like this) is refused, never guessed at.
+func TestResumeRestart_RefusesASessionInTwoPanes(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	env.herdrPanes = []resume.HerdrPane{
+		{ID: "w9Z:p1", Agent: "claude", Session: restartSID},
+		{ID: "w9Z:p2", Agent: "claude", Session: restartSID},
+	}
+	out, err := runRestartCmd(t, "--outdated")
+	if err != nil || env.terminated != 0 || !strings.Contains(out, "2 panes (w9Z:p1, w9Z:p2)") || !strings.Contains(out, "forgectl resume "+restartSID) {
+		t.Fatalf("err=%v terminated=%d out=%q", err, env.terminated, out)
+	}
+}
+
+// When herdr's pane list fails, a run-level line says so, and a session whose
+// environment pane is gone ends pane-gone (exit 1) naming the failure.
+func TestResumeRestart_ListFailureIsNamed(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999", gone: map[string]bool{"w0:p999": true}, panesErr: errors.New("herdr down")}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.Contains(out, "note       herdr pane list failed (herdr down); each session's pane comes from its environment") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
+	}
+	out, err = runRestartCmd(t, "--outdated")
+	if ExitCode(err) != 1 || env.terminated != 0 {
+		t.Fatalf("exit %d (%v), terminated %d; want 1 and untouched\n%s", ExitCode(err), err, env.terminated, out)
+	}
+	for _, want := range []string{
+		"note       herdr pane list failed (herdr down)",
+		"pane-gone  " + restartSID + "  pane w0:p999 no longer exists; re-reading the pane list: herdr pane list failed (herdr down); by hand: forgectl resume " + restartSID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out lacks %q:\n%s", want, out)
+		}
 	}
 }

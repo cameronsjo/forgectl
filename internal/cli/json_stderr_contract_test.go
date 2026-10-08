@@ -158,8 +158,8 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 	// A floor, so a walker that stopped finding verbs cannot pass vacuously.
 	// The floor is the real count, so losing a verb (or a whole command
 	// group) fails here; raise it when a --json verb lands.
-	if len(paths) < 54 {
-		t.Fatalf("found %d --json verbs, want at least 54: %v", len(paths), paths)
+	if len(paths) < 74 {
+		t.Fatalf("found %d --json verbs, want at least 74: %v", len(paths), paths)
 	}
 	for _, path := range paths {
 		name := strings.Join(path, " ")
@@ -291,13 +291,14 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 	}{
 		{name: "k8s ns: kubectl fails", runner: failingRunner(3), args: []string{"k8s", "ns", "--json"}, wantCode: jsonCodeFailed, wantExit: 3, wantMsg: "kubectl"},
 		{name: "k8s ns: namespace argument", args: []string{"k8s", "ns", "staging", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
-		{name: "tasks show: not an id", args: []string{"tasks", "show", "abc", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "not a task id"},
-		{name: "tasks show: no id", args: []string{"tasks", "show", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "accepts 1 arg"},
+		{name: "tasks show: not an id", args: []string{"tasks", "show", "abc", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "not a task id"},
+		{name: "tasks show: no id", args: []string{"tasks", "show", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "missing <id>"},
 		{name: "launch stats: bad window", args: []string{"launch", "stats", "soon", "--json"}, wantCode: jsonCodeFailed, wantExit: 1},
-		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "unknown command"},
+		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "takes no arguments"},
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
 		{name: "update check: unknown step", args: []string{"update", "check", "--only", "forgectl-bogus", "--json"}, wantCode: jsonCodeFailed, wantExit: 2, wantMsg: "forgectl-bogus"},
 		{name: "herdr organize: no config", args: []string{"herdr", "organize", "--json"}, wantCode: jsonCodeFailed, wantExit: 2},
+		{name: "status: non-positive timeout", args: []string{"status", "--json", "--timeout", "0s"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "--timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			isolateJSONContractEnv(t)
@@ -421,6 +422,9 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 			client, dir := drainCmdClient(t, prDrainRunner(map[int]error{1: errors.New("boom: agent refused")}))
 			seedQueuedFixture(t, dir, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, time.Now().UTC())
 			return newPrDrainCmd(client, config.Config{}), []string{"drain", "--json"}
+		}},
+		{name: "status: strict with a failed section", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
+			return newStatusCmdForSources(failingStatusSources(t), theme.Theme{}), []string{"status", "--json", "--strict", "--timeout", "50ms"}
 		}},
 		{name: "projects list: strict on a degraded host", build: func(t *testing.T) (*cobra.Command, []string) {
 			return newProjectsListCmd(listFixture(t, degradedGitHubRunFunc)), []string{"list", "--json", "--strict"}

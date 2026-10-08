@@ -42,13 +42,24 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 
-			profile := launch.DefaultsProfile(lc)
+			// On a home failure DefaultsProfile still returns the usable
+			// defaults, so the harness check below validates those rather
+			// than a zero Profile that would add a misleading second failure.
+			profile, homeErr := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
-				profile = launch.Resolve(lc, cwd)
+				if resolved, err := launch.Resolve(lc, cwd); err == nil {
+					profile = resolved
+				} else if homeErr == nil {
+					homeErr = err
+				}
+			}
+			if homeErr != nil {
+				healthy = false
+				rec.add("profile", doctor.StateFail, "launch profile cannot be resolved: "+safeText(homeErr.Error()))
 			}
 			if err := profile.Validate(); err != nil {
 				healthy = false
-				rec.add("profile", doctor.StateFail, "launch profile invalid: "+termsafe.SafeLine(err.Error()))
+				rec.add("profile", doctor.StateFail, "launch profile invalid: "+safeText(err.Error()))
 			}
 			// [pr] effort is validated separately because it never enters the
 			// resolved [launch] profile above — it is applied inside the review
@@ -60,16 +71,16 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			if cfg.Pr.Effort != "" {
 				if err := (launch.Profile{Harness: "claude", Effort: cfg.Pr.Effort}).Validate(); err != nil {
 					healthy = false
-					rec.add("pr_config", doctor.StateFail, "[pr] config invalid: "+termsafe.SafeLine(err.Error()))
+					rec.add("pr_config", doctor.StateFail, "[pr] config invalid: "+safeText(err.Error()))
 				}
 			}
 			resolvedBinary, binaryErr := launch.ResolveBinary(profile.Harness, lc.Defaults)
 			binaryPath := resolvedBinary.Path
 			if binaryErr == nil {
-				rec.add("harness", doctor.StateOK, termsafe.SafeLine(profile.Harness)+" found: "+termsafe.QuotePath(binaryPath))
+				rec.add("harness", doctor.StateOK, safeLabel(profile.Harness)+" found: "+termsafe.QuotePath(binaryPath))
 			} else {
 				healthy = false
-				rec.add("harness", doctor.StateFail, termsafe.SafeLine(binaryErr.Error()))
+				rec.add("harness", doctor.StateFail, safeText(binaryErr.Error()))
 			}
 
 			configPath := ""
@@ -88,12 +99,12 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// notice on the default arm silently dropped it for the exact
 			// input class #417 is about (#418 review).
 			if notice != "" {
-				rec.add("legacy_migration", doctor.StateWarn, termsafe.SafeLine(notice))
+				rec.add("legacy_migration", doctor.StateWarn, safeText(notice))
 			}
 			switch {
 			case parseErr != nil:
 				healthy = false
-				rec.add("config", doctor.StateFail, "config failed to parse: "+termsafe.SafeLine(parseErr.Error()))
+				rec.add("config", doctor.StateFail, "config failed to parse: "+safeText(parseErr.Error()))
 			case !cfg.HasLaunchSection() && lc.IsZero():
 				var legacyErr error
 				if boundary != nil && boundary.Status != config.BoundaryNoSource {
@@ -101,7 +112,7 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				}
 				if legacyErr != nil {
 					healthy = false
-					rec.add("config", doctor.StateFail, "legacy claunch config failed to parse: "+termsafe.SafeLine(legacyErr.Error()))
+					rec.add("config", doctor.StateFail, "legacy claunch config failed to parse: "+safeText(legacyErr.Error()))
 				} else {
 					rec.add("config", doctor.StateWarn, "no launch profiles configured — using built-in defaults (run `forgectl launch init`)")
 				}
@@ -124,7 +135,7 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// off is a valid choice (a machine with no local collector).
 			if cfg.Bench.Telemetry {
 				rec.add("telemetry", doctor.StateOK, "telemetry: on → "+
-					termsafe.SafeLine(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint()))+" ("+termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol())+")")
+					safeText(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint()))+" ("+safeLabel(cfg.Bench.ResolvedOTLPProtocol())+")")
 			} else {
 				rec.add("telemetry", doctor.StateWarn, "telemetry: off (enable with [bench].telemetry = true)")
 			}
@@ -133,7 +144,7 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// so doctor is never green for a config pr would refuse. The
 			// refusal names the setting, never its value.
 			if _, err := injectedWindowEnv(cfg); err != nil {
-				rec.add("review_window_env", doctor.StateFail, "review-window environment: "+termsafe.SafeLine(err.Error()))
+				rec.add("review_window_env", doctor.StateFail, "review-window environment: "+safeText(err.Error()))
 				healthy = false
 			}
 

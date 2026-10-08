@@ -10,7 +10,7 @@ import (
 // t.Cleanup and never run in parallel, because they are package-level.
 var (
 	recordLaunchUsage = launch.RecordUsage
-	execHarness       = launch.Exec
+	execHarness       = launch.ExecIn
 	usageNow          = time.Now
 )
 

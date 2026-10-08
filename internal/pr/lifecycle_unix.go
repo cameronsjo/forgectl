@@ -66,7 +66,7 @@ func readLockHolder(f *os.File) string {
 	}
 	// Trimmed before the escape, so the body's own trailing newline is
 	// dropped rather than rendered as a literal "\n".
-	return termsafe.SafeLine(strings.TrimSpace(string(buf[:n])))
+	return termsafe.SafeLineMax(strings.TrimSpace(string(buf[:n])), maxLockHolderBytes)
 }
 
 // withLifecycleLock runs fn while holding the exclusive lifecycle lock for

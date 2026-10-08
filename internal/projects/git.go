@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
 // gitStatus runs git in dir and returns a populated GitStatus. Returns
@@ -46,9 +48,7 @@ import (
 // if PATH changes between them. It deliberately claims no more: a hostile git
 // already selected by the invoking environment's initial PATH remains the
 // selected binary. Pinning bounds resolution; it does not attest provenance.
-func gitStatus(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, gitBin, dir string) GitStatus {
+func gitStatus(ctx context.Context, run gitenv.Runner, gitBin, dir string) GitStatus {
 	if _, err := os.Stat(dir + "/.git"); err != nil {
 		return GitStatus{State: StatusNotRepo}
 	}
@@ -56,7 +56,9 @@ func gitStatus(ctx context.Context, run interface {
 		return GitStatus{State: StatusUnknown}
 	}
 
-	out, err := run.Run(ctx, gitBin, "-C", dir, "status", "--porcelain=v2", "--branch")
+	// Unfiltered: status re-hashes a stat-dirty entry through the filter driver
+	// the repository names, which would run its program (#977).
+	out, err := gitenv.RunUnfiltered(ctx, run, gitBin, dir, "status", "--porcelain=v2", "--branch")
 	if err != nil {
 		return GitStatus{State: StatusUnknown}
 	}

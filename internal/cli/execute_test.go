@@ -470,7 +470,9 @@ func TestUnknownCommandTailPointsToTheMenu(t *testing.T) {
 func TestRootLongNamesTheMenu(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	want := `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.`
+arguments for a menu over every command group.
+
+Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`
 	if root.Long != want {
 		t.Errorf("root.Long = %q, want %q", root.Long, want)
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -222,5 +223,21 @@ func TestLoadLegacyLaunch_QuotesPath(t *testing.T) {
 		if !errors.As(err, &pathErr) {
 			t.Errorf("%s: error = %v, lost the *os.PathError", tc.name, err)
 		}
+	}
+}
+
+// TestDecodeLegacyLaunchRefusesWorker: a legacy file's [worker] table is
+// reported unsupported, so migration refuses it, and is never applied: a
+// legacy claunch.conf does not set worker posture.
+func TestDecodeLegacyLaunchRefusesWorker(t *testing.T) {
+	lc, keys, err := decodeLegacyLaunch([]byte("[defaults]\nharness = \"claude\"\n\n[worker]\npermission_mode = \"plan\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(keys, "worker") {
+		t.Fatalf("undecoded keys %q do not report [worker]", keys)
+	}
+	if lc.Worker != (LaunchWorker{}) {
+		t.Fatalf("a legacy [worker] table was applied: %+v", lc.Worker)
 	}
 }

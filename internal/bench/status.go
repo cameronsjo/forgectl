@@ -69,7 +69,16 @@ func Status(ctx context.Context, cfg config.Config, runner exec.Runner, probe Pr
 // no running containers → unavailable; containers up but a probe fails → degraded.
 func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, probe Prober) Component {
 	c := Component{Name: "hearth"}
-	if cfg.Bench.ResolvedHearthDir() == "" {
+	hearthDir, herr := cfg.Bench.ResolveHearthDir()
+	if herr != nil {
+		// Categorical: the configured ~ path cannot be placed, so nothing
+		// was probed. Not "not configured": the operator did configure it.
+		slog.Warn("Failed to resolve the hearth directory.", "error", herr)
+		c.State = StateUnavailable
+		c.Reason = "cannot resolve the home directory for [bench].hearth_dir"
+		return c
+	}
+	if hearthDir == "" {
 		c.State = StateNotConfigured
 		c.Reason = "set [bench].hearth_dir or $HEARTH_DIR"
 		return c
@@ -136,7 +145,13 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 // environment, or a chronicle on PATH) and, on macOS, checks the sync daemon.
 func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) Component {
 	c := Component{Name: "chronicle"}
-	name, args, ok := chronicleStatusCmd(cfg)
+	name, args, ok, derr := chronicleStatusCmd(cfg)
+	if derr != nil {
+		slog.Warn("Failed to resolve the chronicle directory.", "error", derr)
+		c.State = StateUnavailable
+		c.Reason = "cannot resolve the home directory for [bench].chronicle_dir"
+		return c
+	}
 	if !ok {
 		c.State = StateNotConfigured
 		c.Reason = "set [bench].chronicle_dir or $CHRONICLE_DIR (or put chronicle on PATH)"
@@ -234,15 +249,20 @@ type ChronicleSource struct {
 
 // chronicleStatusCmd resolves how to invoke chronicle: the checkout's uv
 // environment when a dir is configured, else a chronicle on PATH, else none
-// (not-configured). Returns (name, args, resolved).
-func chronicleStatusCmd(cfg config.Config) (string, []string, bool) {
-	if dir := cfg.Bench.ResolvedChronicleDir(); dir != "" {
-		return "uv", []string{"--directory", dir, "run", "chronicle", "status", "--json"}, true
+// (not-configured). Returns (name, args, resolved, err). A configured dir
+// that cannot be resolved returns err and does not fall through to PATH.
+func chronicleStatusCmd(cfg config.Config) (string, []string, bool, error) {
+	dir, err := cfg.Bench.ResolveChronicleDir()
+	if err != nil {
+		return "", nil, false, err
+	}
+	if dir != "" {
+		return "uv", []string{"--directory", dir, "run", "chronicle", "status", "--json"}, true, nil
 	}
 	if _, err := osexec.LookPath("chronicle"); err == nil {
-		return "chronicle", []string{"status", "--json"}, true
+		return "chronicle", []string{"status", "--json"}, true, nil
 	}
-	return "", nil, false
+	return "", nil, false, nil
 }
 
 // composeContainer is the subset of `docker compose ps --format json` we read.

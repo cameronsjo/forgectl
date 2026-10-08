@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -57,10 +58,10 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 				return emitPRsJSON(cmd.OutOrStdout(), prs, store)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			return renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted)
+			return renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted, failedQueries(notes), prQueryCount)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref","repo","number","title","state","author","isDraft","updatedAt","url","reviewed"}] to stdout (an empty list is [])`)
 	return cmd
 }
 
@@ -109,10 +110,13 @@ func prRowsJSON(prs []pr.PR, store *pr.ReviewedStore) []prRowJSON {
 }
 
 // renderPRTable writes a grep-friendly REPO/#/TITLE/STATE table to out and a
-// one-line count summary to errOut. Dimmed (reviewed) rows are styled per whole
+// one-line count summary to errOut. failed is how many of the total queries
+// behind prs failed: the count line then says nothing loaded, or that the
+// list is incomplete, so a bare "0 open PRs" never reads as inbox zero when a
+// query failed (forgectl#1149). Dimmed (reviewed) rows are styled per whole
 // line AFTER the tabwriter flush — laying the columns out in plain text first
 // so ANSI escape bytes never enter the width measurement.
-func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style) error {
+func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style, failed, total int) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "REPO\t#\tTITLE\tSTATE"); err != nil {
@@ -120,7 +124,7 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, 
 	}
 	for _, p := range prs {
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
-			p.Ref.Slug(), p.Ref.Number, safeTerm(p.Title), prStateLabel(p)); err != nil {
+			p.Ref.Slug(), p.Ref.Number, safeTitle(p.Title), prStateLabel(p)); err != nil {
 			return err
 		}
 	}
@@ -144,8 +148,36 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, 
 			return err
 		}
 	}
-	fmt.Fprintf(errOut, "%d open PRs (%d reviewed)\n", len(prs), reviewed)
+	switch {
+	case failed == 0:
+		_, _ = fmt.Fprintf(errOut, "%d open PRs (%d reviewed)\n", len(prs), reviewed)
+	case failed >= total:
+		_, _ = fmt.Fprintln(errOut, "PRs not loaded: the query failed (see the note above)")
+	default:
+		_, _ = fmt.Fprintf(errOut, "%d open PRs (%d reviewed), incomplete: %d of %d queries failed (see the notes above)\n", len(prs), reviewed, failed, total)
+	}
 	return nil
+}
+
+// prQueryCount is how many gh searches pr prs unions: authored, assigned and
+// review-requested (pr.Client.PRs).
+const prQueryCount = 3
+
+// failedQueries counts the notes that report a failed query for one of
+// labels, or for any query when labels is empty. Notes are built by
+// ghfail.Note, which starts every failure with "<label>: query failed".
+func failedQueries(notes []string, labels ...string) int {
+	n := 0
+	for _, note := range notes {
+		label, rest, ok := strings.Cut(note, ": ")
+		if !ok || !strings.HasPrefix(rest, "query failed") {
+			continue
+		}
+		if len(labels) == 0 || slices.Contains(labels, label) {
+			n++
+		}
+	}
+	return n
 }
 
 // prStateLabel renders a PR's display state: "draft" for a draft, else the

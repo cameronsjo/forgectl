@@ -2,10 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // renderDegradationNotes writes each per-host/per-query degradation note to
@@ -24,6 +23,23 @@ import (
 // the next note-producing command from being escaped-by-accident-or-not-at-all.
 func renderDegradationNotes(cmd *cobra.Command, notes []string) {
 	for _, n := range notes {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+termsafe.SafeLine(n))
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), degradationNoteLine(n))
 	}
+}
+
+// degradationNoteLine is one note as the inert line every sink prints. The
+// picker's description uses it too, so a note held for the picker passes the
+// same boundary as one printed to stderr.
+func degradationNoteLine(n string) string {
+	return "note: " + safeText(n)
+}
+
+// degradationNotesBlock is the notes as one multi-line string, each line passed
+// through degradationNoteLine, for a form's description.
+func degradationNotesBlock(notes []string) string {
+	lines := make([]string, len(notes))
+	for i, n := range notes {
+		lines[i] = degradationNoteLine(n)
+	}
+	return strings.Join(lines, "\n")
 }

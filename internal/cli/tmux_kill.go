@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -36,17 +37,30 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			prompt := fmt.Sprintf("Kill session %q?", name)
-			if others {
-				prompt = fmt.Sprintf("Kill ALL sessions except %q?", name)
-			}
 			if !yes {
+				if others {
+					all, err := client.ListSessions(cmd.Context())
+					if err != nil {
+						return err
+					}
+					var doomed []string
+					for _, o := range all {
+						if o.ID != session.ID {
+							doomed = append(doomed, o.Name)
+						}
+					}
+					if len(doomed) == 0 {
+						_, _ = fmt.Fprintf(out, "no other sessions besides %q\n", name)
+						return nil
+					}
+					prompt = termsafe.KillOthersPrompt(name, doomed)
+				}
 				ok, err := confirm(th, prompt)
 				if err != nil {
 					return err
 				}
 				if !ok {
-					fmt.Fprintln(out, "cancelled")
-					return nil
+					return noteCancelled(out)
 				}
 			}
 			if others {

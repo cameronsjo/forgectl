@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,14 @@ func (p Profile) Validate() error {
 			termsafe.QuoteArgMax(p.Effort, 0), strings.Join(EffortLevels, ", "),
 		)
 	}
+	// An empty permission_mode is a profile that does not set one (doctor's
+	// effort check builds such a profile); only a value Claude Code would not
+	// accept is refused here. The worker floor refuses empty too.
+	if p.Harness == "claude" && p.PermissionMode != "" {
+		if err := claudePermissionRank.check(p.PermissionMode); err != nil {
+			return err
+		}
+	}
 	if p.Harness == "codex" {
 		if oneOf(p.Model, "opus", "sonnet", "haiku") || strings.HasPrefix(p.Model, "claude-") {
 			return fmt.Errorf(
@@ -40,11 +49,11 @@ func (p Profile) Validate() error {
 				termsafe.QuoteArgMax(p.Model, 0),
 			)
 		}
-		if !oneOf(p.ApprovalPolicy, "untrusted", "on-request", "never") {
-			return fmt.Errorf("unsupported Codex approval_policy %s", termsafe.QuoteArgMax(p.ApprovalPolicy, 0))
+		if err := codexApprovalRank.check(p.ApprovalPolicy); err != nil {
+			return err
 		}
-		if !oneOf(p.Sandbox, "read-only", "workspace-write", "danger-full-access") {
-			return fmt.Errorf("unsupported Codex sandbox %s", termsafe.QuoteArgMax(p.Sandbox, 0))
+		if err := codexSandboxRank.check(p.Sandbox); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -95,6 +104,11 @@ type Profile struct {
 	// Claude-only. Codex has no equivalent flag and launchCodex builds a fresh
 	// Profile that never sets this, so it cannot silently no-op there.
 	StrictMCP bool
+
+	// Detached omits `--ide`, so the session connects to no editor and none of
+	// its MCP tools (which can run code there). Set by the worker floor alone,
+	// and not surfaced in config: a worker has no editor of its own.
+	Detached bool
 }
 
 // Built-in fallbacks applied when a value is set neither by a project nor by
@@ -114,32 +128,38 @@ const (
 	builtinSandbox        = "read-only"
 )
 
+// ErrHomeUnresolved reports that the launch config uses a home-relative path
+// ("~" or "~/...") but the home directory cannot be determined.
+var ErrHomeUnresolved = errors.New("launch: the home directory cannot be resolved")
+
 // Resolve picks the profile for cwd: it resolves symlinks best-effort, makes the
 // path absolute, then applies the pure resolution against the launch config.
-func Resolve(lc config.LaunchConfig, cwd string) Profile {
-	home, _ := os.UserHomeDir()
-	resolved := cwd
-	if r, err := filepath.EvalSymlinks(cwd); err == nil {
-		resolved = r
-	}
-	if abs, err := filepath.Abs(resolved); err == nil {
-		resolved = abs
-	}
-	return resolve(lc, filepath.Clean(resolved), home)
+//
+// The home directory is looked up only when the config needs it (a project
+// match or an add_dir that starts with "~"). Where it is needed and cannot be
+// found, Resolve fails rather than matching with an empty home: a project
+// block that silently stops matching would launch under the defaults instead,
+// and the defaults can be the looser posture. A config with no home-relative
+// paths launches exactly as before, home or no home.
+func Resolve(lc config.LaunchConfig, cwd string) (Profile, error) {
+	return resolveWithHome(lc, cwd, os.UserHomeDir)
 }
 
-// DefaultsProfile resolves [launch.defaults] alone (no project matching), for
-// display by `forgectl config`. Built-in fallbacks are applied.
-func DefaultsProfile(lc config.LaunchConfig) Profile {
-	home, _ := os.UserHomeDir()
-	return defaultsProfile(lc.Defaults, home)
+// resolveMatched is Resolve that also returns the [[launch.project]] block it
+// applied, or nil. The worker profile reads that block's own values, not the
+// merged profile, so a field the block leaves unset is told apart from one
+// [launch.defaults] filled. One normalization and one match serve both.
+func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, *config.LaunchProject, error) {
+	home, err := homeIfNeeded(userHome, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
+	if err != nil {
+		return Profile{}, nil, err
+	}
+	norm := normalizeCWD(cwd)
+	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
 }
 
-// resolve is the pure resolution: fixed home, already-clean absolute cwd. It is
-// the risk-bearing core and is exercised directly by the tests.
-func resolve(lc config.LaunchConfig, cwd, home string) Profile {
-	p := defaultsProfile(lc.Defaults, home)
-
+// matchProject is the longest project match for an already normalized cwd.
+func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
 	best := -1
 	var win *config.LaunchProject
 	for i := range lc.Projects {
@@ -154,6 +174,86 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 			}
 		}
 	}
+	return win
+}
+
+// normalizeCWD resolves cwd's symlinks best-effort and makes it absolute and
+// clean, as project matching expects.
+func normalizeCWD(cwd string) string {
+	resolved := cwd
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		resolved = r
+	}
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	return filepath.Clean(resolved)
+}
+
+// resolveWithHome is Resolve with the home lookup injected.
+func resolveWithHome(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, error) {
+	p, _, err := resolveMatched(lc, cwd, userHome)
+	return p, err
+}
+
+// DefaultsProfile resolves [launch.defaults] alone (no project matching), for
+// display by `forgectl config`. Built-in fallbacks are applied. Only the
+// defaults' own add_dir can need home; on ErrHomeUnresolved the returned
+// profile is still the defaults with those entries left unexpanded, good for
+// display and not for launching.
+func DefaultsProfile(lc config.LaunchConfig) (Profile, error) {
+	return defaultsProfileWithHome(lc, os.UserHomeDir)
+}
+
+func defaultsProfileWithHome(lc config.LaunchConfig, userHome func() (string, error)) (Profile, error) {
+	home, err := homeIfNeeded(userHome, usesHome(lc.Defaults.AddDir))
+	return defaultsProfile(lc.Defaults, home), err
+}
+
+// CheckHome reports ErrHomeUnresolved when any home-relative path in lc (a
+// defaults or project add_dir, or a project match) cannot be expanded. It is
+// for display surfaces that show a profile without resolving one.
+func CheckHome(lc config.LaunchConfig) error {
+	_, err := homeIfNeeded(os.UserHomeDir, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
+	return err
+}
+
+// homeIfNeeded looks the home directory up only when needed, so a config
+// without home-relative paths never depends on it.
+func homeIfNeeded(userHome func() (string, error), needed bool) (string, error) {
+	if !needed {
+		return "", nil
+	}
+	home, err := userHome()
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrHomeUnresolved, err)
+	}
+	return home, nil
+}
+
+func usesHome(paths []string) bool {
+	for _, p := range paths {
+		if p == "~" || strings.HasPrefix(p, "~/") {
+			return true
+		}
+	}
+	return false
+}
+
+func projectsUseHome(ps []config.LaunchProject) bool {
+	for i := range ps {
+		if usesHome([]string{ps[i].Match}) || usesHome(ps[i].AddDir) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolve is the pure resolution: fixed home, already-clean absolute cwd. It is
+// the risk-bearing core and is exercised directly by the tests.
+func resolve(lc config.LaunchConfig, cwd, home string) Profile {
+	p := defaultsProfile(lc.Defaults, home)
+	win := matchProject(lc, cwd, home)
 
 	if win != nil {
 		if win.Harness != "" {

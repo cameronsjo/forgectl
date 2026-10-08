@@ -111,6 +111,16 @@ type StreamingRunner interface {
 	RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error
 }
 
+// EnvStreamingRunner is the optional seam for a caller that must pin
+// environment variables on a child and show its output as it arrives.
+// RunStreamingWithEnv behaves like RunStreaming (no buffering, a *CommandError
+// carrying the exit code and no argv) with env merged over the inherited
+// environment. A caller type-asserts for it and falls back to RunWithEnv, so a
+// Runner that does not implement it keeps working unchanged.
+type EnvStreamingRunner interface {
+	RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout, stderr io.Writer, name string, args ...string) error
+}
+
 // DiscardingRunner is the optional seam for a caller that runs a command only
 // for whether it succeeds and throws its stdout away. RunDiscardingStdout
 // behaves like Runner.Run on the failure path (a *CommandError carrying the
@@ -387,6 +397,69 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// Format renders e for every fmt verb through the same redaction as Error()
+// (#926). Without it, %#v prints the exported fields verbatim, and so does
+// any verb fmt does not route to Error() (%d, %t, …), each of them carrying
+// the URL credential Args, Stderr and Output keep. %v, %+v, %s, %q, %x and
+// %X render Error() under the directive's own flags, width and precision,
+// which is what fmt did before this method existed; %#v renders GoString;
+// any other verb reads %!<verb>(*exec.CommandError=<Error()>), fmt's own
+// shape for a verb that does not fit the operand.
+func (e *CommandError) Format(f fmt.State, verb rune) {
+	switch {
+	case verb == 'v' && f.Flag('#'):
+		_, _ = io.WriteString(f, e.GoString())
+	case e == nil:
+		// fmt printed "<nil>" for a nil receiver before, by catching the
+		// panic Error() raised.
+		_, _ = io.WriteString(f, "<nil>")
+	case verb == 'v', verb == 's', verb == 'q', verb == 'x', verb == 'X':
+		_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), e.Error())
+	default:
+		_, _ = fmt.Fprintf(f, "%%!%c(*exec.CommandError=%s)", verb, e.Error())
+	}
+}
+
+// GoString is %#v's rendering (#926): the Go-syntax field list fmt would
+// print, but with Args rendered the way Error() renders it (renderArgs), and
+// Stderr and Err's text through redact.Text. Output, which Error() never
+// renders (stdout can be the secret itself, as pbpaste's is), reads as
+// redact.Marker whenever it is not empty. Err reads as its type with its
+// redacted text, since an arbitrary error's own fields are not redacted; a
+// nested *CommandError reads as its own GoString.
+func (e *CommandError) GoString() string {
+	if e == nil {
+		return "(*exec.CommandError)(nil)"
+	}
+	var args []string
+	if e.Args != nil {
+		args = renderArgs(e.Args, e.span)
+	}
+	output := ""
+	if e.Output != "" {
+		output = redact.Marker
+	}
+	errText := "error(nil)"
+	if nested, ok := e.Err.(*CommandError); ok { //nolint:errorlint // only a direct *CommandError renders as its own GoString
+		errText = nested.GoString()
+	} else if e.Err != nil {
+		errText = fmt.Sprintf("%T(%q)", e.Err, redact.Text(e.Err.Error()))
+	}
+	return fmt.Sprintf("&exec.CommandError{Name:%q, Args:%#v, Stderr:%q, StderrDropped:%d, Output:%q, ExitCode:%d, Err:%s, span:%#v}",
+		e.Name, args, redact.Text(e.Stderr), e.StderrDropped, output, e.ExitCode, errText, e.span)
+}
+
+// LogValue renders e in a log record as Error() does (#926). Both of slog's
+// built-in handlers already called Error() for an error value, so the bytes
+// they write do not change; this keeps a handler that walks the value some
+// other way from reaching the fields.
+func (e *CommandError) LogValue() slog.Value {
+	if e == nil {
+		return slog.StringValue("<nil>")
+	}
+	return slog.StringValue(e.Error())
+}
 
 // WithoutOutput returns err with the captured stdout removed from every
 // *CommandError it carries, for a caller whose command's stdout IS the

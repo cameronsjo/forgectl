@@ -11,6 +11,7 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -215,7 +216,7 @@ func (c *Client) repairInspectLocked(ctx context.Context) (RepairReport, error) 
 			RecordPath: u.path,
 			FromPhase:  repairPhaseUnreadable,
 			Outcome:    repairOutcomeUnreadable,
-			Error:      termsafe.SafeLine(u.err.Error()),
+			Error:      recordText(u.err.Error()),
 		})
 	}
 	if len(candidates) == 0 {
@@ -311,7 +312,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 		RecordPath: member.path,
 		FromPhase:  repairPhaseUnreadable,
 		Outcome:    repairOutcomeRefused,
-		Error:      termsafe.SafeLine(decodeErr.Error()),
+		Error:      recordText(decodeErr.Error()),
 	}
 	if !opts.ForgetIfAbsent {
 		return item, fmt.Errorf("this build cannot read session record %s, so it cannot adopt or roll it back: %w — "+
@@ -389,7 +390,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	aside, err := c.setAsideUndecodableRecord(member)
 	if err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = safeErrString(err)
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -485,7 +486,7 @@ func setAsidePrompt(member breadcrumbMember, decodeErr error, refKnown bool) str
 		"  record: %s\n"+
 		"  reason: %s\n"+
 		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
-		termsafe.QuoteText(member.path), termsafe.SafeLine(decodeErr.Error()))
+		termsafe.QuoteText(member.path), recordText(decodeErr.Error()))
 	if !refKnown {
 		prompt += "\n  no ref could be read, so whether its review window is live was not checked"
 	}
@@ -567,7 +568,7 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 	}
 	if err := c.writeAdoptedRecord(member.path, bc, adopted.WindowID); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = safeErrString(err)
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -697,7 +698,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 	// inside it.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = safeErrString(err)
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		slog.Error("A repair rollback failed partway; the clean room is recoverable from the repair audit log.",
 			"ref", ref.String(), "workspace", bc.Workspace, "log", c.repairLogPath(), "error", err)
@@ -737,7 +738,14 @@ func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 // stood in for this, and its yes deleted a clean room.
 func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := confirmRemovalForm(prompt, th, &ok).Run()
+	return ok, err
+}
+
+// confirmRemovalForm builds the form, split out so a test can feed it keys. It takes
+// keymap.Cancel so Esc cancels it as Ctrl+C does.
+func confirmRemovalForm(prompt string, th theme.Theme, ok *bool) *huh.Form {
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Remove this clean room? — this cannot be undone").
@@ -746,10 +754,9 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 				Title("Remove the clean room and its session record?").
 				Affirmative("Remove").
 				Negative("Cancel").
-				Value(&ok),
+				Value(ok),
 		),
-	).WithTheme(th.Huh()).Run()
-	return ok, err
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }
 
 // repairForgetLocked removes ONLY the record, after proving that neither a
@@ -792,7 +799,7 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 	// gives: the pair opened just above is this mutation's only row.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = safeErrString(err)
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, fmt.Errorf("forget %s: %w", ref.String(), err)
 	}
@@ -837,7 +844,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 	row.Error = ""
 	if cause != nil {
 		row.Outcome = repairOutcomeFailed
-		row.Error = termsafe.SafeLine(safeErrString(cause))
+		row.Error = recordText(safeErrString(cause))
 	}
 	if err := c.appendRepairRowLocked(row); err != nil {
 		slog.Error("Failed to complete a repair audit row; the intent row is left dangling, which is the honest record.",

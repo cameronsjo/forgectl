@@ -144,8 +144,7 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	results := client.Prune(ctx, report.SafeToDelete, branchpkg.PruneOptions{
@@ -165,12 +164,12 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 // value goes through termsafe (#658).
 func printPruneResults(out io.Writer, results []branchpkg.PruneResult) {
 	for _, r := range results {
-		name := termsafe.SafeLine(r.Name)
+		name := safeTitle(r.Name)
 		switch {
 		case r.Err != nil:
-			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", name, termsafe.Error(r.Err))
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", name, safeText(termsafe.Error(r.Err).Error()))
 		case r.Skipped:
-			_, _ = fmt.Fprintf(out, "skipped %s: %s\n", name, termsafe.SafeLine(r.Reason))
+			_, _ = fmt.Fprintf(out, "skipped %s: %s\n", name, safeText(r.Reason))
 		case r.Deleted:
 			_, _ = fmt.Fprintf(out, "deleted %s\n", name)
 		}
@@ -223,6 +222,6 @@ func printBranchGroup(out io.Writer, label string, items []branchpkg.Classificat
 	fmt.Fprintf(out, "%s (%d):\n", label, len(items))
 	for _, item := range items {
 		// Same rule as printPruneResults: the name can be remote-derived.
-		_, _ = fmt.Fprintf(out, "  %s — %s\n", termsafe.SafeLine(item.Info.Name), termsafe.SafeLine(item.Reason))
+		_, _ = fmt.Fprintf(out, "  %s — %s\n", safeTitle(item.Info.Name), safeText(item.Reason))
 	}
 }

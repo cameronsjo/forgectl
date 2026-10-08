@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/redact/redacttest"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
@@ -57,6 +58,7 @@ func TestExecutor_TrivialWorkflow_ComposedArgv(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git worktree add), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
@@ -366,11 +368,13 @@ func TestExecutor_CloneVerb_ClonesAndExportsWorkspace(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git clone), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	if len(call.Args) == 0 || call.Args[0] != "clone" {
-		t.Errorf("expected a git clone invocation, got args %v", call.Args)
+	// The sandbox clone refuses ext:: and fd:: ahead of the subcommand (#978).
+	if !gitenvtest.Refuses(fake.Calls[0].Args, "ext", "fd") || len(call.Args) == 0 || call.Args[0] != "clone" {
+		t.Errorf("expected a git clone invocation refusing ext and fd, got args %v", fake.Calls[0].Args)
 	}
 
 	workspace, ok := wctx.Get("workspace")
@@ -404,6 +408,7 @@ func TestExecutor_CloneVerb_ClonesLocalRepo(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git clone), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" || len(call.Args) == 0 || call.Args[0] != "clone" {
 		t.Errorf("explicit clone on a local repo must git-clone, got %s %v", call.Name, call.Args)
 	}

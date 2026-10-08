@@ -89,10 +89,20 @@ func TestCheckConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No file at all: valid (built-in defaults).
+	// No file at all: valid (built-in defaults), but reported as not
+	// created rather than ok, with init as the hint.
 	check := checkConfig(Deps{})
-	if check.State != StateOK {
-		t.Errorf("no config file: state = %q, want ok", check.State)
+	if check.State != StateSkip || !strings.Contains(check.Hint, "forgectl init") {
+		t.Errorf("no config file: state = %q, hint = %q; want skip pointing at forgectl init", check.State, check.Hint)
+	}
+
+	// A valid file: ok, naming the path.
+	if err := os.WriteFile(dir, []byte("log_level = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check = checkConfig(Deps{})
+	if check.State != StateOK || check.Detail != dir {
+		t.Errorf("valid config: state = %q, detail = %q; want ok with the path", check.State, check.Detail)
 	}
 
 	// Malformed TOML: fail, with a hint.
@@ -735,5 +745,56 @@ func TestCheckResumeTasks_DirNameIsBounded(t *testing.T) {
 	}
 	if !strings.Contains(check.Detail, "…") {
 		t.Errorf("detail = %q, want the capped name's ellipsis", check.Detail)
+	}
+}
+
+// TestCheckGitleaks pins the gitleaks row's states, which share
+// gitleaks.Resolve with `audit secrets`: absent and relative-PATH are
+// skipped (gitleaks is optional), too old and inside the projects root warn,
+// and a usable one is OK with its version.
+//
+// Mutations that turn it red: report absent as warn; report too old as OK;
+// drop the ProjectsRoot wiring (the under-root row then reads OK).
+func TestCheckGitleaks(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "bin", "gitleaks")
+	outside := filepath.Join(t.TempDir(), "gitleaks")
+	for _, p := range []string{inside, outside} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(p string, err error) func(string) (string, error) {
+		return func(string) (string, error) { return p, err }
+	}
+	version := func(v string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return v, nil }}
+	}
+	cases := []struct {
+		name   string
+		look   func(string) (string, error)
+		run    *exec.FakeRunner
+		state  State
+		detail string
+	}{
+		{"absent", at("", errors.New("not found")), version(""), StateSkip, "not found on PATH"},
+		{"relative", at("", osexec.ErrDot), version(""), StateSkip, "relative PATH entry"},
+		{"under root", at(inside, nil), version("8.30.1"), StateWarn, "inside the projects root"},
+		{"too old", at(outside, nil), version("8.18.4"), StateWarn, "gitleaks 8.18.4 is older than 8.19.0"},
+		{"unreadable version", at(outside, nil), version("dev"), StateWarn, "no recognizable version"},
+		{"ok", at(outside, nil), version("8.30.1"), StateOK, "gitleaks 8.30.1"},
+	}
+	for _, c := range cases {
+		d := Deps{LookPath: c.look, Runner: c.run, ProjectsRoot: func() (string, error) { return root, nil }}
+		check := checkGitleaks(context.Background(), d)
+		if check.Name != "gitleaks" || check.State != c.state || !strings.Contains(check.Detail, c.detail) {
+			t.Errorf("%s: %+v, want state %s with detail containing %q", c.name, check, c.state, c.detail)
+		}
+		if check.State == StateWarn && check.Hint == "" {
+			t.Errorf("%s: a warn row must carry a hint: %+v", c.name, check)
+		}
 	}
 }

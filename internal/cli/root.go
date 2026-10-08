@@ -46,6 +46,36 @@ const (
 	hubTierExtension   = "extension"
 )
 
+// hubNoPickerAnnotation is set by a command whose positional argument goes
+// into another CLI's subcommand slot, so a typed value is never "just an
+// argument" there: the hub must not offer its inline picker for it
+// (forgectl#730). Its value says why; its presence is what counts. The hub
+// rows built for such a command carry NoPicker and print the invocation
+// instead, and hubPickerArgv refuses the command as a backstop.
+//
+// The variadic rule in tui.pickerSpec already keeps the picker off a command
+// that takes a whole argv (launch); this annotation covers the one-positional
+// shape that rule cannot see.
+const hubNoPickerAnnotation = "forgectl:hub-no-picker"
+
+// hasNoPickerAnnotation reports whether cmd opted out of the hub picker.
+func hasNoPickerAnnotation(cmd *cobra.Command) bool {
+	_, ok := cmd.Annotations[hubNoPickerAnnotation]
+	return ok
+}
+
+// stampHubAnnotations records a module's registry position and tier on its
+// command for buildHub. It merges into the constructor's own annotations
+// rather than replacing them, so a module root keeps any it set itself
+// (hubNoPickerAnnotation among them).
+func stampHubAnnotations(cmd *cobra.Command, order int, tier string) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[hubOrderAnnotation] = strconv.Itoa(order)
+	cmd.Annotations[hubTierAnnotation] = tier
+}
+
 // structuredTerminalError is composed only from trusted layout and fields
 // sanitized at their trust boundary. termsafeErrorHandler recognizes this
 // exact private type so it can preserve those newlines; every other error still
@@ -72,10 +102,10 @@ func safeRootArgs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	headline := fmt.Sprintf("unknown command %s for %s", termsafe.QuoteText(args[0]), termsafe.QuoteText(cmd.CommandPath()))
+	headline := fmt.Sprintf("unknown command %s for %s", termsafe.QuoteArgMax(args[0], termsafe.ArgEchoMaxRunes), termsafe.QuoteArgMax(cmd.CommandPath(), termsafe.ArgEchoMaxRunes))
 	suggestions := cmd.SuggestionsFor(args[0])
 	for i := range suggestions {
-		suggestions[i] = termsafe.SafeLine(suggestions[i])
+		suggestions[i] = safeLabel(suggestions[i])
 	}
 
 	return &structuredTerminalError{headline: headline, suggestions: suggestions}
@@ -94,10 +124,12 @@ func newRoot(deps module.Deps) *cobra.Command {
 		Use:   meta.AppName,
 		Short: meta.Tagline,
 		Long: `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.`,
+arguments for a menu over every command group.
+
+Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
-		RunE:    showRootHelp,
+		RunE:    rootRun,
 		// fang renders styled errors/usage; we own when usage appears so an op
 		// failure doesn't dump a wall of help. Bare-invoke → TUI is handled in
 		// Execute, before Cobra runs.
@@ -108,6 +140,7 @@ arguments for a menu over every command group.`,
 	root.SuggestionsMinimumDistance = 2
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
+	addSkillFlags(root)
 
 	root.AddGroup(
 		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
@@ -135,10 +168,7 @@ arguments for a menu over every command group.`,
 			tier = hubTierExtension
 			cmd.GroupID = moreGroupID
 		}
-		cmd.Annotations = map[string]string{
-			hubOrderAnnotation: strconv.Itoa(i),
-			hubTierAnnotation:  tier,
-		}
+		stampHubAnnotations(cmd, i, tier)
 		root.AddCommand(cmd)
 	}
 
@@ -147,11 +177,26 @@ arguments for a menu over every command group.`,
 	// leaf verb outside the registry, alongside --version.
 	root.AddCommand(newVersionCmd())
 
+	// `menu` prints the hub's contents without a TTY (forgectl#730 item 5).
+	// Outside the registry like version: it describes the hub, so it has no
+	// hub tier and no row of its own.
+	root.AddCommand(newMenuCmd(deps))
+
 	// The editor `env set --sops` points sops at — forgectl re-invoking
 	// itself. Registered outside the registry because it is not a verb anyone
 	// runs: it is half of an internal protocol, and its own guards (not its
 	// Hidden flag) are what make it safe to expose at all.
 	root.AddCommand(newSopsEditCmd())
+
+	rejectUnknownSubcommands(root)
+
+	// After the group pass, before the JSON contract wraps Args: a wrong argument
+	// count names the argument and the usage line (forgectl#1087).
+	nameUsageArgs(root)
+
+	// Before the JSON contract, so a usage error carries its exit code into it
+	// (ADR-0015).
+	classifyUsageErrors(root)
 
 	// Last, so it sees every verb: under --json no failure renders fang's
 	// human error frame (forgectl#862, json_errors.go).

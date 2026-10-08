@@ -13,7 +13,6 @@ type entry struct {
 	assign   Assignment
 	fromWS   string // current workspace id
 	toKey    string // destination key: a workspace id, or newKey(label)
-	toWSID   string // existing destination workspace id, empty when it must be created
 	needMove bool
 	key      sortKey
 }
@@ -89,8 +88,8 @@ func indexWorkspaces(wss []herdr.Workspace) (labelOf, canonical map[string]strin
 	return labelOf, canonical, warnings
 }
 
-// classifyTabs classifies every tab that has a pane, in workspace then tab
-// order.
+// classifyTabs classifies every tab that has a pane with a terminal id, in
+// workspace then tab order.
 func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map[string]string) ([]entry, []string) {
 	panesByTab := make(map[string][]herdr.Pane)
 	for _, p := range snap.Panes {
@@ -105,6 +104,13 @@ func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map
 				warnings = append(warnings, fmt.Sprintf("tab %q [%s] has no panes and was skipped", tab.Label, tab.TabID))
 				continue
 			}
+			// The first pane's terminal id is the tab's identity across moves.
+			// Without one, two such tabs would share an identity, so the tab is
+			// left where it is, as a tab with no panes is.
+			if panes[0].TerminalID == "" {
+				warnings = append(warnings, fmt.Sprintf("tab %q [%s] has no terminal id and was skipped", tab.Label, tab.TabID))
+				continue
+			}
 			rule, target, sp := Classify(cfg, panes)
 			title := tab.Label
 			if title == "" {
@@ -116,10 +122,10 @@ func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map
 					Key: matchKey(sp), Rule: rule, From: labelOf[w.WorkspaceID], To: target,
 				},
 				fromWS: w.WorkspaceID,
-				key:    sortKeyFor(root, sp.CWD, tab.TabID),
+				key:    sortKeyFor(root, sp.CWD, panes[0].TerminalID),
 			}
 			if id, ok := canonical[target]; ok {
-				e.toWSID, e.toKey = id, id
+				e.toKey = id
 			} else {
 				e.toKey = newKey(target)
 			}
@@ -168,7 +174,7 @@ func orderMoves(entries []entry, snap Snapshot) (moved, blocked []int) {
 func moveFor(e entry, labelOf map[string]string, blocked bool) Move {
 	m := Move{
 		TerminalID: e.assign.TerminalID, TabID: e.assign.TabID, Title: e.assign.Title, CWD: e.assign.CWD,
-		From: e.assign.From, To: e.assign.To, FromWorkspaceID: e.fromWS, ToWorkspaceID: e.toWSID,
+		From: e.assign.From, To: e.assign.To,
 	}
 	if blocked {
 		m.Blocked = true

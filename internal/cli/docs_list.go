@@ -84,7 +84,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				if asJSON {
 					return
 				}
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeColumnPath(progressRoot))
 			})
 			defer timer.Stop()
 
@@ -119,7 +119,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"root","path","title","modTime"}] to stdout (an empty list is [])`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
 	cmd.SetFlagErrorFunc(docsFlagError("docs list"))
@@ -165,10 +165,13 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		return nil
 	}
 	// Every field is escaped: RelPath is a filename and Title is the doc's own
-	// H1, so either can carry a terminal escape sequence (forgectl#598).
+	// H1, so either can carry a terminal escape sequence (forgectl#598). The
+	// title is also capped (forgectl#894), and so are the root label and the
+	// path (#913): the path unquoted and cut in the middle, so an ordinary row
+	// keeps the %-48s column. --json above carries every field whole.
 	for _, d := range docs {
 		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
-			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), termsafe.SafeLine(d.Title))
+			safeLabel(d.RootLabel), safeColumnPath(d.RelPath), safeTitle(d.Title))
 	}
 	return nil
 }

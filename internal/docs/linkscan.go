@@ -218,49 +218,56 @@ func firstH1(source []byte) string {
 	return ""
 }
 
-// frontmatterRoot decodes a YAML frontmatter block once into its top-level
-// node (the mapping, for a well-formed block), or nil for a TOML (+++) block,
-// an undecodable block, or an empty one. Aliases are a YAML convention and
-// OKF frontmatter is YAML, so a TOML block yields nothing.
+// frontmatterRoot returns a YAML frontmatter block's top-level mapping,
+// decoded once by splitFrontmatter, or nil for a TOML (+++) block or an
+// empty one. Aliases are a YAML convention and OKF frontmatter is YAML, so
+// a TOML block yields nothing.
 func frontmatterRoot(fm frontmatterBlock) *yaml.Node {
 	if fm.delim != '-' {
 		return nil
 	}
-	var node yaml.Node
-	if err := yaml.Unmarshal(fm.block, &node); err != nil || len(node.Content) == 0 {
-		return nil
-	}
-	return node.Content[0]
+	return fm.root
 }
 
 // aliasesFromNode returns a frontmatter mapping's `aliases` value, accepting
-// either a list or a bare scalar (folded to a one-element list). It decodes
-// the already-parsed node into a map, so it sees exactly what a fresh
-// yaml.Unmarshal of the block would (merge keys included); the trust fields
-// read raw scalars instead (see trustFields).
+// either a list or a bare scalar (folded to a one-element list). Only
+// string scalars count, as in a decode of the block (an alias to one
+// included); a number, a boolean or a null is not an alias. It reads the
+// node rather than decoding it into a map, whose cost is superlinear in
+// the keys (#910).
 func aliasesFromNode(mapping *yaml.Node) []string {
-	var m map[string]any
-	if err := mapping.Decode(&m); err != nil {
+	var value *yaml.Node
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if k := resolveAlias(mapping.Content[i]); k.Kind == yaml.ScalarNode && k.Value == "aliases" {
+			value = resolveAlias(mapping.Content[i+1])
+		}
+	}
+	if value == nil {
 		return nil
 	}
-	return toStringList(m["aliases"])
-}
-
-func toStringList(v any) []string {
-	switch t := v.(type) {
-	case string:
-		return []string{t}
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, item := range t {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.ShortTag() == "!!str" {
+			return []string{value.Value}
+		}
+	case yaml.SequenceNode:
+		out := make([]string, 0, len(value.Content))
+		for _, item := range value.Content {
+			if item = resolveAlias(item); item.Kind == yaml.ScalarNode && item.ShortTag() == "!!str" {
+				out = append(out, item.Value)
 			}
 		}
 		return out
-	default:
-		return nil
 	}
+	return nil
+}
+
+// resolveAlias returns the node an alias names, one step, or n itself.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		return n.Alias
+	}
+	return n
 }
 
 // scanBlockIDs returns the sorted, de-duplicated set of Obsidian block ids

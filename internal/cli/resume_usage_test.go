@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -137,4 +139,42 @@ func TestResumeSession_DryRunAndBlockersRecordZero(t *testing.T) {
 				len(probe.events), probe.execs)
 		}
 	})
+}
+
+// TestResumeSession_StdoutTerminalDecidesAllowDanger is the resume half of
+// forgectl#899. `forgectl resume` execs claude onto the same stdout, so off a
+// terminal the resumed session is not interactive and the profile's
+// allow_danger (the built-in default, true) must not reach it. On a terminal
+// it still does, and the rest of ResumeArgs stays either way.
+//
+// Mutations that turn it red: drop the launchStdoutIsTerminal check in
+// resumeSession (the piped row regains the flag), or clear AllowDanger
+// unconditionally (the terminal row loses it).
+func TestResumeSession_StdoutTerminalDecidesAllowDanger(t *testing.T) {
+	const danger = "--allow-dangerously-skip-permissions"
+	for _, terminal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("terminal=%t", terminal), func(t *testing.T) {
+			fakeClaudeBin(t)
+			pinResumePaths(t)
+			pinCwd(t)
+			got := pinLaunchStdoutTerminal(t, terminal)
+			session := deadSession(t)
+
+			cmd, _, _ := newTestCmd()
+			if err := resumeSession(cmd, usageResumeConfig(false), nil, session, false, false); err != nil {
+				t.Fatalf("resumeSession: %v", err)
+			}
+			if len(*got) == 0 {
+				t.Fatal("resumeSession never reached the exec seam")
+			}
+			if has := slices.Contains(*got, danger); has != terminal {
+				t.Errorf("argv %q: contains %s = %t, want %t", *got, danger, has, terminal)
+			}
+			for _, keep := range []string{"--permission-mode", "--model", "--ide", "--resume", session.ID} {
+				if !slices.Contains(*got, keep) {
+					t.Errorf("argv %q lost %s; only the danger flag may be withheld", *got, keep)
+				}
+			}
+		})
+	}
 }

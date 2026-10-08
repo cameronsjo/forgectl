@@ -159,7 +159,10 @@ func npmStep() Step {
 			}
 			var cmdErr *exec.CommandError
 			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && strings.TrimSpace(cmdErr.Output) != "" {
-				return cmdErr.Output, nil
+				// The finding is the deliverable, so it is redacted narrowly
+				// (redact.Stdout, #952), not by redact.Text, which withholds
+				// every node_modules/@scope row.
+				return redact.Stdout(cmdErr.Output), nil
 			}
 			return out, err
 		},
@@ -193,7 +196,10 @@ func (e *SequenceError) Unwrap() error { return e.Err }
 // Runner.Run's own return value (that's always "" on error, by contract —
 // see exec.OSRunner.Run) — it's recovered from the returned
 // *exec.CommandError's Output field instead, which is where a failed
-// command's captured stdout actually lives.
+// command's captured stdout actually lives. That stdout is redacted
+// (redact.Text) before it joins the output (#941): every renderer of the
+// failure — the transcript file, --json, the debug log — shows it, and a
+// CommandError's Stderr and Err are already redacted wherever they render.
 func runSequence(ctx context.Context, run exec.Runner, env map[string]string, argvs ...[]string) (string, error) {
 	var parts []string
 	for _, argv := range argvs {
@@ -204,7 +210,7 @@ func runSequence(ctx context.Context, run exec.Runner, env map[string]string, ar
 		if err != nil {
 			var cmdErr *exec.CommandError
 			if errors.As(err, &cmdErr) && cmdErr.Output != "" {
-				parts = append(parts, cmdErr.Output)
+				parts = append(parts, redact.Text(cmdErr.Output))
 			}
 			return strings.Join(parts, "\n\n"), &SequenceError{Command: strings.Join(redact.Args(argv), " "), Err: err}
 		}

@@ -108,6 +108,8 @@ const logKeepDays = 7
 //	[[herdr.organize.rule]]
 //	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
 //	workspace = "forge"
+//	[tasks]              # forgectl tasks — where a keychain credential may be sent
+//	allowed_hosts = []               # hosts allowed besides the built-in default; plain hostnames only
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -130,6 +132,9 @@ type Config struct {
 	Theme     ThemeConfig     `toml:"theme"`
 	Herdr     HerdrConfig     `toml:"herdr"`
 	Resume    ResumeConfig    `toml:"resume"`
+	Tasks     TasksConfig     `toml:"tasks"`
+	Desk      DeskConfig      `toml:"desk"`
+	Surface   SurfaceConfig   `toml:"surface"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so
 	// ResumeConfig.Validate can name a misspelled hook key instead of
@@ -191,6 +196,9 @@ func (c Config) HasHerdrOrganizeSection() bool {
 type LaunchConfig struct {
 	Defaults LaunchDefaults  `toml:"defaults"`
 	Projects []LaunchProject `toml:"project"`
+	// Worker is [launch.worker]: the posture a coordinator's worker starts
+	// with (`surface launch --worktree`). See LaunchWorker.
+	Worker LaunchWorker `toml:"worker"`
 
 	// UsageStats is the informed opt-in for local launch statistics (#240).
 	// Absent and explicit false are both disabled, and nothing but an operator
@@ -198,6 +206,17 @@ type LaunchConfig struct {
 	// variable, init, doctor, or stats path ever writes true here. See
 	// internal/launch/usage.go for exactly what a recorded row contains.
 	UsageStats bool `toml:"usage_stats"`
+}
+
+// LaunchWorker is [launch.worker]: a worker's posture. Each field left empty
+// takes the built-in worker value (acceptEdits, workspace-write, on-request).
+// A worker takes, field by field, the stricter of this and the matched
+// [[launch.project]] block's own value; [launch.defaults] is the interactive
+// posture and does not bind workers. The worker floor still caps the result.
+type LaunchWorker struct {
+	PermissionMode string `toml:"permission_mode,omitempty"`
+	Sandbox        string `toml:"sandbox,omitempty"`
+	ApprovalPolicy string `toml:"approval_policy,omitempty"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -243,6 +262,9 @@ type LaunchProject struct {
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
 //
+// A [launch.worker] table counts toward non-empty the same way usage_stats
+// does, below.
+//
 // usage_stats counts toward non-empty, which changes how one specific operator
 // is routed: someone holding both a claunch.conf and a config.toml containing
 // nothing but the opt-in used to get wholesale legacy import and now gets the
@@ -250,7 +272,7 @@ type LaunchProject struct {
 // either route — the difference is which code path carries it, and that is
 // worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker == (LaunchWorker{}) && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
@@ -1015,15 +1037,31 @@ type BenchConfig struct {
 
 // ResolvedHearthDir resolves the hearth checkout: the configured value, else
 // $HEARTH_DIR, else empty (the signal to degrade to not-configured). A leading
-// ~/ is expanded.
+// ~/ is expanded. A ~ path whose home cannot be resolved also yields empty
+// (fail closed); use ResolveHearthDir to learn why.
 func (bc BenchConfig) ResolvedHearthDir() string {
-	return resolveDir(bc.HearthDir, "HEARTH_DIR")
+	dir, _ := bc.ResolveHearthDir()
+	return dir
+}
+
+// ResolveHearthDir is ResolvedHearthDir with the failure reason: a configured
+// ~ path whose home directory cannot be resolved returns ("", err) rather than
+// the literal ~/... path, which would resolve against the working directory.
+func (bc BenchConfig) ResolveHearthDir() (string, error) {
+	return resolveDir(bc.HearthDir, "HEARTH_DIR", os.UserHomeDir)
 }
 
 // ResolvedChronicleDir resolves the chronicle checkout: the configured value,
-// else $CHRONICLE_DIR, else empty. A leading ~/ is expanded.
+// else $CHRONICLE_DIR, else empty. A leading ~/ is expanded; an unresolvable
+// home yields empty (fail closed), as for ResolvedHearthDir.
 func (bc BenchConfig) ResolvedChronicleDir() string {
-	return resolveDir(bc.ChronicleDir, "CHRONICLE_DIR")
+	dir, _ := bc.ResolveChronicleDir()
+	return dir
+}
+
+// ResolveChronicleDir is ResolvedChronicleDir with the failure reason.
+func (bc BenchConfig) ResolveChronicleDir() (string, error) {
+	return resolveDir(bc.ChronicleDir, "CHRONICLE_DIR", os.UserHomeDir)
 }
 
 // ResolvedOTLPEndpoint returns the configured OTLP endpoint or the baked
@@ -1045,21 +1083,26 @@ func (bc BenchConfig) ResolvedOTLPProtocol() string {
 }
 
 // resolveDir picks the configured value, falls back to an environment variable,
-// and expands a leading ~/. An empty result means "unconfigured" — callers
-// degrade rather than error.
-func resolveDir(configured, envVar string) string {
+// and expands a leading ~/. An empty result with a nil error means
+// "unconfigured" — callers degrade rather than error. A ~ path whose home
+// lookup fails returns ("", err): the literal ~/... would resolve against the
+// working directory. The home is looked up only for a ~ path.
+func resolveDir(configured, envVar string, userHome func() (string, error)) (string, error) {
 	dir := configured
 	if dir == "" {
 		dir = os.Getenv(envVar)
 	}
 	if dir == "" {
-		return ""
+		return "", nil
 	}
-	home, err := os.UserHomeDir()
+	if dir != "~" && !strings.HasPrefix(dir, "~/") {
+		return dir, nil
+	}
+	home, err := userHome()
 	if err != nil {
-		return dir
+		return "", fmt.Errorf("resolve %s: home directory: %w", dir, err)
 	}
-	return expandTilde(dir, home)
+	return expandTilde(dir, home), nil
 }
 
 // expandTilde expands a leading ~ or ~/ to the home directory. Mirrors the
@@ -1119,11 +1162,14 @@ func LoadPath(path string) Config {
 	}
 	if err != nil && !os.IsNotExist(err) {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
-			"path", termsafe.QuotePath(path), "error", termsafe.SafeLine(err.Error()))
+			"path", termsafe.QuotePath(path), "error", termsafe.SafeLineMax(err.Error(), logErrMaxRunes))
 		cfg.decodeDegraded = true
-		if decodeErr != nil {
+		switch {
+		case isInvalidValueError(decodeErr):
+			cfg.decodeErr = describeInvalidError(path, decodeErr)
+		case decodeErr != nil:
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
-		} else {
+		default:
 			cfg.decodeErr = describeReadError(path, err)
 		}
 	}
@@ -1157,6 +1203,17 @@ func describeDecodeError(path string, err error) error {
 	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
 }
 
+// describeInvalidError words a config file that parses and holds a value the
+// loader refuses. Calling that file one that "does not parse" would send the
+// operator looking for a syntax error that is not there.
+func describeInvalidError(path string, err error) error {
+	return fmt.Errorf("config file %s is not valid: %w", termsafe.QuotePath(path), err)
+}
+
+// logErrMaxRunes caps an error text config logs (#934): internal/cli's
+// textMaxRunes, room for a decode error naming a path and a key.
+const logErrMaxRunes = 1280
+
 // quoteConfigValue is how a validation error echoes a value from config.toml
 // (forgectl#706): visibly quoted with control characters escaped, and capped
 // at termsafe.ArgEchoMaxRunes so a pasted blob cannot flood the terminal or
@@ -1184,7 +1241,35 @@ func DecodeStrict(data []byte) (Config, error) {
 			cfg.resumeUnknown = append(cfg.resumeUnknown, k.String())
 		}
 	}
-	return cfg, tomlerr.Scrub(err)
+	if err != nil {
+		return cfg, tomlerr.Scrub(err)
+	}
+	// [tasks] is checked here, at decode, and not left to the command that
+	// uses it: the list decides where a keychain credential may be sent, and
+	// every reader of this file must see the same refusal. The list is
+	// dropped with the error, so a caller that goes on with this Config
+	// anyway holds one that allows the default host only.
+	//
+	// log_level is checked here for the same reason the list is: a value the
+	// logger does not know would otherwise turn logging off, which is what
+	// "off" does, and nothing would say so. It is dropped with the error, so a
+	// caller that goes on with this Config has logging off — what the value
+	// did before it was checked, and nothing louder.
+	//
+	// Both are checked, and both dropped, before either error is returned, so
+	// a file with two refused values carries neither into the Config.
+	var invalid error
+	if err := cfg.Tasks.Validate(); err != nil {
+		cfg.Tasks = TasksConfig{}
+		invalid = err
+	}
+	if err := validateLogLevel(cfg.LogLevel); err != nil {
+		cfg.LogLevel = ""
+		if invalid == nil {
+			invalid = err
+		}
+	}
+	return cfg, invalid
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1201,7 +1286,8 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [resume], and [theme]. A missing file remains valid and selects built-in defaults.
+// [herdr.organize], [surface.drain], [resume], and [theme]. [tasks] and log_level are checked
+// by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
 // cleanly and still be one every launch path refuses, and a doctor that only
@@ -1225,6 +1311,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Herdr.Organize.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Surface.Drain.Validate(); err != nil {
 		return err
 	}
 	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {
@@ -1266,8 +1355,28 @@ func ResolvedLogPath(logFile string) string {
 	}
 }
 
+// logLevelKey is the dotted key of LogLevel, as Report names a key.
+const logLevelKey = "log_level"
+
+// validateLogLevel refuses a log_level the logger would not act on. It accepts
+// exactly what SetupLogger has always acted on — the names parseLevel knows —
+// and the ways of saying off: absent, empty, blank, or "off". Case and
+// surrounding space are ignored, as they are by parseLevel.
+func validateLogLevel(s string) error {
+	if _, ok := parseLevel(s); ok {
+		return nil
+	}
+	if level := strings.ToLower(strings.TrimSpace(s)); level == "" || level == "off" {
+		return nil
+	}
+	return invalidValueError{message: fmt.Sprintf(
+		"log_level = %s: must be one of off, debug, info, warn, warning, or error; leave it out for off",
+		quoteConfigValue(s))}
+}
+
 // parseLevel maps a level name to slog.Level. Returns (level, true) for known
-// names; (0, false) for "off" or anything unrecognised.
+// names; (0, false) for "off". Any other value is refused at decode
+// (validateLogLevel), so it does not reach here from a loaded config.
 func parseLevel(s string) (slog.Level, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
@@ -1429,6 +1538,18 @@ func WorkflowsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "workflows"), nil
+}
+
+// LensesDir returns the directory `desk show --lens NAME` reads NAME.toml
+// from: <os.UserConfigDir()>/forgectl/lenses (macOS: ~/Library/Application
+// Support/forgectl/lenses; Linux: ~/.config/forgectl/lenses). A lens teaches
+// forgectl to read one app's log as a run (ADR-0014).
+func LensesDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "lenses"), nil
 }
 
 // WorkflowStateDir returns the directory holding per-workflow run-state

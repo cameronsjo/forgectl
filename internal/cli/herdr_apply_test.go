@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
+	"github.com/cameronsjo/forgectl/internal/herdr/organize"
 )
 
 // applyRun is one `organize --apply` against a stateful fake session.
@@ -633,5 +634,258 @@ func TestOrganizeLockPath_LivesBesideTheConfigNotOnIt(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Dir(got)); err != nil || !info.IsDir() {
 		t.Errorf("the lock directory must exist: %v", err)
+	}
+}
+
+// countBetween counts the herdr calls with prefix among events after the first
+// event equal to from and before the next "herdr tab move" call.
+func countBetween(events []string, from, prefix string) (int, bool) {
+	start := -1
+	for i, e := range events {
+		if e == from {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	n := 0
+	for _, e := range events[start+1:] {
+		if strings.HasPrefix(e, "herdr tab move") {
+			break
+		}
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n, true
+}
+
+func TestApply_MovesReReadOnlyAfterACallThatChangedTheSession(t *testing.T) {
+	w := threeMoveWorld()
+	w.intercept = func(args []string) (string, error, bool) {
+		if len(args) >= 4 && args[0] == "tab" && args[1] == "move" && args[2] == "t1" && args[3] == "--workspace" {
+			return `{"id":"x","result":{"move_result":{"changed":false,"reason":"last_tab_in_workspace"}}}`, nil, true
+		}
+		return "", nil, false
+	}
+	a := runApply(t, inSession, w)
+	if a.err == nil || !strings.Contains(a.err.Error(), "last_tab_in_workspace") {
+		t.Fatalf("err = %v, want the decline reported", a.err)
+	}
+	// The declined move changed nothing, so the next move reuses the last read.
+	for _, list := range []string{"herdr pane list", "herdr workspace list"} {
+		n, ok := countBetween(a.events, "herdr tab move t1 --workspace w2", list)
+		if !ok || n != 0 {
+			t.Errorf("%d %q calls between the declined move and the next (found=%v), want 0\n%v", n, list, ok, a.events)
+		}
+		// t2's move was applied and renumbers ids, so t3's move re-reads first.
+		n, ok = countBetween(a.events, "herdr tab move t2 --workspace w2", list)
+		if !ok || n != 1 {
+			t.Errorf("%d %q calls between an applied move and the next (found=%v), want 1\n%v", n, list, ok, a.events)
+		}
+	}
+}
+
+func TestApply_TabOrderReadsTheSessionOncePerWorkspace(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1)).
+		tab("w1", "t1", "term1", "/r/forge/d", "d").
+		tab("w1", "t2", "term2", "/r/forge/c", "c").
+		tab("w1", "t3", "term3", "/r/forge/b", "b").
+		tab("w1", "t4", "term4", "/r/forge/a", "a")
+	w.active = map[string]string{"w1": "t1"}
+	w.focusedTab = "t1"
+	var calls []string
+	w.intercept = func(args []string) (string, error, bool) {
+		calls = append(calls, strings.Join(args, " "))
+		return "", nil, false
+	}
+	cfg := organizeCfg()
+	cfg.Herdr.Organize.WorkspaceOrder = []string{"forge"}
+	cfg.Herdr.Organize.Default = "forge"
+	setHerdrSeams(t, inSession)
+	r := runOrganize(t, cfg, w, "--apply")
+	if r.err != nil {
+		t.Fatalf("err = %v", r.err)
+	}
+	if got, want := w.order("w1"), []string{"term4", "term3", "term2", "term1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+	// Three index moves; each reply carries the new tab list, so the stage lists
+	// tabs and panes once, not once per move.
+	count := func(prefix string) int {
+		n := 0
+		for _, c := range calls {
+			if strings.HasPrefix(c, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	// tab list: the snapshot, then the tab-order stage.
+	if n := count("tab list"); n != 2 {
+		t.Errorf("%d tab list calls, want 2 (snapshot + one for the tab-order stage)\n%v", n, calls)
+	}
+	// pane list: the snapshot, the tab-order stage, and the focus restore.
+	if n := count("pane list"); n != 3 {
+		t.Errorf("%d pane list calls, want 3 (snapshot, tab-order stage, focus restore)\n%v", n, calls)
+	}
+}
+
+// TestApply_DuplicateLabelWorkspaceOrderMatchesTheDryRun: the dry run must
+// report the workspace reorder --apply performs when two workspaces share a
+// label, and a second run must find nothing left to reorder (#732).
+func TestApply_DuplicateLabelWorkspaceOrderMatchesTheDryRun(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1), hws("w2", "forge", 2), hws("w3", "misc", 3)).
+		tab("w1", "t1", "term1", "/r/forge/a", "a").
+		tab("w2", "t2", "term2", "/r/forge/b", "b").
+		tab("w3", "t3", "term3", "/r/x/c", "c").
+		tab("w3", "t4", "term4", "/r/x/d", "d").
+		tab("w3", "t5", "term5", "/r/forge/e", "e")
+	w.active = map[string]string{"w1": "t1", "w2": "t2", "w3": "t3"}
+	w.focusedTab = "t3"
+	setHerdrSeams(t, inSession)
+
+	dry := runOrganize(t, organizeCfg(), w)
+	if dry.err != nil {
+		t.Fatalf("dry run err = %v", dry.err)
+	}
+	// A repeated label carries its workspace's number, so the line says which
+	// forge moves (#945).
+	const wantLine = "order    workspaces: forge #1, misc, forge #2"
+	if !strings.Contains(dry.stdout, wantLine) {
+		t.Fatalf("dry run missing %q:\n%s", wantLine, dry.stdout)
+	}
+
+	// The duplicate's lone tab is blocked; the rest applies cleanly.
+	a := runOrganize(t, organizeCfg(), w, "--apply")
+	if a.err != nil {
+		t.Fatalf("apply err = %v\n%s", a.err, a.stdout)
+	}
+	if !strings.Contains(a.stdout, `ordered  workspace "misc" -> position 2`) {
+		t.Errorf("apply did not report the workspace reorder:\n%s", a.stdout)
+	}
+	if got, want := w.labels(), []string{"forge", "misc", "forge"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("labels after apply = %v, want %v (what the dry run reported)", got, want)
+	}
+
+	again := runOrganize(t, organizeCfg(), w)
+	if strings.Contains(again.stdout, "order    workspaces") {
+		t.Errorf("a second dry run still reports a workspace reorder; apply and the dry run disagree:\n%s", again.stdout)
+	}
+}
+
+// TestApply_ABlockedTabInADuplicateDoesNotStallTheTabOrder: a duplicate forge
+// whose lone tab is blocked must not stop the dry run and --apply from putting
+// the canonical forge's tabs in order, and a second run must find it settled
+// (#945).
+func TestApply_ABlockedTabInADuplicateDoesNotStallTheTabOrder(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1), hws("w3", "misc", 2), hws("w2", "forge", 3)).
+		tab("w1", "t1", "term1", "/r/forge/b", "b").
+		tab("w1", "t2", "term2", "/r/forge/a", "a").
+		tab("w3", "t3", "term3", "/r/x/c", "c").
+		tab("w2", "t4", "term4", "/r/x/x", "x")
+	w.active = map[string]string{"w1": "t1", "w3": "t3", "w2": "t4"}
+	w.focusedTab = "t1"
+	setHerdrSeams(t, inSession)
+
+	dry := runOrganize(t, organizeCfg(), w)
+	if dry.err != nil {
+		t.Fatalf("dry run err = %v", dry.err)
+	}
+	if !strings.Contains(dry.stdout, `order    forge: "a" [t2] -> position 1`) || strings.Contains(dry.stdout, "nothing to apply") {
+		t.Fatalf("dry run does not report forge's reorder:\n%s", dry.stdout)
+	}
+
+	a := runOrganize(t, organizeCfg(), w, "--apply")
+	if a.err != nil {
+		t.Fatalf("apply err = %v\n%s", a.err, a.stdout)
+	}
+	if got, want := w.order("w1"), []string{"term2", "term1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("forge order after apply = %v, want %v", got, want)
+	}
+
+	again := runOrganize(t, organizeCfg(), w)
+	if strings.Contains(again.stdout, "order    ") {
+		t.Errorf("a second dry run still reports a reorder:\n%s", again.stdout)
+	}
+}
+
+// TestApply_WithNoFileLockRefusesBeforeAnyHerdrCall: off Unix the organize
+// lock serializes nothing, so --apply refuses with exit 2 before the fork
+// probe, the lock, or any herdr call, while the report still runs (#732).
+func TestApply_WithNoFileLockRefusesBeforeAnyHerdrCall(t *testing.T) {
+	old := herdrLockSupported
+	t.Cleanup(func() { herdrLockSupported = old })
+	herdrLockSupported = false
+
+	w := sessionWorld()
+	a := runApply(t, herdrSeams{env: inSession.env}, w)
+	if ExitCode(a.err) != 2 || a.err == nil || !strings.Contains(a.err.Error(), "only on Unix") {
+		t.Fatalf("err = %v (exit %d), want exit 2 naming the missing lock", a.err, ExitCode(a.err))
+	}
+	if len(a.runner.Calls) != 0 {
+		t.Errorf("herdr was called: %v", a.runner.Calls)
+	}
+	for _, e := range a.events {
+		if e == "fork" || e == "lock" {
+			t.Errorf("event %q happened, want the refusal first", e)
+		}
+	}
+
+	if dry := runOrganize(t, organizeCfg(), w); dry.err != nil {
+		t.Errorf("the report without --apply failed: %v", dry.err)
+	}
+}
+
+// TestApply_AnIndexMoveReplyWithNoTabsIsListedAgain: an index move whose reply
+// carries a move_result but no tab list must not read as an empty, settled
+// workspace; the stage lists the tabs again and finishes the order (#945).
+func TestApply_AnIndexMoveReplyWithNoTabsIsListedAgain(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1)).
+		tab("w1", "t1", "term1", "/r/forge/c", "c").
+		tab("w1", "t2", "term2", "/r/forge/b", "b").
+		tab("w1", "t3", "term3", "/r/forge/a", "a")
+	w.active = map[string]string{"w1": "t1"}
+	w.focusedTab = "t1"
+	w.intercept = func(args []string) (string, error, bool) {
+		if len(args) >= 4 && args[0] == "tab" && args[1] == "move" && args[3] == "--index" {
+			_ = w.moveTab(t, args)
+			return reply(t, map[string]any{"move_result": map[string]any{"changed": true, "tab_id": args[2], "workspace_id": "w1"}}), nil, true
+		}
+		return "", nil, false
+	}
+	cfg := organizeCfg()
+	cfg.Herdr.Organize.WorkspaceOrder = []string{"forge"}
+	cfg.Herdr.Organize.Default = "forge"
+	setHerdrSeams(t, inSession)
+	r := runOrganize(t, cfg, w, "--apply")
+	if r.err != nil {
+		t.Fatalf("err = %v\n%s", r.err, r.stdout)
+	}
+	if got, want := w.order("w1"), []string{"term3", "term2", "term1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v: an empty reply was read as a settled workspace", got, want)
+	}
+}
+
+// TestApply_APaneWithNoTerminalIDIdentifiesNothing: panes with an empty
+// terminal id are not indexed (two would collide on the one key), and a tab
+// whose first pane has none holds its position under a stand-in, as the plan
+// gives it one (#945).
+func TestApply_APaneWithNoTerminalIDIdentifiesNothing(t *testing.T) {
+	panes := []herdr.Pane{
+		{PaneID: "p1", TabID: "t1", TerminalID: ""},
+		{PaneID: "p2", TabID: "t2", TerminalID: ""},
+		{PaneID: "p3", TabID: "t3", TerminalID: "term3"},
+	}
+	if got := paneByTerminal(panes); len(got) != 1 {
+		t.Errorf("paneByTerminal = %v, want only term3 indexed", got)
+	}
+	tabs := []herdr.Tab{{TabID: "t1"}, {TabID: "t2"}, {TabID: "t3"}}
+	terms, tabOf := tabsInOrder(tabs, panes)
+	want := []string{organize.StandInID("t1"), organize.StandInID("t2"), "term3"}
+	if !reflect.DeepEqual(terms, want) || tabOf[want[1]] != "t2" {
+		t.Errorf("tabsInOrder = (%v, %v), want %v with each stand-in mapped to its tab", terms, tabOf, want)
 	}
 }

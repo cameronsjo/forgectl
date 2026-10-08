@@ -1,0 +1,30 @@
+#  forgectl status  ·  git 2m ago · prs 2m ago · clean 2m ago · bench 2m ago
+✓ git    3 project(s) under "/p": 1 clean, 1 dirty, 1 ahead, 0 unknown      
+    alpha                     [clean]                                       
+  > beta                      [2 modified]                                  
+    gamma                     [1 ahead]                                     
+! prs    0 active review(s), 2 awaiting you, 1 open by you                  
+    note: your-open: query failed                                           
+    o/r#1                     awaiting you · fix the thing                  
+    o/r#2                     awaiting you · add the other                  
+    … 1 more (tab to this section)                                          
+✗ clean  failed: timed out after 20s                                        
+✓ bench  hearth ok, chronicle unavailable                                   
+    hearth                    ok — up                                       
+    chronicle                 unavailable — down                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+↑↓/jk move · tab section · r refresh · R all · / filter · ? help · q quit   

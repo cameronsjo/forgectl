@@ -188,7 +188,8 @@ func TestParity_ClaudeOrdinaryLaunch(t *testing.T) {
 
 	wantArgv := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped run withholds it (forgectl#899)
 		"--ide", "--exclude-dynamic-system-prompt-sections",
 		"--model", "sonnet",
 		"--effort", "high",

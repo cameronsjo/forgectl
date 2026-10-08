@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -123,9 +124,9 @@ func snapshotFocus(snap organize.Snapshot) focusState {
 }
 
 // applyPlan carries out the plan against the live session. It re-reads herdr
-// before each step because ids renumber as tabs move; a tab is found again by
-// its terminal id, which does not change. Focus is restored on every exit,
-// error paths included.
+// after each call that can renumber ids (a tab moving between workspaces, a
+// workspace reorder); a tab is found again by its terminal id, which does not
+// change. Focus is restored on every exit, error paths included.
 func applyPlan(ctx context.Context, c *herdr.Client, snap organize.Snapshot, plan organize.Plan) (res applyResult) {
 	focus := snapshotFocus(snap)
 	defer func() { res.FocusTitle, res.FocusTab, res.FocusErr = restoreFocus(ctx, c, focus) }()
@@ -185,25 +186,43 @@ func canonicalWorkspace(wss []herdr.Workspace, label string, created map[string]
 	return "", false
 }
 
-// paneByTerminal indexes panes by terminal id.
+// paneByTerminal indexes panes by terminal id. A pane with no terminal id is
+// left out: it identifies nothing, and several of them would collide.
 func paneByTerminal(panes []herdr.Pane) map[string]herdr.Pane {
 	out := make(map[string]herdr.Pane, len(panes))
 	for _, p := range panes {
+		if p.TerminalID == "" {
+			continue
+		}
 		out[p.TerminalID] = p
 	}
 	return out
 }
 
+// runMoves makes the planned moves. It re-reads panes and workspaces before a
+// move only when the previous turn changed the session: a move between
+// workspaces renumbers tab ids and can create a workspace, while a tab that
+// was gone, already placed, or declined changed nothing, so the last read
+// still holds.
 func runMoves(ctx context.Context, c *herdr.Client, moves []organize.Move, res *applyResult) error {
 	created := map[string]string{}
+	var (
+		panes []herdr.Pane
+		wss   []herdr.Workspace
+		stale = true
+	)
 	for i, m := range moves {
-		panes, err := c.Panes(ctx)
-		if err != nil {
-			return failStage(res, moves[i:], `reading panes before moving "`+m.Title+`"`, err)
-		}
-		wss, err := c.Workspaces(ctx)
-		if err != nil {
-			return failStage(res, moves[i:], `reading workspaces before moving "`+m.Title+`"`, err)
+		if stale {
+			var err error
+			panes, err = c.Panes(ctx)
+			if err != nil {
+				return failStage(res, moves[i:], `reading panes before moving "`+m.Title+`"`, err)
+			}
+			wss, err = c.Workspaces(ctx)
+			if err != nil {
+				return failStage(res, moves[i:], `reading workspaces before moving "`+m.Title+`"`, err)
+			}
+			stale = false
 		}
 		cur, ok := paneByTerminal(panes)[m.TerminalID]
 		if !ok {
@@ -223,6 +242,7 @@ func runMoves(ctx context.Context, c *herdr.Client, moves []organize.Move, res *
 		var declined *herdr.Declined
 		switch {
 		case err == nil:
+			stale = true
 			if !exists {
 				created[m.To] = result.WorkspaceID
 			}
@@ -244,33 +264,20 @@ func failStage(res *applyResult, notRun []organize.Move, stage string, err error
 }
 
 func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
-	// One step per pass, re-reading between passes as the tab order does, so a
-	// renumbering after a move cannot leave later steps acting on stale ids.
+	// One step per pass, re-reading the workspace list between passes: a
+	// workspace move renumbers workspaces and its reply is not decoded, so a
+	// later step must not act on the numbering from before it.
 	for pass := 0; ; pass++ {
 		wss, err := c.Workspaces(ctx)
 		if err != nil {
 			res.Stage = "reading workspaces to order them"
 			return err
 		}
-		current := make([]string, 0, len(wss))
 		label := make(map[string]string, len(wss))
 		for _, w := range wss {
-			current = append(current, w.WorkspaceID)
 			label[w.WorkspaceID] = w.Label
 		}
-		target := make([]string, 0, len(wss))
-		placed := map[string]bool{}
-		for _, lw := range plan.Layout.Workspaces {
-			if id, ok := canonicalWorkspace(wss, lw.Label, nil); ok && !placed[id] {
-				placed[id] = true
-				target = append(target, id)
-			}
-		}
-		for _, id := range current {
-			if !placed[id] {
-				target = append(target, id)
-			}
-		}
+		current, target := organize.WorkspaceOrderTarget(wss, plan.Layout)
 		steps, ok := organize.OrderSteps(current, target)
 		if !ok || len(steps) == 0 {
 			return nil
@@ -290,7 +297,8 @@ func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan,
 }
 
 // tabsInOrder returns the terminal ids of a workspace's tabs, in tab order. A
-// tab with no pane gets a stand-in id so the positions stay right.
+// tab with no pane, or whose first pane has no terminal id, gets a stand-in id
+// so the positions stay right, as the plan gives it one.
 func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabOf map[string]string) {
 	firstOfTab := map[string]string{}
 	for _, p := range panes {
@@ -301,7 +309,7 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 	tabOf = make(map[string]string, len(tabs))
 	for _, t := range tabs {
 		term, ok := firstOfTab[t.TabID]
-		if !ok {
+		if !ok || term == "" {
 			term = organize.StandInID(t.TabID)
 		}
 		terminals = append(terminals, term)
@@ -310,31 +318,36 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 	return terminals, tabOf
 }
 
+// runTabOrder puts each layout workspace's tabs in order, one index move per
+// pass. It reads the workspace list, the workspace's tabs, and the panes once
+// per workspace: an index move keeps every tab id (measured), and its reply
+// carries the workspace's tab list in the new order, which the next pass uses
+// instead of listing again. A reply whose list is empty or lacks the moved tab
+// is not trusted, and the tabs are listed again.
 func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
 	for _, lw := range plan.Layout.Workspaces {
 		stage := "ordering tabs in " + lw.Label
-		// One step per pass: after a move, ids and positions are re-read rather
-		// than predicted. The bound stops a herdr that ignores index moves.
+		wss, err := c.Workspaces(ctx)
+		if err != nil {
+			res.Stage = stage
+			return err
+		}
+		wsID, ok := canonicalWorkspace(wss, lw.Label, nil)
+		if !ok {
+			continue
+		}
+		tabs, err := c.Tabs(ctx, wsID)
+		if err != nil {
+			res.Stage = stage
+			return err
+		}
+		panes, err := c.Panes(ctx)
+		if err != nil {
+			res.Stage = stage
+			return err
+		}
+		// The bound stops a herdr that ignores index moves.
 		for pass := 0; pass <= len(lw.Tabs)+1; pass++ {
-			wss, err := c.Workspaces(ctx)
-			if err != nil {
-				res.Stage = stage
-				return err
-			}
-			wsID, ok := canonicalWorkspace(wss, lw.Label, nil)
-			if !ok {
-				break
-			}
-			tabs, err := c.Tabs(ctx, wsID)
-			if err != nil {
-				res.Stage = stage
-				return err
-			}
-			panes, err := c.Panes(ctx)
-			if err != nil {
-				res.Stage = stage
-				return err
-			}
 			current, tabOf := tabsInOrder(tabs, panes)
 			steps, _ := organize.OrderSteps(current, organize.ArrangeTarget(layoutTerminals(lw), current))
 			if len(steps) == 0 {
@@ -345,9 +358,20 @@ func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *
 				return fmt.Errorf("the tab order in %s did not settle after %d moves", lw.Label, pass)
 			}
 			s := steps[0]
-			if _, err := c.MoveTab(ctx, tabOf[s.TerminalID], herdr.ToIndex(s.Position)); err != nil {
+			moved, err := c.MoveTab(ctx, tabOf[s.TerminalID], herdr.ToIndex(s.Position))
+			if err != nil {
 				res.Stage = fmt.Sprintf("moving %q to position %d in %s", titleOf(lw, s.TerminalID), s.Position+1, lw.Label)
 				return err
+			}
+			tabs = moved.Tabs
+			if !slices.ContainsFunc(tabs, func(t herdr.Tab) bool { return t.TabID == tabOf[s.TerminalID] }) {
+				// The reply's list is the only read between passes, so one that
+				// is empty or lacks the tab just moved cannot be trusted: an
+				// empty list would read as a settled workspace. List again.
+				if tabs, err = c.Tabs(ctx, wsID); err != nil {
+					res.Stage = stage
+					return err
+				}
 			}
 			s.TabID = tabOf[s.TerminalID]
 			s.Title = titleOf(lw, s.TerminalID)

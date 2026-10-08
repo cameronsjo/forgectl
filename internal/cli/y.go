@@ -222,7 +222,7 @@ scan, classify, or redact the output.`,
 			if len(args) == 1 {
 				parsed, err := strconv.Atoi(args[0])
 				if err != nil {
-					return fmt.Errorf("count %q is not a number", termsafe.SafeLine(args[0]))
+					return fmt.Errorf("count %q is not a number", safeLabel(args[0]))
 				}
 				count = parsed
 			}

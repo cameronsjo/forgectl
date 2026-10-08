@@ -271,6 +271,41 @@ const resumeScaffold = `
 # timeout_seconds = 0  # 0 = default: command 300 (then its process group is killed); restart 1800 (bounds only the wait for idle)
 `
 
+// tasksScaffold is the [tasks] section. The header is ACTIVE so the section
+// exists and `forgectl init` does not re-append it, and the one key stays
+// commented with an empty list: the built-in host needs no entry, and a host
+// written here would be one more place every machine sends a keychain
+// credential.
+//
+// The second comment is there because the list is one list, not one per
+// keychain entry. A host added so a read token can reach it can be sent the
+// write token by the same rule, and the place to say so is where the host is
+// typed.
+const tasksScaffold = `
+# ── tasks: where a keychain credential may be sent (forgectl tasks) ─────────
+[tasks]
+# allowed_hosts = [] # hostnames allowed besides the built-in default; plain hostnames only (no port, user, path, or IP)
+# The list applies to EVERY keychain entry, the write entry included: a listed
+# host can be sent whichever keychain token a command names.
+`
+
+const deskScaffold = `
+# ── desk: how "forgectl desk add" signals the operator (forgectl desk) ──────
+[desk]
+# notify_herdr = true # herdr notification, and the queuing pane's needs-you state
+# notify_macos = true # macOS notification
+`
+
+const surfaceScaffold = `
+# ── surface: how "forgectl surface drain" paces and caps workers ────────────
+[surface.drain]
+# interval = "15s"   # time between ticks; at least 5s
+# cap = 3            # workers holding a slot at once, machine-wide (1-10)
+# per_repo = 1       # of those, how many in one repository
+# notify = true      # notify when a worker needs you
+# idle_minutes = 10  # at the prompt this long with no report: needs-you
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -311,6 +346,9 @@ var initSections = []initSection{
 	{"theme", "theme", themeScaffold},
 	{"herdr", "herdr", herdrScaffold},
 	{"resume", "resume", resumeScaffold},
+	{"tasks", "tasks", tasksScaffold},
+	{"desk", "desk", deskScaffold},
+	{"surface", "surface", surfaceScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

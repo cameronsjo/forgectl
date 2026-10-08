@@ -129,23 +129,36 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 		problems = append(problems, err)
 	}
 	if len(problems) > 0 {
-		return WithExitCode(termsafe.Error(errors.Join(problems...)), 2)
+		// Joined on "; ", not errors.Join's newline: termsafe.Error flattens a
+		// newline to a literal backslash-n, which a --json consumer then reads
+		// as two characters (forgectl#1087).
+		msgs := make([]string, len(problems))
+		for i, p := range problems {
+			msgs[i] = p.Error()
+		}
+		return WithExitCode(termsafe.Error(errors.New(strings.Join(msgs, "; "))), exitUsage)
 	}
 
 	if !opts.apply {
 		return organizeOnce(cmd, deps, opts)
 	}
 
+	// --apply needs the lock that serializes it against other organize runs.
+	// Off Unix there is none, so it refuses before any herdr call (#732).
+	if !herdrLockSupported {
+		return WithExitCode(errors.New("organize --apply needs a file lock to keep two runs apart, and forgectl has one only on Unix; run it without --apply for the report"), exitUsage)
+	}
+
 	// --apply gates twice, both before any change: the session (above), then
 	// the fork's `tab move`. Then it serializes against other organize runs.
 	if err := herdrCheckFork(cmd.Context(), deps.Runner); err != nil {
-		return WithExitCode(termsafe.Error(forkRefusal(err)), 2)
+		return WithExitCode(termsafe.Error(forkRefusal(err)), exitUsage)
 	}
 	lockPath, err := herdrLockPath()
 	if err != nil {
 		// Nothing has changed yet: the same class as the other pre-apply setup
 		// failures, exit 2.
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	notice := func() { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), lockWaitNotice) }
 	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts) })
@@ -162,7 +175,11 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, herdrProjectsRoot())
+	root, err := herdrProjectsRoot()
+	if err != nil {
+		return termsafe.Error(err)
+	}
+	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, root)
 
 	human := cmd.OutOrStdout()
 	if opts.asJSON {
@@ -232,11 +249,11 @@ func organizeConfigProblem(c config.Config) error {
 	if home, err := herdrUserHome(); err == nil {
 		legacy := filepath.Join(home, legacyOrganizeRulesFile)
 		if herdrFileExists(legacy) {
-			fmt.Fprintf(&b, "\nforgectl no longer reads ~/%s. Move its keys into config.toml: default and workspace_order go under [herdr.organize], and each [[rule]] becomes [[herdr.organize.rule]].", legacyOrganizeRulesFile)
+			fmt.Fprintf(&b, ". forgectl no longer reads ~/%s. Move its keys into config.toml: default and workspace_order go under [herdr.organize], and each [[rule]] becomes [[herdr.organize.rule]].", legacyOrganizeRulesFile)
 		}
 	}
 	if _, ok := lookupHerdrEnv(legacyOrganizeRulesEnv); ok {
-		fmt.Fprintf(&b, "\n%s is set, and forgectl ignores it.", legacyOrganizeRulesEnv)
+		fmt.Fprintf(&b, ". %s is set, and forgectl ignores it.", legacyOrganizeRulesEnv)
 	}
 	return errors.New(b.String())
 }
@@ -281,7 +298,7 @@ func (r organizeReport) printf(format string, a ...any) { _, _ = fmt.Fprintf(r.w
 
 // safe clips and neutralizes text herdr reports (titles and cwds are chosen by
 // whatever runs in a pane, so they are untrusted).
-func (r organizeReport) safe(s string) string { return termsafe.SafeLine(s) }
+func (r organizeReport) safe(s string) string { return safeText(s) }
 
 func (r organizeReport) tab(title, id string) string {
 	return `"` + truncate(r.safe(title), titleCols) + `" [` + r.safe(id) + `]`

@@ -112,7 +112,12 @@ func TestTmuxTextUsesApprovedRenderers(t *testing.T) {
 	// elsewhere. A new source must be classified above and deliberately added
 	// here after its renderer wiring is reviewed.
 	want := map[string]int{
-		"tmux_kill.go":   1,
+		// The hub header's session count: only len() of ListSessions is
+		// read; no session text reaches any renderer (forgectl#730).
+		"hub_header.go": 1,
+		// The --others prompt names the sessions it will kill; each name
+		// reaches the prompt only through termsafe.QuoteTextMax.
+		"tmux_kill.go":   2,
 		"tmux_ls.go":     1,
 		"tmux_pick.go":   1,
 		"tmux_rename.go": 1,
@@ -311,6 +316,11 @@ func tmuxTextIsUnsafe(expr ast.Expr, state tmuxTextState, termsafeName string) b
 }
 
 func isApprovedTextRenderer(call *ast.CallExpr, termsafeName string) bool {
+	// The package's capped helpers (termcap.go, #913) wrap termsafe and bound
+	// the value too; TestTextPrintersUseCappedHelpers pins what they call.
+	if ident, ok := call.Fun.(*ast.Ident); ok && cappedTextHelpers[ident.Name] {
+		return true
+	}
 	if termsafeName == "." {
 		ident, ok := call.Fun.(*ast.Ident)
 		return ok && approvedTextRendererName(ident.Name)
@@ -324,6 +334,12 @@ func isApprovedTextRenderer(call *ast.CallExpr, termsafeName string) bool {
 		return false
 	}
 	return approvedTextRendererName(sel.Sel.Name)
+}
+
+// cappedTextHelpers are termcap.go's capped helpers.
+var cappedTextHelpers = map[string]bool{
+	"safeLabel": true, "safeTitle": true, "safeSnippet": true, "safeText": true,
+	"safePath": true, "safeColumnPath": true,
 }
 
 func approvedTextRendererName(name string) bool {

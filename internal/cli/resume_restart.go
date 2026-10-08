@@ -31,6 +31,19 @@ installed claude: it stops each one and resumes it in the same herdr pane with
 ` + "`forgectl resume <id>`" + `, so the configured launch profile and cwd apply and the
 conversation comes back. --outdated is required; it is the only selector today.
 
+Each session's pane is found by session id: one ` + "`herdr pane list`" + ` per run, and
+the pane herdr labels "claude" with that session id is the one checked and
+relaunched into. The process's HERDR_PANE_ID is the fallback, used when no
+pane carries the session or the list fails or is rejected; a "note" line then
+says so. A herdr server restart renumbers every pane, so a long-running
+session's HERDR_PANE_ID can name a pane that no longer exists. A pane that
+differs from the environment's shows as "pane <found> (found by session; env
+said <old>)". A session herdr labels in two panes is refused. When herdr
+answers "pane not found" for a session, the list is read once more for that
+session, and if another pane now holds it the checks continue there. The
+label alone is never trusted: check 3 below still runs against the found
+pane.
+
   forgectl resume restart --outdated --dry-run        show the plan, touch nothing
   forgectl resume restart --outdated                  restart all, waiting for each to be idle
   forgectl resume restart --outdated --session <id>   restart only that session (repeatable)
@@ -55,10 +68,11 @@ before the signal:
 
 Failing 2 or 4 waits and re-checks every few seconds, up to --timeout (default
 30m). Failing 1 or 3 is reported and never signalled; a herdr error other than
-"pane not found" waits instead. A session with no herdr pane in its
-environment, whose version cannot be compared, or that this run is itself
-running inside (its pid is an ancestor of this process, as when an agent's
-shell tool runs the command) is reported and left alone.
+"pane not found" waits instead. A session with no herdr pane (none found by
+session and none in its environment), whose version cannot be compared, or
+that this run is itself running inside (its pid is an ancestor of this
+process, as when an agent's shell tool runs the command) is reported and left
+alone.
 
 Keystrokes typed into a session in the instant between the last screen read
 and the signal cannot be seen and are lost with the process; the window is a
@@ -86,34 +100,43 @@ used instead.
 Ctrl-C, SIGTERM, and SIGHUP (a closed terminal) stop the waiting, never a
 restart already signalled: that session is still relaunched and confirmed.
 SIGPIPE is ignored, so a broken output pipe cannot kill the run either. A
-failed stop or relaunch is reported with the command to run by hand. One gap
-remains: closing the terminal also hangs up the herdr calls the run makes, so
-a relaunch in flight at that moment can fail with its report going to the
-closed terminal. Run it from a terminal that stays open.
+failed stop or relaunch is reported with the command to run by hand. Each
+herdr call the run makes is in a process group of its own, so neither a
+closed terminal's hangup nor Ctrl-C reaches a call in flight; only the
+progress lines are lost with the terminal. Each call is bounded at 10
+seconds instead, and one that runs past it is killed, so a wedged herdr
+after the stop is reported as a failure with the command to resume it by
+hand. The exception is the relaunch itself: a send killed at the bound may
+already have typed the line, so the run still waits for the session to
+register, and reports it resumed if it does or reports delivery as unknown
+(check the pane before resuming by hand) if it does not.
 
 Output is one line per session per state change: waiting (with the reason),
-restarting, resumed, skipped, failed, and left (still waiting at the timeout
-or Ctrl-C; never signalled). --dry-run prints each session's planned action
+restarting, resumed, skipped, failed, left (still waiting at the timeout or
+Ctrl-C; never signalled), and pane-gone (herdr has no pane for it, even after
+reading the list again; never signalled), plus a run-level note when herdr's
+pane list cannot be used. --dry-run prints each session's planned action
 and what the checks say right now, using reads only.
 
 Exit 0 when every selected session was resumed or skipped with a reason
 (skips are the safety checks working, not errors). Exit 1 when a stop or
-relaunch failed, or the timeout or Ctrl-C left sessions waiting. Exit 2 on
-bad usage.`,
+relaunch failed, the timeout or Ctrl-C left sessions waiting, or a session's
+pane could not be found (it can reappear under a new id, so the update
+watcher retries it). Exit 2 on bad usage.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !outdated {
-				return WithExitCode(errors.New("pass --outdated: it is the only selector `resume restart` has"), 2)
+				return WithExitCode(errors.New("pass --outdated: it is the only selector `resume restart` has"), exitUsage)
 			}
 			for _, id := range only {
 				if !resume.ValidSessionID(id) {
-					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeTerm(id)), 2)
+					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeLabel(id)), exitUsage)
 				}
 			}
 			if timeout <= 0 {
-				return WithExitCode(errors.New("--timeout must be positive"), 2)
+				return WithExitCode(errors.New("--timeout must be positive"), exitUsage)
 			}
 			ctx := cmd.Context()
 			if ctx == nil {
@@ -160,22 +183,26 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 		return err
 	}
 	if res.Incomplete() {
-		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting — each is listed above with the command to resume it by hand", res.Failed, res.Left), 1)
+		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting, %d with no herdr pane — each is listed above with the command to resume it by hand", res.Failed, res.Left, res.PaneGone), exitFailed)
 	}
 	return nil
 }
 
 // printRestartEvent renders one progress line. Every field can carry
-// registry- or herdr-derived text, so the whole line goes through safeTerm.
+// registry- or herdr-derived text, so the whole line goes through safeText.
 func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	line := fmt.Sprintf("%-10s %s  %s", ev.State, ev.SessionID, ev.Detail)
+	if ev.SessionID == "" {
+		// A run-level line (StateNote) names no session.
+		line = fmt.Sprintf("%-10s %s", ev.State, ev.Detail)
+	}
 	if ev.Manual != "" {
 		line += "; by hand: " + ev.Manual
 	}
 	// Dropped rather than returned: a closed terminal or broken pipe (SIGPIPE
 	// is ignored for the run) must not stop the run, and a run mid-restart is
 	// still bound to relaunch and confirm whether anyone reads the line.
-	_, _ = fmt.Fprintln(out, safeTerm(line))
+	_, _ = fmt.Fprintln(out, safeText(line))
 }
 
 // printRestartPreview renders --dry-run.
@@ -185,7 +212,7 @@ func printRestartPreview(out io.Writer, lines []resume.PreviewLine) error {
 		return err
 	}
 	for _, l := range lines {
-		if _, err := fmt.Fprintln(out, safeTerm(fmt.Sprintf("%-8s %s  %s", l.Action, l.SessionID, l.Detail))); err != nil {
+		if _, err := fmt.Fprintln(out, safeText(fmt.Sprintf("%-8s %s  %s", l.Action, l.SessionID, l.Detail))); err != nil {
 			return err
 		}
 	}

@@ -532,7 +532,7 @@ func transcriptPath(p Paths, id, cwd string, idx *projectIndex) string {
 	}
 	name := id + ".jsonl"
 	if cwd != "" {
-		guess := filepath.Join(p.projectsDir(), slugify(cwd), name)
+		guess := filepath.Join(p.projectsDir(), ProjectSlug(cwd), name)
 		if _, err := os.Stat(guess); err == nil {
 			return guess
 		}
@@ -550,9 +550,9 @@ func transcriptPath(p Paths, id, cwd string, idx *projectIndex) string {
 	return ""
 }
 
-// slugify reproduces Claude Code's project-directory encoding: every byte
+// ProjectSlug reproduces Claude Code's project-directory encoding: every byte
 // outside [A-Za-z0-9] becomes '-', so /Users/x/.dotfiles is -Users-x--dotfiles.
-func slugify(cwd string) string {
+func ProjectSlug(cwd string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':

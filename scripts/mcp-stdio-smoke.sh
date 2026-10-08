@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
 # Stdio smoke for `forgectl tasks mcp`, run against a LIVE Vikunja instance.
 #
-# It drives the real transport — three JSON-RPC frames on stdin, responses on
-# stdout — and asserts three things in a deliberate order:
+# It drives the real transport — JSON-RPC frames on stdin, responses on
+# stdout — and asserts five things in a deliberate order:
 #
 #   1. initialize returns a result                  (the transport works)
-#   2. tools/list names all six tools               (registration works)
+#   2. tools/list names all seven tools             (registration works)
 #   3. tools/call list_projects returns projects    (the credential is ALIVE)
 #   4. tools/call create_task returns a tool error  (the credential is READ-ONLY)
+#   5. tools/call complete_task on an id that does not exist returns the
+#      not_found tool error                         (the tool is registered and
+#                                                    its pre-read gates the write)
 #
 # Step 4 is evidence only because step 3 passed. An out-of-scope write and a
 # revoked token both answer 401, so a refusal on its own proves nothing about
 # scope — the passing read is what makes the refusal mean "denied" rather than
 # "dead". Reversing that order would turn this script into a check that cannot
 # go red for the reason it claims to.
+#
+# Step 5 is NOT a scope check. A missing id answers not_found under any
+# credential, read-only or not, so it says nothing about what this credential
+# may update. It shows that complete_task is reachable over the transport and
+# that it reads the task before it writes: a close that skipped its pre-read
+# would answer something other than not_found here.
 #
 # Usage:
 #   bash scripts/mcp-stdio-smoke.sh [--keychain-service NAME] [--host HOST]
@@ -27,6 +36,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEYCHAIN_SERVICE="vikunja-readonly"
 HOST="tasks.sjo.lol"
 EXPECTED_PROJECTS=3
+# An id far above any this board will reach. Step 5 asks to close it and
+# expects to be told it does not exist.
+MISSING_TASK_ID=999999999
 
 # Every flag here takes a value, and a missing one must exit 2 (the documented
 # bad-argument code) with a message naming the flag. Reaching "$2" unguarded
@@ -83,20 +95,24 @@ fail() {
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# Step 4 files a task and asserts a 401, so a WRITE credential would leave a
-# real row on the shared board that the writer profile cannot delete.
+# Three of the seven tools write (create_task, add_comment, complete_task), and
+# this script calls two of them; it never calls add_comment. Step 4 files a task
+# and asserts a 401, so a WRITE credential would leave a real row on the shared
+# board that the writer profile cannot delete. Step 5 calls complete_task on an
+# id chosen not to exist, so it changes nothing under any credential — unless
+# that id is ever a real task, in which case a write credential would close it.
 #
 # The name check below is a CONVENIENCE, not a control — nothing stops a
 # write-capable credential being stored under a name containing "readonly", and
 # treating a string as a permission would be exactly the kind of check that
 # cannot fail for the reason it claims. The actual protection is that the
-# verifier treats an unexpectedly SUCCESSFUL create as a failure and prints the
-# created id for manual cleanup; that arm keys on what the board did, not on
+# verifier treats an unexpectedly SUCCESSFUL create or close as a failure and
+# prints the id for manual cleanup; that arm keys on what the board did, not on
 # what the entry is called.
 case "$KEYCHAIN_SERVICE" in
 *readonly* | *read-only* | *ro) ;;
 *)
-	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test files a task and asserts it is REFUSED." >&2
+	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test calls two of the three write tools — it files a task and asserts it is REFUSED, and it asks to close a task id that should not exist." >&2
 	echo "Against a write credential the create SUCCEEDS — the assertion fails and a real task is left on the board." >&2
 	echo "Re-run with a read-only entry, or use the container transport for write testing." >&2
 	echo "(This is a name check, not a permission check — it catches the obvious mistake, not a mislabelled entry.)" >&2
@@ -128,6 +144,7 @@ step "driving the stdio transport against $HOST (keychain service: $KEYCHAIN_SER
 	echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 	echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}'
 	echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_task","arguments":{"project_id":1,"title":"stdio-smoke-DO-NOT-KEEP"}}}'
+	echo "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"complete_task\",\"arguments\":{\"task_id\":$MISSING_TASK_ID,\"evidence\":\"smoke check\"}}}"
 	# The server exits when stdin closes; the sleep gives it time to answer
 	# the last call before that happens.
 	sleep 5
@@ -145,7 +162,7 @@ fi
 # One python pass over the frames, so each assertion reads the same parsed
 # data. Parsing the same file five times with grep is how two assertions end
 # up disagreeing about what the server said.
-if ! python3 - "$WORKDIR/out.jsonl" "$EXPECTED_PROJECTS" >"$WORKDIR/verdicts.txt" <<'PY'
+if ! python3 - "$WORKDIR/out.jsonl" "$EXPECTED_PROJECTS" "$MISSING_TASK_ID" >"$WORKDIR/verdicts.txt" <<'PY'
 import json, sys
 
 # A non-JSON line on stdout is a FAILURE, not something to skip past. stdout is
@@ -168,6 +185,7 @@ with open(sys.argv[1]) as fh:
             frames[frame["id"]] = frame
 
 expected_projects = int(sys.argv[2])
+missing_task_id = int(sys.argv[3])
 out = []
 
 def verdict(ok, label):
@@ -178,8 +196,8 @@ verdict("result" in init, "initialize returned a result")
 
 tools_frame = frames.get(2, {})
 names = sorted(t["name"] for t in tools_frame.get("result", {}).get("tools", []))
-want = ["add_comment", "create_task", "get_task", "list_projects", "list_tasks", "ready_tasks"]
-verdict(names == want, "tools/list names the six tools (got: %s)" % ", ".join(names))
+want = ["add_comment", "complete_task", "create_task", "get_task", "list_projects", "list_tasks", "ready_tasks"]
+verdict(names == want, "tools/list names the seven tools (got: %s)" % ", ".join(names))
 
 projects = frames.get(3, {})
 text = "".join(c.get("text", "") for c in projects.get("result", {}).get("content", []))
@@ -213,6 +231,29 @@ else:
             "create_task was refused 401 under the read-only entry — meaningful ONLY because the read above passed (got: %s)"
             % create_text.strip()[:140])
 
+close = frames.get(5, {})
+close_text = "".join(c.get("text", "") for c in close.get("result", {}).get("content", []))
+if "result" not in close:
+    # No result at all: the tool is not registered, or the server exited
+    # before it answered. Either way nothing was shown about the pre-read.
+    verdict(False, "complete_task on task %d returned no result (got: %s)"
+            % (missing_task_id, json.dumps(close)[:200]))
+elif not close["result"].get("isError", False):
+    # The close SUCCEEDED, so the id exists and this credential may update it.
+    # Whatever it says — closed, or already done — a task was reached that this
+    # script believed did not exist. Say so, with the id.
+    verdict(False,
+            "complete_task SUCCEEDED on task %d — that id exists, and if it was open it has just been marked done "
+            "on the live board. Check task %d by hand in the UI. Server said: %s"
+            % (missing_task_id, missing_task_id, close_text.strip()[:200]))
+else:
+    # The exact code, at the start. Any other refusal — unauthorized, failed,
+    # usage_error — means the call did not end at the pre-read's 404, and this
+    # line would then be claiming something it did not see.
+    verdict(close_text.startswith("complete_task: not_found:"),
+            "complete_task on a task id that does not exist returned not_found — the tool is registered and its "
+            "pre-read gates the write (got: %s)" % close_text.strip()[:140])
+
 print("\n".join(out))
 PY
 then
@@ -229,7 +270,7 @@ while IFS= read -r line; do
 done <"$WORKDIR/verdicts.txt"
 
 if [ "$fail_count" -eq 0 ]; then
-	echo "VERDICT: PASS — stdio transport, six tools, credential alive and read-only" >&2
+	echo "VERDICT: PASS — stdio transport, seven tools, credential alive and read-only, complete_task pre-read in place" >&2
 	exit 0
 fi
 echo "VERDICT: FAIL — $fail_count assertion(s) failed" >&2

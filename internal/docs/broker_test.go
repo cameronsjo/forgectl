@@ -21,9 +21,13 @@ import (
 )
 
 // recvTimeout is how long a test waits for a message that should already be
-// in flight. Generous because CI machines stall, but bounded so a genuine
-// missing-delivery bug fails rather than hanging the suite.
-const recvTimeout = 2 * time.Second
+// in flight. It is a hang bound, not a promptness check: every use waits for
+// something that must arrive, and a pass returns as soon as it does, so the
+// bound costs nothing on a pass. Generous because CI machines stall (at 2 s,
+// a watch rebuild under 8 CPU burners on 4 cores missed it, forgectl#919),
+// but bounded so a genuine missing-delivery bug fails rather than hanging the
+// suite. A silence check waits quietWindow instead, never this.
+const recvTimeout = 10 * time.Second
 
 func recvOne(t *testing.T, ch <-chan string) (string, bool) {
 	t.Helper()

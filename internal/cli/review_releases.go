@@ -62,7 +62,10 @@ are listed in a footer.
 A repo is stalled when its nightly toggle is on and it has no ship run in 26h,
 when the same non-quiet gate reason (not go, no-pr, or paused) shows on its
 last 2 scheduled runs, when the last run reports half-shipped, when an
-endpoint trails the release by more than 24h, or when its gate copy drifted.
+endpoint trails the release by more than 24h, when its gate copy drifted, when
+a feat, fix, perf, breaking commit has waited over 24h with no release PR open
+(no-release-pr), or when the release-PR workflow has a run waiting, queued, or
+pending for over 1h (release-workflow-stuck).
 A paused repo (toggle not on) is shown but not judged on its beat. A repo
 whose reads failed is unknown, and the failure is named.
 
@@ -153,7 +156,7 @@ func resolveCanonicalGate(flag, regPath string) (string, error) {
 
 // renderReleasesTable writes the radar table, then one line per stall or
 // error, then the untracked footer. Every API-derived string passes through
-// safeTerm: tags, versions, and reasons come from repos, not from us.
+// safeText: tags, versions, and reasons come from repos, not from us.
 func renderReleasesTable(out io.Writer, rep review.Report) error {
 	now := rep.GeneratedAt
 	var buf bytes.Buffer
@@ -163,12 +166,12 @@ func renderReleasesTable(out io.Writer, rep review.Report) error {
 	for _, r := range rep.Rows {
 		w.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Repo, r.Class, r.State,
-			safeTerm(releaseCell(r, now)),
+			safeText(releaseCell(r, now)),
 			unreleasedCell(r),
 			prCell(r, now),
-			safeTerm(shipCell(r, now)),
+			safeText(shipCell(r, now)),
 			gatesCell(r, now),
-			safeTerm(endpointsCell(r)),
+			safeText(endpointsCell(r)),
 			dash(r.GateCopy))
 	}
 	if w.err != nil {
@@ -181,10 +184,10 @@ func renderReleasesTable(out io.Writer, rep review.Report) error {
 	var notes []string
 	for _, r := range rep.Rows {
 		for _, st := range r.Stalls {
-			notes = append(notes, "stall   "+r.Repo+": "+safeTerm(st))
+			notes = append(notes, "stall   "+r.Repo+": "+safeText(st))
 		}
 		for _, e := range r.Errors {
-			notes = append(notes, "unknown "+r.Repo+": "+safeTerm(e))
+			notes = append(notes, "unknown "+r.Repo+": "+safeText(e))
 		}
 	}
 	if len(notes) > 0 {
@@ -199,7 +202,7 @@ func renderReleasesTable(out io.Writer, rep review.Report) error {
 			}
 			parts = append(parts, p+")")
 		}
-		w.printf("\nnot tracked: %s\n", safeTerm(strings.Join(parts, ", ")))
+		w.printf("\nnot tracked: %s\n", safeText(strings.Join(parts, ", ")))
 	}
 	if w.err != nil {
 		return w.err

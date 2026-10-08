@@ -1,12 +1,12 @@
 package herdr
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -17,9 +17,10 @@ import (
 const exitFailure = 1
 
 // Error is herdr's structured refusal: {"error":{"code","message"}} on stderr
-// with exit 1. Code is herdr's own vocabulary (workspace_not_found,
-// server_not_running, ...); match on it, not on Message. It unwraps to the
-// *[exec.CommandError] it came from.
+// with exit 1, or the same envelope as an exit-0 reply. Code is herdr's own
+// vocabulary (workspace_not_found, server_not_running, ...); match on it, not
+// on Message. It unwraps to the *[exec.CommandError] it came from, or to nil
+// for an exit-0 reply, where no command failed.
 type Error struct {
 	Code    string
 	Message string
@@ -44,21 +45,16 @@ func (e *Error) Error() string {
 // short line; 512 escaped runes keeps any real one whole.
 const herdrTextMaxRunes = 512
 
-// printableMax is printable capped at herdrTextMaxRunes of output, ending in
-// termsafe.TruncatedMarker when it cut.
+// printableMax renders herdr text as one inert terminal line through
+// termsafe.SafeLineMax, as forgectl's other child-stderr echoes are, capped at
+// herdrTextMaxRunes of output and ending in termsafe.TruncatedMarker when it
+// cut. herdr's text can echo pane-controlled values (labels, titles): a
+// decoded \u001b would drive a terminal that prints the error, and a bidi
+// override or other format character (Cf, e.g. U+202E) would reorder what the
+// operator reads (#825). The escape shows each such rune as itself escaped
+// rather than dropping it, so the operator can see something was there.
 func printableMax(s string) string {
 	return termsafe.SafeLineMax(s, herdrTextMaxRunes)
-}
-
-// printable renders herdr text as one inert terminal line through
-// termsafe.SafeLine, as forgectl's other child-stderr echoes are. herdr's
-// text can echo pane-controlled values (labels, titles): a decoded \u001b
-// would drive a terminal that prints the error, and a bidi override or other
-// format character (Cf, e.g. U+202E) would reorder what the operator reads
-// (#825). SafeLine shows each such rune as its escape rather than dropping
-// it, so the operator can see something was there.
-func printable(s string) string {
-	return termsafe.SafeLine(s)
 }
 
 // Unwrap returns the *[exec.CommandError] behind the refusal.
@@ -72,7 +68,7 @@ func (e *Error) Unwrap() error { return e.cause }
 func classify(args []string, err error) error {
 	var ce *exec.CommandError
 	if errors.As(err, &ce) && ce.ExitCode == exitFailure && ce.StderrDropped == 0 {
-		if e := parseEnvelope(ce.Stderr); e != nil {
+		if e := refusal([]byte(ce.Stderr)); e != nil {
 			e.cause = ce
 			return e
 		}
@@ -88,21 +84,17 @@ func argvText(args []string) string {
 	return strings.Join(redact.Args(args), " ")
 }
 
-// parseEnvelope returns the *Error in a stderr stream that is exactly one
-// herdr error object, or nil. Log lines before the JSON, a second object, or
-// an envelope without a code all return nil.
-func parseEnvelope(stderr string) *Error {
-	var env struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &env); err != nil {
+// refusal returns the *Error in a stream that is exactly one herdr error
+// object, by [wire.DecodeError], or nil. Log lines before the JSON, a second
+// object, or an envelope without a code all return nil.
+//
+// Message is stored redacted (redact.Text, #941), not only rendered so: the
+// field is exported, and %#v or a future reader would otherwise show herdr's
+// raw text. Error() still redacts it, which is a no-op on redacted text.
+func refusal(raw []byte) *Error {
+	r, ok := wire.DecodeError(raw)
+	if !ok {
 		return nil
 	}
-	if env.Error == nil || env.Error.Code == "" {
-		return nil
-	}
-	return &Error{Code: env.Error.Code, Message: env.Error.Message}
+	return &Error{Code: r.Code, Message: redact.Text(r.Message)}
 }

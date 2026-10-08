@@ -2,22 +2,16 @@ package herdr
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 )
 
 // Binary is the herdr executable the client runs.
 const Binary = "herdr"
-
-// maxIDLen bounds an id or label passed as a herdr operand. Real ids are a
-// dozen bytes; the bound only stops a runaway value reaching the argv.
-const maxIDLen = 256
 
 // Client talks to the herdr session the process runs in.
 type Client struct {
@@ -135,14 +129,23 @@ func (c *Client) ReadPane(ctx context.Context, paneID string, src ReadSource, li
 	return c.run(ctx, args...)
 }
 
-// act runs a mutation whose reply is not decoded, after checking the id it
-// names. The id is passed separately so it is validated once, in one place.
+// act runs a mutation whose success reply is not decoded, after checking the
+// id it names. The id is passed separately so it is validated once, in one
+// place. No success shape is captured for these verbs, so only herdr's error
+// envelope is read from the reply: an exit-0 refusal must not read as success
+// (#722).
 func (c *Client) act(ctx context.Context, what, id string, args ...string) error {
 	if err := checkID(what, id); err != nil {
 		return err
 	}
-	_, err := c.run(ctx, args...)
-	return err
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return err
+	}
+	if e := refusal([]byte(out)); e != nil {
+		return e
+	}
+	return nil
 }
 
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
@@ -154,8 +157,9 @@ func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 }
 
 // read runs a herdr command and decodes the "result" member of its
-// {"id","result"} envelope into T in one pass. The envelope's id is ignored,
-// unknown fields are tolerated, and a missing or null result fails closed.
+// {"id","result"} envelope into T through [wire.DecodeResult]: the envelope's
+// id is ignored, unknown fields are tolerated, and a missing or null result
+// fails closed. A reply that is herdr's error envelope returns that *[Error].
 // Fields that must be present are pointers in T; see [need].
 func read[T any](ctx context.Context, c *Client, args ...string) (T, error) {
 	var zero T
@@ -163,16 +167,17 @@ func read[T any](ctx context.Context, c *Client, args ...string) (T, error) {
 	if err != nil {
 		return zero, err
 	}
-	var env struct {
-		Result *T `json:"result"`
+	if e := refusal([]byte(out)); e != nil {
+		return zero, e
 	}
-	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return zero, fmt.Errorf("herdr %s: decode response: %w", argvText(args), err)
-	}
-	if env.Result == nil {
+	r, err := wire.DecodeResult[T]([]byte(out))
+	switch {
+	case errors.Is(err, wire.ErrNoResult):
 		return zero, fmt.Errorf("herdr %s: response has no result", argvText(args))
+	case err != nil:
+		return zero, fmt.Errorf("herdr %s: %w", argvText(args), err)
 	}
-	return *env.Result, nil
+	return r, nil
 }
 
 // need returns *p, or an error when the member was absent or null. An empty
@@ -186,20 +191,19 @@ func need[P any](p *P, key string, args []string) (P, error) {
 	return *p, nil
 }
 
-// checkID refuses an empty id, one that herdr would parse as a flag, one with
-// a control character, and one longer than [maxIDLen].
+// checkID refuses an id or label that is not one safe herdr operand, by
+// [wire.CheckOperand]: empty, read as a flag, longer than
+// [wire.MaxOperandLen], not valid UTF-8, or carrying a control, bidi or
+// invisible character.
 func checkID(what, id string) error {
-	if id == "" {
-		return errors.New("herdr: empty " + what)
-	}
-	if strings.HasPrefix(id, "-") {
-		return fmt.Errorf("herdr: %s %q starts with '-'", what, id)
-	}
-	if len(id) > maxIDLen {
-		return fmt.Errorf("herdr: %s is %d bytes, over the %d limit", what, len(id), maxIDLen)
-	}
-	if strings.IndexFunc(id, unicode.IsControl) >= 0 {
-		return fmt.Errorf("herdr: %s %q has a control character", what, id)
+	if err := wire.CheckOperand(id); err != nil {
+		if errors.Is(err, wire.ErrEmptyOperand) {
+			return errors.New("herdr: empty " + what)
+		}
+		if errors.Is(err, wire.ErrLongOperand) {
+			return fmt.Errorf("herdr: %s %w", what, err)
+		}
+		return fmt.Errorf("herdr: %s %q %w", what, id, err)
 	}
 	return nil
 }

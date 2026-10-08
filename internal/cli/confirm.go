@@ -3,6 +3,7 @@ package cli
 import (
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -13,14 +14,23 @@ import (
 // every one of its destructive passes always confirms first.
 func confirm(th theme.Theme, prompt string) (bool, error) {
 	ok := false
-	err := huh.NewConfirm().
-		Title(prompt).
-		Affirmative("Yes").
-		Negative("No").
-		Value(&ok).
-		WithTheme(th.Huh()).
-		Run()
+	err := confirmForm(th, prompt, &ok).Run()
 	return ok, err
+}
+
+// confirmForm builds the prompt's form. Split from confirm so a test can feed
+// it keys without a tty. Esc and Ctrl+C both cancel (keymap.Cancel), and the
+// description says so, because huh's own help line lists only the toggle and
+// submit keys.
+func confirmForm(th theme.Theme, prompt string, ok *bool) *huh.Form {
+	return keymap.Suspendable(huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title(prompt).
+			Description("esc to cancel").
+			Affirmative("Yes").
+			Negative("No").
+			Value(ok),
+	))).WithKeyMap(keymap.Cancel()).WithShowHelp(true).WithTheme(th.Huh())
 }
 
 // confirmFn is confirm, exposed as a package-level var so tests can

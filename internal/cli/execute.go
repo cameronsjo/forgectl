@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/fang"
@@ -103,6 +104,15 @@ func processArgs() []string {
 // opening the TUI (bare invoke or an external-command miss — the thumb-mode
 // affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
+	userCancelled.Store(false)
+	return finishCancel(executeFn(ctx))
+}
+
+// executeFn is the dispatch Execute wraps, a seam so a test can end it in a
+// cancel and check the exit code without a terminal.
+var executeFn = execute
+
+func execute(ctx context.Context) error {
 	// FIRST, ahead of every line below. A `surface _exec` re-entry carries a
 	// private socket path and a one-use rendezvous nonce in argv, and every
 	// statement after this one either does work that invocation does not need
@@ -126,7 +136,7 @@ func Execute(ctx context.Context) error {
 		// second line beneath them is noise on every failed claude run. Its
 		// exit code still propagates; only the message is dropped.
 		if err != nil && !errors.Is(err, errHarnessExit) {
-			fmt.Fprintln(os.Stderr, termsafe.SafeLine(err.Error()))
+			fmt.Fprintln(os.Stderr, safeText(err.Error()))
 		}
 		return err
 	}
@@ -150,7 +160,7 @@ func Execute(ctx context.Context) error {
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
-			return preFangFailure(defaultRoot, args, err)
+			return preFangFailure(defaultRoot, args, WithExitCode(err, preFangUsageExit(args)))
 		}
 	} else {
 		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
@@ -181,7 +191,7 @@ func Execute(ctx context.Context) error {
 	// built over a config that failed to decode can stand in a stub without
 	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {
-		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
+		return preFangFailure(defaultRoot, args, WithExitCode(err, classExit(classUsage)))
 	}
 	builtRoot := func() *cobra.Command { return root }
 
@@ -215,11 +225,8 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		opts := tui.RunOptions{
-			Hub:     buildHub(root, configFilePresent()),
-			NoIcons: noIcons,
-			Theme:   deps.Theme,
-		}
+		opts := hubRunOptions(ctx, deps, root, tmuxClient)
+		opts.NoIcons = noIcons
 		return runAction(ctx, deps, root, tmuxClient, opts)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
@@ -238,7 +245,7 @@ func Execute(ctx context.Context) error {
 		return errHeadlessMenuRoute
 	default:
 		logDispatch("Dispatching to command verb.", root, args)
-		return execCommand(ctx, root, args, deps.Theme)
+		return execDispatch(ctx, deps, root, args, deps.Theme)
 	}
 }
 
@@ -304,8 +311,70 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
+	// `completion` is a lazy builtin, so classifyUsageErrors (newRoot) never saw it.
+	// Register it now (idempotent) and give it the same usage class (ADR-0015).
+	root.InitDefaultCompletionCmd()
+	if c, _, err := root.Find([]string{"completion"}); err == nil && c != nil && c != root {
+		classifyUsageErrors(c)
+	}
+	// Before cobra: it prints help for an unknown command under --help, and for a
+	// group with no Run, and exits 0 either way (forgectl#1080, #1090).
+	if err := unknownSubcommand(root, args); err != nil {
+		return renderCommandError(ctx, root, th, err)
+	}
+	withCancelHandling(root)
 	root.SetArgs(args)
-	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
+	trimHelpFrames(root)
+	run := func() error {
+		return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
+	}
+	// The root's own page (bare forgectl, --help, help, --version) comes from fang
+	// directly, so trim that stream for the whole run. The lazy builtins other
+	// than help also resolve to the root before Execute registers them, but they
+	// print data (a completion script, a man page, __complete candidates), so
+	// they keep the original stream. Everything else that resolves to the root
+	// only shows help.
+	if target, _, _ := root.Find(args); target == root && rootRunShowsHelp(args) {
+		var err error
+		withTrimmedOut(root, func() { err = run() })
+		return err
+	}
+	return run()
+}
+
+// completionShells are the shell children cobra's lazy `completion` builtin
+// registers; `completion <shell>` prints a script, which is data.
+var completionShells = map[string]bool{"bash": true, "zsh": true, "fish": true, "powershell": true}
+
+// rootRunShowsHelp reports whether an argv that resolves to the root renders
+// only help or an error. The lazy builtins resolve to the root before Execute
+// registers them: `help` renders a page; `completion` does too, unless it
+// names a shell and no help flag, which prints a script; `man` and
+// `__complete` print data.
+func rootRunShowsHelp(args []string) bool {
+	first, i := firstNonFlag(args)
+	switch first {
+	case "completion":
+		rest := args[i+1:]
+		flags := rest[:indexOr(rest, "--")]
+		if slices.Contains(flags, "-h") || slices.Contains(flags, "--help") {
+			return true
+		}
+		shell, _ := firstNonFlag(rest)
+		return !completionShells[shell]
+	case "help":
+		return true
+	default:
+		return !builtinVerbs[first]
+	}
+}
+
+// indexOr returns the index of the first x in s, or len(s) when absent.
+func indexOr(s []string, x string) int {
+	if i := slices.Index(s, x); i >= 0 {
+		return i
+	}
+	return len(s)
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version
@@ -348,6 +417,7 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 // untouched; and SafeLine leaves ordinary ASCII byte-identical, so fang's own
 // prefix match for usage errors ("unknown flag: …") still fires.
 func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
+	defer trimErrorFrame(w)()
 	if structured, ok := err.(*structuredTerminalError); ok {
 		renderStructuredTerminalError(w, styles, structured)
 		return
@@ -476,7 +546,22 @@ func newSilentCodedError(code int) error {
 // need the tty (attach / sesh connect / a hub-selected verb) run here, after
 // Bubble Tea has released the terminal.
 func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client, opts tui.RunOptions) error {
-	act, err := tui.Run(ctx, client, opts)
+	return runActionWith(ctx, client, opts, tui.Run, func(argv []string) error {
+		return runHubVerb(ctx, deps, root, argv, opts.Theme)
+	})
+}
+
+// hubRunner opens the hub and returns the action chosen in it; tui.Run in
+// production. It is a parameter so a caller's handling of the chosen action
+// can be tested without a terminal.
+type hubRunner func(ctx context.Context, client *tmux.Client, opts tui.RunOptions) (tui.Action, error)
+
+// runActionWith is runAction with the hub and the hand-off of a chosen verb
+// supplied by the caller. Outside fang (the bare-invoke route) runVerb runs
+// the verb at once; under fang (`forgectl tmux`) it defers it to
+// execDispatch, so the verb never nests a second fang frame in the first.
+func runActionWith(ctx context.Context, client *tmux.Client, opts tui.RunOptions, run hubRunner, runVerb func(argv []string) error) error {
+	act, err := run(ctx, client, opts)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err
@@ -486,7 +571,7 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 		slog.Debug("TUI exited with no action.")
 		return nil
 	case tui.ActionRunVerb:
-		return runHubVerb(ctx, deps, root, act.Argv, opts.Theme)
+		return runVerb(act.Argv)
 	case tui.ActionShowInvocation:
 		fmt.Fprintln(os.Stderr, hubDollarLine(opts.Theme, act.Argv))
 		return nil
@@ -497,20 +582,30 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 
 // hubDollarLine renders a hub-selected invocation's echo line — the "$ "
 // prefix is always present (the signal under NO_COLOR); the rest is muted
-// when the theme is styled.
+// when the theme is styled. It is the placeholder form ActionShowInvocation
+// prints ("pr <ref>"): Use-line text this binary compiled in, joined plainly
+// so a placeholder reads as a placeholder rather than as a quoted argument.
 func hubDollarLine(th theme.Theme, argv []string) string {
-	return th.Styles().Muted.Render("$ " + meta.AppName + " " + strings.Join(argv, " "))
+	return th.Styles().Muted.Render(safeText("$ " + meta.AppName + " " + strings.Join(argv, " ")))
+}
+
+// hubRunLine is the echo line for an argv the hub is about to run. That argv
+// can carry one operator-typed picker argument, so it renders through
+// tui.DisplayArgv, which quotes that element and escapes anything
+// terminal-unsafe — the line shows exactly the elements that run.
+func hubRunLine(th theme.Theme, argv []string) string {
+	return th.Styles().Muted.Render("$ " + meta.AppName + " " + tui.DisplayArgv(argv))
 }
 
 // runHubVerb re-enters the same argv dispatch pipeline a typed command
 // takes: launchIntercept and the extension rungs both apply to a
 // hub-selected `launch` exactly as they do to a typed one.
 func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv []string, th theme.Theme) error {
-	fmt.Fprintln(os.Stderr, hubDollarLine(th, argv))
+	fmt.Fprintln(os.Stderr, hubRunLine(th, argv))
 	if rest, ok := launchIntercept(argv); ok {
 		if handled, err := runLaunch(deps, rest); handled {
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+safeText(err.Error()))
 			}
 			return err
 		}
@@ -518,7 +613,73 @@ func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv
 	if handled, err := tryExtensionRungs(root, argv, defaultExternalCommandRuntime()); handled {
 		return err
 	}
-	return execCommand(ctx, root, argv, th)
+	return execDispatch(ctx, deps, root, argv, th)
+}
+
+// deferredVerb is the slot a command running under fang fills when it wants
+// another command run after it returns: `status --tui` hands back the
+// `pr <ref>` chosen in the cockpit this way, and `forgectl tmux` a verb chosen
+// in the hub. Running that command from inside
+// the first one's RunE would nest a second fang.Execute in the first — the
+// inner fang renders a failure and the outer renders it again, and root's
+// persistent pre-run runs twice. execDispatch runs it after fang has returned
+// instead, the way the hub's own actions run (runAction, outside fang).
+type deferredVerb struct{ argv []string }
+
+type deferredVerbKey struct{}
+
+// deferVerb records argv in the context's deferred-verb slot. It reports
+// false when the command is not running under execDispatch, and the caller
+// then falls back to printing the invocation.
+//
+// ctx must be the root command's context, which cobra's ExecuteContext sets
+// afresh on every dispatch. A subcommand's own context is set only while it
+// is still nil, so a second dispatch of the same subcommand in one process
+// would hand back the first dispatch's spent slot, and the verb would be
+// dropped without a word (forgectl#1003).
+func deferVerb(ctx context.Context, argv []string) bool {
+	if ctx == nil {
+		return false
+	}
+	slot, ok := ctx.Value(deferredVerbKey{}).(*deferredVerb)
+	if !ok || slot == nil {
+		return false
+	}
+	slot.argv = append([]string(nil), argv...)
+	return true
+}
+
+// deferHubVerb is how a command running under fang hands on a verb the
+// operator chose in its TUI: into the deferred-verb slot, so execDispatch runs
+// it once this command's fang frame has returned and a failing verb is
+// rendered once, by its own dispatch. Off that path it runs nothing and
+// prints the invocation instead.
+func deferHubVerb(cmd *cobra.Command, th theme.Theme, argv []string) error {
+	if deferVerb(cmd.Root().Context(), argv) {
+		return nil
+	}
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubRunLine(th, argv))
+	return nil
+}
+
+// execDispatch is execCommand plus the deferred-verb slot: when the command
+// it ran succeeded and left an argv in the slot, that argv runs next, through
+// runHubVerb, after fang has returned.
+func execDispatch(ctx context.Context, deps module.Deps, root *cobra.Command, args []string, th theme.Theme) error {
+	slot := &deferredVerb{}
+	if err := execCommand(context.WithValue(ctx, deferredVerbKey{}, slot), root, args, th); err != nil {
+		return err
+	}
+	if slot.argv == nil {
+		return nil
+	}
+	// A dispatch whose context ended while the command ran never starts the
+	// verb it deferred.
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintln(root.ErrOrStderr(), meta.AppName+": not running "+tui.DisplayArgv(slot.argv)+": "+safeText(err.Error()))
+		return err
+	}
+	return runHubVerb(ctx, deps, root, slot.argv, th)
 }
 
 // dispatchAction routes a TUI action to the appropriate client call. Separated

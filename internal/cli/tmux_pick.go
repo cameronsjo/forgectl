@@ -39,7 +39,7 @@ func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 			// discovered — neither composed by forgectl, both printable to a
 			// terminal only after neutralizing.
 			for _, n := range names {
-				fmt.Fprintln(out, termsafe.SafeLine(n))
+				_, _ = fmt.Fprintln(out, safeText(n))
 			}
 			return nil
 		},
@@ -85,7 +85,11 @@ func seshPick(ctx context.Context, client *tmux.Client, name string) error {
 	if strings.Contains(name, "#") {
 		return fmt.Errorf("%w: %s", errSeshUnsafeCandidate, termsafe.QuotePath(name))
 	}
-	for _, p := range seshResolvedPaths(name) {
+	paths, err := seshResolvedPaths(name, os.UserHomeDir)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", errSeshUnsafeCandidate, termsafe.QuotePath(name), err)
+	}
+	for _, p := range paths {
 		if strings.Contains(p, "#") {
 			return fmt.Errorf("%w: %s resolves to a path containing '#'",
 				errSeshUnsafeCandidate, termsafe.QuotePath(name))
@@ -109,24 +113,33 @@ func seshPick(ctx context.Context, client *tmux.Client, name string) error {
 // The Abs path is returned even when EvalSymlinks fails, so a relative
 // candidate such as "." or "sub/.." is checked against the working directory
 // it really names. That over-refuses a session-name candidate picked from
-// inside a '#' directory, which is the safe direction. With no home directory
-// sesh's ExpandPath errors before any tmux call, so nothing is returned.
-func seshResolvedPaths(name string) []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
+// inside a '#' directory, which is the safe direction. The home directory is
+// looked up only for a candidate whose expansion starts with "~", and a failed
+// lookup there is an error the caller refuses on, never a silently skipped
+// check: a candidate that needs a home directory cannot be proven '#'-free
+// without one, and a candidate that does not need one is still resolved. When
+// the working directory is gone (filepath.Abs fails) the env- and tilde-expanded
+// path is returned as written, so the '#' check still runs on it.
+func seshResolvedPaths(name string, userHomeDir func() (string, error)) ([]string, error) {
 	path := os.ExpandEnv(name)
 	if strings.HasPrefix(path, "~") {
+		home, err := userHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home directory: %w", termsafe.Error(err))
+		}
 		path = strings.Replace(path, "~", home, 1)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil
+		// No working directory to anchor a relative path (a deleted cwd). The
+		// env- and tilde-expanded path is still checked as written, so a '#'
+		// that only appears after expansion is refused; a plain name stays
+		// allowed.
+		return []string{path}, nil
 	}
 	paths := []string{abs}
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		paths = append(paths, resolved)
 	}
-	return paths
+	return paths, nil
 }

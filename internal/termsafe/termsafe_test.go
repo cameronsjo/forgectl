@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/perftest"
 )
 
 func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
@@ -20,6 +22,71 @@ func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
 		want := unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
 		if got := IsUnsafeTerminalRune(r); got != want {
 			t.Fatalf("IsUnsafeTerminalRune(%U) = %t, want %t", r, got, want)
+		}
+	}
+}
+
+// TestIsInvisibleRune pins the validator classifier by named rune: #916's
+// format characters and separators, and #948's variation selectors, other
+// default-ignorables, Hangul fillers and braille blank. The visible side holds
+// the neighbors a wider rule would wrongly catch: combining marks outside
+// Variation_Selector (decomposed accents), spaces TrimSpace already handles,
+// and the braille dots next to U+2800.
+func TestIsInvisibleRune(t *testing.T) {
+	invisible := []struct {
+		name string
+		r    rune
+	}{
+		{"ZERO WIDTH SPACE (Cf)", 0x200b},
+		{"ZERO WIDTH NO-BREAK SPACE (Cf)", 0xfeff},
+		{"WORD JOINER (Cf)", 0x2060},
+		{"SOFT HYPHEN (Cf)", 0x00ad},
+		{"ZERO WIDTH JOINER (Cf)", 0x200d},
+		{"LANGUAGE TAG (Cf)", 0xe0001},
+		{"TAG LATIN CAPITAL LETTER A (Cf)", 0xe0041},
+		{"CANCEL TAG (Cf)", 0xe007f},
+		{"LINE SEPARATOR (Zl)", 0x2028},
+		{"PARAGRAPH SEPARATOR (Zp)", 0x2029},
+		{"VARIATION SELECTOR-1 (Mn)", 0xfe00},
+		{"VARIATION SELECTOR-16 (Mn)", 0xfe0f},
+		{"VARIATION SELECTOR-17 (Mn)", 0xe0100},
+		{"VARIATION SELECTOR-256 (Mn)", 0xe01ef},
+		{"MONGOLIAN FREE VARIATION SELECTOR ONE (Mn)", 0x180b},
+		{"COMBINING GRAPHEME JOINER (Mn)", 0x034f},
+		{"KHMER VOWEL INHERENT AQ (Mn)", 0x17b4},
+		{"HANGUL CHOSEONG FILLER (Lo)", 0x115f},
+		{"HANGUL JUNGSEONG FILLER (Lo)", 0x1160},
+		{"HANGUL FILLER (Lo)", 0x3164},
+		{"HALFWIDTH HANGUL FILLER (Lo)", 0xffa0},
+		{"BRAILLE PATTERN BLANK (So)", 0x2800},
+	}
+	for _, tc := range invisible {
+		if !IsInvisibleRune(tc.r) {
+			t.Errorf("IsInvisibleRune(%U %s) = false, want true", tc.r, tc.name)
+		}
+	}
+	visible := []struct {
+		name string
+		r    rune
+	}{
+		{"LATIN SMALL LETTER A", 'a'},
+		{"SPACE", ' '},
+		{"NO-BREAK SPACE (Zs)", 0x00a0},
+		{"IDEOGRAPHIC SPACE (Zs)", 0x3000},
+		{"COMBINING ACUTE ACCENT (Mn)", 0x0301},
+		{"COMBINING DIAERESIS (Mn)", 0x0308},
+		{"DEVANAGARI SIGN VIRAMA (Mn)", 0x094d},
+		{"LATIN SMALL LETTER E WITH ACUTE", 0x00e9},
+		{"HANGUL SYLLABLE GA", 0xac00},
+		{"HANGUL CHOSEONG KIYEOK", 0x1100},
+		{"BRAILLE PATTERN DOTS-1", 0x2801},
+		{"CJK UNIFIED IDEOGRAPH-4E2D", 0x4e2d},
+		{"FIRE (emoji)", 0x1f525},
+		{"HEAVY BLACK HEART", 0x2764},
+	}
+	for _, tc := range visible {
+		if IsInvisibleRune(tc.r) {
+			t.Errorf("IsInvisibleRune(%U %s) = true, want false", tc.r, tc.name)
 		}
 	}
 }
@@ -81,10 +148,10 @@ func TestSafeLineQuotesTabAndTheInvisibleFormattingResidual(t *testing.T) {
 
 // TestSafeLinePreservesOrdinaryGraphicText is the other half of the boundary:
 // SafeLine must not turn legitimate non-ASCII text into escapes. RTL script and
-// emoji are graphic runes and survive verbatim. Joiners and variation selectors
-// are deliberately NOT in this set — they are Cf, and SafeLine quotes them by
-// its non-graphic rule, which
-// TestVisibleQuotingDoesNotBroadenSharedClassifier pins from the other side.
+// emoji are graphic runes and survive verbatim. Joiners are deliberately NOT
+// in this set — they are Cf, and SafeLine quotes them by its non-graphic rule,
+// which TestVisibleQuotingDoesNotBroadenSharedClassifier pins from the other
+// side. Variation selectors are Mn and graphic, so SafeLine keeps them.
 func TestSafeLinePreservesOrdinaryGraphicText(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -528,6 +595,77 @@ func TestQuotePathMax_ShortPathAllocatesNoMoreThanQuoteText(t *testing.T) {
 	}
 }
 
+// TestPathCut_ExactBoundaries pins pathCut's three comparisons at their
+// exact boundaries, for both renderings that share it (#913 review).
+//
+// Mutations that turn it red: `len(path) <= maxRunes` to `<` in pathCut (a
+// path exactly the budget in bytes allocates the rune-offset slice);
+// `total <= maxRunes` to `<` (a multibyte path exactly the budget in runes is
+// cut); `elem <= maxRunes-maxRunes/4` to `<` (a final element exactly three
+// quarters of the budget loses its separator).
+func TestPathCut_ExactBoundaries(t *testing.T) {
+	// 4 runes, 7 bytes: past the byte fast path, exactly the rune budget.
+	multi := "/\u00e9\u00e9\u00e9"
+	if got, want := QuotePathMax(multi, 4), QuoteText(multi); got != want {
+		t.Errorf("QuotePathMax(exact rune budget) = %q, want %q uncut", got, want)
+	}
+	if got, want := SafePathMax(multi, 4), SafeLine(multi); got != want {
+		t.Errorf("SafePathMax(exact rune budget) = %q, want %q uncut", got, want)
+	}
+
+	// Budget 8: the final element "/nm.go" is 6 runes, exactly 8-8/4, so it
+	// is kept whole rather than cut to the last half of the budget.
+	path := "/abcdefghij/nm.go"
+	if got, want := QuotePathMax(path, 8), `"/a"…"/nm.go"`; got != want {
+		t.Errorf("QuotePathMax(element at 3/4 budget) = %q, want %q", got, want)
+	}
+	if got, want := SafePathMax(path, 8), "/a…/nm.go"; got != want {
+		t.Errorf("SafePathMax(element at 3/4 budget) = %q, want %q", got, want)
+	}
+
+	// Exactly the budget in bytes takes the fast path: no rune-offset slice.
+	exact := "/" + strings.Repeat("p", 15)
+	var sink string
+	quote := testing.AllocsPerRun(100, func() { sink = QuoteText(exact) })
+	capped := testing.AllocsPerRun(100, func() { sink = QuotePathMax(exact, len(exact)) })
+	line := testing.AllocsPerRun(100, func() { sink = SafeLine(exact) })
+	bare := testing.AllocsPerRun(100, func() { sink = SafePathMax(exact, len(exact)) })
+	_ = sink
+	if capped > quote {
+		t.Errorf("QuotePathMax at the exact byte budget allocated %v times, QuoteText %v", capped, quote)
+	}
+	if bare > line {
+		t.Errorf("SafePathMax at the exact byte budget allocated %v times, SafeLine %v", bare, line)
+	}
+}
+
+// TestQuoteTextMax_BoundsAndEscapes pins #928's capped QuoteText: at most
+// maxRunes input runes, the ellipsis outside the quote, every rune escaped,
+// and no cap for maxRunes < 1.
+//
+// Mutations that turn it red: return QuoteText(text) unconditionally; cut at
+// n > maxRunes instead of n == maxRunes; put the ellipsis inside the quote.
+func TestQuoteTextMax_BoundsAndEscapes(t *testing.T) {
+	tests := []struct {
+		name, in string
+		max      int
+		want     string
+	}{
+		{"short unchanged", "a b", 5, `"a b"`},
+		{"exact budget unchanged", "abcde", 5, `"abcde"`},
+		{"one over is cut", "abcdef", 5, `"abcde"…`},
+		{"escapes count as one input rune", "\u202e\u202e\u202exyz", 2, `"\u202e\u202e"…`},
+		{"no cap below one", "abcdef", 0, `"abcdef"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QuoteTextMax(tt.in, tt.max); got != tt.want {
+				t.Errorf("QuoteTextMax(%q, %d) = %q, want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestQuotePath_CapsKeepingTheFinalElement is #832 items 1 and 2: QuotePath
 // echoed a path at any length, and the cap it lacked kept only the head, so a
 // long path lost the filename that identifies it. QuotePath now cuts in the
@@ -571,6 +709,38 @@ func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
 	}
 }
 
+// TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes pins #913's column form:
+// the same middle cut as QuotePathMax, the kept halves escaped with SafeLine
+// and unquoted, so an ordinary path renders exactly as SafeLine renders it.
+//
+// Mutations that turn it red: return SafeLine(path) whenever cut is true in
+// SafePathMax (the long rows come back whole); render the halves with
+// QuoteText (every cut row gains quotes); drop the tail (the file name is lost).
+func TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes(t *testing.T) {
+	dir := "/" + strings.Repeat("d", PathEchoMaxRunes)
+	tests := []struct {
+		name, path string
+		max        int
+		want       string
+	}{
+		{"short path is SafeLine", "/tmp/a b", 0, "/tmp/a b"},
+		{"short path still escapes", "/tmp/a\x1bb", 0, `/tmp/a\x1bb`},
+		{"at the budget unchanged", "/abcd", 5, "/abcd"},
+		{"final element kept whole", "/abcdefghij/name.go", 12, "/abc…/name.go"},
+		{"no separator keeps half the budget", strings.Repeat("y", 20) + "END", 8, "yyyy…yEND"},
+		{"one-rune budget keeps the head only", "/abc", 1, "/…"},
+		{"escapes are never split", "/\u202e\u202e\u202e/f", 4, `/\u202e…/f`},
+		{"deep", dir + "/name.go", 0, dir[:PathEchoMaxRunes-len("/name.go")] + "…/name.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafePathMax(tt.path, tt.max); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole pins the uncapped form
 // (#832): QuotePathIfUnsafe's callers print machine-parseable fields, so a
 // long but ordinary path has to come back byte-identical.
@@ -593,53 +763,56 @@ func (f *fanOutCycle) Unwrap() []error { return []error{f, f, f.pathErr} }
 
 // TestError_FanOutUnwrapCycleTerminates is #845 item 1: the chain walk has a
 // node budget, so a cycle through Unwrap() []error ends, and the path error
-// it keeps revisiting is still capped once per span.
+// it keeps revisiting is still capped once per span. The walk returns in
+// milliseconds; the deadline is a hang backstop only, generous so host load
+// cannot trip it (forgectl#879).
 //
 // Mutation that turns it red: drop `|| budget <= 0` from overlongPathErrors's
 // guard, and the walk never returns within the deadline.
 func TestError_FanOutUnwrapCycleTerminates(t *testing.T) {
+	const deadline = 10 * time.Second
 	pathErr := &os.PathError{Op: "open", Path: "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL", Err: errors.New("denied")}
 	cyclic := &fanOutCycle{pathErr: pathErr}
 	done := make(chan string, 1)
-	start := time.Now()
 	go func() { done <- Error(cyclic).Error() }()
 	select {
 	case got := <-done:
-		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-			t.Errorf("Error took %v on a fan-out cycle, want well under 100ms", elapsed)
-		}
 		if want := "cycle: " + Error(pathErr).Error(); got != want {
 			t.Errorf("Error() =\n%q\nwant\n%q", got, want)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Error did not return within 100ms on a fan-out-2 Unwrap cycle")
+	case <-time.After(deadline):
+		t.Fatalf("Error did not return within %v on a fan-out-2 Unwrap cycle", deadline)
 	}
 }
 
 // TestError_JoinOfManyOverlongPathsIsLinear is #845 item 2: an errors.Join of
 // 2000 over-cap path errors (a ~1 MB message) took 3.2s when every match
-// re-scanned and re-concatenated the rest of the message. One scan and one
-// build bring it to ~150ms; the bound leaves room for a slow runner.
+// re-scanned and re-concatenated the rest of the message; one scan and one
+// build are linear. The check is a ratio in CPU time (perftest.Linear,
+// forgectl#879): the Join of 4000 against the Join of 500. Below about 500 errors the old cost is not yet quadratic,
+// which is why the sizes are this large.
 //
 // Mutation that turns it red: restore the recursive capWrappedPaths from
 // before #845 (strings.Index per error, recursing on both sides of each
-// match), and this takes ~3s.
+// match), and eight times the errors costs 60 to 70 times as much.
 func TestError_JoinOfManyOverlongPathsIsLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
 	}
-	errs, err := joinOfOverlongPaths(2000)
-	start := time.Now()
-	got := Error(err).Error()
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("Error of a Join of %d over-cap path errors took %v, want linear time", len(errs), elapsed)
-	}
-	for _, i := range []int{0, 999, 1999} {
+	const n, k = 4000, 8
+	_, small := joinOfOverlongPaths(n / k)
+	errs, err := joinOfOverlongPaths(n)
+	var got string
+	smallRun, largeRun := perftest.Amortize(
+		func() { _ = Error(small).Error() },
+		func() { got = Error(err).Error() })
+	perftest.Linear(t, "Error of a Join of over-cap path errors", k, smallRun, largeRun)
+	for _, i := range []int{0, n / 2, n - 1} {
 		if !strings.Contains(got, Error(errs[i]).Error()) {
 			t.Errorf("error %d was not capped in the joined message", i)
 		}
 	}
-	if strings.Contains(got, errs[1999].(*os.PathError).Path) {
+	if strings.Contains(got, errs[n-1].(*os.PathError).Path) {
 		t.Error("a whole over-cap path survived in the joined message")
 	}
 }

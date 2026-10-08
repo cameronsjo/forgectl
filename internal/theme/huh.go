@@ -46,6 +46,12 @@ func (t Theme) Huh() huh.Theme {
 		s.Focused.BlurredButton = s.Focused.BlurredButton.
 			Foreground(muted).
 			Background(t.Color(RoleSurfaceRaised))
+		// Focus must not ride on colour alone: NO_COLOR strips the fill, and
+		// a plain capture has no attributes either. A leading marker shows
+		// which button is selected in every rendering; the blurred button
+		// gets a blank of the same width so the row does not shift.
+		s.Focused.FocusedButton = s.Focused.FocusedButton.Bold(true).Transform(func(l string) string { return "> " + l })
+		s.Focused.BlurredButton = s.Focused.BlurredButton.Transform(func(l string) string { return "  " + l })
 
 		s.Focused.TextInput.Placeholder = s.Focused.TextInput.Placeholder.Foreground(t.Color(RoleDim))
 

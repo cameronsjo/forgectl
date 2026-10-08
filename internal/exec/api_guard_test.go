@@ -43,6 +43,27 @@ var guardPlatforms = []guardPlatform{
 	{"freebsd", "amd64"},
 }
 
+// String names the configuration in a finding.
+func (c guardConfig) String() string {
+	if c.cgo {
+		return c.p.String() + " cgo"
+	}
+	return c.p.String()
+}
+
+// guardConfigs is every guardPlatforms entry with cgo off, then on: the
+// configurations the AST guards read internal/exec through, so a
+// `//go:build cgo` or `!cgo` file is scanned whichever way it builds (#982).
+var guardConfigs = func() []guardConfig {
+	var out []guardConfig
+	for _, cgo := range []bool{false, true} {
+		for _, p := range guardPlatforms {
+			out = append(out, guardConfig{p, cgo})
+		}
+	}
+	return out
+}()
+
 const (
 	apiGoldenDir    = "testdata"
 	apiGoldenShared = "exported_api.golden"
@@ -54,12 +75,20 @@ const (
 var pinnedDirs = []struct{ dir, shown string }{
 	{".", "internal/exec"},
 	{filepath.Join("internal", "sealed"), "internal/exec/internal/sealed"},
+	{filepath.Join("internal", "validated"), "internal/exec/internal/validated"},
 	{filepath.Join("..", "tmux", "tmuxesc"), "internal/tmux/tmuxesc"},
 }
 
 // sealedImportPath is the package that holds every payload and the only code
 // that reads one (forgectl#854).
 const sealedImportPath = execImportPath + "/internal/sealed"
+
+// validatedImportPath is the package that builds the only command shape
+// startSealed accepts (forgectl#888).
+const validatedImportPath = execImportPath + "/internal/validated"
+
+// validatedAPIPrefix starts each golden line that spells validated's surface.
+const validatedAPIPrefix = "validated: "
 
 // sealedAPIPrefix starts each golden line that spells sealed's surface, so its
 // names cannot collide with internal/exec's in the sorted line set.
@@ -76,18 +105,19 @@ const sealedAPIPrefix = "sealed: "
 // allows: a new export of sealed that hands a payload out (an accessor, a
 // callback parameter), and a new export of internal/exec that forwards one.
 //
-//   - every non-test file in internal/exec, internal/exec/internal/sealed and
-//     internal/tmux/tmuxesc,
+//   - every non-test file in internal/exec, internal/exec/internal/sealed,
+//     internal/exec/internal/validated and internal/tmux/tmuxesc,
 //     whatever its build constraint, with that constraint and a cgo mark, so
 //     a new or retagged file fails until reviewed. A .go file that no
-//     platform in guardPlatforms compiles with cgo off (one for a platform
-//     guardPlatforms lacks, a cgo file, a `//go:build ignore` file) is
+//     platform in guardPlatforms compiles with cgo off or on (one for a platform
+//     guardPlatforms lacks, a `//go:build ignore` file) is
 //     refused outright rather than pinned, because no guard type-checks it
 //     and once pinned its contents could change unseen (forgectl#854);
 //     assembly and object files are refused module-wide by
 //     TestNoFileReachesPastTheTypeSystem;
-//   - every exported func, var and const of internal/exec and of sealed
-//     (sealed's lines prefixed "sealed: "), with its full type;
+//   - every exported func, var and const of internal/exec, of sealed and of
+//     validated (their lines prefixed "sealed: " and "validated: "), with its
+//     full type;
 //   - every named type declared at package level, exported or not, with its
 //     full underlying type (every field, embed and tag) and its method set on
 //     both T and *T: every method declared in this package, and every
@@ -116,15 +146,17 @@ const sealedAPIPrefix = "sealed: "
 //   - an unexported embed inner{Secret string} in an exported struct
 //   - func WinOnly() {} in a new x_windows.go            (a windows-only export)
 //   - func ArmOnly() {} in a new x_arm64.go              (an arm64-only export)
-//   - a new file that imports "C"                       (a cgo-only file)
+//   - a new file that imports "C"                       (a cgo-only file, pinned with its cgo mark)
 //   - func Only386() {} in a new x_386.go, even after -update pins it
 //     (a file no guard platform compiles)
 func TestExportedAPI(t *testing.T) {
 	files := renderPinnedFiles(t)
 	got := map[guardPlatform]string{}
 	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
-		got[p] = files + renderAPI(c.pkg) + prefixLines(sealedAPIPrefix, renderAPI(c.sealed))
+		off, on := checkExec(t, guardConfig{p, false}), checkExec(t, guardConfig{p, true})
+		got[p] = files + mergeAPI(renderAPI(off.pkg), renderAPI(on.pkg)) +
+			prefixLines(sealedAPIPrefix, mergeAPI(renderAPI(off.sealed), renderAPI(on.sealed))) +
+			prefixLines(validatedAPIPrefix, mergeAPI(renderAPI(off.validated), renderAPI(on.validated)))
 	}
 	if *updateAPI {
 		writeAPIGoldens(t, got)
@@ -148,6 +180,24 @@ func TestExportedAPI(t *testing.T) {
 				p, name, diff, apiRegenerate)
 		}
 	}
+}
+
+// mergeAPI is a's lines followed by the lines only b has, so the surface a
+// cgo-on build adds shows in the golden and a surface both builds share is
+// listed once (#982). With no cgo-only export it returns a unchanged.
+func mergeAPI(a, b string) string {
+	have := map[string]bool{}
+	for _, l := range strings.Split(a, "\n") {
+		have[l] = true
+	}
+	out := a
+	for _, l := range strings.Split(b, "\n") {
+		if l != "" && !have[l] {
+			have[l] = true
+			out += l + "\n"
+		}
+	}
+	return out
 }
 
 // prefixLines prefixes every line of s.
@@ -246,7 +296,7 @@ func renderPinnedFiles(t *testing.T) string {
 			line := "file " + d.shown + "/" + name
 			if strings.HasSuffix(name, ".go") {
 				if !compiledByAGuardPlatform(t, d.dir, name) {
-					t.Errorf("%s/%s is compiled by no platform in guardPlatforms (cgo off), so no guard type-checks it "+
+					t.Errorf("%s/%s is compiled by no platform in guardPlatforms (cgo off or on), so no guard type-checks it "+
 						"and pinning it would let its contents change unseen; delete it, or retag it so a platform in "+
 						"guardPlatforms compiles it, or add its platform to guardPlatforms (every platform .goreleaser.yaml "+
 						"ships must be there, but a guarded platform need not ship)", d.shown, name)
@@ -275,8 +325,10 @@ var archBaselineTags = map[string][]string{
 	"arm64": {"arm64.v8.0"},
 }
 
-// guardContext is the build.Context the guards read p through: cgo off as
-// every release build has it, and tool tags built for p rather than copied
+// guardContext is the build.Context the guards read p through: cgo as given
+// (the guards read every platform with cgo off, as every release build has
+// it, AND with cgo on, so a `//go:build cgo` file is not skipped, #982), and
+// tool tags built for p rather than copied
 // from the host. build.Default.ToolTags carries the host's architecture
 // level (amd64.v3 on a host built with GOAMD64=v3, or none of arm64's on an
 // amd64 host), which would make a file tagged for a feature level match or
@@ -284,9 +336,9 @@ var archBaselineTags = map[string][]string{
 // they belong to the compiler, not the host. Use it for file selection
 // (MatchFile, ImportDir on a local directory) only: go/build resolves an
 // import path in module mode only for a context with the default ToolTags.
-func guardContext(p guardPlatform) build.Context {
+func guardContext(p guardPlatform, cgo bool) build.Context {
 	ctx := build.Default
-	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, cgo
 	var tags []string
 	for _, tag := range build.Default.ToolTags {
 		if strings.HasPrefix(tag, "goexperiment.") {
@@ -298,13 +350,13 @@ func guardContext(p guardPlatform) build.Context {
 }
 
 // compiledByAGuardPlatform reports whether some platform in guardPlatforms,
-// with cgo off as every release build has it, compiles dir/name, reading both
+// with cgo off or on, compiles dir/name, reading both
 // its GOOS/GOARCH file-name suffix and its //go:build line. A file none of
 // them compiles is one no guard type-checks (forgectl#854, D-N1).
 func compiledByAGuardPlatform(t *testing.T, dir, name string) bool {
 	t.Helper()
-	for _, p := range guardPlatforms {
-		ctx := guardContext(p)
+	for _, p := range guardConfigs {
+		ctx := guardContext(p.p, p.cgo)
 		ok, err := ctx.MatchFile(dir, name)
 		if err != nil {
 			t.Fatalf("match %s for %s: %v", filepath.Join(dir, name), p, err)
@@ -628,27 +680,35 @@ func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
 }
 
 // checkedPackage is internal/exec's production files type-checked for one
-// platform, with sealed as the importer resolved it (from source, function
-// bodies skipped, which is all its surface needs).
+// platform, with sealed and validated as the importer resolved them (from
+// source, function bodies skipped, which is all their surface needs).
 type checkedPackage struct {
-	fset   *token.FileSet
-	files  []*ast.File
-	info   *types.Info
-	pkg    *types.Package
-	sealed *types.Package
+	cfg       guardConfig
+	fset      *token.FileSet
+	files     []*ast.File
+	info      *types.Info
+	pkg       *types.Package
+	sealed    *types.Package
+	validated *types.Package
 }
 
-var checkedByPlatform = map[guardPlatform]*checkedPackage{}
+var checkedByConfig = map[guardConfig]*checkedPackage{}
 
-// checkExecFor type-checks internal/exec's production files as they build
-// for p with cgo off, resolving every import from source under the same
-// build.Context so a platform-tagged dependency file is read too. Results
-// are cached per platform for the test binary's life.
-func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
+// checkExec type-checks internal/exec's production files as they build for
+// cfg (a platform with cgo off or on), resolving every import from source
+// under the same build.Context so a platform-tagged dependency file is read
+// too. With cgo on, files that import "C" are checked with go/types' fake C
+// package, and the module's own packages (sealed, validated) are read with
+// cgo on as well, so a `//go:build cgo` file in any of them is scanned
+// (#982); the standard library stays cgo off, which is as far as the guards
+// need and what its cgo-free fallbacks provide. Results are cached per
+// configuration for the test binary's life.
+func checkExec(t *testing.T, cfg guardConfig) *checkedPackage {
 	t.Helper()
-	if c, ok := checkedByPlatform[p]; ok {
+	if c, ok := checkedByConfig[cfg]; ok {
 		return c
 	}
+	p := cfg.p
 	dir, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatal(err)
@@ -657,18 +717,17 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	// host's. Its imports resolve through a context that keeps the default
 	// tool tags, because go/build hands module-mode resolution to the go
 	// command only for a context whose ToolTags are the default ones.
-	own := guardContext(p)
-	bp, err := own.ImportDir(dir, 0)
+	names, err := guardFiles(dir, cfg)
 	if err != nil {
-		t.Fatalf("list internal/exec for %s: %v", p, err)
+		t.Fatalf("list internal/exec for %s: %v", cfg, err)
 	}
 	fset := token.NewFileSet()
-	files, err := parseGoFiles(fset, dir, bp.GoFiles)
+	files, err := parseGoFiles(fset, dir, names)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) == 0 {
-		t.Fatalf("parsed no production files of internal/exec for %s", p)
+		t.Fatalf("parsed no production files of internal/exec for %s", cfg)
 	}
 	info := &types.Info{
 		Types:      map[ast.Expr]types.TypeAndValue{},
@@ -677,19 +736,44 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	}
 	ctx := build.Default
 	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
-	imp := &sourceImporter{ctx: &ctx, fset: fset, pkgs: map[string]*types.Package{}, errs: map[string]error{}}
-	conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", ctx.GOARCH)}
+	imp := &sourceImporter{ctx: &ctx, fset: fset, pkgs: map[string]*types.Package{}, errs: map[string]error{}, cgo: cfg.cgo}
+	conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", ctx.GOARCH), FakeImportC: cfg.cgo}
 	pkg, err := conf.Check(execImportPath, fset, files, info)
 	if err != nil {
-		t.Fatalf("type-check internal/exec for %s: %v", p, err)
+		t.Fatalf("type-check internal/exec for %s: %v", cfg, err)
 	}
 	sealed := imp.pkgs[sealedImportPath]
 	if sealed == nil {
-		t.Fatalf("internal/exec for %s does not import %s; the payload is not sealed", p, sealedImportPath)
+		t.Fatalf("internal/exec for %s does not import %s; the payload is not sealed", cfg, sealedImportPath)
 	}
-	c := &checkedPackage{fset: fset, files: files, info: info, pkg: pkg, sealed: sealed}
-	checkedByPlatform[p] = c
+	validated := imp.pkgs[validatedImportPath]
+	if validated == nil {
+		t.Fatalf("internal/exec for %s does not import %s; startSealed is not fed a validated command", cfg, validatedImportPath)
+	}
+	c := &checkedPackage{cfg: cfg, fset: fset, files: files, info: info, pkg: pkg, sealed: sealed, validated: validated}
+	checkedByConfig[cfg] = c
 	return c
+}
+
+// guardFiles are the production files of the package in dir that a build for
+// cfg compiles, selected with cfg's own cgo setting and tool tags.
+func guardFiles(dir string, cfg guardConfig) ([]string, error) {
+	ctx := guardContext(cfg.p, cfg.cgo)
+	bp, err := ctx.ImportDir(dir, 0)
+	if err != nil {
+		return nil, err
+	}
+	return buildFiles(bp, cfg.cgo), nil
+}
+
+// buildFiles are the files a build of bp compiles. With cgo on, a file that
+// imports "C" sits in CgoFiles, not GoFiles, so a reader of GoFiles alone
+// never sees it (#982).
+func buildFiles(bp *build.Package, cgo bool) []string {
+	if !cgo {
+		return bp.GoFiles
+	}
+	return slices.Concat(bp.GoFiles, bp.CgoFiles)
 }
 
 // sourceImporter type-checks imports from source under one build.Context,
@@ -700,6 +784,7 @@ type sourceImporter struct {
 	fset *token.FileSet
 	pkgs map[string]*types.Package // nil value: import in progress
 	errs map[string]error          // a failed import, returned again as is
+	cgo  bool                      // read the module's own packages with cgo on
 }
 
 func (s *sourceImporter) Import(path string) (*types.Package, error) {
@@ -713,6 +798,13 @@ func (s *sourceImporter) ImportFrom(path, dir string, _ types.ImportMode) (*type
 	bp, err := s.ctx.Import(path, dir, 0)
 	if err != nil {
 		return nil, err
+	}
+	if s.cgo && strings.HasPrefix(bp.ImportPath, modulePath+"/") {
+		cgoCtx := *s.ctx
+		cgoCtx.CgoEnabled = true
+		if bp, err = cgoCtx.Import(path, dir, 0); err != nil {
+			return nil, err
+		}
 	}
 	key := bp.ImportPath
 	if err, ok := s.errs[key]; ok {
@@ -736,11 +828,12 @@ func (s *sourceImporter) ImportFrom(path, dir string, _ types.ImportMode) (*type
 }
 
 func (s *sourceImporter) check(bp *build.Package) (*types.Package, error) {
-	files, err := parseGoFiles(s.fset, bp.Dir, bp.GoFiles)
+	own := s.cgo && strings.HasPrefix(bp.ImportPath, modulePath+"/")
+	files, err := parseGoFiles(s.fset, bp.Dir, buildFiles(bp, own))
 	if err != nil {
 		return nil, err
 	}
-	conf := types.Config{Importer: s, IgnoreFuncBodies: true, Sizes: types.SizesFor("gc", s.ctx.GOARCH)}
+	conf := types.Config{Importer: s, IgnoreFuncBodies: true, FakeImportC: own, Sizes: types.SizesFor("gc", s.ctx.GOARCH)}
 	p, err := conf.Check(bp.ImportPath, s.fset, files, nil)
 	if err != nil {
 		return nil, fmt.Errorf("type-check %s for %s/%s: %w", bp.ImportPath, s.ctx.GOOS, s.ctx.GOARCH, err)
@@ -774,13 +867,57 @@ func TestGuardContextIsHostIndependent(t *testing.T) {
 			continue
 		}
 		var arch []string
-		for _, tag := range guardContext(p).ToolTags {
+		for _, tag := range guardContext(p, false).ToolTags {
 			if !strings.HasPrefix(tag, "goexperiment.") {
 				arch = append(arch, tag)
 			}
 		}
 		if !slices.Equal(arch, want) {
 			t.Errorf("%s: architecture tool tags = %q, want %q", p, arch, want)
+		}
+	}
+}
+
+// TestGuardsReadEveryCgoSetting is #982's pin: a file behind `//go:build cgo`
+// (or `!cgo`, or importing "C") is read by the configuration that compiles
+// it, and the union over guardConfigs holds them all. Reading only cgo off
+// would leave the cgo file unscanned by every AST guard.
+//
+// Mutations that turn it red: force CgoEnabled back to false in guardContext
+// (cgo_only.go and imports_c.go are never selected, and compiledByAGuardPlatform
+// rejects cgo_only.go); make buildFiles return only bp.GoFiles (imports_c.go
+// is never parsed).
+func TestGuardsReadEveryCgoSetting(t *testing.T) {
+	dir := t.TempDir()
+	src := map[string]string{
+		"plain.go":     "package p\n",
+		"cgo_only.go":  "//go:build cgo\n\npackage p\n",
+		"no_cgo.go":    "//go:build !cgo\n\npackage p\n",
+		"imports_c.go": "package p\n\n// int x;\nimport \"C\"\n",
+	}
+	for name, body := range src {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := guardPlatform{"linux", "amd64"}
+	off, err := guardFiles(dir, guardConfig{p, false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	on, err := guardFiles(dir, guardConfig{p, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"no_cgo.go", "plain.go"}; !slices.Equal(off, want) {
+		t.Errorf("cgo off reads %q, want %q", off, want)
+	}
+	if want := []string{"cgo_only.go", "plain.go", "imports_c.go"}; !slices.Equal(on, want) {
+		t.Errorf("cgo on reads %q, want %q", on, want)
+	}
+	for name := range src {
+		if !compiledByAGuardPlatform(t, dir, name) {
+			t.Errorf("%s is compiled by no guard configuration, but one of cgo off or on builds it", name)
 		}
 	}
 }

@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
-	"unicode"
+
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 )
 
 // HerdrConfig is the [herdr] section: settings for the `forgectl herdr`
@@ -76,15 +78,27 @@ func (hc HerdrOrganizeConfig) Validate() error {
 }
 
 // checkLabel refuses a workspace label herdr's client would refuse at apply
-// time: one that starts with '-' (read as a flag) or holds a control
-// character. Catching it here means the dry run cannot promise a move that
-// --apply then fails halfway through.
+// time, by the same check the client runs (wire.CheckOperand): one that starts
+// with '-' (read as a flag), holds a control, bidi or invisible character, is
+// not valid UTF-8, or is over wire.MaxOperandLen bytes. Catching it here means the dry run cannot promise a
+// move that --apply then fails halfway through. An empty label passes: whether
+// one may be empty is each caller's own check.
 func checkLabel(label string) error {
-	if strings.HasPrefix(label, "-") {
-		return fmt.Errorf("a label must not start with '-'")
+	if label == "" {
+		return nil
 	}
-	if strings.IndexFunc(label, unicode.IsControl) >= 0 {
-		return fmt.Errorf("a label must not contain control characters")
+	switch err := wire.CheckOperand(label); {
+	case err == nil:
+		return nil
+	case errors.Is(err, wire.ErrFlagOperand):
+		return errors.New("a label must not start with '-'")
+	case errors.Is(err, wire.ErrControlOperand):
+		return errors.New("a label must not contain control characters")
+	case errors.Is(err, wire.ErrInvisibleOperand), errors.Is(err, wire.ErrEncodingOperand):
+		return errors.New("a label must not contain invisible characters or invalid UTF-8")
+	case errors.Is(err, wire.ErrLongOperand):
+		return fmt.Errorf("a label is over %d bytes", wire.MaxOperandLen)
+	default:
+		return fmt.Errorf("a label %w", err)
 	}
-	return nil
 }

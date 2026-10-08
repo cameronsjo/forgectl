@@ -199,3 +199,33 @@ func TestMutationsSurfaceHerdrErrors(t *testing.T) {
 		t.Errorf("FocusTab err = %v", err)
 	}
 }
+
+// TestUndecodedMutationsReadAnErrorReplyAsAFailure: MoveWorkspace,
+// FocusWorkspace, and FocusTab decode no success shape (none is captured), but
+// a reply that IS herdr's error envelope must not read as success whatever the
+// exit status (#722). Anything else on exit 0 still succeeds.
+//
+// Mutation: drop the wire.DecodeError check from (*Client).act and the refusal
+// rows go red.
+func TestUndecodedMutationsReadAnErrorReplyAsAFailure(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(*Client) error{
+		"move workspace":  func(c *Client) error { return c.MoveWorkspace(ctx, "w2", 1) },
+		"focus workspace": func(c *Client) error { return c.FocusWorkspace(ctx, "w2") },
+		"focus tab":       func(c *Client) error { return c.FocusTab(ctx, "w2:t3") },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call(New(runnerFor(fixture(t, "err_workspace_not_found.json"), nil)))
+			var he *Error
+			if !errors.As(err, &he) || he.Code != "workspace_not_found" {
+				t.Errorf("an exit-0 error envelope = %v, want *Error workspace_not_found", err)
+			}
+			for _, ok := range []string{`{"id":"x","result":{"type":"ok"}}`, ``, fixture(t, "workspace_list.json")} {
+				if err := call(New(runnerFor(ok, nil))); err != nil {
+					t.Errorf("reply %.30q = %v, want success", ok, err)
+				}
+			}
+		})
+	}
+}

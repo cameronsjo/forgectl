@@ -33,19 +33,17 @@ type Config struct {
 }
 
 // Move relocates one tab to another workspace. From and To are workspace
-// labels. TabID and FromWorkspaceID are valid only at plan time; ToWorkspaceID
-// is empty when the destination label has no workspace yet and must be created.
+// labels, never ids: apply resolves To to a live workspace right before the
+// move. TabID is valid only at plan time.
 type Move struct {
-	TerminalID      string
-	TabID           string
-	Title           string
-	CWD             string
-	From            string
-	To              string
-	FromWorkspaceID string
-	ToWorkspaceID   string
-	Blocked         bool
-	BlockedReason   string
+	TerminalID    string
+	TabID         string
+	Title         string
+	CWD           string
+	From          string
+	To            string
+	Blocked       bool
+	BlockedReason string
 }
 
 // LayoutTab is one tab in the desired final arrangement.

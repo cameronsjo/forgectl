@@ -3,6 +3,8 @@ package projects
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -184,7 +186,7 @@ func TestGithubList_PartialFailureKeepsHealthyRowsAndNotesCategorically(t *testi
 	if len(repos) != 1 || repos[0].Owner != "alpha" {
 		t.Fatalf("repos = %+v, want alpha's rows preserved", repos)
 	}
-	if len(notes) != 1 || notes[0] != "github(beta): query failed" {
+	if len(notes) != 1 || notes[0] != "github(beta): query failed (run forgectl doctor for the cause)" {
 		t.Fatalf("notes = %v, want exactly [github(beta): query failed]", notes)
 	}
 	if strings.Contains(strings.Join(notes, " "), "ghp_deadbeef") {
@@ -206,7 +208,7 @@ func TestGithubList_EveryOwnerFailingReturnsSafeAggregate(t *testing.T) {
 	if len(repos) != 0 {
 		t.Errorf("repos = %+v, want none", repos)
 	}
-	want := []string{"github(alpha): query failed", "github(beta): query failed"}
+	want := []string{"github(alpha): query failed (run forgectl doctor for the cause)", "github(beta): query failed (run forgectl doctor for the cause)"}
 	if len(notes) != 2 || notes[0] != want[0] || notes[1] != want[1] {
 		t.Fatalf("notes = %v, want %v in owner order", notes, want)
 	}
@@ -225,7 +227,7 @@ func TestGithubList_BadJSONIsACategoricalOwnerFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("a JSON parse failure for the only owner must return an error")
 	}
-	if len(notes) != 1 || notes[0] != "github(alpha): query failed" {
+	if len(notes) != 1 || notes[0] != "github(alpha): query failed (run forgectl doctor for the cause)" {
 		t.Fatalf("notes = %v, want the categorical owner note", notes)
 	}
 }
@@ -304,7 +306,7 @@ func TestInventory_KeepsOwnerNotesAndOneAggregateNote(t *testing.T) {
 			aggregates++
 		}
 	}
-	want := []string{"github(alpha): query failed", "github(beta): query failed"}
+	want := []string{"github(alpha): query failed (run forgectl doctor for the cause)", "github(beta): query failed (run forgectl doctor for the cause)"}
 	if len(notes) != 3 || notes[0] != want[0] || notes[1] != want[1] {
 		t.Fatalf("notes = %v, want the two owner notes in order plus one aggregate", notes)
 	}
@@ -321,5 +323,54 @@ func TestWithGitHubOwners_CopiesInput(t *testing.T) {
 
 	if len(c.githubOwners) != 1 || c.githubOwners[0] != "alpha" {
 		t.Fatalf("client owners = %v, want the value copied at construction", c.githubOwners)
+	}
+}
+
+// #978 item 2: gh runs git clone outside internal/gitenv, so the variables
+// that would point that clone's checkout or index at another repository are
+// removed from gh's environment, on both clone paths, and the host pin
+// survives the switch to the filtered path.
+// Mutation: run either clone through Run (no removals): GIT_WORK_TREE and
+// GIT_INDEX_FILE reach gh.
+func TestCloneRepo_ScrubsRepositoryVariablesFromGh(t *testing.T) {
+	t.Setenv("GIT_WORK_TREE", "/elsewhere")
+	t.Setenv("GIT_INDEX_FILE", "/elsewhere/index")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	for name, clone := range map[string]func(context.Context, exec.Runner, string, string, string) error{
+		"cloneRepo": cloneRepo, "cloneBareRepo": cloneBareRepo,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			if err := clone(context.Background(), fake, "cameronsjo/forgectl", t.TempDir(), githubauth.DefaultHost); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.Last()
+			if c.Name != "gh" || len(c.Args) < 2 || c.Args[1] != "clone" {
+				t.Fatalf("call = %+v, want gh repo clone", c)
+			}
+			for _, k := range []string{"GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+				if !slices.Contains(c.UnsetEnv, k) {
+					t.Errorf("gh's removals %v lack %s", c.UnsetEnv, k)
+				}
+			}
+			if slices.Contains(c.UnsetEnv, "GIT_CONFIG_COUNT") {
+				t.Errorf("gh's removals %v drop the operator's injected config, which Transport keeps", c.UnsetEnv)
+			}
+			if c.Env["GH_HOST"] != githubauth.DefaultHost {
+				t.Errorf("GH_HOST = %q, want the pin %q", c.Env["GH_HOST"], githubauth.DefaultHost)
+			}
+		})
+	}
+}
+
+// TestOwnersNote: a failed login lookup gets ghfail's categorical note; a
+// configured owner list refused before any query says to fix the config.
+func TestOwnersNote(t *testing.T) {
+	login := fmt.Errorf("%w: gh could not report the authenticated login", githubauth.ErrLoginUnavailable)
+	if got := ownersNote(login, "github.com"); got != "github owners: query failed (run forgectl doctor for the cause)" {
+		t.Errorf("login failure note = %q", got)
+	}
+	if got := ownersNote(errors.New("configured owner 1 is outside the allowed owner charset"), "github.com"); got != "github owners: configured owners refused (fix the owners list in config.toml)" {
+		t.Errorf("config refusal note = %q", got)
 	}
 }

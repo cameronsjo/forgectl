@@ -81,11 +81,11 @@ interactively when no sshUrl is available.`,
 				}
 			}
 
-			all, notes, err := client.Inventory(ctx)
+			all, held, err := loadInventory(cmd, client)
 			if err != nil {
 				return err
 			}
-			renderDegradationNotes(cmd, notes)
+			defer held.flush()
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}
@@ -98,16 +98,16 @@ interactively when no sshUrl is available.`,
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
-					return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun)
+					return held.before(func() error { return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun) })
 				}
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone, th)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone, th, held)
 			if err != nil {
 				return err
 			}
-			return cloneOnly(ctx, client, cmd, chosen, wing, dryRun)
+			return held.before(func() error { return cloneOnly(ctx, client, cmd, chosen, wing, dryRun) })
 		},
 	}
 	cmd.Flags().StringVar(&org, "org", "", "bulk-clone every repo owned by this GitHub user/org")
@@ -134,11 +134,11 @@ func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, 
 	for _, r := range repos {
 		if err := cloneOnly(ctx, client, cmd, r, "", dryRun); err != nil {
 			// Best-effort diagnostic write, same as every stderr note here.
-			// err goes through termsafe too: this line bypasses the root
+			// err goes through termsafe and safeText too: this line bypasses the root
 			// error handler, so nothing else would escape a path or cause
 			// that carries a control (#658).
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n",
-				termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.Error(err))
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %s\n",
+				safeTitle(r.Owner), safeTitle(r.Name), safeText(termsafe.Error(err).Error()))
 			failed++
 		}
 	}
@@ -171,7 +171,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	if r.Cloned {
 		// Best-effort diagnostic write, same as every stderr note here.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s already on disk at %s\n",
-			termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.QuotePath(r.LocalPath))
+			safeTitle(r.Owner), safeTitle(r.Name), termsafe.QuotePath(r.LocalPath))
 		// The one stdout line is the scriptable contract; a failed write there is
 
 		// the caller's pipe closing, not something this command can act on.
@@ -194,7 +194,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	}
 	// Best-effort diagnostic write, same as every stderr note here.
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n",
-		termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+		safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 	dest, err := client.CloneInto(ctx, r, wing)
 	if err != nil {
 		return err

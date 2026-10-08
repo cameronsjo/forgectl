@@ -28,7 +28,7 @@ func TestBuildLaunchWhichJSON_KeySet(t *testing.T) {
 		Match:          "cadence-ecosystem",
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-hunter2"},
-	}, "/tmp/cwd", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 
 	raw, err := json.Marshal(got)
 	if err != nil {
@@ -63,10 +63,10 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "x", "FOO": "y"},
 	}
-	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "/tmp/config.toml", nil)
+	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "", "/tmp/config.toml", nil)
 
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, theme.Theme{}, profile, "/tmp/cwd", "/tmp/config.toml", nil)
+	printLaunchProfile(&buf, theme.Theme{}, profile, "/tmp/cwd", "", "/tmp/config.toml", nil)
 	human := buf.String()
 
 	for _, want := range []string{profile.Harness, profile.Model, profile.Effort, profile.PermissionMode, profile.Match, "/tmp/extra"} {
@@ -96,7 +96,7 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 // no-env, no-add-dir profile: both slice fields must encode as [], never null,
 // so a caller can range over them without a nil guard.
 func TestBuildLaunchWhichJSON_EmptyCollectionsAreArraysNeverNull(t *testing.T) {
-	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "/tmp/config.toml", nil)
+	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -119,7 +119,7 @@ func TestBuildLaunchWhichJSON_NoEnvValuesEmitted(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-hunter2",
 			"FOO":               "plainbarvalue",
 		},
-	}, "/tmp/cwd", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -144,7 +144,7 @@ func TestNewLaunchWhichCmd_JSONFailingRunLeavesStdoutEmpty(t *testing.T) {
 	// pins the achievable half of the contract: an encoder error propagates
 	// without a partial write reaching a real io.Writer beforehand.
 	buf := failingWriter{err: errWriteFailed}
-	if err := writeLaunchWhichJSON(buf, launch.Profile{Harness: "claude"}, "/tmp/cwd", "/tmp/config.toml", nil); err == nil {
+	if err := writeLaunchWhichJSON(buf, launch.Profile{Harness: "claude"}, "/tmp/cwd", "", "/tmp/config.toml", nil); err == nil {
 		t.Fatal("expected an error from a failing writer, got nil")
 	}
 }
@@ -179,7 +179,7 @@ func TestPrintLaunchProfile_EnvValuesAreWithheld(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-hunter2",
 			"FOO":               "plainbarvalue",
 		},
-	}, "/tmp/cwd", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 	out := buf.String()
 
 	// Both values, not just the secret-looking one: the policy is every value,
@@ -214,7 +214,7 @@ func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Harness: "claude",
 		Model:   "opus",
-	}, "/tmp/cwd", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 
 	// Anchored on the rendered LABEL, not a bare "env" substring: three
 	// letters matched against the whole render would also trip on a config
@@ -254,7 +254,7 @@ func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testi
 		PermissionMode: attack,
 		AddDir:         []string{attack},
 		Env:            map[string]string{attack: "withheld"},
-	}, attack, attack, nil)
+	}, attack, attack, attack, nil)
 	out := buf.String()
 	if strings.ContainsAny(out, "\t\r\x7f") || strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u009b') || strings.ContainsRune(out, '\u202e') {
 		t.Fatalf("profile output contains attacker controls: %q", out)
@@ -276,7 +276,7 @@ func TestPrintLaunchProfile_EscapesPiProvider(t *testing.T) {
 		Harness:  "pi",
 		Provider: attack,
 		Model:    "qwen/qwen3-coder-next",
-	}, "/tmp/cwd", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
 	out := buf.String()
 	if strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u202e') || strings.Contains(out, "lm-studio\nforged") {
 		t.Fatalf("Pi provider output contains attacker controls: %q", out)
@@ -317,5 +317,54 @@ func TestLaunchWorkingDirectory_CapsTheFailingPath(t *testing.T) {
 	var pe *os.PathError
 	if !errors.As(err, &pe) {
 		t.Errorf("errors.As lost the *os.PathError: %v", err)
+	}
+}
+
+// TestLaunchWhich_RunDirectory pins `launch which` reporting where a claude
+// session will start (cadence-ecosystem#608): a "runs in" row only when it
+// differs from the directory, and run_directory in --json for claude alone.
+func TestLaunchWhich_RunDirectory(t *testing.T) {
+	claude := launch.Profile{Harness: "claude", Model: "opus"}
+
+	var moved bytes.Buffer
+	printLaunchProfile(&moved, theme.Theme{}, claude, "/repo/pkg", "/repo", "/tmp/config.toml", nil)
+	if !strings.Contains(moved.String(), "runs in") || !strings.Contains(moved.String(), "/repo  (settings root; --here to stay)") {
+		t.Errorf("moved launch has no runs-in row:\n%s", moved.String())
+	}
+
+	var stays bytes.Buffer
+	printLaunchProfile(&stays, theme.Theme{}, claude, "/repo/pkg", "/repo/pkg", "/tmp/config.toml", nil)
+	if strings.Contains(stays.String(), "runs in") {
+		t.Errorf("unmoved launch printed a runs-in row:\n%s", stays.String())
+	}
+
+	for _, tc := range []struct {
+		name    string
+		profile launch.Profile
+		runDir  string
+		want    string
+		present bool
+	}{
+		{"claude moved", claude, "/repo", "/repo", true},
+		{"claude unmoved", claude, "/repo/pkg", "/repo/pkg", true},
+		{"codex", launch.Profile{Harness: "codex"}, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(buildLaunchWhichJSON(tc.profile, "/repo/pkg", tc.runDir, "/tmp/config.toml", nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := decoded["run_directory"]
+			if ok != tc.present {
+				t.Fatalf("run_directory present = %t, want %t: %s", ok, tc.present, raw)
+			}
+			if ok && string(got) != `"`+tc.want+`"` {
+				t.Errorf("run_directory = %s, want %q", got, tc.want)
+			}
+		})
 	}
 }

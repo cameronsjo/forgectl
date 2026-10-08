@@ -17,11 +17,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +90,9 @@ type RegistryEntry struct {
 	HumanGates []string   `yaml:"human_gates" json:"human_gates"`
 	Endpoints  []Endpoint `yaml:"endpoints" json:"endpoints"`
 	Upstream   string     `yaml:"upstream" json:"upstream,omitempty"`
+	// ReleaseWorkflow is the workflow that opens the release PR (release-pr
+	// only; optional). Unset means DefaultReleaseWorkflow.
+	ReleaseWorkflow string `yaml:"release_workflow,omitempty" json:"release_workflow,omitempty"`
 }
 
 // Endpoint is a downstream channel that must catch up to each release.
@@ -151,21 +156,89 @@ func TagMatches(pattern, tag string) bool {
 
 // LoadRegistry reads and validates the registry at path.
 func LoadRegistry(path string) (Registry, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the registry file (--registry or env)
+	f, err := os.Open(path) //nolint:gosec // G304: the operator names the registry file (--registry or env)
+	if err != nil {
+		return Registry{}, fmt.Errorf("read registry: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	// One byte past the cap is enough for ParseRegistry to refuse the file,
+	// so a huge one is never read whole.
+	raw, err := io.ReadAll(io.LimitReader(f, maxRegistryBytes+1))
 	if err != nil {
 		return Registry{}, fmt.Errorf("read registry: %w", err)
 	}
 	return ParseRegistry(raw)
 }
 
+// maxRegistryBytes is the largest registry ParseRegistry reads (#959). An
+// entry runs about 190 bytes, so 256 KiB holds about 1,300 repos, against
+// 21 today.
+const maxRegistryBytes = 256 << 10
+
+// maxRegistryMappingKeys is the most keys any mapping in the registry may
+// have. An entry has 8 and the top level 2 or 3. yaml.v3's struct decode
+// compares every key of a mapping with every later key, and does it again
+// each time an alias to that mapping expands, so 256 KiB of keys in one
+// mapping took 4.5 s to decode. At 64 the whole file stays cheap, aliases
+// included.
+const maxRegistryMappingKeys = 64
+
 // ParseRegistry decodes and validates registry YAML. Any invalid entry fails
 // the whole registry: a radar that silently skipped a malformed row would
 // report "no stalls" for a repo it never looked at.
+//
+// The file is parsed into a node first, and yamlsafe.CheckTree refuses, in
+// linear time, what the struct decode would spend superlinear time on (a
+// repeated key, a merge key, a mapping over maxRegistryMappingKeys) before
+// that decode runs (#959).
 func ParseRegistry(raw []byte) (Registry, error) {
-	var reg Registry
-	if err := yaml.Unmarshal(raw, &reg); err != nil {
-		return Registry{}, fmt.Errorf("parse registry: %w", err)
+	doc, err := yamlsafe.Parse(raw, maxRegistryBytes)
+	if errors.Is(err, yamlsafe.ErrTooLarge) {
+		return Registry{}, fmt.Errorf("registry is larger than the %d KiB limit", maxRegistryBytes>>10)
 	}
+	if err != nil {
+		return Registry{}, registryYAMLError(err)
+	}
+	var reg Registry
+	if root := yamlsafe.Root(doc); root != nil {
+		if err := yamlsafe.CheckTree(root, yamlsafe.Options{MaxKeys: maxRegistryMappingKeys}); err != nil {
+			return Registry{}, fmt.Errorf("parse registry: %w", err)
+		}
+		if err := doc.Decode(&reg); err != nil {
+			return Registry{}, registryYAMLError(err)
+		}
+	}
+	return validateRegistry(reg)
+}
+
+// yamlLine matches the line number yaml.v3 puts at the front of a syntax
+// error ("yaml: line 3: …") and of each decode error ("line 3: …").
+var yamlLine = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): `)
+
+// registryYAMLError words a yaml.v3 parse or decode failure as its kind and
+// line only. yaml.v3's own text quotes the start of a value (cannot
+// unmarshal !!str `abcdefg...`) and anchor names, so it never passes through
+// (#1006). A failure with no line number says so without one.
+func registryYAMLError(err error) error {
+	var te *yaml.TypeError
+	if errors.As(err, &te) && len(te.Errors) > 0 {
+		msg := "a value has the wrong type"
+		if m := yamlLine.FindStringSubmatch(te.Errors[0]); m != nil {
+			msg = "line " + m[1] + ": " + msg
+		}
+		if n := len(te.Errors) - 1; n > 0 {
+			msg += fmt.Sprintf(" (and %d more)", n)
+		}
+		return errors.New("parse registry: " + msg)
+	}
+	if m := yamlLine.FindStringSubmatch(err.Error()); m != nil {
+		return errors.New("parse registry: line " + m[1] + ": not valid YAML")
+	}
+	return errors.New("parse registry: not valid YAML")
+}
+
+// validateRegistry checks a decoded registry's version and entries.
+func validateRegistry(reg Registry) (Registry, error) {
 	if reg.Version != 1 {
 		return Registry{}, fmt.Errorf("registry version %d, want 1", reg.Version)
 	}
@@ -227,6 +300,9 @@ func validateEntry(e RegistryEntry) error {
 	if needsEntry && !reRegWorkflow.MatchString(e.Entrypoint) {
 		return fmt.Errorf("%s: %s needs an entrypoint under .github/workflows/", e.Repo, e.Class)
 	}
+	if e.ReleaseWorkflow != "" && (e.Class != ClassReleasePR || !reRegWorkflow.MatchString(e.ReleaseWorkflow)) {
+		return fmt.Errorf("%s: release_workflow needs a release-pr repo and a path under .github/workflows/", e.Repo)
+	}
 	if !needsEntry && e.Entrypoint != "" {
 		return fmt.Errorf("%s: %s has no entrypoint", e.Repo, e.Class)
 	}
@@ -262,6 +338,10 @@ type RepoFacts struct {
 	Unreleased *int `json:"unreleased,omitempty"`
 	// OldestUnreleasedAt is the committer date of the oldest of those.
 	OldestUnreleasedAt *time.Time `json:"oldest_unreleased_at,omitempty"`
+	// UnreleasedCommits are the unreleased commits (release-pr only), oldest
+	// first, read for the releasable rule. Collection reports an error rather
+	// than a partial list when the unseen tail could change the verdict.
+	UnreleasedCommits []CommitFact `json:"unreleased_log,omitempty"`
 	// ReleasePRs are the open release PRs (title shape of ship-gate.sh).
 	ReleasePRs []PRFact `json:"release_prs,omitempty"`
 	// Toggle is the class's nightly toggle variable; nil when the class has
@@ -270,6 +350,9 @@ type RepoFacts struct {
 	// Runs are the entrypoint's recent runs, newest first. Reason is filled
 	// for the newest run and the two newest scheduled runs.
 	Runs []RunFact `json:"runs,omitempty"`
+	// PendingReleaseRuns are the release-PR workflow's runs that have not
+	// completed (release-pr only).
+	PendingReleaseRuns []RunFact `json:"pending_release_runs,omitempty"`
 	// Endpoints mirrors the registry's endpoints with the version found.
 	Endpoints []EndpointFact `json:"endpoints,omitempty"`
 	// GateCopySHA256 is the sha256 of .github/scripts/ship-gate.sh on the
@@ -477,6 +560,14 @@ func Derive(e RegistryEntry, f RepoFacts, canonicalGate string, now time.Time) R
 	// A half-shipped release is broken whether or not the beat is on.
 	if row.LastRun != nil && row.LastRun.Reason == "half-shipped" {
 		row.Stalls = append(row.Stalls, "last ship run reports half-shipped")
+	}
+
+	// The release machinery itself: releasable commits with no release PR, and
+	// a release-PR workflow run that never started.
+	if e.Class == ClassReleasePR {
+		row.Stalls = append(row.Stalls, noReleasePRStall(f, now)...)
+		wf, _ := ReleaseWorkflowFile(e)
+		row.Stalls = append(row.Stalls, releaseWorkflowStall(wf, f.PendingReleaseRuns, now)...)
 	}
 
 	// Endpoint lag: every endpoint must carry the last release within 24h.

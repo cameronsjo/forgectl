@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -45,6 +46,7 @@ each domain already knows how to make — it never reimplements one:
   log path        the resolved log path's parent directory exists or can be created
   tmux/ghostty/cmux   present on PATH
   gh              installed and authenticated
+  gitleaks        its version, as forgectl audit secrets would run it (optional)
   hearth/chronicle        the local bench's health (forgectl bench status)
   trust store     the workflow-blessing trust store, if you use blessed workflows
   forgectl version   the Homebrew tap's reachability + forgectl's own currency
@@ -78,7 +80,7 @@ Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 			if !report.Healthy() {
 				// Under --json the report on stdout is the verdict
 				// (forgectl#862).
-				return jsonVerdict(WithExitCode(fmt.Errorf("doctor found problems"), 1), asJSON)
+				return jsonVerdict(WithExitCode(doctorProblems(report), 1), asJSON)
 			}
 			return nil
 		},
@@ -117,11 +119,11 @@ func doctorMark(s doctor.State, marks theme.Marks) string {
 // treatment: encoding/json already escapes control bytes.
 func printDoctorReport(out io.Writer, report doctor.Report, marks theme.Marks) error {
 	for _, c := range report.Checks {
-		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State, marks), c.Name, termsafe.SafeLine(c.Detail)); err != nil {
+		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State, marks), c.Name, safeText(c.Detail)); err != nil {
 			return err
 		}
 		if c.Hint != "" {
-			if _, err := fmt.Fprintf(out, "  %s\n", termsafe.SafeLine(c.Hint)); err != nil {
+			if _, err := fmt.Fprintf(out, "  %s\n", safeText(c.Hint)); err != nil {
 				return err
 			}
 		}
@@ -152,4 +154,16 @@ func writeDoctorJSON(out io.Writer, report doctor.Report) error {
 	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(j)
+}
+
+// doctorProblems is doctor's closing verdict. It names the failed checks so
+// the operator need not rescan every row for the ✗ (forgectl#1148); each
+// row's own hint carries the fix. Check names are fixed strings.
+func doctorProblems(report doctor.Report) error {
+	failed := report.Failed()
+	noun := "problems"
+	if len(failed) == 1 {
+		noun = "problem"
+	}
+	return fmt.Errorf("doctor found %d %s: %s (each row's hint names the fix)", len(failed), noun, strings.Join(failed, ", "))
 }

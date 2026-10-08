@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -354,12 +355,16 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 // triggered at the limit, so it is ignored there, but rg's stderr (fully
 // drained by the time the run returns) still is not: rg that wrote a
 // diagnostic before the limit stopped it had failed on something.
+//
+// rg's stderr is redacted (redact.Text) before searchError escapes it, as
+// the Err arm below is (#941): redact.Text works per line, so it runs while
+// the line breaks SafeLineMax escapes still mark its boundaries.
 func rootFailures(root Root, unparsed int, runErr error, stderr string, truncated bool) []SearchError {
 	var out []SearchError
 	if unparsed > 0 {
 		out = append(out, searchError(root, fmt.Sprintf("%d rg output records could not be parsed", unparsed)))
 	}
-	msg := strings.TrimSpace(stderr)
+	msg := strings.TrimSpace(redact.Text(stderr))
 	switch {
 	case truncated:
 		// runErr is our own cancel; only a diagnostic counts.
@@ -380,8 +385,8 @@ func rootFailures(root Root, unparsed int, runErr error, stderr string, truncate
 			// *exec.ExitError ("exit status 2") and ExitCode is 2.
 			// cmdErr.Err, not cmdErr.Error(): the latter prefixes the
 			// command line, which a runner that keeps Args would fill with
-			// the query.
-			msg = cmdErr.Err.Error()
+			// the query. Its text is redacted as Error() redacts it (#926).
+			msg = redact.Text(cmdErr.Err.Error())
 		case isCmdErr:
 			msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
 		default:

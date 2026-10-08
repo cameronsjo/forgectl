@@ -2,10 +2,14 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +81,13 @@ type Watcher struct {
 	debounce time.Duration
 	maxWait  time.Duration
 
+	// createArmsSettle turns on the forgectl#895 workaround in Run: any
+	// in-tree Create that is not stray arms a settle. NewWatcher sets it
+	// from kqueueListing, since only kqueue's directory listing can hide a
+	// new doc behind an unopenable entry (forgectl#936). It is a field so
+	// tests elsewhere can exercise the workaround; set it before Run starts.
+	createArmsSettle bool
+
 	// resetPending records that a watch was added through a path that
 	// stopped naming its directory, or that a watched directory moved.
 	// fsnotify's bookkeeping for such a watch cannot be trusted, and a moved
@@ -112,7 +123,7 @@ func NewWatcher(store *Store, broker *Broker) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait}
+	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait, createArmsSettle: kqueueListing}
 	w.register(store.Current())
 	return w, nil
 }
@@ -158,7 +169,8 @@ func (w *Watcher) replaceWatcher() bool {
 }
 
 // register walks every root in idx and adds a watch for each directory the
-// indexer would descend into. Failures are logged and skipped rather than
+// indexer would descend into; a single-file root gets one watch, on its own
+// directory (watchOnlyFileDir). Failures are logged and skipped rather than
 // returned: a single unreadable subdirectory should cost live reload for that
 // subtree, not refuse to start the reader at all.
 //
@@ -180,7 +192,9 @@ func (w *Watcher) registerRoots(roots []Root) map[string]bool {
 			slog.Debug("docs: live-reload registration could not open a root.", "root", root.Label, "error", err)
 			continue
 		}
-		if err := w.watchTree(rt, root.Path); err != nil {
+		if root.OnlyFile != "" {
+			w.watchOnlyFileDir(rt, root.Path)
+		} else if err := w.watchTree(rt, root.Path); err != nil {
 			slog.Debug("docs: live-reload registration walk failed for a root.", "root", root.Label, "error", err)
 		}
 		_ = rt.Close()
@@ -214,6 +228,21 @@ func (w *Watcher) watchTree(dir *os.Root, top string) error {
 		}
 		return nil
 	})
+}
+
+// watchOnlyFileDir watches dir, the directory a single-file root's rt holds,
+// and nothing below it (forgectl#923). The one file the root serves lives
+// directly in dir, so its events arrive on that watch, and a walk of the
+// subtree would put watches on directories the user never asked to serve:
+// renaming one would rebuild the watches, and writes under it would wake
+// the watcher. Run drops the events the watch delivers for the file's
+// siblings (onlyFileSibling).
+func (w *Watcher) watchOnlyFileDir(rt *os.Root, dir string) {
+	want, err := rt.Stat(".")
+	if err != nil || !want.IsDir() {
+		return
+	}
+	w.addVerified(dir, want)
 }
 
 // watchStage names the points in addVerified that testHookWatch runs at.
@@ -330,10 +359,11 @@ func (w *Watcher) insideSomeRoot(path string) bool {
 // under every root that holds it. The directory is opened through the
 // pinned root one held component at a time, so a symlink anywhere on the
 // way is refused rather than followed, and a component the indexer would
-// not descend into stops the registration.
+// not descend into stops the registration. A single-file root watches only
+// its own directory (watchOnlyFileDir), so it registers nothing here.
 func (w *Watcher) watchCreatedDir(path string) {
 	for _, root := range w.store.Current().Roots() {
-		if path == root.Path || !withinRoot(root.Path, path) {
+		if root.OnlyFile != "" || path == root.Path || !withinRoot(root.Path, path) {
 			continue
 		}
 		rel, err := filepath.Rel(root.Path, path)
@@ -375,13 +405,28 @@ func (w *Watcher) watchCreatedDir(path string) {
 
 // Run processes filesystem events until ctx is canceled or the underlying
 // watcher closes. It coalesces bursts through w.debounce, bounded by
-// w.maxWait (settleIn), and, for each settled burst, rebuilds the index,
-// swaps it into the Store, and publishes one reload notification.
+// w.maxWait (settleIn), and, for each settled burst, rebuilds the watches
+// if a rebuild is pending, rebuilds the index, swaps it into the Store, and
+// publishes one reload notification when the burst held a doc event or the
+// index changed (reload).
 func (w *Watcher) Run(ctx context.Context) {
 	var (
 		timer    *time.Timer
 		settledC <-chan time.Time
+		// sawDocEvent records that the burst being settled held an event
+		// on an in-root doc name (relevant and not stray). Such a burst
+		// publishes even when the rebuilt index is equal: the index cannot
+		// see a body edit that kept the doc's metadata and its mtime tick.
+		sawDocEvent bool
 	)
+	arm := func() {
+		if timer == nil {
+			timer = time.NewTimer(w.settleIn(time.Now()))
+		} else {
+			timer.Reset(w.settleIn(time.Now()))
+		}
+		settledC = timer.C
+	}
 	defer func() {
 		if timer != nil {
 			timer.Stop()
@@ -390,8 +435,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	// A registration in NewWatcher that met a changing directory has a
 	// watch rebuild waiting. Run the reload that performs it.
 	if w.resetPending {
-		timer = time.NewTimer(w.settleIn(time.Now()))
-		settledC = timer.C
+		arm()
 	}
 
 	for {
@@ -403,33 +447,77 @@ func (w *Watcher) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
+			// A single-file root's directory watch also reports the file's
+			// siblings, which the root does not serve. Nothing about them
+			// may reach the watch set or the settle (forgectl#923).
+			if w.onlyFileSibling(ev.Name) {
+				continue
+			}
 			// Keep the watch set current before deciding relevance: a newly
 			// created directory needs watching even when the event that
 			// revealed it carries no markdown of its own, and the containing
 			// directory may itself have just been replaced.
 			wasPending := w.resetPending
-			w.refreshWatch(ev)
+			// Decided before refreshWatch, which may change the watch set
+			// but never the filesystem the event came through.
+			stray := w.strayEvent(ev.Name)
+			createdDir := w.refreshWatch(ev)
+			// A Rename of a watched directory rebuilds the watches: the
+			// moved tree's descendants keep theirs wherever it went,
+			// outside the root or into an excluded directory, and only a
+			// fresh watcher drops them (forgectl#796). Move detection
+			// never consults stray, since a directory renamed away and
+			// replaced by a symlink has a stray Rename (PR #868 review).
 			moved := w.dirMoved(ev)
-			if moved {
-				// The moved tree's descendants keep their watches wherever
-				// it went, outside the root or into an excluded directory;
-				// only a fresh watcher drops them (forgectl#796).
+			// A stray event rebuilds the watches too: fsnotify holds a
+			// watch bound somewhere its name does not lead, and on kqueue a
+			// watch opened through a symlink keeps that binding even after
+			// the name is a real file or directory again, since a re-Add
+			// of a watched path reuses the watch (forgectl#865). Only a
+			// fresh fsnotify watcher drops it.
+			if moved || stray {
 				w.resetPending = true
 			}
+			// stray gates only the doc-event decision. A stray event can
+			// still publish, but only through the index its settle rebuilds
+			// changing (a doc replaced by a symlink drops out of it), and
+			// the index holds only root-confined state.
+			docEvent := !stray && w.relevant(ev.Name)
+			if docEvent {
+				sawDocEvent = true
+			}
+			// An attachment added, removed or renamed arms a settle but is
+			// not a doc event: it publishes only through the attachment set
+			// the rebuilt index compares (sameIndex), so a name that did not
+			// change what resolves stays silent (forgectl#904).
+			attachmentEvent := !stray && w.attachmentRelevant(ev)
+			// On kqueue, any in-tree Create arms a settle too, and publishes
+			// only if the rebuilt index changed (forgectl#895). A new
+			// entry reaches us only as the Create fsnotify's dirChange sends
+			// while listing the directory, and that listing stops at the
+			// first entry it cannot open (EACCES, EPERM, ENOENT), which it
+			// never marks seen: every later change to the directory sends
+			// that entry's Create again and nothing for the docs sorting
+			// after it. A dangling link's repeat Create is stray and
+			// rebuilds already; an unopenable plain file's lands here, and
+			// the rebuild's walk finds the docs the listing missed. It can
+			// postpone a pending rebuild no further than settleIn allows.
+			// Other backends report each entry itself, so there a non-doc
+			// file's Create (build output, say) costs no reload
+			// (forgectl#936). A directory's Create still arms one on every
+			// backend: a tree moved, copied or unpacked in arrives as that
+			// one Create, and a doc written into it before its watch landed
+			// sends nothing, so only the rebuild's walk finds them.
+			createEvent := (w.createArmsSettle || createdDir) && !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			if !w.relevant(ev.Name) && !moved && !resetNeedsArming {
+			if !docEvent && !attachmentEvent && !createEvent && !moved && !resetNeedsArming {
 				continue
 			}
-			if timer == nil {
-				timer = time.NewTimer(w.settleIn(time.Now()))
-			} else {
-				timer.Reset(w.settleIn(time.Now()))
-			}
-			settledC = timer.C
+			arm()
 
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
@@ -443,12 +531,12 @@ func (w *Watcher) Run(ctx context.Context) {
 			if w.resetPending {
 				w.noteReset(time.Now())
 			}
-			w.reload()
+			w.reload(sawDocEvent)
+			sawDocEvent = false
 			// A rebuild that itself met a changing directory waits again
 			// rather than looping, backed off by settleDelay.
 			if w.resetPending {
-				timer.Reset(w.settleIn(time.Now()))
-				settledC = timer.C
+				arm()
 			}
 		}
 	}
@@ -508,24 +596,26 @@ func (w *Watcher) settleDelay() time.Duration {
 // directory that was itself replaced) and registers a newly created directory
 // subtree. A created directory that the indexer would refuse to descend into is
 // deliberately NOT watched — see relevant() for why that matters.
-func (w *Watcher) refreshWatch(ev fsnotify.Event) {
+//
+// It reports whether ev created a directory the indexer would descend
+// into: Run arms a settle for it, since docs already inside send no events
+// of their own (forgectl#936).
+func (w *Watcher) refreshWatch(ev fsnotify.Event) bool {
 	if dir := filepath.Dir(ev.Name); dir != "" {
 		w.readdVerified(dir)
 	}
 
-	if !ev.Has(fsnotify.Create) {
-		return
+	if !ev.Has(fsnotify.Create) || excludedDir(filepath.Base(ev.Name)) {
+		return false
 	}
 	info, err := os.Lstat(ev.Name)
 	if err != nil || !info.IsDir() {
-		return
-	}
-	if excludedDir(filepath.Base(ev.Name)) {
-		return
+		return false
 	}
 	// A directory arriving whole (an mv of a populated tree) can surface as a
 	// single Create with no per-file events, so walk and watch it now.
 	w.watchCreatedDir(ev.Name)
+	return true
 }
 
 // dirMoved reports whether ev is a Rename of a directory addVerified
@@ -548,6 +638,75 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 	return ok
 }
 
+// strayEvent reports whether an event reached the watcher through a watch
+// that is now bound outside the watched tree (forgectl#865). fsnotify names
+// an event by the path its watch was registered under, and on kqueue
+// (macOS, BSD) it also watches every entry of a watched directory itself,
+// listing and opening each by path, so every symlink on the way is
+// followed: an intermediate one (a directory swapped for a symlink to an
+// outside directory is listed through it, and each outside entry gets a
+// watch named root/a/<entry> without any Add of ours) and a leaf one (an
+// in-root leak.md linking to an outside file, or a directory named *.md
+// swapped for such a link, is watched at its target). addVerified's checks
+// cannot see those watches, and relevant() is lexical, so a write to the
+// outside file would drive a reload.
+//
+// So the event's full name is resolved as the filesystem stands now
+// (resolveNow), and when it resolves through any symlink the resolved path
+// must pass the same predicate the name did: relevant() for a doc name,
+// which keeps an OnlyFile root to its one file and refuses excluded
+// directories, or inTree() for any other name (a directory's own Rename).
+// An event whose resolved path fails is stray: it is never a doc event,
+// so it publishes only if the index its settle rebuilds changed, and it
+// schedules a rebuild of the watches (Run). A stray Rename of a watched
+// directory still counts as a move. A compat symlink that leads to a doc
+// elsewhere inside the root is not stray, and a name with no symlink on
+// its path is decided exactly as before. The check fails closed: a path
+// that cannot be resolved for any reason but its own absence (a dangling
+// symlink, a loop) is stray. A deleted path resolves through its deepest
+// existing ancestor, so its events still reload.
+//
+// It is a delivery-time check, so a path swapped back between the event and
+// the check passes it. The stray watches themselves last until the next
+// full rebuild (replaceWatcher) or Close; fsnotify has no by-handle Remove.
+func (w *Watcher) strayEvent(name string) bool {
+	resolved, err := resolveNow(name)
+	if err != nil {
+		return true
+	}
+	if resolved == name {
+		return false
+	}
+	if AllowedExt(name) {
+		return !w.relevant(resolved)
+	}
+	return !w.inTree(resolved)
+}
+
+// resolveNow resolves every symlink in path, the leaf included, as the
+// filesystem stands now. A path that does not exist resolves through its
+// deepest existing ancestor, with the missing tail joined back on. Any
+// other failure is an error, including a component that exists but
+// resolves nowhere (a dangling symlink).
+func resolveNow(path string) (string, error) {
+	tail := ""
+	for p := path; ; {
+		resolved, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+		if _, lerr := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) || !errors.Is(lerr, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
+	}
+}
+
 // relevant reports whether an event path should trigger a reload.
 //
 // It reuses AllowedExt and excludedDir rather than restating either, so the
@@ -563,48 +722,132 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 // trigger a rebuild, so relevance is decided from the path string against the
 // already-canonical root paths.
 func (w *Watcher) relevant(path string) bool {
-	if !AllowedExt(path) {
-		return false
-	}
-
-	idx := w.store.Current()
-	for _, root := range idx.Roots() {
-		if !withinRoot(root.Path, path) {
-			continue
-		}
-		// Naming a single file must not make its siblings live-reloadable any
-		// more than it makes them servable.
-		if root.OnlyFile != "" {
-			return path == root.OnlyFile
-		}
-		rel, err := filepath.Rel(root.Path, path)
-		if err != nil {
-			return false
-		}
-		// Directory components only — walkRoot excludes hidden DIRECTORIES,
-		// not a file that merely happens to start with a dot, so the final
-		// segment (the filename) is not subject to the rule.
-		segments := strings.Split(filepath.ToSlash(rel), "/")
-		for _, dir := range segments[:len(segments)-1] {
-			if excludedDir(dir) {
-				return false
-			}
-		}
-		return true
-	}
-	return false // outside every configured root
+	return AllowedExt(path) && w.inTree(path)
 }
 
-// reload rebuilds the index and, on success, installs it and notifies
-// subscribers. A failed rebuild keeps the previous index in service: a root
-// that is temporarily gone should degrade live reload, not blank the reader.
+// attachmentRelevant reports whether ev can change a vault root's attachment
+// set (walkRoot): a Create, Remove or Rename of a non-markdown name that is
+// not a dot-file, which some vault root accepts (rootAccepts). A write to an
+// attachment's contents is not relevant, since resolution reads names only.
+// Like relevant() it is lexical, because a removed or renamed-away path
+// cannot be stat'ed; a Create of a directory or a symlink with such a name
+// arms a settle too, and the rebuilt index, which lists neither, leaves it
+// unpublished.
+func (w *Watcher) attachmentRelevant(ev fsnotify.Event) bool {
+	if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
+		return false
+	}
+	if AllowedExt(ev.Name) || strings.HasPrefix(filepath.Base(ev.Name), ".") {
+		return false
+	}
+	// The kind comes from a root that accepts the path, not merely the
+	// first that holds it: roots can overlap (forgectl#917).
+	for _, root := range w.store.Current().Roots() {
+		if root.Kind == RootVault && rootAccepts(root, ev.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyFileSibling reports whether name lies in some root but every root
+// holding it is a single-file root that name is neither the file of nor
+// the directory of: a sibling of the file, or something below one, which
+// the root's directory watch (or, on kqueue, fsnotify's own watch of each
+// entry of that directory) reports although no root serves it
+// (forgectl#923). Lexical, like relevant(). A name no root holds is not a
+// sibling, and goes through Run's usual checks.
+func (w *Watcher) onlyFileSibling(name string) bool {
+	held := false
+	for _, root := range w.store.Current().Roots() {
+		if !withinRoot(root.Path, name) {
+			continue
+		}
+		if root.OnlyFile == "" || name == root.OnlyFile || name == root.Path {
+			return false
+		}
+		held = true
+	}
+	return held
+}
+
+// inTree is relevant() without the extension rule: whether some root
+// accepts path (rootAccepts). Every containing root is consulted, not just
+// the first: with overlapping roots (docs serve ~/v/n.md ~/v) the first may
+// be a single-file root that refuses what the enclosing root accepts
+// (forgectl#917).
+func (w *Watcher) inTree(path string) bool {
+	for _, root := range w.store.Current().Roots() {
+		if rootAccepts(root, path) {
+			return true
+		}
+	}
+	return false // no configured root accepts it
+}
+
+// rootAccepts reports whether path lies in root, is root's one file when it
+// is an OnlyFile root, has no excluded directory component below it, and
+// sits no deeper than the index walk descends (maxHeldDirs directories
+// below the root, walkHeld).
+//
+// It is lexical, so a deleted or renamed-away path is still judged, and so
+// it cannot see a symlink on the path: a name through an in-root link to a
+// directory elsewhere passes. The callers own that rule. Run resolves every
+// event's name first and refuses one that resolves somewhere rootAccepts
+// would not (strayEvent), and the watch set is built by the held walk,
+// which never descends a link (watchTree, addVerified).
+func rootAccepts(root Root, path string) bool {
+	if !withinRoot(root.Path, path) {
+		return false
+	}
+	// Naming a single file must not make its siblings live-reloadable any
+	// more than it makes them servable.
+	if root.OnlyFile != "" {
+		return path == root.OnlyFile
+	}
+	rel, err := filepath.Rel(root.Path, path)
+	if err != nil {
+		return false
+	}
+	// Directory components only — walkRoot excludes hidden DIRECTORIES,
+	// not a file that merely happens to start with a dot, so the final
+	// segment (the filename) is not subject to the rule.
+	segments := strings.Split(filepath.ToSlash(rel), "/")
+	if len(segments)-1 > maxHeldDirs {
+		return false // the walk skips a directory this deep, so nothing in it is indexed
+	}
+	for _, dir := range segments[:len(segments)-1] {
+		if excludedDir(dir) {
+			return false
+		}
+	}
+	return true
+}
+
+// reload rebuilds the index and, on success, installs it. It notifies
+// subscribers when docEvent is set (the settled burst held an in-root doc
+// event) or the fresh index differs from the one it replaces (sameIndex),
+// and otherwise stays silent. A failed rebuild keeps the previous index in
+// service: a root that is temporarily gone should degrade live reload, not
+// blank the reader.
+//
+// Every settle takes this one path, a watch rebuild included, so a change
+// the rebuild could not see as an event (a doc edited before its directory
+// was watched again) still reaches the index and, by changing it,
+// publishes. A settle only a stray event armed cannot publish on that
+// event's account, but the rebuild it runs can still find a change. The
+// docs, attachments and skipped paths come from a walk confined to the
+// roots. Each root's kind and vault path do not: detectRootKind looks for a
+// .obsidian directory in every ancestor of the root below $HOME, so a
+// .obsidian created or removed above a root changes the index from outside
+// it, and a settle that happens to run then publishes that change.
 //
 // A pending watch rebuild registers every root once. The fresh watcher is
 // registered against the current index before the rebuild, so a change
 // during the rebuild still wakes Run, and after it only the roots that pass
 // could not open are registered from the fresh index (a root replaced since
 // the last index, whose new directory only the fresh index pins).
-func (w *Watcher) reload() {
+func (w *Watcher) reload(docEvent bool) {
 	current := w.store.Current()
 	var reset map[string]bool
 	if w.resetPending && w.replaceWatcher() {
@@ -632,6 +875,50 @@ func (w *Watcher) reload() {
 		w.registerRoots(rest)
 	}
 
+	if !docEvent && sameIndex(current, fresh) {
+		slog.Debug("docs: index rebuilt for live reload; nothing changed.", "docCount", len(fresh.List()))
+		return
+	}
 	slog.Debug("docs: index rebuilt for live reload.", "docCount", len(fresh.List()))
 	w.broker.Publish(reloadMessage)
+}
+
+// sameIndex reports whether b holds what a does as far as a reader can
+// tell: the same roots (by label, path, single file, kind and vault), the
+// same docs in the same order with every scanned field equal, the same
+// attachments per root (what a vault wikilink can resolve to,
+// forgectl#904), and the same skipped paths. A root's pinned directory
+// identity is not compared: a root replaced by an identical tree serves
+// the same pages.
+//
+// Attachments compare by basename table, one entry per file, rather than by
+// the case-folded path set: removing a/Dup.png beside a/dup.png leaves the
+// folded set unchanged but turns an ambiguous [[dup.png]] into a hit
+// (forgectl#917). buildRootIndexes sorts each entry's paths, so a change of
+// walk order alone (a directory renamed Z to z) compares equal
+// (forgectl#923).
+func sameIndex(a, b *Index) bool {
+	if len(a.roots) != len(b.roots) || len(a.docs) != len(b.docs) || !slices.Equal(a.skipped, b.skipped) {
+		return false
+	}
+	for i := range a.roots {
+		x, y := a.roots[i], b.roots[i]
+		if x.Label != y.Label || x.Path != y.Path || x.OnlyFile != y.OnlyFile || x.Kind != y.Kind || x.VaultPath != y.VaultPath {
+			return false
+		}
+		if !maps.EqualFunc(a.attachmentsByName(x.Label), b.attachmentsByName(y.Label), slices.Equal[[]string]) {
+			return false
+		}
+	}
+	for i := range a.docs {
+		x, y := a.docs[i], b.docs[i]
+		if !x.ModTime.Equal(y.ModTime) {
+			return false
+		}
+		x.ModTime, y.ModTime = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(x, y) {
+			return false
+		}
+	}
+	return true
 }

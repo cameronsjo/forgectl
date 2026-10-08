@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // editDeadline bounds the `sops` edit call.
@@ -125,13 +126,12 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		return OutcomeUnspecified, err
 	}
 
-	// Both checks run against the bytes just read, not a re-open. Re-opening
-	// by name between the check and the use is how the final path component
-	// gets swapped underneath a decision.
-	if !IsSOPSFile(before) {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", termsafe.QuotePath(target.Rel()))
-	}
-	rules, err := ReadPlaintextRules(before)
+	// Every check runs against the bytes just read, not a re-open.
+	// Re-opening by name between the check and the use is how the final path
+	// component gets swapped underneath a decision. ReadDocument parses them
+	// once: the size first, so an oversized file is refused as that rather
+	// than as "not a SOPS document", then the sops: block, then its rules.
+	rules, err := ReadDocument(before)
 	if err != nil {
 		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), err)
 	}
@@ -205,7 +205,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// still verified below. Reporting it as an error would fail every
 		// idempotent re-run.
 	default:
-		if restoreErr := work.restore(target); restoreErr != nil {
+		if restoreErr := work.restore(target, guard.trackScratch); restoreErr != nil {
 			return OutcomeUnspecified, restoreFailed(errors.New("sops refused the edit"), restoreErr, target, guard.keepBackup())
 		}
 		guard.settle()
@@ -234,7 +234,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)
 	if err != nil {
-		if restoreErr := work.restore(target); restoreErr != nil {
+		if restoreErr := work.restore(target, guard.trackScratch); restoreErr != nil {
 			return OutcomeUnspecified, restoreFailed(err, restoreErr, target, guard.keepBackup())
 		}
 		guard.settle()
@@ -362,13 +362,19 @@ func (c *Client) verify(ctx context.Context, sopsBin string, target env.Target, 
 // that could not be made to go red on demand. It resolves the path properly
 // now. The prefix match was sloppy too — `leaf+":"` also matches
 // `token:anything`.
+//
+// The re-read is capped at MaxRewrittenBytes and parsed into a node, never
+// decoded into a map, so the walk is linear in the file (#959).
 func assertEncryptedAtPath(doc []byte, path []string) error {
-	var root yaml.Node
-	if err := yaml.Unmarshal(doc, &root); err != nil {
+	root, err := yamlsafe.Parse(doc, MaxRewrittenBytes)
+	if errors.Is(err, yamlsafe.ErrTooLarge) {
+		return fmt.Errorf("the re-read file is larger than %d MiB", MaxRewrittenBytes>>20)
+	}
+	if err != nil {
 		return errors.New("the re-read file does not parse as YAML")
 	}
 
-	node := &root
+	node := root
 	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
 		node = node.Content[0]
 	}
@@ -562,12 +568,18 @@ func (w *workDir) readEditorError() string {
 // restore puts the backup back and PROVES it, by digest, before returning
 // success. A restore that reports success without checking is the one thing
 // worse than no restore at all.
-func (w *workDir) restore(target env.Target) error {
+//
+// The write's own scratch directory beside the target is created through
+// track, which the signal guard holds its lock across and records, so the
+// guard removes it if a signal lands mid-restore (cameronsjo/forgectl#751).
+// Untracked, the handler terminated the process with it on disk, and the next
+// write refused on it.
+func (w *workDir) restore(target env.Target, track env.ScratchTracker) error {
 	backup, err := os.ReadFile(w.backup)
 	if err != nil {
 		return errors.New("the backup is unreadable")
 	}
-	if err := env.WriteTarget(target, backup); err != nil {
+	if err := env.WriteTargetTracked(target, backup, track); err != nil {
 		return err
 	}
 	after, err := env.ReadTarget(target)

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -253,7 +254,7 @@ func TestFmtTs(t *testing.T) {
 
 // TestWriteSearchHitsJSON pins `sessions search --json` (#482): valid JSON,
 // the documented field set, and the stored value carried unaltered (no
-// safeTerm quoting on the machine path).
+// termsafe.SafeLine quoting on the machine path).
 func TestWriteSearchHitsJSON(t *testing.T) {
 	hits := []sessions.SearchHit{{
 		Path: "hearth/colima.md", Title: "Colima split brain", Project: "hearth",
@@ -384,13 +385,13 @@ func TestFinishSync_CompleteAndDryRunSucceed(t *testing.T) {
 
 // TestSessionsText_CapsRunbookTitles pins forgectl#891 item 5: the indexer
 // stores a runbook title uncut, so every `sessions` text line that prints one
-// caps it at runbookTitleMaxRunes, while --json carries it whole.
+// caps it at titleMaxRunes, while --json carries it whole.
 //
-// Mutations that turn it red, one per row: print h.Title through safeTerm in
+// Mutations that turn it red, one per row: print h.Title through termsafe.SafeLine in
 // printSearchHits (search), h.Title in printWhyHits (why), or a.Title in
 // printLastSession (last).
 func TestSessionsText_CapsRunbookTitles(t *testing.T) {
-	long := strings.Repeat("t", runbookTitleMaxRunes*4)
+	long := strings.Repeat("t", titleMaxRunes*4)
 	ts := ptrTime("2026-07-09T11:00:00Z")
 	for _, tt := range []struct {
 		sink       string
@@ -427,10 +428,10 @@ func TestSessionsText_CapsRunbookTitles(t *testing.T) {
 		},
 	} {
 		text, _ := renderCmd(t, tt.text)
-		if strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes+1)) {
-			t.Errorf("%s text printed more than %d runes of the title", tt.sink, runbookTitleMaxRunes)
+		if strings.Contains(text, strings.Repeat("t", titleMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the title", tt.sink, titleMaxRunes)
 		}
-		if !strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes/2)) {
+		if !strings.Contains(text, strings.Repeat("t", titleMaxRunes/2)) {
 			t.Errorf("%s text lost the title's head: %q", tt.sink, text)
 		}
 		asJSON, _ := renderCmd(t, tt.json)
@@ -442,13 +443,13 @@ func TestSessionsText_CapsRunbookTitles(t *testing.T) {
 
 // TestSessionsText_CapsSnippets pins the #891 review finding: ts_headline's
 // MaxWords bounds words, not characters, so a match snippet can be tens of
-// thousands of characters. search and why cap it at runbookSnippetMaxRunes
+// thousands of characters. search and why cap it at snippetMaxRunes
 // in text output, while --json carries it whole.
 //
-// Mutations that turn it red, one per row: print h.Snippet through safeTerm
+// Mutations that turn it red, one per row: print h.Snippet through termsafe.SafeLine
 // in printSearchHits (search) or in printWhyHits (why).
 func TestSessionsText_CapsSnippets(t *testing.T) {
-	long := strings.Repeat("s", runbookSnippetMaxRunes*4)
+	long := strings.Repeat("s", snippetMaxRunes*4)
 	ts := ptrTime("2026-07-09T11:00:00Z")
 	search := []sessions.SearchHit{{Path: "p/x.md", Title: "T", Snippet: long}}
 	why := []sessions.WhyHit{{SessionID: "s1", LastTs: ts, Title: "T", Path: "p/x.md", Snippet: long}}
@@ -468,10 +469,10 @@ func TestSessionsText_CapsSnippets(t *testing.T) {
 		},
 	} {
 		text, _ := renderCmd(t, tt.text)
-		if strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes+1)) {
-			t.Errorf("%s text printed more than %d runes of the snippet", tt.sink, runbookSnippetMaxRunes)
+		if strings.Contains(text, strings.Repeat("s", snippetMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the snippet", tt.sink, snippetMaxRunes)
 		}
-		if !strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes/2)) {
+		if !strings.Contains(text, strings.Repeat("s", snippetMaxRunes/2)) {
 			t.Errorf("%s text lost the snippet's head: %q", tt.sink, text)
 		}
 		asJSON, _ := renderCmd(t, tt.json)
@@ -481,68 +482,143 @@ func TestSessionsText_CapsSnippets(t *testing.T) {
 	}
 }
 
-// sessionsTextLineMaxRunes bounds one line of `sessions` text output when
-// every field is at its cap: the widest line, search's first, holds a title
-// (256), three labels (64 each) and their truncation markers, well under this.
-const sessionsTextLineMaxRunes = 1024
+// sessionsTextFieldMaxRunes is how many runes of one field's value a
+// `sessions` text sink may print, by field name. The numbers are literal on
+// purpose: deriving them from labelMaxRunes and its siblings would let
+// a raised cap raise its own bound. Labels are 64, titles 256, snippets 320;
+// Path is 512 input runes (QuotePathMax, which a plain fill escapes to
+// itself); "repo" is the argument printLastSession echoes on a miss.
+var sessionsTextFieldMaxRunes = map[string]int{
+	"SessionID": 64, "Project": 64, "Model": 64, "Machine": 64,
+	"GitBranch": 64, "Type": 64, "Missing": 64, "repo": 64,
+	"Title": 256, "Snippet": 320, "Path": 512,
+}
+
+// filledField is one value fillEveryString planted, under its field name.
+type filledField struct{ name, value string }
 
 // fillEveryString sets every exported string field of the struct v points at
-// to long, recursing into slices of structs (one element) and filling string
-// slices with one long element. Fields named Path get a short value instead:
-// runbook paths are escaped but not capped yet (forgectl#894), and this is the
-// only allowlist. It returns how many fields it filled with long.
-func fillEveryString(t *testing.T, v reflect.Value, long string) int {
+// to a fresh value from next, recursing into slices of structs (one element)
+// and giving string slices one element. It fails the test on any other field
+// kind that is not on its text-free allowlist (numbers, bools, time.Time and
+// *time.Time), so a *string, map or nested struct added later cannot stay at
+// its zero value and leave the pin green. It returns what it planted.
+func fillEveryString(t testing.TB, v reflect.Value, next func() string) []filledField {
 	t.Helper()
-	filled := 0
+	var filled []filledField
+	timeType := reflect.TypeFor[time.Time]()
 	for i := range v.NumField() {
 		f, sf := v.Field(i), v.Type().Field(i)
 		if !sf.IsExported() {
 			continue
 		}
 		switch {
-		case f.Kind() == reflect.String && sf.Name == "Path": // forgectl#894
-			f.SetString("p/x.md")
 		case f.Kind() == reflect.String:
-			f.SetString(long)
-			filled++
+			val := next()
+			f.SetString(val)
+			filled = append(filled, filledField{sf.Name, val})
 		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.String:
-			f.Set(reflect.ValueOf([]string{long}))
-			filled++
+			val := next()
+			f.Set(reflect.ValueOf([]string{val}))
+			filled = append(filled, filledField{sf.Name, val})
 		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.Struct:
 			elem := reflect.New(f.Type().Elem()).Elem()
-			filled += fillEveryString(t, elem, long)
+			filled = append(filled, fillEveryString(t, elem, next)...)
 			f.Set(reflect.Append(reflect.MakeSlice(f.Type(), 0, 1), elem))
+		case f.Type() == timeType, f.Kind() == reflect.Pointer && f.Type().Elem() == timeType:
+		default:
+			switch f.Kind() {
+			case reflect.Bool,
+				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+				reflect.Float32, reflect.Float64:
+			default:
+				t.Fatalf("fillEveryString: field %s.%s is a %s, which it cannot fill; teach it the kind, or allowlist it if it carries no text",
+					v.Type().Name(), sf.Name, f.Type())
+			}
 		}
 	}
 	return filled
 }
 
+// fatalRecorder is a testing.TB whose Fatalf records the message and unwinds
+// by panic, so a test can watch a helper call Fatalf without failing itself.
+type fatalRecorder struct {
+	testing.TB
+	msg string
+}
+
+func (r *fatalRecorder) Helper() {}
+
+func (r *fatalRecorder) Fatalf(format string, args ...any) {
+	r.msg = fmt.Sprintf(format, args...)
+	panic(r)
+}
+
+// TestFillEveryString_RejectsKindsItCannotFill pins the default arm: a field
+// kind fillEveryString does not handle must fail the fixture, not stay zero.
+//
+// Mutation that turns it red: delete fillEveryString's inner `default` arm.
+func TestFillEveryString_RejectsKindsItCannotFill(t *testing.T) {
+	for name, v := range map[string]any{
+		"*string": &struct{ P *string }{},
+		"map":     &struct{ M map[string]string }{},
+		"struct":  &struct{ S struct{ X string } }{},
+	} {
+		rec := &fatalRecorder{TB: t}
+		func() {
+			defer func() {
+				if p := recover(); p != nil && p != any(rec) {
+					panic(p)
+				}
+			}()
+			fillEveryString(rec, reflect.ValueOf(v).Elem(), func() string { return "x" })
+		}()
+		if !strings.Contains(rec.msg, "cannot fill") {
+			t.Errorf("%s field: fillEveryString did not fail the fixture (msg %q)", name, rec.msg)
+		}
+	}
+}
+
 // TestSessionsText_EveryFieldCapped pins the structure the #891 review asked
 // for: every string field of every struct a `sessions` text printer renders
-// goes through a capped helper. Each struct gets a 5000-rune value in EVERY
-// string field by reflection, so a field added later without a cap turns this
-// red without anyone remembering to add a row. Path fields are the one
-// allowlist (forgectl#894). --json carries every value whole.
+// goes through a capped helper. Each struct gets a distinct 5000-rune value in
+// EVERY string field by reflection, one Greek letter per field, so a field
+// added later without a cap turns this red without anyone remembering to add a
+// row. The text output must print each field at least once and at most its
+// literal budget in sessionsTextFieldMaxRunes; --json carries every value
+// whole. Path has no allowlist since forgectl#894.
 //
-// Mutations that turn it red: print h.Type through safeTerm in
-// printSearchHits, h.Project through safeTerm in printSearchHits, or
-// s.GitBranch through safeTerm in printLastSession.
+// Mutations that turn it red: print h.Type through termsafe.SafeLine in
+// printSearchHits, h.Project through termsafe.SafeLine in printSearchHits, or
+// s.GitBranch through termsafe.SafeLine in printLastSession; raise
+// labelMaxRunes to 200; print h.Type through safeTitle in
+// printSearchHits; make safePath return termsafe.SafeLine(s).
 func TestSessionsText_EveryFieldCapped(t *testing.T) {
-	long := strings.Repeat("x", 5000)
+	letter := 'α' // Greek alpha: no fixed text in these printers uses Greek
+	next := func() string {
+		if letter > 'ω' {
+			t.Fatal("ran out of distinct Greek letters for the fields")
+		}
+		v := strings.Repeat(string(letter), 5000)
+		letter++
+		return v
+	}
 	var hit sessions.SearchHit
 	var why sessions.WhyHit
 	var last sessions.SessionSummary
 	var receipt sessions.Receipt
-	filled := map[string]int{}
+	filled := map[string][]filledField{}
 	for name, v := range map[string]any{"SearchHit": &hit, "WhyHit": &why, "SessionSummary": &last, "Receipt": &receipt} {
-		if filled[name] = fillEveryString(t, reflect.ValueOf(v).Elem(), long); filled[name] == 0 {
+		if filled[name] = fillEveryString(t, reflect.ValueOf(v).Elem(), next); len(filled[name]) == 0 {
 			t.Fatalf("%s: no string field filled; the fixture tests nothing", name)
 		}
 	}
+	repo := filledField{"repo", next()}
 	for _, tt := range []struct {
 		sink       string
 		text, json func(cmd *cobra.Command) error
-		whole      int // long values --json must carry whole
+		fields     []filledField
 	}{
 		{
 			sink: "search",
@@ -552,23 +628,24 @@ func TestSessionsText_EveryFieldCapped(t *testing.T) {
 			json: func(cmd *cobra.Command) error {
 				return writeSearchHitsJSON(cmd.OutOrStdout(), []sessions.SearchHit{hit})
 			},
-			whole: filled["SearchHit"],
+			fields: filled["SearchHit"],
 		},
 		{
-			sink:  "why",
-			text:  func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, false) },
-			json:  func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, true) },
-			whole: filled["WhyHit"],
+			sink:   "why",
+			text:   func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, false) },
+			json:   func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, true) },
+			fields: filled["WhyHit"],
 		},
 		{
-			sink:  "last",
-			text:  func(cmd *cobra.Command) error { return printLastSession(cmd, long, &last, false) },
-			json:  func(cmd *cobra.Command) error { return printLastSession(cmd, long, &last, true) },
-			whole: filled["SessionSummary"],
+			sink:   "last",
+			text:   func(cmd *cobra.Command) error { return printLastSession(cmd, repo.value, &last, false) },
+			json:   func(cmd *cobra.Command) error { return printLastSession(cmd, repo.value, &last, true) },
+			fields: filled["SessionSummary"],
 		},
 		{
-			sink: "last (no session)",
-			text: func(cmd *cobra.Command) error { return printLastSession(cmd, long, nil, false) },
+			sink:   "last (no session)",
+			text:   func(cmd *cobra.Command) error { return printLastSession(cmd, repo.value, nil, false) },
+			fields: []filledField{repo},
 		},
 		{
 			sink: "sync receipt",
@@ -576,23 +653,47 @@ func TestSessionsText_EveryFieldCapped(t *testing.T) {
 				_ = printReceipt(cmd.OutOrStdout(), &receipt) // MISSING rows fail the receipt by design
 				return nil
 			},
+			fields: filled["Receipt"],
 		},
 	} {
 		text, _ := renderCmd(t, tt.text)
 		if !strings.Contains(text, strings.TrimSpace(termsafe.TruncatedMarker)) {
 			t.Errorf("%s text shows no truncation marker, so no cap engaged: %q", tt.sink, text)
 		}
-		for _, line := range strings.Split(text, "\n") {
-			if n := utf8.RuneCountInString(line); n > sessionsTextLineMaxRunes {
-				t.Errorf("%s text line is %d runes, over %d: an uncapped field, head %q", tt.sink, n, sessionsTextLineMaxRunes, line[:80])
+		for _, f := range tt.fields {
+			budget, ok := sessionsTextFieldMaxRunes[f.name]
+			if !ok {
+				t.Fatalf("%s: field %s has no budget in sessionsTextFieldMaxRunes; add one", tt.sink, f.name)
+			}
+			r, _ := utf8.DecodeRuneInString(f.value)
+			switch n := strings.Count(text, string(r)); {
+			case n == 0:
+				t.Errorf("%s text never printed field %s", tt.sink, f.name)
+			case n > budget:
+				t.Errorf("%s text printed %d runes of field %s, over its budget of %d", tt.sink, n, f.name, budget)
 			}
 		}
 		if tt.json == nil {
 			continue
 		}
 		asJSON, _ := renderCmd(t, tt.json)
-		if got := strings.Count(asJSON, long); got != tt.whole {
-			t.Errorf("%s --json carried %d fields whole, want all %d", tt.sink, got, tt.whole)
+		for _, f := range tt.fields {
+			if !strings.Contains(asJSON, f.value) {
+				t.Errorf("%s --json did not carry field %s whole", tt.sink, f.name)
+			}
 		}
+	}
+}
+
+// TestPrintLastSession_MissEscapesRepoOnce pins the #894 nit: the miss line
+// quotes the repo once, so an ESC in it reads \x1b, not \\x1b.
+//
+// Mutation that turns it red: format safeLabel(repo) with %q again.
+func TestPrintLastSession_MissEscapesRepoOnce(t *testing.T) {
+	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
+		return printLastSession(cmd, "a\x1bb", nil, false)
+	})
+	if want := `no sessions recorded for "a\x1bb"` + "\n"; stdout != want {
+		t.Errorf("miss line = %q, want %q", stdout, want)
 	}
 }

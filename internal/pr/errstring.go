@@ -13,6 +13,41 @@ import (
 const errTextUnavailable = "error text unavailable: its Error method panicked " +
 	"(an os.Root operation racing a symlink swap is the known cause)"
 
+// recordTextMaxRunes caps a line of free text a record or report field keeps:
+// an error, a refusal, a repair reason (#934). The field is escaped at the
+// source, so --json, the breadcrumb and the repair log all carry the escaped
+// form; the cap keeps a multi-megabyte stderr out of all three. It equals
+// internal/cli's textMaxRunes, so the text printer never cuts it a second
+// time.
+const recordTextMaxRunes = 1280
+
+// recordText is s made one inert terminal line and bounded for a record or
+// report field.
+func recordText(s string) string {
+	return termsafe.SafeLineMax(s, recordTextMaxRunes)
+}
+
+// breadcrumbTextMaxBytes caps the bytes one free-text field of a breadcrumb
+// record (LastError, RepairReason) takes in the encoded record (#963). A rune
+// cap alone overflowed maxBreadcrumbRecordBytes: '<' encodes as six bytes and
+// a 4-byte emoji as four, so two 1280-rune fields could reach 15 KiB. Two
+// fields at this cap are 3 KiB, which leaves the rest of the 8 KiB for the
+// structured fields, a workspace path up to PATH_MAX included
+// (TestBreadcrumbWorstCaseFitsTheRecordLimit).
+const breadcrumbTextMaxBytes = 1536
+
+// breadcrumbText is recordText further bounded by breadcrumbTextMaxBytes of
+// encoded JSON: every free-text field a breadcrumb record carries is written
+// through it, so no error text can push the record past its size limit.
+//
+// SafeLineMaxJSON returns "" for a value it has to cut when the byte cap is
+// smaller than TruncatedMarker's encoded size, and an empty RepairReason
+// fails a needs-repair record's validation. breadcrumbTextMaxBytes is far
+// above that size; TestBreadcrumbTextNeverCutsToEmpty holds it there.
+func breadcrumbText(s string) string {
+	return termsafe.SafeLineMaxJSON(s, recordTextMaxRunes, breadcrumbTextMaxBytes)
+}
+
 // safeErrString is err.Error() for an error whose Error method may panic.
 // Go 1.26's os.Root.RemoveAll can leak its internal errSymlink, wrapped in a
 // *fs.PathError, when a directory it is walking is swapped for a symlink

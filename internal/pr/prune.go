@@ -557,7 +557,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 		// append to it fine, and refusing the whole sweep over a line nobody can
 		// parse would make one hand edit permanent.
 		report.Log.Outcome = pruneOutcomeRefused
-		report.Log.Error = termsafe.SafeLine(safeErrString(readErr))
+		report.Log.Error = recordText(safeErrString(readErr))
 		slog.Warn("Refusing to compact the repair audit log: it could not be read back.",
 			"path", c.repairLogPath(), "error", readErr)
 	} else {
@@ -680,7 +680,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 		}
 		if err := pinAsideCandidate(root, cand); err != nil {
 			cand.item.Outcome = pruneOutcomeRefused
-			cand.item.Error = termsafe.SafeLine(safeErrString(err))
+			cand.item.Error = recordText(safeErrString(err))
 			continue
 		}
 		cand.ref, cand.hasRef = refFromRawRecord(cand.bytes)
@@ -786,14 +786,14 @@ func (c *Client) pruneOne(cand *asideCandidate, dirInfo fs.FileInfo) {
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		cand.item.Outcome = pruneOutcomeRefused
-		cand.item.Error = termsafe.SafeLine(safeErrString(err))
+		cand.item.Error = recordText(safeErrString(err))
 		slog.Warn("Refusing to remove a set-aside session record: its audit row could not be written first.",
 			"path", cand.path, "error", err)
 		return
 	}
 	if rerr := c.removeAsideFile(cand, dirInfo); rerr != nil {
 		cand.item.Outcome = pruneOutcomeFailed
-		cand.item.Error = termsafe.SafeLine(safeErrString(rerr))
+		cand.item.Error = recordText(safeErrString(rerr))
 		c.completeRepairRow(rowID, row, rerr)
 		slog.Error("Failed to remove a set-aside session record; it is still on disk.",
 			"path", cand.path, "error", rerr)
@@ -918,7 +918,7 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	plan, err := c.scanRepairLogFile(cutoff)
 	if err != nil {
 		out.Outcome = pruneOutcomeRefused
-		out.Error = termsafe.SafeLine(safeErrString(err))
+		out.Error = recordText(safeErrString(err))
 		return
 	}
 	if plan.dropped == 0 {
@@ -937,13 +937,13 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		out.Outcome = pruneOutcomeRefused
-		out.Error = termsafe.SafeLine(safeErrString(err))
+		out.Error = recordText(safeErrString(err))
 		return
 	}
 	plan, err = c.rewriteRepairLog(cutoff)
 	if err != nil {
 		out.Outcome = pruneOutcomeFailed
-		out.Error = termsafe.SafeLine(safeErrString(err))
+		out.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		slog.Error("Failed to compact the repair audit log; the previous log is intact and nothing was dropped.",
 			"path", c.repairLogPath(), "error", err)

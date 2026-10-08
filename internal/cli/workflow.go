@@ -372,7 +372,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// what keeps the next field added here from being the exception.
 			// Under --json the termsafe seam is termsafe.JSONEncoder instead, so
 			// the raw (unescaped) strings go straight into the payload built below.
-			name := termsafe.SafeLine(args[0])
+			name := safeLabel(args[0])
 			out := cmd.OutOrStdout()
 
 			state, ok, err := workflow.LoadState(args[0])
@@ -409,15 +409,15 @@ func newWorkflowStatusCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(out, "%s — run %s\n", termsafe.SafeLine(state.Workflow), termsafe.SafeLine(state.RunID))
-			fmt.Fprintf(out, "  started: %s\n", termsafe.SafeLine(state.StartedAt))
-			fmt.Fprintf(out, "  updated: %s\n", termsafe.SafeLine(state.UpdatedAt))
+			_, _ = fmt.Fprintf(out, "%s — run %s\n", safeLabel(state.Workflow), safeLabel(state.RunID))
+			_, _ = fmt.Fprintf(out, "  started: %s\n", safeLabel(state.StartedAt))
+			_, _ = fmt.Fprintf(out, "  updated: %s\n", safeLabel(state.UpdatedAt))
 			if len(state.Steps) == 0 {
 				fmt.Fprintln(out, "  no steps checkpointed complete")
 			} else {
 				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
 				for _, s := range state.Steps {
-					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(s.CompletedAt))
+					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), safeLabel(s.CompletedAt))
 				}
 			}
 
@@ -428,7 +428,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// stdout with the rest of it. What it must share with the shared
 			// sink is the termsafe boundary, and it does.
 			if note != "" {
-				_, _ = fmt.Fprintf(out, "  note: %s\n", termsafe.SafeLine(note))
+				_, _ = fmt.Fprintf(out, "  note: %s\n", safeText(note))
 			}
 			return nil
 		},
@@ -457,7 +457,7 @@ func workflowStatusNote(rawName, safeName string, state workflow.RunState) strin
 		// wrapped *os.PathError cannot reinsert the raw path its own Error
 		// method would print. The result is already terminal-safe, so both
 		// the human and --json callers use it as-is with no further escaping.
-		return fmt.Sprintf("could not load the current definition of %s (%v) — resume is unavailable until it loads", safeName, termsafe.Error(err))
+		return fmt.Sprintf("could not load the current definition of %s (%s) — resume is unavailable until it loads", safeName, safeText(termsafe.Error(err).Error()))
 	}
 	if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
 		return fmt.Sprintf("%s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh", safeName)
@@ -537,10 +537,13 @@ func quoteEach(items []string) []string {
 
 // printField writes one non-empty plan-step field as an indented line. The
 // escaping lives here rather than at each call site so a field added to
-// printPlan's list cannot be the one that ships raw.
+// printPlan's list cannot be the one that ships raw. It is escaped and NOT
+// capped (#782, #927 review): the dry run is the review of a file about to
+// be trusted, and a cut would let a hostile file push the tail of a cmd,
+// repo or ref behind the truncation marker.
 func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
+	_, _ = fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
 }

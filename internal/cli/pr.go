@@ -595,7 +595,7 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 func windowKillTimeoutNote(target string, parked bool) string {
 	where := "a session"
 	if target != "" {
-		where = termsafe.QuotePathIfUnsafe(target)
+		where = safePath(target)
 	}
 	state := "the record is parked as needs-repair"
 	if !parked {
@@ -684,7 +684,7 @@ func refusalLine(f pr.CleanupFailure, withCause bool) string {
 	case errors.Is(f.Err, pr.ErrTmuxBudgetSpent):
 		return fmt.Sprintf("skipped %s: tmux stopped answering earlier in this sweep, so it was not attempted and "+
 			"nothing of it was touched. Once tmux responds, run 'forgectl pr cleanup' again",
-			termsafe.QuotePathIfUnsafe(f.Path))
+			safePath(f.Path))
 	case errors.Is(f.Err, pr.ErrWindowKillTimedOut):
 		return windowKillTimeoutNote(f.Path, !errors.Is(f.Err, pr.ErrRecordNotParked))
 	case errors.Is(f.Err, tmux.ErrAmbiguousWindow):
@@ -694,7 +694,7 @@ func refusalLine(f pr.CleanupFailure, withCause bool) string {
 		}
 		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so none was killed: "+
 			"nothing was removed and %s. Close the ones that are not the review, then run 'forgectl pr teardown' "+
-			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
+			"again, or see 'forgectl pr repair'", safePath(f.Path), state)
 	case errors.Is(f.Err, pr.ErrWindowStateUnreadable):
 		state := "the record is parked as needs-repair"
 		if errors.Is(f.Err, pr.ErrRecordNotParked) {
@@ -702,13 +702,13 @@ func refusalLine(f pr.CleanupFailure, withCause bool) string {
 		}
 		cause := ""
 		if withCause {
-			cause = " (" + termsafe.SafeLine(f.Err.Error()) + ")"
+			cause = " (" + safeText(f.Err.Error()) + ")"
 		}
 		return fmt.Sprintf("refused %s: tmux could not say whether its review window still exists, so it was not "+
 			"treated as gone: nothing was removed and %s%s. Once tmux reads cleanly, run 'forgectl pr teardown' "+
-			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, cause)
+			"again, or see 'forgectl pr repair'", safePath(f.Path), state, cause)
 	default:
-		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
+		return fmt.Sprintf("failed %s: %s", safePath(f.Path), safeText(f.Err.Error()))
 	}
 }
 

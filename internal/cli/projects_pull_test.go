@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
 
@@ -45,6 +46,7 @@ func pullCmdFixture(t *testing.T, names []string, statusRecords, pullOut map[str
 	}
 	t.Setenv("PROJECTS_DIR", tmp)
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != testProjectsGitBinary || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}

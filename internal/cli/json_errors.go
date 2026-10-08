@@ -75,6 +75,10 @@ func jsonFailure(cmd *cobra.Command, err error, asJSON bool, code string) error 
 		return silent
 	}
 	path := ""
+	var jsonCoded *jsonCodedError
+	if chainAs(err, &jsonCoded) {
+		code = jsonCoded.code
+	}
 	var withPath jsonFailurePath
 	if chainAs(err, &withPath) {
 		path = withPath.jsonFailurePath()
@@ -248,7 +252,7 @@ func preFangFailure(root func() *cobra.Command, args []string, err error) error 
 	if cmd := preFangJSONTarget(root, args); cmd != nil {
 		return jsonFamilyFailure(cmd, err)
 	}
-	_, _ = fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(jsonErrorText(err)))
+	_, _ = fmt.Fprintln(os.Stderr, meta.AppName+": "+safeText(jsonErrorText(err)))
 	return err
 }
 

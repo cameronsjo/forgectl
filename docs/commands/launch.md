@@ -9,6 +9,7 @@ forgectl launch agents --json      # pure passthrough (byte-clean); posture inje
 forgectl launch mcp list           # Claude subcommands, -- --help, --version: byte-clean, no posture
 forgectl launch -p "<prompt>"      # print mode: only the profile's --permission-mode is injected
 forgectl launch -- <harness args…> # `--` ends launch verbs: `-- doctor` is claude's, not forgectl's
+forgectl launch --here [args…]     # from a repo subfolder: start claude here, not at the repo root
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
@@ -30,11 +31,11 @@ tasks. Claude remains the compatibility default.
 harness         = "claude"   # or "codex" / "pi"
 model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # Claude starts in plan
+permission_mode = "plan"     # Claude starts in plan; plan|default|manual|acceptEdits|auto|dontAsk|bypassPermissions, anything else is refused
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex settings when harness = "codex":
-# approval_policy   = "on-request"
+# approval_policy   = "on-request"   # untrusted|on-request|never; older Codex accepted "untrusted", 0.160 refuses it
 # sandbox           = "read-only"   # launch always starts non-writing; opt up to "workspace-write"
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 # Pi settings when harness = "pi":
@@ -99,13 +100,15 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   "<task>"` keeps the builder posture. A flag forgectl does not know is
   assumed to take a value, which leaves the builder posture and its
   permission mode in place.
-- **A piped builder run withholds `--allow-dangerously-skip-permissions`** —
-  with stdout not a terminal, claude runs a prompt non-interactively even
-  without `-p`, so `forgectl launch -- "<task>" | tee log` keeps the builder
-  posture (permission mode, `--add-dir`, `--model`, `--effort`) but drops
-  the one flag print mode drops for safety. `allow_danger` never makes bypass
-  reachable in an unattended run. A bare `forgectl launch` with no arguments
-  keeps the session posture either way.
+- **A piped run withholds `--allow-dangerously-skip-permissions`** — with
+  stdout not a terminal, claude runs a prompt non-interactively even without
+  `-p`, so `forgectl launch -- "<task>" | tee log` keeps the builder posture
+  (permission mode, `--add-dir`, `--model`, `--effort`) but drops the one flag
+  print mode drops for safety. The same holds for a bare `forgectl launch`
+  (which keeps the session posture), `launch agents` with injection, and
+  `forgectl resume`. `allow_danger` never makes bypass reachable in an
+  unattended run. A flag you type into the arguments yourself still reaches
+  claude.
 - **One leading `--` belongs to forgectl, for every harness** — `forgectl
   launch -- <args>` skips launch's own verbs (`which`, `doctor`, `edit`, …) and
   drops the separator, so Claude, Codex, and Pi never see it. A shell wrapper
@@ -126,6 +129,60 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   Cadence bridge variables such as `CADENCE_BRIEFS_DIR`,
   `CADENCE_METRICS_DIR`, and `GIT_GUARDRAILS_ALLOWED_OWNERS` in `env`; forgectl
   passes their values to Pi but shows only their names in `launch which`.
+
+**A claude session starts at the repository root when the settings live
+there.** Claude Code reads `.claude/settings.json` and
+`.claude/settings.local.json` only from the directory it starts in (measured on
+2.1.292), so a session started in a subfolder of a repository silently runs
+without the root's env, hooks, and permissions. `forgectl launch` and
+`forgectl surface launch` therefore start claude at the repository root when
+all of these hold:
+
+- the directory has neither settings file of its own;
+- walking up from it, the nearest directory with a `.git` entry (a directory,
+  or the file a linked worktree has) holds one of them.
+
+Otherwise claude starts where you are. The profile is still resolved for the
+directory you ran from, so a `[[launch.project]]` block that matches the
+subfolder still applies. The move prints one stderr line naming both
+directories, and sets `PWD` to the root. It applies to the postures that start
+a session (bare, builder, print, and `agents` with posture); the byte-clean
+passthroughs (`mcp …`, `--help`, `agents --json`) never move, so `mcp add
+--scope project` still writes where you ran it. Codex and Pi never move, since
+neither reads `.claude`, and neither does a coordinator worker, which already
+starts at its worktree's root.
+
+Some other cases never move:
+
+- **Continuing or resuming a session.** A launch whose arguments carry `-c`,
+  `--continue`, `-r`, `--resume`, `--from-pr`, or `--teleport` (before
+  claude's own `--`) stays put.
+  Claude Code keeps sessions per project directory, so a move would silently
+  resume the root's history, not the subfolder's.
+- **Symlinked directories.** The walk follows the physical path, the same one
+  profile matching uses. A `~/link` to `/real/pkg` looks for the repository
+  above `/real/pkg`, never above `~`. A move starts claude at the physical root.
+- **Your user configuration directory.** A root whose `.claude` is Claude
+  Code's user configuration (`~/.claude`, or `$CLAUDE_CONFIG_DIR`) is never a
+  settings root. Its `settings.json` is your user settings file, which applies
+  everywhere already. Without this rule, a git-tracked home directory would pull
+  every launch outside a repository up to `$HOME`.
+
+**Relative paths resolve against the root after a move.** forgectl does not
+rewrite path arguments, so a relative path in a flag or a prompt
+(`forgectl launch -- "fix ./main.go"`) means the root's `./main.go`. Use an
+absolute path, or `--here` to keep the session and its paths local.
+
+`launch which` reports the move. A `runs in` row names the root when a bare
+launch would start there. `run_directory` under `--json` names where the
+session starts, and is present for the claude harness only. `surface launch
+--dry-run` previews the same `run_directory` for a claude launch.
+
+To stay put, pass `--here` as the **first** argument: `forgectl launch --here`,
+`forgectl launch --here -- "<task>"`. Like the leading `--`, it is forgectl's
+and never reaches the harness, and only the first position counts: `forgectl
+launch -- --here` hands claude a `--here` of its own. `surface launch` takes it
+as an ordinary flag, `--here`.
 
 **Choosing the binary** uses env → config → PATH:
 `FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or
@@ -208,6 +265,21 @@ Config replacement, backup creation, and source retirement are separate reported
 A captured legacy name disappearing while a process waits for the writer lock is a successful peer no-op only when the locked `[launch]` config already supersedes every captured legacy addition. Otherwise the disappearance is reported as drift/refusal, the source is not claimed as cooperatively retired, and fallback uses the captured profile when no native `[launch]` is authoritative.
 
 New config and backup files are owner-only and no broader than `0600`; a restrictive umask may narrow them further, and an existing config mode such as `0400`, `0200`, or `0000` is not broadened. Every cooperating launch/top-level init writer shares the same Unix sibling lock and atomic replacement path. Secure legacy mutation and directory-durability claims apply to Unix builds (the shipped Darwin/Linux targets); non-Unix builds refuse automatic and explicit legacy mutation before writer activity. Their developer-only normal init may make a replacement visible, but reports that directory durability and cross-process serialization are unavailable.
+
+### Worker posture: `[launch.worker]`
+
+A coordinator worker (`forgectl surface launch --worktree`) does not take its posture from `[launch.defaults]`. Those are your interactive defaults, and their built-in `plan` would leave every worker unable to write. Each worker posture field comes from `[launch.worker]`, or the built-in worker value when it is unset. When the matched `[[launch.project]]` block sets the same field itself, the worker takes the stricter of the two:
+
+```toml
+[launch.worker]
+permission_mode = "acceptEdits"   # claude workers; built-in value acceptEdits
+sandbox         = "workspace-write" # codex workers; built-in value workspace-write
+approval_policy = "on-request"    # codex workers; built-in value on-request
+```
+
+To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
+
+A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `auto`, `workspace-write` and `on-request`. Setting `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. `auto` is allowed (ADR-0010, 2026-10-07): set `permission_mode = "auto"` in `[launch.worker]` to send a worker's tool calls to Claude Code's classifier instead of prompting; a project block that sets `acceptEdits` or stricter still wins. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 

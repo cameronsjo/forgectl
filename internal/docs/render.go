@@ -2,13 +2,14 @@ package docs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html"
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
+	"github.com/BurntSushi/toml"
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
@@ -44,7 +45,7 @@ const chromaStyle = "monokai"
 var markdown = newMarkdown(true, false)
 
 // markdownPlain is the same pipeline without the frontmatter extension. It
-// serves any document hasWellFormedFrontmatter rejects: the extension treats
+// serves any document wellFormedFrontmatter rejects: the extension treats
 // EVERY leading ---/+++ fence as an opener and, unterminated, consumes to end
 // of file — so a doc that merely opens with a thematic break would otherwise
 // render empty. Two instances beat one instance plus source rewriting; the
@@ -84,8 +85,9 @@ func newMarkdown(withFrontmatter, vault bool, extra ...goldmark.Option) goldmark
 	if withFrontmatter {
 		// Consumes a leading YAML/TOML frontmatter block at parse time, so the
 		// delimiters stop rendering as a thematic break + mangled heading. The
-		// parsed data is read back per-render (frontmatter.Get) and presented
-		// as a collapsed metadata disclosure — see frontmatterHTML.
+		// extension never decodes the block: frontmatterHTML presents the
+		// block splitFrontmatter already decoded, as a collapsed metadata
+		// disclosure.
 		extenders = append(extenders, &frontmatter.Extender{})
 	}
 	if vault {
@@ -532,13 +534,17 @@ func ChromaCSS() []byte {
 	return chromaArtificerCSS
 }
 
-// renderMu serializes goldmark.Convert calls. goldmark's Markdown value is
+// renderMu serializes renders. goldmark's Markdown value is
 // safe for concurrent Convert calls per its own docs in the common case, but
 // the highlighting extension's CSSWriter option (unused here) and some
 // third-party extensions are documented as not concurrency-safe; a mutex
 // costs nothing at docs-server request volumes and removes the question
-// entirely.
-var renderMu sync.Mutex
+// entirely. It is a one-slot semaphore rather than a sync.Mutex so that
+// acquiring it can give up at the render deadline or when the request goes
+// away. A request holds it only while goldmark runs, and never past
+// renderDeadline; a render that outlives that keeps goldmark to itself
+// through renderInFlight instead (renderdeadline.go).
+var renderMu = make(chan struct{}, 1)
 
 // Render converts markdown source to sanitized HTML: goldmark (GFM +
 // class-based chroma highlighting) then bluemonday (UGCPolicy + class
@@ -572,7 +578,8 @@ func render(source []byte, kind RootKind) (string, error) {
 
 // renderWith is render with a wikilink resolver for a vault page. A nil
 // resolve, or any other root kind, renders exactly as render does. resolve
-// runs under renderMu, so it must never render.
+// runs in the goldmark stage, one render at a time, so it must never
+// render.
 func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
 	rendered, _, err := renderHidden(source, kind, resolve)
 	return rendered, err
@@ -583,12 +590,26 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 // the same parse the page is rendered from, so countWords can leave comment
 // text out of the reading estimate.
 func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
+	out := renderHiddenContext(context.Background(), source, kind, resolve)
+	return out.html, out.hidden, out.err
+}
+
+// renderHiddenContext is renderHidden for a request: the render gives up,
+// and starts no render, once ctx is done, and it reports which notice, if
+// any, the page shows instead of the formatted document.
+func renderHiddenContext(ctx context.Context, source []byte, kind RootKind, resolve wikilinkResolver) renderOutcome {
+	// A document over the render-CPU cap is shown as its source text,
+	// before any parse, the frontmatter decode included (renderdeadline.go).
+	if len(source) > maxRenderBytes {
+		return sourceOutcome(noticeRenderSize, source)
+	}
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
 	// the REST OF THE FILE — so without this gate a doc opening with a
 	// thematic break renders as an empty page.
-	withFrontmatter := hasWellFormedFrontmatter(source)
+	front := wellFormedFrontmatter(source)
+	withFrontmatter := front != nil
 	var md goldmark.Markdown
 	switch {
 	case kind == RootVault && withFrontmatter:
@@ -600,17 +621,23 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	default:
 		md = markdownPlain
 	}
-	// A document goldmark would take superlinear time on is shown as plain
-	// text instead, before renderMu is taken. The guard measures the block
-	// structure md itself gives source (markupguard.go).
-	tooComplex, guardErr := markupTooComplex(md, source)
-	if guardErr != nil {
-		return "", nil, guardErr
-	}
-	if tooComplex {
-		return plainTextDoc(source), nil, nil
-	}
-	renderMu.Lock()
+	return renderBounded(ctx, md, source, front, kind, resolve)
+}
+
+// goldmarkOutput is what the goldmark stage hands the post-processing
+// stage.
+type goldmarkOutput struct {
+	html   []byte
+	pc     parser.Context
+	hidden []text.Segment
+	front  *frontmatterBlock
+}
+
+// renderGoldmark is the goldmark stage: parse and render. It runs only on a
+// render goroutine renderBounded starts, never two at a time, and may
+// outlive the request that started it, so it must not touch anything
+// request-scoped beyond its arguments.
+func renderGoldmark(md goldmark.Markdown, source []byte, front *frontmatterBlock, kind RootKind, resolve wikilinkResolver) (goldmarkOutput, error) {
 	var buf bytes.Buffer
 	ctx := newParseContext()
 	if kind == RootVault && resolve != nil {
@@ -623,11 +650,20 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if err == nil && kind == RootVault {
 		hidden = hiddenComments(doc, ctx)
 	}
-	renderMu.Unlock()
 	if err != nil {
-		return "", nil, fmt.Errorf("render markdown: %w", err)
+		return goldmarkOutput{}, fmt.Errorf("render markdown: %w", err)
 	}
-	input := dropDuplicateSVGNamespaces(buf.Bytes())
+	// The properties block reads the split that chose md
+	// (wellFormedFrontmatter), not a decode of its own.
+	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden, front: front}, nil
+}
+
+// renderPost is the stage after goldmark: the sanitizer, the balancer and
+// the post-sanitizer additions. None of it shares state between renders
+// (the bluemonday policy is read-only once built, and every other step
+// works on its arguments), so it runs outside renderMu, as it always has.
+func renderPost(g goldmarkOutput, kind RootKind) string {
+	input := dropDuplicateSVGNamespaces(g.html)
 	body := stripChromeClasses(balanceFragment(string(sanitizer.SanitizeBytes(input))))
 	// An unclosed skip-content element makes the sanitizer drop the rest of
 	// the document (forgectl#622). The sanitizer is left exactly as it is,
@@ -637,7 +673,7 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if name, ok := unclosedSkipContent(input); ok {
 		notice = skipContentBanner(name)
 	}
-	return notice + frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
+	return notice + frontmatterHTML(g.front) + transformCallouts(body, kind)
 }
 
 // hiddenComments returns the source range of every %% comment in a parsed
@@ -703,6 +739,10 @@ type RenderedDoc struct {
 	Outline []OutlineItem
 	Words   int
 	Minutes int
+	// Notice names the notice the page shows in place of the formatted
+	// document (its data-forgectl-notice value), or is empty when the
+	// document was formatted.
+	Notice string
 }
 
 // RenderDoc renders a docs-root document and derives its outline and
@@ -716,6 +756,12 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 // wikilinks into links; with either nil, every wikilink renders as an
 // unresolved miss instead.
 func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
+	return RenderDocForContext(context.Background(), kind, source, idx, from)
+}
+
+// RenderDocForContext is RenderDocFor for a request: once ctx is done the
+// render gives up with ctx's error and starts no render.
+func RenderDocForContext(ctx context.Context, kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
 	var resolve wikilinkResolver
 	if idx != nil && from != nil {
 		budget := newFragmentBudget()
@@ -723,12 +769,13 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 			return idx.wikilinkTarget(from, ref, budget)
 		})
 	}
-	rendered, hidden, err := renderHidden(source, kind, resolve)
-	if err != nil {
-		return RenderedDoc{}, err
+	out := renderHiddenContext(ctx, source, kind, resolve)
+	if out.err != nil {
+		return RenderedDoc{}, out.err
 	}
+	rendered := out.html
 	// A vault page's %% comments are not on the page, so they are not read.
-	words := countWords(cutSegments(source, hidden))
+	words := countWords(cutSegments(source, out.hidden))
 	minutes := (words + 199) / 200
 	if minutes < 1 {
 		minutes = 1
@@ -738,6 +785,7 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 		Outline: extractOutline(rendered),
 		Words:   words,
 		Minutes: minutes,
+		Notice:  out.notice,
 	}, nil
 }
 
@@ -969,37 +1017,47 @@ func calloutTitle(rest string) (string, int) {
 	return html.EscapeString(html.UnescapeString(raw)), end
 }
 
-// hasWellFormedFrontmatter reports whether source opens with a frontmatter
-// block safe to hand to the frontmatter extension. It mirrors the extension's
+// wellFormedFrontmatter returns the frontmatter block source opens with, or
+// nil when it opens with none safe to hand to the frontmatter extension. It mirrors the extension's
 // own delimiter rules (a first line of three-plus repeated - or +, closed by
 // an identical line) and then applies the judgment the extension skips: a ---
 // fence shares syntax with a thematic break, so an unterminated block, or one
 // whose body is not a YAML mapping, is markdown — not metadata — and must
 // reach the parser that treats it that way. A +++ TOML fence collides with no
-// markdown syntax, so termination alone qualifies it.
-func hasWellFormedFrontmatter(source []byte) bool {
-	_, ok := splitFrontmatter(source)
-	return ok
+// markdown syntax, so termination and the TOML size cap qualify it. The
+// render reads the one block it returns, so the page splits and decodes
+// the block once before the parse.
+func wellFormedFrontmatter(source []byte) *frontmatterBlock {
+	fm, ok := splitFrontmatter(source)
+	if !ok {
+		return nil
+	}
+	return &fm
 }
 
 // frontmatterBlock is splitFrontmatter's view of a document: the fence byte that
-// opened the block, the block's raw bytes (fences excluded), and the body
-// that follows the closing fence.
+// opened the block, the block's raw bytes (fences excluded), the body
+// that follows the closing fence, and, for a --- block, the top-level
+// mapping of its one decode (nil for an empty block or a +++ one).
 type frontmatterBlock struct {
 	delim byte
 	block []byte
 	body  []byte
+	root  *yaml.Node
 }
 
 // splitFrontmatter is the ONE place the frontmatter fence rule lives: a
 // first line of three-plus repeated - or +, closed by the first later line
 // that repeats the same byte at the same length. A --- block must also
 // decode as a YAML mapping (an empty mapping counts) — see
-// hasWellFormedFrontmatter for why; a +++ TOML block needs only
-// termination. Every consumer — the renderer's well-formedness gate,
-// countWords, and scanDoc's alias extraction — reads through this function
-// so they can never disagree about where a document's metadata ends and
-// its body begins.
+// wellFormedFrontmatter for why — within the limits
+// yamlFrontmatterRoot checks; a +++ TOML block needs termination and must
+// fit maxTOMLFrontmatterBytes. Every consumer — the renderer's
+// well-formedness gate, countWords, and scanDoc's alias extraction — reads
+// through this function so they can never disagree about where a
+// document's metadata ends and its body begins. A block over maxFrontmatterBytes is not frontmatter
+// either, so no consumer ever decodes one (#910). The block is decoded
+// here, once; consumers read fm.root rather than decoding it again.
 func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	lines := bytes.SplitAfter(source, []byte("\n"))
 	if len(lines) == 0 {
@@ -1009,9 +1067,15 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	if delim == 0 {
 		return frontmatterBlock{}, false
 	}
+	blockLen := 0
 	for i := 1; i < len(lines); i++ {
 		d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n")))
 		if d != delim || c != count {
+			// A closing fence past the cap would close an over-cap
+			// block, which is not frontmatter, so the search ends here.
+			if blockLen += len(lines[i]); blockLen > maxFrontmatterBytes {
+				return frontmatterBlock{}, false
+			}
 			continue
 		}
 		fm := frontmatterBlock{
@@ -1021,18 +1085,38 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 		}
 		// First matching fence closes the block, same as the extension.
 		if delim == '+' {
+			if len(fm.block) > maxTOMLFrontmatterBytes {
+				return frontmatterBlock{}, false
+			}
 			return fm, true
 		}
-		var m map[string]any
-		// A nil (empty) mapping still counts: `---` immediately closed by
-		// `---` is legal, empty frontmatter, not a pair of thematic breaks.
-		if yaml.Unmarshal(fm.block, &m) != nil {
+		// An empty block (nil root) still counts: `---` immediately
+		// closed by `---` is legal, empty frontmatter, not a pair of
+		// thematic breaks.
+		root, ok := yamlFrontmatterRoot(fm.block)
+		if !ok {
 			return frontmatterBlock{}, false
 		}
+		fm.root = root
 		return fm, true
 	}
 	return frontmatterBlock{}, false
 }
+
+// maxFrontmatterBytes is the largest frontmatter block, fences excluded,
+// that splitFrontmatter accepts. A larger block is treated as no
+// frontmatter: the document renders and indexes as markdown, fences and
+// all, so its source stays readable. The block is decoded before every
+// other bound on a request (the render deadline, the markup guard, the
+// render lock) and in the index scan of every doc (#910). The decode is
+// kept linear by what frontmatter_check.go refuses, and this cap bounds
+// the linear cost: at 16 KiB the worst shape measured, flow collections
+// nested as deep as the block allows (`k: [[[…]]]`, depth about 8000),
+// took 20 ms of CPU to split and 87 ms for the whole page render. A +++
+// block has a smaller cap of its own, maxTOMLFrontmatterBytes. Written
+// frontmatter is far smaller: the largest found across this estate's docs
+// and vaults was about 7 KiB.
+const maxFrontmatterBytes = 16 << 10
 
 // frontmatterDelim interprets one newline-stripped line as a frontmatter
 // fence: the opening byte (- or +) repeated for the whole line, minimum
@@ -1055,24 +1139,23 @@ func frontmatterDelim(line []byte) (byte, int) {
 	return d, len(line)
 }
 
-// frontmatterHTML renders a document's parsed frontmatter as a collapsed
+// frontmatterHTML renders a document's frontmatter as a collapsed
 // Artificer disclosure (accordion + kv grid), or "" when the document has
-// none. Key order follows the document; a non-scalar value is shown as its
-// YAML flow form rather than flattened.
-func frontmatterHTML(ctx parser.Context) string {
-	fm := frontmatter.Get(ctx)
+// none. It reads the block splitFrontmatter found, so the page decodes it
+// no more often than the gate did: a YAML block is its one node decode,
+// in document key order, with a non-scalar value shown as its YAML flow
+// form rather than flattened; a TOML block is decoded here, once, and its
+// keys sorted.
+func frontmatterHTML(fm *frontmatterBlock) string {
 	if fm == nil {
 		return ""
 	}
-	var node yaml.Node
-	if err := fm.Decode(&node); err != nil || len(node.Content) == 0 {
-		// TOML frontmatter (or unparseable YAML) has no yaml.Node form —
-		// fall back to the unordered map both formats can decode into.
-		return frontmatterHTMLUnordered(fm)
+	if fm.delim == '+' {
+		return frontmatterHTMLTOML(fm.block)
 	}
-	mapping := node.Content[0]
-	if mapping.Kind != yaml.MappingNode {
-		return frontmatterHTMLUnordered(fm)
+	mapping := fm.root
+	if mapping == nil {
+		return ""
 	}
 	status, staleAfter := trustFields(mapping)
 	tr := evalTrust(status, staleAfter, trustNow())
@@ -1086,9 +1169,12 @@ func frontmatterHTML(ctx parser.Context) string {
 	return wrapFrontmatter(b.String(), pairs)
 }
 
-func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
+// frontmatterHTMLTOML renders a +++ block's keys in sorted order, each
+// value in its YAML form, or "" when the block does not decode or is
+// empty.
+func frontmatterHTMLTOML(block []byte) string {
 	var m map[string]any
-	if err := fm.Decode(&m); err != nil || len(m) == 0 {
+	if err := toml.Unmarshal(block, &m); err != nil || len(m) == 0 {
 		return ""
 	}
 	keys := make([]string, 0, len(m))
@@ -1103,8 +1189,7 @@ func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
 		if err != nil {
 			continue // badge counts rendered pairs, so a skipped key is not counted
 		}
-		// No trust badges here: OKF frontmatter is YAML, and this fallback
-		// serves TOML and YAML the node decode could not read.
+		// No trust badges here: OKF frontmatter is YAML.
 		writeKV(&b, k, strings.TrimSpace(string(b2)), trustState{})
 		pairs++
 	}

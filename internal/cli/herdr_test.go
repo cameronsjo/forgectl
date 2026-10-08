@@ -133,7 +133,7 @@ func setHerdrSeams(t *testing.T, s herdrSeams) {
 		}
 		return fn()
 	}
-	herdrProjectsRoot = func() string { return "/r" }
+	herdrProjectsRoot = func() (string, error) { return "/r", nil }
 	herdrUserHome = func() (string, error) { return "/home/u", nil }
 	herdrFileExists = func(p string) bool { return s.legacyRules && p == "/home/u/.config/herdr-organize/rules.toml" }
 }
@@ -174,6 +174,30 @@ func runOrganize(t *testing.T, cfg config.Config, w *herdrWorld, args ...string)
 }
 
 var inSession = herdrSeams{env: map[string]string{"HERDR_ENV": "1"}}
+
+// A newline in the organize message reached a --json consumer as a literal
+// backslash and n: termsafe.Error flattens newlines, and the problems were
+// joined with errors.Join's (forgectl#1087).
+func TestHerdrOrganize_NoRules_MessageHasNoLiteralBackslashN(t *testing.T) {
+	setHerdrSeams(t, herdrSeams{
+		sessionErr:  herdr.ErrNotInSession,
+		legacyRules: true,
+		env:         map[string]string{"HERDR_ORGANIZE_RULES": "/x/rules.toml"},
+	})
+	r := runOrganize(t, config.Config{}, nil)
+	if r.err == nil {
+		t.Fatal("want an error")
+	}
+	msg := r.err.Error()
+	if strings.Contains(msg, `\n`) || strings.Contains(msg, "\n") {
+		t.Errorf("error carries a newline or a literal backslash-n: %q", msg)
+	}
+	for _, want := range []string{"no rules are configured", "forgectl no longer reads", "HERDR_ORGANIZE_RULES is set", "not inside a herdr session"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error lacks %q: %q", want, msg)
+		}
+	}
+}
 
 func TestHerdrOrganize_NotInHerdrAndNoConfig_ReportsBothInOneRun(t *testing.T) {
 	setHerdrSeams(t, herdrSeams{sessionErr: herdr.ErrNotInSession})
@@ -512,5 +536,29 @@ func TestHerdrOrganize_JSON_Golden(t *testing.T) {
 	}
 	if strings.Contains(r.stdout, "re-run with") {
 		t.Errorf("human text leaked into the JSON stdout:\n%s", r.stdout)
+	}
+}
+
+// A projects root that cannot be resolved stops organize before it plans:
+// planning against an empty root would match rules against the wrong paths.
+func TestHerdrOrganize_UnresolvedProjectsRootFailsBeforePlanning(t *testing.T) {
+	setHerdrSeams(t, inSession)
+	rootErr := errors.New("resolving projects root: no home")
+	herdrProjectsRoot = func() (string, error) { return "", rootErr }
+	for _, args := range [][]string{nil, {"--apply"}} {
+		w := newWorld(hws("w2", "misc", 1)).
+			tab("w2", "t1", "term1", "/r/forge/a", "alpha")
+		r := runOrganize(t, organizeCfg(), w, args...)
+		if r.err == nil || !strings.Contains(r.err.Error(), "resolving projects root") {
+			t.Errorf("args %v: err = %v, want the root resolution error", args, r.err)
+		}
+		if r.stdout != "" {
+			t.Errorf("args %v: stdout = %q, want nothing planned or reported", args, r.stdout)
+		}
+		for _, c := range r.runner.Calls {
+			if strings.Contains(strings.Join(c.Args, " "), "move") {
+				t.Errorf("args %v: a move was issued despite the error: %v", args, c)
+			}
+		}
 	}
 }

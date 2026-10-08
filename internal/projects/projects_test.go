@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
@@ -44,6 +46,7 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 		"cameron\tnewgt\tsource\tssh://git@git.sjo.lol:222/cameron/newgt.git\n"
 
 	return func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch name {
 		case "gh":
 			// With no [projects].owners configured, the inventory asks
@@ -167,9 +170,12 @@ func TestInventory_DegradesWhenHostErrors(t *testing.T) {
 	if len(repos) != 1 || repos[0].Host != "git.sjo.lol" {
 		t.Fatalf("expected the surviving gitea repo, got %+v", repos)
 	}
-	if len(notes) != 1 {
-		t.Fatalf("expected one degradation note, got %v", notes)
+	// One note for the owner lookup, with its categorical reason, then the
+	// source note.
+	if len(notes) != 2 || !strings.HasPrefix(notes[0], "github owners: query failed (") {
+		t.Fatalf("expected the owner-lookup note and one source note, got %v", notes)
 	}
+	notes = notes[1:]
 	// The note names the SOURCE (which enumerator failed), not a hostname —
 	// a GitHub run that errors produced no rows, so it has no host to name.
 	if !strings.Contains(notes[0], "github") {
@@ -314,6 +320,7 @@ func TestClone_RejectsUnsafeHostOrOwner(t *testing.T) {
 // originGitea answers `git remote get-url origin` with the gitea homeclaw URL —
 // used to stand up an existing checkout at the collision path.
 func originGitea(name string, args []string) (string, error) {
+	args = gitenvtest.Strip(args)
 	if len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 		return "ssh://git@git.sjo.lol:222/cameron/homeclaw.git", nil
 	}
@@ -357,6 +364,7 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 			return "ssh://git@git.sjo.lol:222/cameron/somethingelse.git", nil
 		}
@@ -495,10 +503,13 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 }
 
 // TestInventory_StatusProcessBudget pins forgectl#216 end to end: a full
-// Inventory row costs exactly two git processes per repository — one status
-// probe and one origin lookup — whether the tree is clean or dirty. Before
-// the porcelain-v2 collapse a clean row cost three, because learning the
-// ahead count needed a second `rev-list` walk.
+// Inventory row costs exactly four git processes per repository without
+// submodules — the filter-driver and submodule listings that keep the status
+// probe from running a repository's filter (#977), one status probe, and one
+// origin lookup —
+// whether the tree is clean or dirty. Before the porcelain-v2 collapse a
+// clean row cost a further process, because learning the ahead count needed a
+// second `rev-list` walk.
 //
 // Calls are filtered by binary, repo dir, and subcommand rather than by slice
 // index: Inventory fans the status phase and the origin phase out across
@@ -528,7 +539,8 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			mkGitDir(t, tmp, "forgectl")
 			repo := filepath.Join(tmp, "forgectl")
 
-			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				switch name {
 				case "gh":
 					if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
@@ -544,7 +556,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 					return tc.statusOut, nil
 				}
 				return "", nil
-			}}
+			})}
 			c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 			repos, notes, err := c.Inventory(context.Background())
@@ -570,6 +582,9 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			if counts["remote"] != 1 {
 				t.Errorf("remote get-url calls = %d, want exactly 1", counts["remote"])
 			}
+			if counts["config"] != 1 || counts["ls-files"] != 1 {
+				t.Errorf("filter-driver and submodule listings = %d and %d, want exactly 1 each", counts["config"], counts["ls-files"])
+			}
 			if counts["rev-list"] != 0 {
 				t.Errorf("rev-list calls = %d, want 0", counts["rev-list"])
 			}
@@ -577,8 +592,8 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			for _, n := range counts {
 				total += n
 			}
-			if total != 2 {
-				t.Errorf("git calls for %s = %d (%v), want exactly 2", repo, total, counts)
+			if total != 4 {
+				t.Errorf("git calls for %s = %d (%v), want exactly 4", repo, total, counts)
 			}
 		})
 	}
@@ -608,6 +623,7 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 	}
 
 	for _, call := range fake.Calls {
+		call.Args = gitenvtest.Strip(call.Args)
 		if call.Name != "git" || len(call.Args) < 2 {
 			continue
 		}
@@ -642,6 +658,7 @@ func TestLocalRepos_SSHURLNeverCarriesAPassword(t *testing.T) {
 		tmp := t.TempDir()
 		mkGitDir(t, tmp, "r")
 		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 				return tc.origin + "\n", nil
 			}
@@ -1216,6 +1233,7 @@ func TestClone_DuplicateAcrossLayoutsIsANoOp(t *testing.T) {
 				t.Fatal(err)
 			}
 			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && len(args) >= 4 && args[2] == "remote" {
 					return origin, nil
 				}
@@ -1264,6 +1282,7 @@ func TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:someone-else/forgectl.git", nil
 		}
@@ -1428,6 +1447,7 @@ func TestClone_OverrideWingStillFindsTheConfiguredWing(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:cameronsjo/forgectl.git", nil
 		}
@@ -1471,6 +1491,7 @@ func TestClone_ProbeDoesNotWalkUpToAnAncestorRepo(t *testing.T) {
 	// A runner that answers every `remote get-url` with the matching origin —
 	// i.e. the worst case, an ancestor repo that really is this repo.
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:cameronsjo/forgectl.git", nil
 		}
@@ -1587,5 +1608,89 @@ func TestDiscover_WingMembersOfACheckoutAreStillFound(t *testing.T) {
 	}
 	if !got["member"] || !got["wing"] {
 		t.Errorf("a wing that is also a checkout must yield both itself and its members, got %v", got)
+	}
+}
+
+// TestLocalNames_MatchesDiscoverWithoutSpawning pins the hub picker's
+// projects source (forgectl#730): the same names Discover lists, sorted and
+// de-duplicated, from the filesystem walk alone — no git probe runs.
+func TestLocalNames_MatchesDiscoverWithoutSpawning(t *testing.T) {
+	tmp := t.TempDir()
+	mkCanonicalGitDir(t, tmp, "github.com", "cameronsjo", "forgectl")
+	mkCanonicalGitDir(t, tmp, "git.sjo.lol", "cameron", "forgectl") // same name, other host
+	mkGitDir(t, tmp, "homeclaw")
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	got := LocalNames(tmp)
+	if want := "forgectl,homeclaw,notes"; strings.Join(got, ",") != want {
+		t.Errorf("LocalNames = %v, want %s", got, want)
+	}
+
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projs) != 4 {
+		t.Errorf("Discover found %d projects after the walk was extracted, want 4: %+v", len(projs), projs)
+	}
+	if len(fake.Calls) == 0 {
+		t.Error("control: Discover spawned no git probe, so the fixture proves nothing about LocalNames")
+	}
+	if LocalNames(filepath.Join(tmp, "absent")) != nil {
+		t.Error("LocalNames of a missing root should be nil")
+	}
+}
+
+// TestInventory_EverySourceFailingIsAnError: a missing projects root, a
+// failing GitHub, and no Gitea used to come back as an empty inventory with
+// no error, which `projects list` printed as "0 projects" and exit 0
+// (forgectl#1149). It is ErrNoSourceReadable now, with every note kept.
+func TestInventory_EverySourceFailingIsAnError(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch name {
+			case "gh":
+				return "", errors.New("gh: not authenticated")
+			case "tea":
+				return "", &exec.CommandError{Name: "tea", ExitCode: -1, Err: osexec.ErrNotFound}
+			}
+			return "", nil
+		},
+	}
+	c := &Client{Dir: filepath.Join(t.TempDir(), "missing"), run: fake, gitBin: "git"}
+
+	repos, notes, err := c.Inventory(context.Background())
+	if !errors.Is(err, ErrNoSourceReadable) {
+		t.Fatalf("err = %v, want ErrNoSourceReadable", err)
+	}
+	if repos != nil {
+		t.Errorf("repos = %v, want none", repos)
+	}
+	if len(notes) == 0 || !strings.HasPrefix(notes[0], "local: projects directory not found") {
+		t.Errorf("notes = %v, want the local note first", notes)
+	}
+}
+
+// TestInventory_OneReadableSourceIsNotAnError: GitHub failing while the
+// local walk works is a partial inventory, not a failure.
+func TestInventory_OneReadableSourceIsNotAnError(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch name {
+			case "gh":
+				return "", errors.New("gh: not authenticated")
+			case "tea":
+				return "", &exec.CommandError{Name: "tea", ExitCode: -1, Err: osexec.ErrNotFound}
+			}
+			return "", nil
+		},
+	}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+	if _, _, err := c.Inventory(context.Background()); err != nil {
+		t.Fatalf("a readable local root must keep the inventory partial, got %v", err)
 	}
 }

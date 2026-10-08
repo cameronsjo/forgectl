@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"runtime"
@@ -199,6 +200,36 @@ func TestErrorMessageIsRedacted(t *testing.T) {
 	}
 }
 
+// TestErrorFieldsHoldRedactedText is #941: Message and Reason are exported
+// and were stored raw, redacted only by Error(), so %#v, a log of the struct,
+// or a future reader of the field showed herdr's text. They are stored
+// redacted now; a line without a credential shape survives.
+//
+// Mutation that turns it red: store r.Message raw in refusal
+// (the Message row), or mr.Reason raw in MoveTab (the Reason row).
+func TestErrorFieldsHoldRedactedText(t *testing.T) {
+	const secret = "SEKRIT-herdr-941" //nolint:gosec // G101: a fake credential the test plants
+	env := `{"error":{"code":"bad_request","message":"kept line\nAuthorization: Bearer ` + secret + `"}}`
+	_, err := New(runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: env})).Workspaces(context.Background())
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *Error", err)
+	}
+	if got := fmt.Sprintf("%#v", he); strings.Contains(got, secret) || !strings.Contains(he.Message, "kept line") {
+		t.Errorf("Message row: %%#v = %s; want the credential line withheld and the other kept", got)
+	}
+
+	out := `{"id":"1","result":{"move_result":{"changed":false,"reason":"last_tab_in_workspace\nAuthorization: Bearer ` + secret + `"}}}`
+	_, err = New(runnerFor(out, nil)).MoveTab(context.Background(), "w1:t1", ToIndex(0))
+	var d *Declined
+	if !errors.As(err, &d) {
+		t.Fatalf("MoveTab err = %v, want *Declined", err)
+	}
+	if got := fmt.Sprintf("%#v", d); strings.Contains(got, secret) || !strings.Contains(d.Reason, "last_tab_in_workspace") {
+		t.Errorf("Reason row: %%#v = %s; want the credential line withheld and the reason code kept", got)
+	}
+}
+
 // TestDeclinedReasonIsRedacted is #832 item 7: Declined.Reason rendered
 // through printable only, while (*Error).Error already redacted Message. A
 // credential herdr put in the reason is now withheld, and a line without a
@@ -216,10 +247,10 @@ func TestDeclinedReasonIsRedacted(t *testing.T) {
 // TestErrorTextEscapesFormatCharacters is #825 item 2: printable dropped only
 // Cc controls, so a bidi override (U+202E) and other Cf format characters in
 // herdr's text reached the terminal and could reorder what the operator read.
-// Every sink printable feeds must show them as escapes instead.
+// Every sink printableMax feeds must show them as escapes instead.
 //
 // Mutation that turns it red: restore the Cc-only strings.Map filter in
-// printable.
+// printableMax.
 func TestErrorTextEscapesFormatCharacters(t *testing.T) {
 	const planted = "a\u202eb\u2066c\u200bd\u2060e\ufeff"
 	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: `{"error":{"code":"x\u202ey","message":"` + planted + `"}}`}
@@ -253,8 +284,8 @@ func TestErrorTextEscapesFormatCharacters(t *testing.T) {
 // stderr tail. Each now stops at herdrTextMaxRunes and says so; the head
 // survives.
 //
-// Mutation: make printableMax return printable(s) and every row renders the
-// whole 100k-rune field.
+// Mutation: make printableMax return termsafe.SafeLine(s) and every row
+// renders the whole 100k-rune field.
 func TestHerdrTextIsCapped(t *testing.T) {
 	long := "HEAD" + strings.Repeat("x\u202e", 50_000)
 	for name, got := range map[string]string{

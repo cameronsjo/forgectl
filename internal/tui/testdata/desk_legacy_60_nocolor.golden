@@ -1,0 +1,60 @@
+desk ○ idle · forgectl 0.0.0-test · host-…  up 4h37m · 19:07
+◌ 0 waiting · 6 started today · median 52s · ✓ 36 ✗ 4
+╭ queue ─┤ ● 0 running  ◌ 0 waiting ├──────────────────────╮
+│ nothing waiting                                          │
+│ Claude queues scripts with forgectl desk add; they appe… │
+╰──────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────╮
+│ the selected item's sha256, what and why show here       │
+╰──────────────────────────────────────────────────────────╯
+╭ timeline ────────────────────────────────────────────────╮
+│  Today · Mon 5 Oct ────────────────────────────────── 6  │
+│   16:07  ✓ 44 legacy-task-44                             │
+│          │ ended with no exit recorded                   │
+│   13:07  ✓ 43 legacy-task-43                             │
+│          │ ran ok in 0:53                                │
+│   10:07  ✓ 42 legacy-task-42                             │
+│          │ ran ok in 0:52                                │
+│   07:07  ✓ 41 legacy-task-41                             │
+│          │ ran ok in 0:51                                │
+│   04:07  ✗ 40 legacy-task-40                             │
+│          │ failed · exit 4 after 0:50                    │
+│   01:07  ✓ 39 legacy-task-39                             │
+│            ran ok in 0:49                                │
+│                                                          │
+│  Yesterday · Sun 4 Oct ────────────────────────────── 8  │
+│   22:07  ✓ 38 legacy-task-38                             │
+│          │ ran ok in 0:48                                │
+│   19:07  ✓ 37 legacy-task-37                             │
+│          │ ran ok in 0:47                                │
+│   16:07  ✓ 36 legacy-task-36                             │
+│          │ ran ok in 0:46                                │
+│   13:07  ✓ 35 legacy-task-35                             │
+│          │ ran ok in 0:45                                │
+│   10:07  ✓ 34 legacy-task-34                             │
+│          │ ran ok in 0:44                                │
+│   07:07  ✓ 33 legacy-task-33                             │
+│          │ ended with no exit recorded                   │
+│   04:07  ✓ 32 legacy-task-32                             │
+│          │ ran ok in 0:42                                │
+│   01:07  ✓ 31 legacy-task-31                             │
+│            ran ok in 0:41                                │
+│                                                          │
+│  Sat 3 Oct ────────────────────────────────────────── 8  │
+│   22:07  ✗ 30 legacy-task-30                             │
+│          │ failed · exit 3 after 0:40                    │
+│   19:07  ✓ 29 legacy-task-29                             │
+│          │ ran ok in 0:39                                │
+│   16:07  ✓ 28 legacy-task-28                             │
+│          │ ran ok in 0:38                                │
+│   13:07  ✓ 27 legacy-task-27                             │
+│          │ ran ok in 0:37                                │
+│   10:07  ✓ 26 legacy-task-26                             │
+│          │ ran ok in 0:36                                │
+│   07:07  ✓ 25 legacy-task-25                             │
+│          │ ran ok in 0:35                                │
+│   04:07  ✓ 24 legacy-task-24                             │
+│          │ ran ok in 0:34                                │
+│ … 23 more · t to open                                    │
+╰──────────────────────────────────────────────────────────╯
+ l log · r runs · t timeline · h history · ? help · q quit

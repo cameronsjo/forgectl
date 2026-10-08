@@ -45,6 +45,10 @@ const (
 	// FailureInternal is a defect on our side: a validation we should have
 	// run earlier, an impossible state, a programming error.
 	FailureInternal
+	// FailureTargetBusy is a pane the adapter must type into that is already
+	// running something other than its idle shell. Typing there would hand the
+	// bootstrap, nonce included, to whatever holds the pane.
+	FailureTargetBusy
 
 	failureClassCount
 )
@@ -61,6 +65,7 @@ var failureClassNames = [failureClassCount]string{
 	FailureCanceled:          "canceled",
 	FailureIdentityMismatch:  "identity-mismatch",
 	FailureInternal:          "internal",
+	FailureTargetBusy:        "target-busy",
 }
 
 // Valid reports whether c names a real class. The zero value does not.

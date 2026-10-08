@@ -37,7 +37,10 @@ type RestartRequest struct {
 	// a stop and its relaunch. A caller that already owns signals leaves it off.
 	HandleSignals bool
 
-	Lookup    func() PaneLookup
+	Lookup func() PaneLookup
+	// Panes reads herdr's pane list, which finds each session's pane by its
+	// session id; Lookup's environment value is the fallback.
+	Panes     func(ctx context.Context) ([]HerdrPane, error)
 	Binary    func() (string, error)
 	Env       func(forgectl string) (RestartEnv, error)
 	Ancestors func() map[int]bool
@@ -56,14 +59,18 @@ type RestartResult struct {
 	Preview []PreviewLine
 	Finals  []RestartEvent
 	// Failed counts stops or relaunches that went wrong; Left counts sessions
-	// still waiting when the timeout or a cancel ended the run.
-	Failed, Left int
+	// still waiting when the timeout or a cancel ended the run; PaneGone counts
+	// sessions refused because herdr has no pane for them (StatePaneGone).
+	Failed, Left, PaneGone int
 }
 
 // Incomplete reports whether the run owes the operator attention: a failed
-// stop or relaunch, or sessions it gave up waiting on. Skips are not
-// incomplete — they are the safety checks working.
-func (r RestartResult) Incomplete() bool { return r.Failed > 0 || r.Left > 0 }
+// stop or relaunch, sessions it gave up waiting on, or sessions whose pane
+// herdr could not find. Other skips are not incomplete — they are the safety
+// checks working. A missing pane is counted because it can be temporary (a
+// herdr restart renumbers panes), and an incomplete run is what brings the
+// update watcher back for another attempt.
+func (r RestartResult) Incomplete() bool { return r.Failed > 0 || r.Left > 0 || r.PaneGone > 0 }
 
 // ErrRestartBusy reports that another restart run holds the lock.
 var ErrRestartBusy = errors.New("another `forgectl resume restart` is running")
@@ -89,7 +96,19 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 	if err != nil {
 		return RestartResult{}, err
 	}
-	plan := SkipAncestors(PlanRestart(list, req.Only), req.Ancestors())
+	// One pane list per run, read before planning. A pane moves only when the
+	// herdr server restarts, so the list is not re-read every poll; it is
+	// re-read once for a session whose pane herdr then reports gone (see
+	// checkSession), which covers a herdr restart mid-run.
+	var ambiguous map[string][]string
+	if len(list) > 0 {
+		panes, listErr := req.Panes(ctx)
+		list, ambiguous = resolvePanes(list, panes, listErr)
+		if listErr != nil {
+			req.Progress(RestartEvent{State: StateNote, Detail: paneListProblem(listErr) + "; each session's pane comes from its environment"})
+		}
+	}
+	plan := SkipAncestors(SkipAmbiguousPanes(PlanRestart(list, req.Only), ambiguous), req.Ancestors())
 
 	if req.DryRun {
 		env, err := req.Env("")
@@ -128,6 +147,7 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 
 	opts := req.Options
 	opts.Progress = req.Progress
+	opts.Panes = req.Panes
 	res := RestartResult{Finals: RunRestart(ctx, env, plan, opts)}
 	for _, ev := range res.Finals {
 		switch ev.State {
@@ -135,6 +155,8 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 			res.Failed++
 		case StateLeft:
 			res.Left++
+		case StatePaneGone:
+			res.PaneGone++
 		}
 	}
 	return res, nil
@@ -143,6 +165,9 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 func (r *RestartRequest) fill() {
 	if r.Lookup == nil {
 		r.Lookup = PaneFor
+	}
+	if r.Panes == nil {
+		r.Panes = SystemRestartEnv{runner: r.Runner, herdr: r.HerdrBin}.ListPanes
 	}
 	if r.Binary == nil {
 		r.Binary = RelaunchBinary
@@ -227,7 +252,7 @@ func PreviewPlan(ctx context.Context, env RestartEnv, plan []RestartPlanItem) []
 			default:
 				line.Action, line.Detail = "refuse", c.Reason+"; by hand: "+ManualResume(item.SessionID)
 			}
-			line.Detail += fmt.Sprintf(" (pane %s, pid %d)", item.Session.Pane, item.Session.Pid)
+			line.Detail += fmt.Sprintf(" (pane %s, pid %d)", paneLabel(item.Session), item.Session.Pid)
 		}
 		lines = append(lines, line)
 	}
