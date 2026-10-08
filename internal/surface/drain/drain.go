@@ -199,8 +199,9 @@ func PlanClaims(rows []worker.QueueRow, ledgers map[string]Ledger, s config.Drai
 // CheckClaimed re-checks a claimed row before it is launched: the store
 // checks only version, fields and state when it reads, so the repo must be a
 // clean absolute path, the brief must pass the queue's brief check, and its
-// hash must be the one recorded at enqueue, and its profile name and model
-// must have their shapes.
+// hash must be the one recorded at enqueue, its harness must be claude, codex
+// or pi (a profile only with claude), and its profile name and model must have
+// their shapes.
 func CheckClaimed(q worker.QueueRow) error {
 	if !filepath.IsAbs(q.Repo) || filepath.Clean(q.Repo) != q.Repo {
 		return fmt.Errorf("the row's repo %q is not a clean absolute path", q.Repo)

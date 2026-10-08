@@ -279,6 +279,8 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
+A pi worker takes none of these fields: pi has no permission or sandbox flag, so it runs with pi's own config and extensions, as a claude worker runs with your settings (ADR-0010, 2026-10-08 amendment). It still takes no harness args, and `allow_danger` and `add_dir` are cleared.
+
 A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `auto`, `workspace-write` and `on-request`. Setting `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. `auto` is allowed (ADR-0010, 2026-10-07): set `permission_mode = "auto"` in `[launch.worker]` to send a worker's tool calls to Claude Code's classifier instead of prompting; a project block that sets `acceptEdits` or stricter still wins. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.

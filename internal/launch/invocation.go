@@ -110,12 +110,10 @@ type InvocationRequest struct {
 	// wins over a removal, because it is the operator naming a value explicitly.
 	UnsetEnv []string
 	Resolve  BinaryResolver
-	// Harness, when set, replaces the harness of the profile matched by CWD.
-	// Only claude and codex are accepted: pi has no permission or sandbox flag
-	// forgectl can pass, so an override to it would start an agent with no
-	// posture at all. The override changes no posture field: the matched
+	// Harness, when set, replaces the harness of the profile matched by CWD:
+	// claude, codex or pi. The override changes no posture field: the matched
 	// profile's permission mode, allow_danger, approval policy and sandbox all
-	// stay. Those fields are per harness, so a repo block that set only claude
+	// stay. Pi takes none of them; a pi launch runs with pi's own config. Those fields are per harness, so a repo block that set only claude
 	// fields gives a codex override the codex values from [launch.defaults];
 	// the worker profile (T5) is what compares the two.
 	Harness string
@@ -129,7 +127,8 @@ type InvocationRequest struct {
 	// Prompt is a worker's first brief. It goes last in the argv, after a
 	// `--`, so the harness starts its first turn with it and no keystroke is
 	// typed into its TUI. Only a worker takes one; the caller validates its
-	// text (worker.CheckBrief).
+	// text (worker.CheckBrief). A pi prompt may not start with '@': pi reads
+	// an '@' argument as a file to attach, even after `--`.
 	Prompt string
 	// SessionID, when set, is passed to a claude worker as --session-id, so
 	// the coordinator knows which transcript the worker writes. Only a claude
@@ -156,7 +155,7 @@ type InvocationRequest struct {
 
 var (
 	// ErrHarnessOverride reports a --harness value outside the overridable set.
-	ErrHarnessOverride = errors.New("launch: harness override must be claude or codex")
+	ErrHarnessOverride = errors.New("launch: harness override must be claude, codex, or pi")
 	// ErrWorkerPosture reports a resolved posture a worker may not start with.
 	ErrWorkerPosture = errors.New("launch: this posture is not allowed for a worker")
 )
@@ -188,10 +187,12 @@ func allowedUpTo(r postureRank, limit string) string {
 // applyWorkerFloor caps a worker's posture after the worker profile
 // (applyWorkerProfile) has set it.
 //
-// Workers run unattended in panes the operator is not watching. pi is refused
-// whichever way it was chosen, because forgectl can pass it no permission or
-// sandbox flag. A posture outside the allowlists above is refused rather than
-// quietly narrowed, so the operator sees the conflict. allow_danger is turned
+// Workers run unattended in panes the operator is not watching. A posture
+// outside the allowlists above is refused rather than quietly narrowed, so
+// the operator sees the conflict. A pi worker has no posture flag to cap: it
+// runs with pi's own config, as a full-harness claude worker runs with the
+// operator's settings (ADR-0010, 2026-10-08 amendment). A harness this
+// switch does not name is refused. allow_danger is turned
 // off rather than refused: it is on by default, and refusing it would refuse
 // every worker on a default config.
 func applyWorkerFloor(p Profile) (Profile, error) {
@@ -201,6 +202,8 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 			return Profile{}, fmt.Errorf("%w: permission_mode %q (workers allow %s)",
 				ErrWorkerPosture, p.PermissionMode, allowedUpTo(claudePermissionRank, workerMaxPermissionMode))
 		}
+	case "pi":
+		// No posture flag to cap; allow_danger and add_dir are cleared below.
 	case "codex":
 		if !codexSandboxRank.atMost(p.Sandbox, workerMaxSandbox) {
 			return Profile{}, fmt.Errorf("%w: sandbox %q (workers allow %s)",
@@ -211,7 +214,7 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 				ErrWorkerPosture, p.ApprovalPolicy, allowedUpTo(codexApprovalRank, workerMaxApproval))
 		}
 	default:
-		return Profile{}, fmt.Errorf("%w: %s has no permission or sandbox flag forgectl can pass", ErrWorkerPosture, p.Harness)
+		return Profile{}, fmt.Errorf("%w: harness %q has no worker floor (workers run claude, codex, or pi)", ErrWorkerPosture, p.Harness)
 	}
 	p.AllowDanger = false
 	// A worker edits its own worktree. Extra directories from the repo profile
@@ -286,7 +289,7 @@ func withWorkerSettings(args []string) ([]string, error) {
 var workerEnvKeys = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
 	"LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK",
-	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "XDG_CONFIG_HOME",
+	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME",
 }
 
 // workerBaseEnv keeps the entries of env named in workerEnvKeys, and the
@@ -333,7 +336,7 @@ func applyHarnessOverride(p Profile, harness string) (Profile, error) {
 	if harness == "" {
 		return p, nil
 	}
-	if harness != "claude" && harness != "codex" {
+	if harness != "claude" && harness != "codex" && harness != "pi" {
 		return Profile{}, ErrHarnessOverride
 	}
 	if harness == p.Harness {
@@ -415,6 +418,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if req.Prompt != "" && !req.Worker {
 		return BuiltInvocation{}, errors.New("launch: only a worker launch takes a prompt")
 	}
+	if profile.Harness == "pi" && strings.HasPrefix(strings.TrimLeft(req.Prompt, " \t\n"), "@") {
+		// Measured on Pi 1.0.4: `pi -- '@README.md say OK'` exits "File not
+		// found: <cwd>/README.md say OK".
+		return BuiltInvocation{}, errors.New("launch: a pi brief cannot start with '@': pi reads it as a file to attach")
+	}
 	if req.Worker {
 		// A user arg lands after the posture, where Claude Code's last-flag-wins
 		// parsing would let `--permission-mode` or `--settings` undo the floor.
@@ -450,10 +458,10 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		harnessArgs = append(harnessArgs, "--session-id", req.SessionID)
 	}
 	if req.Prompt != "" {
-		// The `--` ends option parsing in both harnesses, so a prompt that
+		// The `--` ends option parsing in every harness, so a prompt that
 		// starts with '-' or names a subcommand (`mcp`, `update`) stays the
 		// prompt. Measured: Claude Code 2.1.289 answered `-- mcp` as a prompt,
-		// and Codex 0.160.0 took `-- --help` as one.
+		// and Codex 0.160.0 and Pi 1.0.4 took `-- --help` as one.
 		harnessArgs = append(harnessArgs, "--", req.Prompt)
 	}
 

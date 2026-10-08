@@ -402,9 +402,16 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 	} else {
 		d.resume(drain.PauseHerdr)
 	}
+	// claudeHeld is set once claude-slots holds a claude row this tick: later
+	// claude rows are skipped unclaimed, and codex and pi rows, which are not
+	// claude sessions, still launch.
+	claudeHeld := false
 	for _, q := range plan {
 		if d.pauses.Paused() || d.stopping() {
 			return
+		}
+		if claudeHeld && q.Launch().Harness == "claude" {
+			continue
 		}
 		id, err := d.io.launchID()
 		if err != nil {
@@ -420,12 +427,18 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 			continue
 		}
 		checkErr := drain.CheckClaimed(claimed)
-		if checkErr == nil {
+		// claude-slots caps claude sessions; a codex or pi worker is not one.
+		if checkErr == nil && claimed.Launch().Harness == "claude" {
 			// The machine's session cap, checked as late as possible: a held
-			// row goes back to queued, and nothing more is claimed this tick.
+			// row goes back to queued, and no more claude rows are claimed
+			// this tick.
 			if hold, why := d.slotsHold(ctx, claimed, started+1); hold {
 				d.unclaim(claimed, why)
-				return
+				if ctx.Err() != nil {
+					return // a stop cut the check short: launch nothing more
+				}
+				claudeHeld = true
+				continue
 			}
 		}
 		d.event(drain.Event{Kind: drain.EventState, Name: claimed.Name, Repo: claimed.Repo, State: string(claimed.State), Attempt: claimed.Attempts})
@@ -495,7 +508,7 @@ func newDrainLaunchID() (string, error) {
 }
 
 // drainLaunch is the real launch: the in-process worker launch (T8.1) with
-// harness claude, the row's brief text, and the branch worker/<name>. The
+// the row's harness, the row's brief text, and the branch worker/<name>. The
 // repo must still resolve to the top the row records.
 func drainLaunch(runner exec.Runner) func(context.Context, config.Config, worker.QueueRow) drain.Attempt {
 	return drainLaunchWith(runner, launchWorker)
@@ -530,12 +543,12 @@ func drainLaunchWith(runner exec.Runner, launchFn workerLauncher) func(context.C
 	}
 }
 
-// drainSpec is the worker launch for a claimed row: harness claude, branch
-// worker/<name>, no $PATH binary, the row's model, and the claim's launch id
-// for the ledger. The row's profile is resolved by the caller, against the
+// drainSpec is the worker launch for a claimed row: the row's harness (claude
+// when it names none), branch worker/<name>, no $PATH binary, the row's
+// model, and the claim's launch id for the ledger. The row's profile is resolved by the caller, against the
 // config it launches with.
 func drainSpec(row worker.QueueRow) workerSpec {
-	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", allowPATH: false,
+	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: row.Launch().Harness, allowPATH: false,
 		launchID: row.LaunchID, model: row.Model}
 }
 

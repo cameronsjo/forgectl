@@ -23,7 +23,7 @@ import (
 )
 
 // `surface drain start|stop|status|events` run and inspect the detached
-// process that launches queued briefs as herdr claude workers. `surface
+// process that launches queued briefs as herdr workers. `surface
 // _drain` is that process.
 
 // drainStartWait is how long `drain start` waits for the child to report
@@ -78,16 +78,16 @@ type drainEventsResult struct {
 func newSurfaceDrainCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drain",
-		Short: "Run the process that launches queued briefs as herdr claude workers",
+		Short: "Run the process that launches queued briefs as herdr workers",
 		Long: `drain runs a detached process that launches the queue's briefs as herdr
-claude workers, at most [surface.drain] cap at a time (default 3) and per_repo
+workers, each with the harness its row names (claude, codex, or pi), at most [surface.drain] cap at a time (default 3) and per_repo
 in one repository (default 1), and watches each worker: its REPORT line marks
 the row reported, a permission prompt or other blocking screen marks it
 needs-you, and a worker at its prompt with no report for idle_minutes is
 needs-you too. The drain never types into a pane or answers a prompt.
 
-Before each launch the drain runs claude-slots check N (found on PATH at
-start, 5 s cap), where N is 1 plus the launches this tick already made: exit
+Before each claude launch the drain runs claude-slots check N (found on PATH
+at start, 5 s cap), where N is 1 plus the launches this tick already made: exit
 1 puts the row back to queued and waits; a missing or failing claude-slots
 launches without the session cap. A row's --profile is
 resolved from the config file at launch; an unknown name pauses claiming.

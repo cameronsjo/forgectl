@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -92,6 +93,10 @@ type QueueRow struct {
 	Profile string `json:"profile,omitempty"`
 	// Model replaces the launch profile's model for this worker, or is empty.
 	Model string `json:"model,omitempty"`
+	// Harness is the harness the drain launches the worker with: claude,
+	// codex, or pi. A row written before the field existed has none, and
+	// runs claude.
+	Harness string `json:"harness,omitempty"`
 }
 
 // QueueLaunch is what a queue row asks of its launch beyond the brief.
@@ -100,11 +105,40 @@ type QueueLaunch struct {
 	Profile string
 	// Model is a model name for the harness's --model.
 	Model string
+	// Harness is claude, codex, or pi; empty is claude.
+	Harness string
 }
 
-// check refuses a profile name or model outside its shape. Whether the
+// DefaultQueueHarness is the harness of a row that names none.
+const DefaultQueueHarness = "claude"
+
+// queueHarnesses are the harnesses a queue row may name.
+var queueHarnesses = []string{"claude", "codex", "pi"}
+
+// ErrProfileNotClaude reports a profile on a row whose harness is not
+// claude: a profile sets CLAUDE_CONFIG_DIR, which only claude reads.
+var ErrProfileNotClaude = errors.New("worker: a profile sets CLAUDE_CONFIG_DIR and applies to claude workers only")
+
+// normalized fills in the default harness, so a row that names none and a
+// row that names claude compare equal.
+func (l QueueLaunch) normalized() QueueLaunch {
+	if l.Harness == "" {
+		l.Harness = DefaultQueueHarness
+	}
+	return l
+}
+
+// check refuses a harness outside the three, a profile for a harness other
+// than claude, and a profile name or model outside its shape. Whether the
 // profile exists is the config's question, asked at enqueue and at launch.
 func (l QueueLaunch) check() error {
+	l = l.normalized()
+	if !slices.Contains(queueHarnesses, l.Harness) {
+		return fmt.Errorf("worker: harness %q: want claude, codex, or pi", l.Harness)
+	}
+	if l.Profile != "" && l.Harness != "claude" {
+		return fmt.Errorf("%w (harness %s)", ErrProfileNotClaude, l.Harness)
+	}
 	if l.Profile != "" {
 		if err := config.CheckProfileName(l.Profile); err != nil {
 			return fmt.Errorf("worker: profile %q: %w", l.Profile, err)
@@ -118,11 +152,14 @@ func (l QueueLaunch) check() error {
 	return nil
 }
 
-// Launch is the row's QueueLaunch.
-func (r QueueRow) Launch() QueueLaunch { return QueueLaunch{Profile: r.Profile, Model: r.Model} }
+// Launch is the row's QueueLaunch, with the default harness filled in.
+func (r QueueRow) Launch() QueueLaunch {
+	return QueueLaunch{Profile: r.Profile, Model: r.Model, Harness: r.Harness}.normalized()
+}
 
-// CheckLaunch re-checks a stored row's profile name and model shape, for the
-// drain, which reads rows the store checked only for version and state.
+// CheckLaunch re-checks a stored row's harness, profile name and model
+// shape, for the drain, which reads rows the store checked only for version
+// and state.
 func (r QueueRow) CheckLaunch() error { return r.Launch().check() }
 
 // queueVersion is the on-disk format version. A file with another version is
@@ -262,8 +299,9 @@ func enqueueRow(rows []QueueRow, row QueueRow) (out []QueueRow, existing QueueRo
 				ErrQueueNameTaken, r.Name, r.BriefSHA256, row.BriefSHA256, r.State)
 		}
 		if r.Launch() != row.Launch() {
-			return nil, r, false, fmt.Errorf("%w: %q is queued with profile %q and model %q, this enqueue asks for profile %q and model %q (state %s); dequeue it first to replace it",
-				ErrQueueNameTaken, r.Name, r.Profile, r.Model, row.Profile, row.Model, r.State)
+			was, want := r.Launch(), row.Launch()
+			return nil, r, false, fmt.Errorf("%w: %q is queued with harness %q, profile %q and model %q, this enqueue asks for harness %q, profile %q and model %q (state %s); dequeue it first to replace it",
+				ErrQueueNameTaken, r.Name, was.Harness, was.Profile, was.Model, want.Harness, want.Profile, want.Model, r.State)
 		}
 		return nil, r, false, errQueueUnchanged
 	}
@@ -347,13 +385,15 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 	return q.EnqueueLaunch(name, repo, brief, batch, QueueLaunch{}, now)
 }
 
-// EnqueueLaunch is Enqueue for a row that names a profile or a model. The
-// profile is stored by name ("main" as empty), never as a path. A name
-// already queued with another profile or model is ErrQueueNameTaken.
+// EnqueueLaunch is Enqueue for a row that names a harness, a profile or a
+// model. The profile is stored by name ("main" as empty), never as a path,
+// and the harness always (claude when none is named). A name already queued
+// with another harness, profile or model is ErrQueueNameTaken.
 func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunch, now time.Time) (row QueueRow, added bool, err error) {
 	if launch.Profile == config.MainProfile {
 		launch.Profile = ""
 	}
+	launch = launch.normalized()
 	if err := launch.check(); err != nil {
 		return QueueRow{}, false, err
 	}
@@ -372,7 +412,7 @@ func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunc
 	now = now.UTC()
 	candidate := QueueRow{
 		Name: name, Repo: repo, Brief: brief, BriefSHA256: BriefSHA256(brief), Batch: batch,
-		State: QueueQueued, EnqueuedAt: now, StateAt: now, Profile: launch.Profile, Model: launch.Model,
+		State: QueueQueued, EnqueuedAt: now, StateAt: now, Profile: launch.Profile, Model: launch.Model, Harness: launch.Harness,
 	}
 	err = q.mutate(MaxQueueBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, existing, ok, err := enqueueRow(rows, candidate)
