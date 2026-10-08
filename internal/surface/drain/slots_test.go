@@ -20,8 +20,9 @@ func TestDecideSlots(t *testing.T) {
 	}{
 		"free":                      {check: SlotsCheck{Exit: 0}},
 		"free after a hold":         {check: SlotsCheck{Exit: 0}, prev: "held"},
-		"held, first time":          {check: SlotsCheck{Exit: 1, Reason: "3 of 3 sessions live"}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "3 of 3 sessions live", reasonIn: "3 of 3 sessions live"},
+		"held, first time":          {check: SlotsCheck{Exit: 1, Reason: "3 of 3 sessions live"}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "check 1 exited 1: 3 of 3 sessions live", reasonIn: "3 of 3 sessions live"},
 		"held again":                {check: SlotsCheck{Exit: 1, Reason: "3 of 3 sessions live"}, prev: "held", hold: true, cond: "held", reasonIn: "3 of 3"},
+		"names the asked count":     {check: SlotsCheck{Need: 3, Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "claude-slots check 3 exited 1"},
 		"held with no output":       {check: SlotsCheck{Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "no reason given"},
 		"odd exit launches":         {check: SlotsCheck{Exit: 2, Reason: "usage"}, cond: "exit 2", emit: true, kind: EventError, errHas: "exited 2"},
 		"odd exit again is quiet":   {check: SlotsCheck{Exit: 2}, prev: "exit 2", cond: "exit 2"},

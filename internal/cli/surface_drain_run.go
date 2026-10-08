@@ -10,6 +10,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,9 +74,10 @@ type drainIO struct {
 	// load reads the config file with the normal loader.
 	load   func() (config.Config, error)
 	notify drainNotifier
-	// slots runs `claude-slots check 1` before a launch; nil when claude-slots
-	// was not on PATH at drain start, and the drain launches without the cap.
-	slots func(ctx context.Context) drain.SlotsCheck
+	// slots runs `claude-slots check <need>` before a launch; nil when
+	// claude-slots was not on PATH at drain start, and the drain launches
+	// without the cap.
+	slots func(ctx context.Context, need int) drain.SlotsCheck
 	// emit records one event.
 	emit     func(drain.Event) error
 	now      func() time.Time
@@ -117,14 +119,14 @@ func (d *drainer) announce() {
 	}
 }
 
-// slotsHold runs the claude-slots check for the claimed row q and reports
-// whether to hold it, with the reason. An event is recorded once per entry
-// into a held or failed condition.
-func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow) (bool, string) {
+// slotsHold runs the claude-slots check for the claimed row q, asking for need
+// slots, and reports whether to hold it, with the reason. An event is
+// recorded once per entry into a held or failed condition.
+func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow, need int) (bool, string) {
 	if d.io.slots == nil {
 		return false, ""
 	}
-	dec := drain.DecideSlots(d.io.slots(ctx), d.slotsCond)
+	dec := drain.DecideSlots(d.io.slots(ctx, need), d.slotsCond)
 	d.slotsCond = dec.Cond
 	if dec.Emit {
 		e := dec.Event
@@ -383,9 +385,18 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 // the slots allow and nothing pauses claiming.
 func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
 	plan := drain.PlanClaims(rows, ledgers, d.settings)
-	if len(plan) == 0 && !d.pauseHeld(drain.PauseHerdr) {
-		return
+	if len(plan) == 0 {
+		// Nothing to launch ends a hold: the next one is a new entry and
+		// records its own slots-held event.
+		d.slotsCond = ""
+		if !d.pauseHeld(drain.PauseHerdr) {
+			return
+		}
 	}
+	// started counts the launches this tick made that may have started a
+	// session, so the next check asks for one more slot than that: a session
+	// launched moments ago may not be registered with claude-slots yet.
+	started := 0
 	if err := d.io.herdrReady(ctx); err != nil {
 		d.pause(drain.PauseHerdr, termsafe.SafeLineMax(err.Error(), maxDrainErrorLen))
 	} else {
@@ -412,7 +423,7 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 		if checkErr == nil {
 			// The machine's session cap, checked as late as possible: a held
 			// row goes back to queued, and nothing more is claimed this tick.
-			if hold, why := d.slotsHold(ctx, claimed); hold {
+			if hold, why := d.slotsHold(ctx, claimed, started+1); hold {
 				d.unclaim(claimed, why)
 				return
 			}
@@ -423,6 +434,9 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 			a = drain.Attempt{Class: drain.ErrRowInvalid, Err: checkErr.Error(), CreatedNothing: true}
 		} else {
 			a = d.io.launch(ctx, d.cfg, claimed)
+		}
+		if !a.CreatedNothing {
+			started++
 		}
 		a.Err = termsafe.SafeLineMax(a.Err, maxDrainErrorLen)
 		dec := drain.DecideLaunch(claimed, a)
@@ -721,23 +735,29 @@ func (c *cappedOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// runClaudeSlots runs `<path> check 1` with the drain's environment, stdin
-// from /dev/null, and a claudeSlotsTimeout cap, and reports how it ended with
-// the first non-empty line of its output as the reason.
-func runClaudeSlots(ctx context.Context, path string) drain.SlotsCheck {
-	ctx, cancel := context.WithTimeout(ctx, claudeSlotsTimeout)
+// runClaudeSlots runs `<path> check <need>` with the drain's environment,
+// stdin from /dev/null, and a claudeSlotsTimeout cap, and reports how it
+// ended with the first non-empty line of its output as the reason. A check
+// cut short by parent (the drain stopping) is Stopped, never a timeout.
+func runClaudeSlots(parent context.Context, path string, need int) drain.SlotsCheck {
+	if parent.Err() != nil {
+		return drain.SlotsCheck{Need: need, Exit: -1, Stopped: true}
+	}
+	ctx, cancel := context.WithTimeout(parent, claudeSlotsTimeout)
 	defer cancel()
 	var out cappedOutput
-	cmd := osexec.CommandContext(ctx, path, "check", "1") //nolint:gosec // G204: the claude-slots path resolved at drain start, fixed arguments
+	cmd := osexec.CommandContext(ctx, path, "check", strconv.Itoa(need)) //nolint:gosec // G204: the claude-slots path resolved at drain start, a count argument
 	cmd.Stdout, cmd.Stderr = &out, &out
 	// A child that keeps the pipes open after the kill must not hold the tick.
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
-	c := drain.SlotsCheck{Exit: -1, Reason: slotsReason(string(out.b))}
+	c := drain.SlotsCheck{Need: need, Exit: -1, Reason: slotsReason(string(out.b))}
 	var exitErr *osexec.ExitError
 	switch {
 	case err == nil:
 		c.Exit = 0
+	case parent.Err() != nil:
+		c.Stopped = true
 	case ctx.Err() != nil:
 		c.TimedOut = true
 	case errors.As(err, &exitErr):
@@ -766,9 +786,9 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 	if err != nil {
 		return drainIO{}, err
 	}
-	var slots func(context.Context) drain.SlotsCheck
+	var slots func(context.Context, int) drain.SlotsCheck
 	if slotsPath != "" {
-		slots = func(ctx context.Context) drain.SlotsCheck { return runClaudeSlots(ctx, slotsPath) }
+		slots = func(ctx context.Context, need int) drain.SlotsCheck { return runClaudeSlots(ctx, slotsPath, need) }
 	}
 	return drainIO{
 		slots: slots,

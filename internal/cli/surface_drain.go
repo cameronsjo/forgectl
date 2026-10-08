@@ -86,9 +86,10 @@ the row reported, a permission prompt or other blocking screen marks it
 needs-you, and a worker at its prompt with no report for idle_minutes is
 needs-you too. The drain never types into a pane or answers a prompt.
 
-Before each launch the drain runs claude-slots check 1 (found on PATH at
-start, 5 s cap): exit 1 puts the row back to queued and waits; a missing or
-failing claude-slots launches without the session cap. A row's --profile is
+Before each launch the drain runs claude-slots check N (found on PATH at
+start, 5 s cap), where N is 1 plus the launches this tick already made: exit
+1 puts the row back to queued and waits; a missing or failing claude-slots
+launches without the session cap. A row's --profile is
 resolved from the config file at launch; an unknown name pauses claiming.
 
   forgectl surface drain start

@@ -353,9 +353,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
 	}
 	if configDir != "" && opts.Harness == "codex" {
-		// Refused here rather than at the build step, which runs after the
-		// worktree exists.
-		return WithExitCode(errors.New("--profile sets CLAUDE_CONFIG_DIR and applies to claude workers only"), exitUsage)
+		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
 		configDir: configDir, model: opts.Model}
@@ -363,6 +361,9 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
 		return err
+	}
+	if err := checkProfileHarness(deps.Cfg.Launch, worker.WorktreePath(setup.top, spec.name), spec); err != nil {
+		return WithExitCode(err, exitUsage)
 	}
 	prompt, brief, err := launchBrief(opts.Brief, time.Now)
 	if err != nil {
@@ -383,6 +384,31 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	_, err = fmt.Fprintln(out, safePath(attempt.launched.worktree))
 	return err
+}
+
+// errProfileNotClaude refuses --profile for a worker that is not claude.
+var errProfileNotClaude = errors.New("--profile sets CLAUDE_CONFIG_DIR and applies to claude workers only")
+
+// checkProfileHarness refuses a --profile for a worker whose harness, after
+// the --harness override or else the launch profile matched at its worktree,
+// is not claude. It runs before the worktree exists; the build step would
+// refuse the same launch only after it.
+func checkProfileHarness(lc config.LaunchConfig, worktree string, spec workerSpec) error {
+	if spec.configDir == "" {
+		return nil
+	}
+	harness := spec.harness
+	if harness == "" {
+		p, err := launch.Resolve(lc, worktree)
+		if err != nil {
+			return err
+		}
+		harness = p.Harness
+	}
+	if harness != "claude" {
+		return errProfileNotClaude
+	}
+	return nil
 }
 
 // buildWorkerInvocation marks req as a worker launch, which is what turns on

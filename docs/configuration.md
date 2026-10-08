@@ -67,8 +67,9 @@ config_dir = "~/.claude-work"   # absolute, or starting with "~/"
 
 - `main`, or no `--profile`, keeps today's behavior: the worker inherits the launcher's `CLAUDE_CONFIG_DIR` through the worker environment allowlist. `main` cannot be defined as an entry.
 - A name is 1 to 32 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.
-- `config_dir` is checked when the file loads: a relative path, `~user/...`, or an empty value makes the file invalid, and the whole `[surface.profiles]` table is dropped, so no worker runs under a directory the loader refused. A leading `~` expands to the home directory at launch.
+- `config_dir` is checked when the file loads: a relative path, `~user/...`, an empty value, or the home directory (`~`) or root (`/`) itself makes the file invalid, and the whole `[surface.profiles]` table is dropped, so no worker runs under a directory the loader refused. A leading `~` expands to the home directory at launch.
 - A queue row stores the profile's name, never its path. The drain resolves the name from the config file when it launches the row, so a changed `config_dir` applies to rows already queued. A name the config no longer defines fails that launch as a launch-config error, which pauses claiming until the next `drain start`.
+- That pause stops the whole drain, rows with no profile included, so removing a profile while rows still name it holds every queued row until you dequeue those rows and run `drain start` again.
 - A profile applies to claude workers only, and sets only `CLAUDE_CONFIG_DIR`; it adds nothing else to the worker's environment.
 
 ## Theme

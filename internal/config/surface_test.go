@@ -95,6 +95,11 @@ func TestSurfaceProfiles_Validate(t *testing.T) {
 		"other user tilde":  {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "~bob/.claude"}}, wantErr: []string{"config_dir", "~bob"}},
 		"empty config_dir":  {profiles: map[string]SurfaceProfile{"work": {}}, wantErr: []string{"config_dir"}},
 		"main is reserved":  {profiles: map[string]SurfaceProfile{"main": {ConfigDir: "/x"}}, wantErr: []string{"main", "reserved"}},
+		"home itself":       {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "~"}}, wantErr: []string{"config_dir", "home directory"}},
+		"home with slash":   {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "~/"}}, wantErr: []string{"config_dir", "home directory"}},
+		"home dot":          {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "~/."}}, wantErr: []string{"config_dir", "home directory"}},
+		"root":              {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "/"}}, wantErr: []string{"config_dir", "root"}},
+		"root, unclean":     {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "//."}}, wantErr: []string{"config_dir", "root"}},
 		"upper-case name":   {profiles: map[string]SurfaceProfile{"Work": {ConfigDir: "/x"}}, wantErr: []string{"profile name"}},
 		"leading dash name": {profiles: map[string]SurfaceProfile{"-w": {ConfigDir: "/x"}}, wantErr: []string{"profile name"}},
 	}
@@ -148,6 +153,14 @@ func TestSurfaceProfiles_ConfigDir(t *testing.T) {
 				t.Fatalf("ProfileConfigDir(%q) = %q, %v; want %q", c.name, got, err, c.want)
 			}
 		})
+	}
+	// ProfileConfigDir checks the expanded path again, for a table that
+	// skipped ValidateProfiles.
+	for _, dir := range []string{"~/sub/..", "/opt/.."} {
+		raw := SurfaceConfig{Profiles: map[string]SurfaceProfile{"w": {ConfigDir: dir}}}
+		if got, err := raw.ProfileConfigDir("w", home); err == nil {
+			t.Errorf("config_dir %q resolved to %q; want the home directory and root refused", dir, got)
+		}
 	}
 	if _, err := sc.ProfileConfigDir("work", func() (string, error) { return "relative-home", nil }); err == nil {
 		t.Fatal("a config_dir that is not absolute after expanding ~ was accepted")

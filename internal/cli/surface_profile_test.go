@@ -5,6 +5,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
@@ -131,6 +133,26 @@ func TestWorkerProfileReachesEnvAndTranscript(t *testing.T) {
 	}
 }
 
+// TestCheckProfileHarness: --profile is refused, before the worktree exists,
+// for a worker whose harness the launch config makes codex, not only for an
+// explicit --harness codex.
+func TestCheckProfileHarness(t *testing.T) {
+	codexCfg := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex"}}
+	wt := "/repo/x/.claude/worktrees/w1"
+	if err := checkProfileHarness(codexCfg, wt, workerSpec{configDir: "/cfg/work"}); !errors.Is(err, errProfileNotClaude) {
+		t.Fatalf("codex from config: %v, want errProfileNotClaude", err)
+	}
+	if err := checkProfileHarness(codexCfg, wt, workerSpec{configDir: "/cfg/work", harness: "claude"}); err != nil {
+		t.Fatalf("--harness claude over a codex config: %v", err)
+	}
+	if err := checkProfileHarness(codexCfg, wt, workerSpec{}); err != nil {
+		t.Fatalf("no profile: %v", err)
+	}
+	if err := checkProfileHarness(config.LaunchConfig{}, wt, workerSpec{configDir: "/cfg/work"}); err != nil {
+		t.Fatalf("claude by default: %v", err)
+	}
+}
+
 func envOf(env []string, key string) string {
 	v := ""
 	for _, e := range env {
@@ -214,12 +236,63 @@ func slotsDrain(t *testing.T, checks ...drain.SlotsCheck) (*fakeDrain, *drainer,
 	t.Helper()
 	f, d, q := newFakeDrain(t)
 	calls := 0
-	d.io.slots = func(context.Context) drain.SlotsCheck {
+	d.io.slots = func(_ context.Context, need int) drain.SlotsCheck {
 		c := checks[min(calls, len(checks)-1)]
+		c.Need = need
 		calls++
 		return c
 	}
 	return f, d, q, &calls
+}
+
+// TestDrainSlotsAsksForEachLaunchThisTick: with one slot free and three rows
+// planned in one tick, the Nth check asks for N slots, so only the first row
+// launches; a session launched moments ago would not be counted by
+// claude-slots yet, and asking for 1 each time would overshoot the cap.
+func TestDrainSlotsAsksForEachLaunchThisTick(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	var needs []int
+	const free = 1
+	d.io.slots = func(_ context.Context, need int) drain.SlotsCheck {
+		needs = append(needs, need)
+		if need <= free {
+			return drain.SlotsCheck{Need: need, Exit: 0}
+		}
+		return drain.SlotsCheck{Need: need, Exit: 1, Reason: fmt.Sprintf("%d free, %d asked", free, need)}
+	}
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	enqueueAt(t, q, "b", "/repo/b", drainT0.Add(time.Minute))
+	enqueueAt(t, q, "c", "/repo/c", drainT0.Add(2*time.Minute))
+	d.tick(t.Context())
+	if strings.Join(f.launched, ",") != "a" {
+		t.Fatalf("launched %v with one slot free; want only a", f.launched)
+	}
+	if fmt.Sprint(needs) != "[1 2]" {
+		t.Fatalf("checks asked for %v slots; want [1 2] (the second launch counts the first)", needs)
+	}
+	for _, name := range []string{"b", "c"} {
+		if r := rowNamed(t, q, name); r.State != worker.QueueQueued || r.Attempts != 0 {
+			t.Fatalf("row %s %+v; want held in queued with no attempt", name, r)
+		}
+	}
+}
+
+// TestDrainSlotsHoldEndsWithAnEmptyPlan: a tick with nothing to claim ends
+// the held condition, so the next hold records its own slots-held event.
+func TestDrainSlotsHoldEndsWithAnEmptyPlan(t *testing.T) {
+	f, d, q, _ := slotsDrain(t, drain.SlotsCheck{Exit: 1, Reason: "full"})
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	d.tick(t.Context())
+	d.tick(t.Context())
+	if _, err := q.Dequeue("a"); err != nil {
+		t.Fatal(err)
+	}
+	d.tick(t.Context()) // nothing to claim
+	enqueueAt(t, q, "b", "/repo/b", drainT0)
+	d.tick(t.Context())
+	if n := len(eventsOfKind(f, drain.EventSlotsHeld)); n != 2 {
+		t.Fatalf("%d slots-held events; want one per hold, and two holds", n)
+	}
 }
 
 func eventsOfKind(f *fakeDrain, kind string) []drain.Event {
@@ -344,31 +417,45 @@ func fakeSlotsTool(t *testing.T, body string) string {
 func TestRunClaudeSlots(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
 	tool := fakeSlotsTool(t, `printf '%s\n' "$*" > `+argsFile+`; printf '\n  2 of 2 sessions live  \nsecond line\n'; exit 1`)
-	c := runClaudeSlots(t.Context(), tool)
-	if c.Exit != 1 || c.TimedOut || c.Err != "" || c.Reason != "2 of 2 sessions live" {
+	c := runClaudeSlots(t.Context(), tool, 3)
+	if c.Exit != 1 || c.TimedOut || c.Err != "" || c.Need != 3 || c.Reason != "2 of 2 sessions live" {
 		t.Fatalf("held: %+v", c)
 	}
 	got, err := os.ReadFile(argsFile) //nolint:gosec // G304: the stand-in's argv file in this test's temp dir
-	if err != nil || strings.TrimSpace(string(got)) != "check 1" {
-		t.Fatalf("argv %q (%v), want check 1", got, err)
+	if err != nil || strings.TrimSpace(string(got)) != "check 3" {
+		t.Fatalf("argv %q (%v), want check 3", got, err)
 	}
-	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "exit 0")); c.Exit != 0 || c.TimedOut {
+	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "exit 0"), 1); c.Exit != 0 || c.TimedOut {
 		t.Fatalf("free: %+v", c)
 	}
-	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "echo bad usage >&2; exit 2")); c.Exit != 2 || c.Reason != "bad usage" {
+	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "echo bad usage >&2; exit 2"), 1); c.Exit != 2 || c.Reason != "bad usage" {
 		t.Fatalf("odd exit: %+v", c)
+	}
+	// The drain stopping is a stop, not a timeout: nothing may launch.
+	stopped, cancel := context.WithCancel(t.Context())
+	cancel()
+	if c := runClaudeSlots(stopped, fakeSlotsTool(t, "exit 0"), 1); !c.Stopped || c.TimedOut {
+		t.Fatalf("cancelled before the run: %+v, want stopped", c)
+	}
+	mid, cancelMid := context.WithCancel(t.Context())
+	time.AfterFunc(100*time.Millisecond, cancelMid)
+	if c := runClaudeSlots(mid, fakeSlotsTool(t, "exec sleep 30"), 1); !c.Stopped || c.TimedOut {
+		t.Fatalf("cancelled mid-run: %+v, want stopped", c)
+	}
+	if d := drain.DecideSlots(drain.SlotsCheck{Stopped: true}, "exit 2"); !d.Hold || d.Emit || d.Cond != "exit 2" {
+		t.Fatalf("stopped decision %+v; want hold, no event, condition kept", d)
 	}
 	old := claudeSlotsTimeout
 	claudeSlotsTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { claudeSlotsTimeout = old })
 	start := time.Now()
-	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "exec sleep 30")); !c.TimedOut {
+	if c := runClaudeSlots(t.Context(), fakeSlotsTool(t, "exec sleep 30"), 1); !c.TimedOut || c.Stopped {
 		t.Fatalf("slow tool: %+v, want timed out", c)
 	}
 	if took := time.Since(start); took > 3*time.Second {
 		t.Fatalf("a slow tool held the check for %s", took)
 	}
-	if c := runClaudeSlots(t.Context(), filepath.Join(t.TempDir(), "missing")); c.Err == "" {
+	if c := runClaudeSlots(t.Context(), filepath.Join(t.TempDir(), "missing"), 1); c.Err == "" {
 		t.Fatalf("missing binary: %+v, want a run error", c)
 	}
 }

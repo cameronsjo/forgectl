@@ -82,8 +82,9 @@ func CheckModelName(model string) error {
 }
 
 // ValidateProfiles checks every [surface.profiles] entry: its name, and a
-// config_dir that is absolute or starts with "~/". A name of "main" is
-// refused, since it means no profile.
+// config_dir that is absolute or starts with "~/", and is neither the home
+// directory nor the root. A name of "main" is refused, since it means no
+// profile.
 func (c SurfaceConfig) ValidateProfiles() error {
 	names := make([]string, 0, len(c.Profiles))
 	for name := range c.Profiles {
@@ -98,7 +99,10 @@ func (c SurfaceConfig) ValidateProfiles() error {
 			return fmt.Errorf("[surface.profiles.%s]: the name %q is reserved for the launcher's own CLAUDE_CONFIG_DIR and cannot be defined", name, MainProfile)
 		}
 		dir := c.Profiles[name].ConfigDir
-		if dir != "~" && !strings.HasPrefix(dir, "~/") && !filepath.IsAbs(dir) {
+		if wholeTree(dir) {
+			return fmt.Errorf("[surface.profiles.%s] config_dir: want a directory of its own, not the home directory or the root, got %s", name, quoteConfigValue(dir))
+		}
+		if !strings.HasPrefix(dir, "~/") && !filepath.IsAbs(dir) {
 			return fmt.Errorf("[surface.profiles.%s] config_dir: want an absolute path or one starting with \"~/\", got %s", name, quoteConfigValue(dir))
 		}
 	}
@@ -118,17 +122,34 @@ func (c SurfaceConfig) ProfileConfigDir(name string, home func() (string, error)
 		return "", fmt.Errorf("%w: %s", ErrUnknownProfile, quoteConfigValue(name))
 	}
 	dir := p.ConfigDir
-	if dir == "~" || strings.HasPrefix(dir, "~/") {
+	if strings.HasPrefix(dir, "~/") {
 		h, err := home()
 		if err != nil {
 			return "", fmt.Errorf("[surface.profiles.%s] config_dir: home directory: %w", name, err)
 		}
 		dir = expandTilde(dir, h)
+		if filepath.Clean(dir) == filepath.Clean(h) {
+			return "", fmt.Errorf("[surface.profiles.%s] config_dir: want a directory of its own, not the home directory, got %s", name, quoteConfigValue(p.ConfigDir))
+		}
 	}
 	if !filepath.IsAbs(dir) {
 		return "", fmt.Errorf("[surface.profiles.%s] config_dir: want an absolute path after expanding \"~\", got %s", name, quoteConfigValue(dir))
 	}
+	if filepath.Clean(dir) == string(filepath.Separator) {
+		return "", fmt.Errorf("[surface.profiles.%s] config_dir: want a directory of its own, not the root, got %s", name, quoteConfigValue(p.ConfigDir))
+	}
 	return filepath.Clean(dir), nil
+}
+
+// wholeTree reports a config_dir that is, as written, the home directory
+// ("~", "~/", "~/.") or the filesystem root: a worker's CLAUDE_CONFIG_DIR
+// there would write Claude Code's state straight into it. ProfileConfigDir
+// checks the expanded path again.
+func wholeTree(dir string) bool {
+	if dir == "~" || (strings.HasPrefix(dir, "~/") && filepath.Clean("/"+dir[2:]) == "/") {
+		return true
+	}
+	return filepath.IsAbs(dir) && filepath.Clean(dir) == string(filepath.Separator)
 }
 
 // SurfaceDrainConfig is [surface.drain]: how `forgectl surface drain` paces
