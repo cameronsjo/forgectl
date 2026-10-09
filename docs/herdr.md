@@ -193,7 +193,7 @@ The drain runs prune with the default cutoff once each UTC day, at the end of th
 
 ### usage-daily.jsonl
 
-Before prune removes a queue row with a `cost_usd`, it appends that cost to `usage-daily.jsonl` in the state directory: one JSON line per UTC day of the rows' `state_at`, `{"day":"2026-10-09","costUsd":1.75,"rows":2}`, summing the rows that one run removes. A later run that removes more rows from the same day appends another line for that day; sum the lines per day to read it. The lines are written under the queue lock, and when they cannot be written no row is removed. The file is append-only and never pruned or rotated: it is the long-term cost record, rotated by hand.
+Before prune removes a queue row with a `cost_usd`, it appends one JSON line per removed row to `usage-daily.jsonl` in the state directory: `{"day":"2026-10-09","name":"fix-login","launch_id":"…","costUsd":1.75}`, `day` being the UTC day of the row's `state_at`. The lines are written under the queue lock before the rows go, and when they cannot be written no row is removed, so a cost is never lost. A prune that fails after the lines are written leaves the rows in place, and the next run writes their lines again, so to read the file sum the unique `(name, launch_id)` lines per day. The file is append-only and never pruned or rotated: it is the long-term cost record, rotated by hand.
 
 ## Status and merge policy
 

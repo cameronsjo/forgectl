@@ -24,7 +24,8 @@ import (
 
 // `surface prune` removes old closed, failed, expired and reported queue rows
 // and old closed ledger rows (atelier P4, T10.3), adding the removed rows' cost to
-// usage-daily.jsonl first. The drain runs it once a UTC day.
+// usage-daily.jsonl first, one line per row. The drain runs it once a UTC
+// day.
 
 // pruneTimeout bounds one prune: herdr probes and the state files.
 const pruneTimeout = 2 * time.Minute
@@ -39,8 +40,8 @@ type pruneResult struct {
 	Removed []drain.PruneItem `json:"removed"`
 	Kept    []drain.PruneItem `json:"kept"`
 	// Usage is the lines appended to usage-daily.jsonl, or that would be.
-	Usage []drain.UsageDay `json:"usage"`
-	Notes []string         `json:"notes"`
+	Usage []drain.UsageLine `json:"usage"`
+	Notes []string          `json:"notes"`
 }
 
 // pruneQueue is the slice of *worker.Queue prune uses.
@@ -102,14 +103,17 @@ file cannot be read at all. When herdr cannot be read (no herdr session, or
 the server is down), no ledger row is removed, and prune says so.
 
 Before a queue row with a cost_usd is removed, its cost is added to
-usage-daily.jsonl in the state directory: one line per UTC day of state_at,
-{"day","costUsd","rows"}, summing the rows this run removes. The file is
-append-only and never pruned; it is the long-term cost record. The lines are
-written under the queue lock, and nothing is removed when they cannot be.
+usage-daily.jsonl in the state directory: one line per removed row,
+{"day","name","launch_id","costUsd"}, day being the UTC day of its state_at.
+The lines are written under the queue lock before the rows go, and nothing
+is removed when they cannot be written. A prune that fails after writing can
+write a row's line again on the next run, so read the file by summing the
+unique (name, launch_id) lines per day. The file is append-only and never
+pruned; it is the long-term cost record.
 
 --dry-run reads everything and writes nothing. --json prints {"dry_run",
-"older_than","cutoff","removed":[...],"kept":[...],"usage":[{"day","costUsd",
-"rows"}],"notes"}, each row {"kind","name","repo","session","state","at",
+"older_than","cutoff","removed":[...],"kept":[...],"usage":[{"day","name",
+"launch_id","costUsd"}],"notes"}, each row {"kind","name","repo","session","state","at",
 "cost_usd","reason"}; kind is queue, ledger or status-cache (named by head), and with --dry-run removed is
 what would be removed. The drain runs prune with the default cutoff once
 each UTC day.
@@ -225,7 +229,7 @@ func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) dra
 // each only if it is still the row read. An error means the queue or the
 // ledger directory could not be read, or the queue could not be written.
 func runPrune(ctx context.Context, d pruneDeps, now time.Time, olderThan time.Duration, dryRun bool) (pruneResult, error) {
-	res := pruneResult{DryRun: dryRun, Cutoff: now.Add(-olderThan).UTC(), Removed: []drain.PruneItem{}, Kept: []drain.PruneItem{}, Usage: []drain.UsageDay{}, Notes: []string{}}
+	res := pruneResult{DryRun: dryRun, Cutoff: now.Add(-olderThan).UTC(), Removed: []drain.PruneItem{}, Kept: []drain.PruneItem{}, Usage: []drain.UsageLine{}, Notes: []string{}}
 	rows, err := d.queue.Rows()
 	if err != nil {
 		return res, fmt.Errorf("read the queue: %w", err)
@@ -279,7 +283,7 @@ func runPrune(ctx context.Context, d pruneDeps, now time.Time, olderThan time.Du
 	}
 	if dryRun {
 		res.Removed = append(res.Removed, plan.Remove...)
-		res.Usage = append(res.Usage, drain.UsageRollup(pruneItemRows(queueItems))...)
+		res.Usage = append(res.Usage, drain.UsageLines(pruneItemRows(queueItems))...)
 		return res, nil
 	}
 
@@ -287,7 +291,7 @@ func runPrune(ctx context.Context, d pruneDeps, now time.Time, olderThan time.Du
 	if err != nil {
 		return res, err
 	}
-	res.Usage = append(res.Usage, drain.UsageRollup(removed)...)
+	res.Usage = append(res.Usage, drain.UsageLines(removed)...)
 	gone := map[string]bool{}
 	for _, r := range removed {
 		gone[r.Name] = true
@@ -340,7 +344,7 @@ func pruneQueueRows(d pruneDeps, items []drain.PruneItem) ([]worker.QueueRow, er
 		was, ok := planned[r.Name]
 		return ok && worker.SameRead(was)(r)
 	}, func(rows []worker.QueueRow) error {
-		lines, err := usageLines(drain.UsageRollup(rows))
+		lines, err := usageLines(drain.UsageLines(rows))
 		if err != nil || len(lines) == 0 {
 			return err
 		}
@@ -361,9 +365,9 @@ func pruneItemRows(items []drain.PruneItem) []worker.QueueRow {
 }
 
 // usageLines renders usage-daily.jsonl lines.
-func usageLines(days []drain.UsageDay) ([]byte, error) {
+func usageLines(lines []drain.UsageLine) ([]byte, error) {
 	var b []byte
-	for _, u := range days {
+	for _, u := range lines {
 		// termsafe:allow-raw-json private 0600 usage file of numbers and a date, read back as data
 		line, err := json.Marshal(u)
 		if err != nil {
@@ -393,7 +397,7 @@ func reportPrune(out io.Writer, r pruneResult, asJSON bool) error {
 		fmt.Fprintf(&b, "  %s %s %s (%s)\n", it.Kind, termsafe.SafeLineMax(it.Name, 64), termsafe.SafeLineMax(it.State, 16), safeColumnPath(it.Repo))
 	}
 	for _, u := range r.Usage {
-		fmt.Fprintf(&b, "usage %s: $%.2f over %d rows\n", u.Day, u.CostUSD, u.Rows)
+		fmt.Fprintf(&b, "usage %s %s: $%.2f\n", u.Day, termsafe.SafeLineMax(u.Name, 64), u.CostUSD)
 	}
 	for _, it := range r.Kept {
 		if it.Kind == drain.PruneKindQueue && (it.State == string(worker.QueueClosed) || it.State == string(worker.QueueFailed) || it.State == string(worker.QueueExpired)) {

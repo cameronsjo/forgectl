@@ -257,36 +257,34 @@ func queueKeepReason(q worker.QueueRow, ledgers map[worker.LedgerID]PruneLedger,
 	return ""
 }
 
-// UsageDay is one line of usage-daily.jsonl: the cost of the rows one prune
-// removed whose state_at falls on Day (UTC).
-type UsageDay struct {
-	Day     string  `json:"day"`
-	CostUSD float64 `json:"costUsd"`
-	Rows    int     `json:"rows"`
+// UsageLine is one line of usage-daily.jsonl: the cost of one queue row
+// prune removed. Day is the UTC day of its state_at. A row is identified by
+// Name and LaunchID, so a reader that sums the unique (name, launch_id)
+// lines per day counts each row once even if a failed prune wrote its line
+// twice.
+type UsageLine struct {
+	Day      string  `json:"day"`
+	Name     string  `json:"name"`
+	LaunchID string  `json:"launch_id"`
+	CostUSD  float64 `json:"costUsd"`
 }
 
-// UsageRollup sums the cost of the priced rows by the UTC day of their
-// state_at, oldest day first. Rows without a cost are not counted.
-func UsageRollup(rows []worker.QueueRow) []UsageDay {
-	by := map[string]*UsageDay{}
+// UsageLines is one line per priced row, oldest day first, then by name.
+// Rows without a cost are not counted.
+func UsageLines(rows []worker.QueueRow) []UsageLine {
+	out := []UsageLine{}
 	for _, r := range rows {
 		if r.CostUSD == nil {
 			continue
 		}
-		day := r.StateAt.UTC().Format(worker.UTCDayLayout)
-		u, ok := by[day]
-		if !ok {
-			u = &UsageDay{Day: day}
-			by[day] = u
+		out = append(out, UsageLine{Day: r.StateAt.UTC().Format(worker.UTCDayLayout), Name: r.Name, LaunchID: r.LaunchID, CostUSD: *r.CostUSD})
+	}
+	slices.SortFunc(out, func(a, b UsageLine) int {
+		if c := strings.Compare(a.Day, b.Day); c != 0 {
+			return c
 		}
-		u.CostUSD += *r.CostUSD
-		u.Rows++
-	}
-	out := make([]UsageDay, 0, len(by))
-	for _, u := range by {
-		out = append(out, *u)
-	}
-	slices.SortFunc(out, func(a, b UsageDay) int { return strings.Compare(a.Day, b.Day) })
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out
 }
 

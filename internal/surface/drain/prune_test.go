@@ -249,26 +249,30 @@ func TestPlanPruneUnreadableLedger(t *testing.T) {
 	}
 }
 
-func TestUsageRollup(t *testing.T) {
+func TestUsageLines(t *testing.T) {
 	day1 := time.Date(2026, 9, 1, 23, 30, 0, 0, time.UTC)
 	day2 := time.Date(2026, 9, 2, 0, 30, 0, 0, time.UTC)
 	rows := []worker.QueueRow{
-		{Name: "a", StateAt: day2, CostUSD: cost(2)},
-		{Name: "b", StateAt: day1, CostUSD: cost(1.25)},
-		{Name: "c", StateAt: day1, CostUSD: cost(0.5)},
-		{Name: "d", StateAt: day1}, // unpriced: not counted
+		{Name: "a", LaunchID: "La", StateAt: day2, CostUSD: cost(2)},
+		{Name: "c", LaunchID: "Lc", StateAt: day1, CostUSD: cost(0.5)},
+		{Name: "b", LaunchID: "Lb", StateAt: day1, CostUSD: cost(1.25)},
+		{Name: "d", LaunchID: "Ld", StateAt: day1}, // unpriced: no line
 	}
-	got := UsageRollup(rows)
-	want := []UsageDay{{Day: "2026-09-01", CostUSD: 1.75, Rows: 2}, {Day: "2026-09-02", CostUSD: 2, Rows: 1}}
+	got := UsageLines(rows)
+	want := []UsageLine{
+		{Day: "2026-09-01", Name: "b", LaunchID: "Lb", CostUSD: 1.25},
+		{Day: "2026-09-01", Name: "c", LaunchID: "Lc", CostUSD: 0.5},
+		{Day: "2026-09-02", Name: "a", LaunchID: "La", CostUSD: 2},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("%+v", got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("day %d: %+v, want %+v", i, got[i], want[i])
+			t.Fatalf("line %d: %+v, want %+v", i, got[i], want[i])
 		}
 	}
-	if len(UsageRollup(nil)) != 0 {
+	if len(UsageLines(nil)) != 0 {
 		t.Fatal("no rows, no lines")
 	}
 }

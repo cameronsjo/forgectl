@@ -198,7 +198,8 @@ func TestRunPruneRemovesOldRowsKeepsLive(t *testing.T) {
 		}
 	}
 	day := pruneNow.Add(-drain.PruneAfter - time.Hour).UTC().Format(worker.UTCDayLayout)
-	want := `{"day":"` + day + `","costUsd":1.75,"rows":2}` + "\n"
+	want := `{"day":"` + day + `","name":"closed-a","launch_id":"launch-closed-a","costUsd":1.5}` + "\n" +
+		`{"day":"` + day + `","name":"closed-b","launch_id":"launch-closed-b","costUsd":0.25}` + "\n"
 	if got := usageFile(t); got != want {
 		t.Fatalf("usage-daily.jsonl %q, want %q", got, want)
 	}
@@ -233,7 +234,7 @@ func TestRunPruneDryRunWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.DryRun || itemNames(res.Removed) == "" || len(res.Usage) != 1 || res.Usage[0].CostUSD != 1.75 {
+	if !res.DryRun || itemNames(res.Removed) == "" || len(res.Usage) != 2 || res.Usage[0].CostUSD+res.Usage[1].CostUSD != 1.75 {
 		t.Fatalf("dry run: %+v", res)
 	}
 	after, err := q.Rows()
@@ -265,9 +266,9 @@ func TestRunPruneUsageAppendOnly(t *testing.T) {
 	if _, err := runPrune(t.Context(), deps, pruneNow, drain.PruneAfter, false); err != nil {
 		t.Fatal(err)
 	}
-	want := `{"day":"2026-08-01","costUsd":1,"rows":1}` + "\n" +
-		`{"day":"2026-08-01","costUsd":2,"rows":1}` + "\n" +
-		`{"day":"2026-08-02","costUsd":0.5,"rows":1}` + "\n"
+	want := `{"day":"2026-08-01","name":"a","launch_id":"","costUsd":1}` + "\n" +
+		`{"day":"2026-08-01","name":"b","launch_id":"","costUsd":2}` + "\n" +
+		`{"day":"2026-08-02","name":"c","launch_id":"","costUsd":0.5}` + "\n"
 	if got := usageFile(t); got != want {
 		t.Fatalf("usage-daily.jsonl\n%s\nwant\n%s", got, want)
 	}
