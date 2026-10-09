@@ -75,7 +75,7 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
       }
       comments(first: 100) {
         pageInfo { hasNextPage }
-        nodes { author { ` + actorFields + ` } body }
+        nodes { author { ` + actorFields + ` } body url createdAt }
       }
     }
   }
@@ -287,8 +287,10 @@ type PRRead struct {
 // DecodePR reads a PRQuery response, refusing on any remaining page.
 func DecodePR(data []byte) (PRRead, error) {
 	type comment struct {
-		Author *Actor `json:"author"`
-		Body   string `json:"body"`
+		Author    *Actor `json:"author"`
+		Body      string `json:"body"`
+		URL       string `json:"url"`
+		CreatedAt string `json:"createdAt"`
 	}
 	var d struct {
 		Repository *struct {
@@ -390,7 +392,7 @@ func DecodePR(data []byte) (PRRead, error) {
 		out.Reviews = append(out.Reviews, rv)
 	}
 	for _, c := range p.Comments.Nodes {
-		out.Comments = append(out.Comments, Comment{Author: actor(c.Author), Body: c.Body})
+		out.Comments = append(out.Comments, Comment{Author: actor(c.Author), Body: c.Body, URL: c.URL, CreatedAt: c.CreatedAt})
 	}
 	return out, nil
 }
