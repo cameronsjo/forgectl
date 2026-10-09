@@ -1,0 +1,1 @@
+{"errors":[{"path":["query","repository","issue","lastEditedAtX"],"extensions":{"code":"undefinedField","typeName":"Issue","fieldName":"lastEditedAtX"},"locations":[{"line":1,"column":80}],"message":"Field 'lastEditedAtX' doesn't exist on type 'Issue'"}]}

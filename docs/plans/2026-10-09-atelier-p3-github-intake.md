@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T9.1 surface intake gh, then the file-set security review, then a live intake of one labeled issue."
+next: "T9.1 code landed on plan/atelier-p3-intake; the file-set security review, then a live intake of one labeled issue."
 branch: plan/atelier-p3-intake
 pr: "—"
 updated: 2026-10-09
@@ -61,11 +61,11 @@ Recorded boundary, not designed against: the brief's rules are instructions, not
 
 ### T9.1: `surface intake gh` (one PR)
 
-- [ ] Config `[surface.intake]` (`authors`, `labels`, `max_per_run`), validated at load.
-- [ ] Queue row fields `source` and `author` (omitempty; queue version unchanged, so a drain on an older binary must be restarted after the upgrade, as with forgectl#1199), and an enqueue path that takes them.
-- [ ] The intake command: remote → owner/repo; one GraphQL query per page of eligible issues; the gate above; the brief template with the nonce fence and the rules; enqueue; per-issue skips; `--dry-run --json`.
-- [ ] Tests from captured GraphQL fixtures: each refusal (outsider author, bot author, outsider labeler, relabel by an outsider after the owner, edit between labelings, same-second edit, title rename after label, missing `lastEditedAt`, GraphQL error, PR, transferred, too long, `CheckBrief` content, org repo with no `authors`, non-github remote, name collision) and the happy path; idempotence; a body containing the fence text. Stage breaks of the author, labeler, edit and title checks and confirm each goes red.
-- [ ] Docs: docs/herdr.md "Intake" section, help text.
+- [x] Config `[surface.intake]` (`authors`, `labels`, `max_per_run`), validated at load.
+- [x] Queue row fields `source` and `author` (omitempty; queue version unchanged, so a drain on an older binary must be restarted after the upgrade, as with forgectl#1199), and an enqueue path that takes them.
+- [x] The intake command: remote → owner/repo; one GraphQL query per page of eligible issues; the gate above; the brief template with the nonce fence and the rules; enqueue; per-issue skips; `--dry-run --json`.
+- [x] Tests from captured GraphQL fixtures: each refusal (outsider author, bot author, outsider labeler, relabel by an outsider after the owner, edit between labelings, same-second edit, title rename after label, missing `lastEditedAt`, GraphQL error, PR, transferred, too long, `CheckBrief` content, org repo with no `authors`, non-github remote, name collision) and the happy path; idempotence; a body containing the fence text. Stage breaks of the author, labeler, edit and title checks and confirm each goes red.
+- [x] Docs: docs/herdr.md "Intake" section, help text.
 - [ ] Security review (Opus) of the control's file set, not only the diff, before the live check: the T9.1 diff with the brief template and fixtures; `internal/surface/worker/brief.go`, `queue.go`; `internal/surface/drain/drain.go`; `internal/cli/surface_queue.go`; `internal/launch/invocation.go`. It checks the gate against the written code. `[surface.merge] mode` stays `off` (ADR-0011 Decision 10).
 - [ ] Live check: label one real issue in cameronsjo/forgectl (user-owned, so the default `authors` covers it), run intake with `--dry-run`, then for real; confirm the row, the brief, and a draft PR with `Closes #N`.
 
@@ -96,4 +96,19 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 1 Critical, 9 Imp
 - **`max_per_run` instead of a per-source depth cap.**
 - **No CHANGELOG task:** forgectl's changelog is written by release-please from commit messages.
 
+## Deviations (T9.1)
+
+- **Several eligible labels: the earliest labeling counts.** The gate's "that latest label event" is, with more than one eligible label on an issue, the earliest of each label's latest labeling, so an edit between two labelings refuses. The plan's "edit between labelings" test pins it.
+- **CRLF becomes LF in the fenced body.** A carriage return is a control character `CheckBrief` refuses, and GitHub's web editor writes CRLF; no other byte of the body changes.
+- **`ssh.github.com` counts as github.com,** as `workerBase` already does; the query is pinned to `github.com` either way.
+- **Two refusals the plan did not list:** GitHub naming a different owner than origin (a rename or transfer it followed; the default author would be someone origin never named), and an owner that is neither `User` nor `Organization` with no `authors`.
+- **A page limit:** at most 20 pages of 25 issues per run, reported in `stopped`.
+- **Docs box ticked with the code** (the brief said the first four boxes; the docs landed in the same commit).
+
 ## Learnings
+
+- **Captured shapes (gh 2.101.0, 2026-10-09):** `gh api graphql` exits 1 on any GraphQL error and prints the error JSON on stdout, both for an undefined field (`errors` only) and for a missing repository (`data.repository: null` beside `errors`). `repository.issues` nodes are GraphQL type `Issue` (introspection: `IssueConnection.nodes: [Issue]`), so a pull request cannot appear there; the `__typename` check stays. Array variables pass as `-f 'labels[]=<name>'`, and the `labels` filter is any-of.
+- **Same-second timeline events.** Timestamps are whole seconds and several label events often share one (the capture of #13 and #32 has unlabel and label pairs in one second). GitHub documents no order within a second, so a same-second unlabel of the label, or a same-second edit or rename, refuses.
+- **Bots.** GraphQL gives a `Bot` actor's login without the REST `[bot]` suffix, so the gate reads `__typename` (only `User` is allowed) and refuses a `[bot]` login too. No bot event was in this repository's capture to observe it.
+- **Re-intake dedupe is by name only.** Each brief carries a fresh nonce, so the queue's same-brief no-op never fires on a second run; intake checks the row name against the queue first, and a row written in between is caught as `ErrQueueNameTaken`.
+- **Before the live check:** a read-only `--dry-run` against cameronsjo/forgectl (temporary state dir) would queue #13 and #32, which the owner already labeled `exec:guided`. For the live check, label the test issue `exec:mechanical` and run with `--label exec:mechanical` (neither #13 nor #32 carries it), or expect those two queued too.
