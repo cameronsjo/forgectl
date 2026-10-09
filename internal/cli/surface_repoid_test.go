@@ -81,8 +81,9 @@ func TestWorkerRepoIdentity(t *testing.T) {
 	})
 	failing := func() map[string]*exec.FakeRunner {
 		return map[string]*exec.FakeRunner{
-			"gh fails":      identityFake("git@github.com:o/r.git", "", errors.New("HTTP 502"), ""),
-			"gh refused":    identityFake("git@github.com:o/r.git", "", errors.New("HTTP 404: Not Found"), ""),
+			"gh fails":      identityFake("git@github.com:o/r.git", "", &exec.CommandError{Name: "gh", Stderr: `Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host`}, ""),
+			"gh refused":    identityFake("git@github.com:o/r.git", "", &exec.CommandError{Name: "gh", Stderr: "gh: HTTP 404: Not Found (https://api.github.com/graphql)"}, ""),
+			"not gh":        identityFake("git@github.com:o/r.git", "", errors.New("HTTP 502"), ""),
 			"bad response":  identityFake("git@github.com:o/r.git", `{"data":{"repository":null}}`, nil, ""),
 			"graphql error": identityFake("git@github.com:o/r.git", `{"errors":[{"message":"nope"}]}`, nil, ""),
 		}
@@ -195,5 +196,27 @@ func TestDrainSpecRefusesExistingBranch(t *testing.T) {
 	err := errors.Join(errors.New("context"), worker.ErrBranchExists)
 	if got := classifyLaunchError(err); got != drain.ErrRowInvalid {
 		t.Fatalf("class %v, want ErrRowInvalid (failed, no retry)", got)
+	}
+}
+
+// The markers are matched on the raw stderr: Error() redacts a line carrying a
+// URL, which is where gh prints most network failures.
+func TestTransientGitHubFailureReadsRawStderr(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		`Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host`:           true,
+		`Post "https://api.github.com/graphql": net/http: TLS handshake timeout`:                         true,
+		"error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com": true,
+		"gh: HTTP 502: Bad Gateway (https://api.github.com/graphql)":                                     true,
+		"API rate limit exceeded for user ID 1.":                                                         true,
+		"gh: HTTP 404: Not Found (https://api.github.com/graphql)":                                       false,
+		"GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)":                   false,
+	} {
+		err := error(&exec.CommandError{Name: "gh", Stderr: stderr})
+		if got := transientGitHubFailure(err); got != want {
+			t.Errorf("%q: transient %v, want %v", stderr, got, want)
+		}
+	}
+	if transientGitHubFailure(&exec.CommandError{Name: "git", Stderr: "dial tcp: no such host"}) {
+		t.Error("a non-gh command error read as a transient GitHub failure")
 	}
 }

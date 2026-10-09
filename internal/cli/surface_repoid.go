@@ -104,15 +104,24 @@ var errIdentityRead = errors.New("the repository identity could not be read from
 // on it fails at the attempt limit instead of holding the queue.
 var errIdentityRefused = errors.New("GitHub refused the repository identity read")
 
+// transientGitHubMarkers are gh stderr fragments that mean the network, a
+// server error or a rate limit, not GitHub's answer.
+var transientGitHubMarkers = []string{"HTTP 5", "rate limit", "dial tcp", "connection refused", "connection reset",
+	"no such host", "i/o timeout", "TLS handshake timeout", "network is unreachable", "context deadline exceeded",
+	"timeout awaiting", "unexpected EOF", "error connecting to"}
+
 // transientGitHubFailure reports a gh failure worth pausing for rather than
 // counting: the network, a server error, or a rate limit. Anything else is
-// treated as GitHub's answer.
+// treated as GitHub's answer. Like githubAuthFailure it matches the raw
+// stderr, never Error(), which redacts any line carrying a URL and with it
+// most of gh's network errors.
 func transientGitHubFailure(err error) bool {
-	msg := strings.ToLower(err.Error())
-	for _, s := range []string{"http 5", "rate limit", "dial tcp", "connection refused", "connection reset",
-		"no such host", "i/o timeout", "tls handshake", "network is unreachable", "context deadline exceeded",
-		"timeout awaiting", "unexpected eof"} {
-		if strings.Contains(msg, s) {
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) || ce.Name != "gh" {
+		return false
+	}
+	for _, m := range transientGitHubMarkers {
+		if strings.Contains(ce.Stderr, m) {
 			return true
 		}
 	}
