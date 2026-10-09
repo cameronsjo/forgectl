@@ -48,6 +48,13 @@
        "body": "cadence-review: security head=8b6170f5bc3e934e351c19ea60abd661782e3012 crit=0 imp=0",
        "commit": {
         "oid": "8b6170f5bc3e934e351c19ea60abd661782e3012"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -62,6 +69,13 @@
        "body": "cadence-review: code head=8b6170f5bc3e934e351c19ea60abd661782e3012 crit=0 imp=0",
        "commit": {
         "oid": "8b6170f5bc3e934e351c19ea60abd661782e3012"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -76,6 +90,13 @@
        "body": "cadence-review: security head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0",
        "commit": {
         "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -90,6 +111,13 @@
        "body": "cadence-review: code head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0",
        "commit": {
         "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -104,6 +132,13 @@
        "body": "<!-- cadence-review: cadence-forge-security-reviewer head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0 -->",
        "commit": {
         "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -118,6 +153,13 @@
        "body": "<!-- cadence-review: polish head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0 -->",
        "commit": {
         "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -132,6 +174,13 @@
        "body": "<!-- cadence-review: cadence-forge-security-reviewer head=d2a35ddc18851d85be5493211c3103b928ada66a crit=0 imp=0 -->",
        "commit": {
         "oid": "d2a35ddc18851d85be5493211c3103b928ada66a"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       },
       {
@@ -146,6 +195,13 @@
        "body": "<!-- cadence-review: chief-of-staff head=d2a35ddc18851d85be5493211c3103b928ada66a crit=0 imp=0 -->",
        "commit": {
         "oid": "d2a35ddc18851d85be5493211c3103b928ada66a"
+       },
+       "lastEditedAt": null,
+       "comments": {
+        "pageInfo": {
+         "hasNextPage": false
+        },
+        "nodes": []
        }
       }
      ]

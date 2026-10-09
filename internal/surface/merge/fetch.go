@@ -141,7 +141,7 @@ func (r Reader) Read(ctx context.Context, row Row) (Snapshot, error) {
 	}
 	head, base := pr.PR.HeadRefOid, pr.PR.BaseRefOid
 	f := &snap.Facts
-	f.PR, f.Reviews, f.Comments = pr.PR, pr.Reviews, pr.Comments
+	f.PR, f.Reviews, f.Comments, f.ReviewComments = pr.PR, pr.Reviews, pr.Comments, pr.ReviewComments
 	data, err = r.graphQL(ctx, ChecksQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number, "-f", "head="+head)
 	if err != nil {
 		return Snapshot{}, err

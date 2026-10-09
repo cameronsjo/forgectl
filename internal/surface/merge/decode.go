@@ -38,8 +38,13 @@ const DiscoverQuery = `query($owner: String!, $name: String!, $head: String!) {
   }
 }`
 
-// PRQuery reads one PR: its state, its reviews and its conversation
-// comments.
+// commentFields is a comment's selection: author, body, link, and when it
+// was posted and last edited.
+const commentFields = `author { ` + actorFields + ` } body url createdAt lastEditedAt`
+
+// PRQuery reads one PR: its state, its reviews with each review's inline
+// comments, and its conversation comments. Every connection refuses on a
+// remaining page.
 const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     databaseId
@@ -68,14 +73,19 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
           author { ` + actorFields + ` }
           state
           submittedAt
+          lastEditedAt
           url
           body
           commit { oid }
+          comments(first: 100) {
+            pageInfo { hasNextPage }
+            nodes { ` + commentFields + ` }
+          }
         }
       }
       comments(first: 100) {
         pageInfo { hasNextPage }
-        nodes { author { ` + actorFields + ` } body url createdAt }
+        nodes { ` + commentFields + ` }
       }
     }
   }
@@ -303,16 +313,52 @@ type PRRead struct {
 	PR         PullRequest
 	Reviews    []Review
 	Comments   []Comment
+	// ReviewComments are the inline comments of every review.
+	ReviewComments []Comment
+}
+
+// commentNode is a comment in a PRQuery response. LastEditedAt is kept raw
+// so a missing field (EditUnread) differs from an explicit null (never
+// edited).
+type commentNode struct {
+	Author       *Actor          `json:"author"`
+	Body         string          `json:"body"`
+	URL          string          `json:"url"`
+	CreatedAt    string          `json:"createdAt"`
+	LastEditedAt json.RawMessage `json:"lastEditedAt"`
+}
+
+// editStamp reads a raw lastEditedAt: absent is unread, null is never
+// edited, a string is the edit time. Anything else refuses the read.
+func editStamp(raw json.RawMessage) (at string, unread bool, err error) {
+	if len(raw) == 0 {
+		return "", true, nil
+	}
+	var v *string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", false, fmt.Errorf("%w: lastEditedAt is %s, expected a timestamp or null", ErrResponse, raw)
+	}
+	if v == nil {
+		return "", false, nil
+	}
+	if *v == "" {
+		return "", false, fmt.Errorf("%w: lastEditedAt is an empty string, expected a timestamp or null", ErrResponse)
+	}
+	return *v, false, nil
+}
+
+func (c commentNode) comment() (Comment, error) {
+	out := Comment{Body: c.Body, URL: c.URL, CreatedAt: c.CreatedAt}
+	if c.Author != nil {
+		out.Author = *c.Author
+	}
+	var err error
+	out.LastEditedAt, out.EditUnread, err = editStamp(c.LastEditedAt)
+	return out, err
 }
 
 // DecodePR reads a PRQuery response, refusing on any remaining page.
 func DecodePR(data []byte) (PRRead, error) {
-	type comment struct {
-		Author    *Actor `json:"author"`
-		Body      string `json:"body"`
-		URL       string `json:"url"`
-		CreatedAt string `json:"createdAt"`
-	}
 	var d struct {
 		Repository *struct {
 			repoNode
@@ -340,19 +386,24 @@ func DecodePR(data []byte) (PRRead, error) {
 				Reviews *struct {
 					PageInfo pageInfo `json:"pageInfo"`
 					Nodes    []struct {
-						Author      *Actor  `json:"author"`
-						State       string  `json:"state"`
-						SubmittedAt *string `json:"submittedAt"`
-						URL         string  `json:"url"`
-						Body        string  `json:"body"`
-						Commit      *struct {
+						Author       *Actor          `json:"author"`
+						State        string          `json:"state"`
+						SubmittedAt  *string         `json:"submittedAt"`
+						LastEditedAt json.RawMessage `json:"lastEditedAt"`
+						URL          string          `json:"url"`
+						Body         string          `json:"body"`
+						Commit       *struct {
 							OID string `json:"oid"`
 						} `json:"commit"`
+						Comments *struct {
+							PageInfo pageInfo      `json:"pageInfo"`
+							Nodes    []commentNode `json:"nodes"`
+						} `json:"comments"`
 					} `json:"nodes"`
 				} `json:"reviews"`
 				Comments *struct {
-					PageInfo pageInfo  `json:"pageInfo"`
-					Nodes    []comment `json:"nodes"`
+					PageInfo pageInfo      `json:"pageInfo"`
+					Nodes    []commentNode `json:"nodes"`
 				} `json:"comments"`
 			} `json:"pullRequest"`
 		} `json:"repository"`
@@ -410,10 +461,32 @@ func DecodePR(data []byte) (PRRead, error) {
 		if r.Commit != nil {
 			rv.CommitOID = r.Commit.OID
 		}
+		if rv.LastEditedAt, rv.EditUnread, err = editStamp(r.LastEditedAt); err != nil {
+			return PRRead{}, err
+		}
 		out.Reviews = append(out.Reviews, rv)
+		// A review's inline comments: the connection must be there, and in
+		// one page, or the read refuses rather than judge part of them.
+		if r.Comments == nil {
+			return PRRead{}, fmt.Errorf("%w: review %s has no comments connection", ErrResponse, nonEmpty(r.URL, "with no URL"))
+		}
+		if err := remaining("a review's inline comment list", r.Comments.PageInfo); err != nil {
+			return PRRead{}, err
+		}
+		for _, c := range r.Comments.Nodes {
+			rc, err := c.comment()
+			if err != nil {
+				return PRRead{}, err
+			}
+			out.ReviewComments = append(out.ReviewComments, rc)
+		}
 	}
 	for _, c := range p.Comments.Nodes {
-		out.Comments = append(out.Comments, Comment{Author: actor(c.Author), Body: c.Body, URL: c.URL, CreatedAt: c.CreatedAt})
+		pc, err := c.comment()
+		if err != nil {
+			return PRRead{}, err
+		}
+		out.Comments = append(out.Comments, pc)
 	}
 	return out, nil
 }

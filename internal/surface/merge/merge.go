@@ -2,6 +2,7 @@ package merge
 
 import (
 	"fmt"
+	"html"
 	"path"
 	"regexp"
 	"slices"
@@ -9,8 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // GitHubActionsAppID is the GitHub Actions app's id, matched by number,
@@ -126,15 +131,24 @@ type Review struct {
 	Body        string
 	// CommitOID is the commit the review was submitted at.
 	CommitOID string
+	// LastEditedAt is when the body was last edited, "" when it never was.
+	// EditUnread is true when the response did not carry the field at all,
+	// so whether it was edited is not known.
+	LastEditedAt string
+	EditUnread   bool
 }
 
-// Comment is a PR conversation comment. Only checkOpenFindings reads it: a
-// comment is never a passing marker, but one holding a marker can refuse.
+// Comment is a PR conversation comment, or an inline review comment. Only
+// checkOpenFindings reads it: a comment is never a passing marker, but one
+// holding a marker can refuse.
 type Comment struct {
 	Author    Actor
 	Body      string
 	URL       string
 	CreatedAt string
+	// LastEditedAt and EditUnread are as on Review.
+	LastEditedAt string
+	EditUnread   bool
 }
 
 // File is one changed file, from the compare of base and head, with its
@@ -166,9 +180,11 @@ type Facts struct {
 	PR         PullRequest
 	Checks     []CheckRun
 	Reviews    []Review
-	// Comments are the PR's conversation comments.
-	Comments []Comment
-	Files    []File
+	// Comments are the PR's conversation comments, and ReviewComments its
+	// inline review comments (on a diff line), from every review.
+	Comments       []Comment
+	ReviewComments []Comment
+	Files          []File
 	// BaseAncestry is compare(Row.Base...PR.BaseRefOid).status, and
 	// HeadAncestry compare(Row.Base...PR.HeadRefOid).status.
 	BaseAncestry string
@@ -516,6 +532,9 @@ type marker struct {
 	at     time.Time
 	commit string
 	index  int
+	// edited is true when the review was edited after it was posted, or
+	// when the read could not say: such a marker never passes.
+	edited bool
 }
 
 // countedReview reports a review the cadence-review approver reads: a User
@@ -528,7 +547,7 @@ func countedReview(r Review, s config.MergeSettings) bool {
 // markersOf collects the strict cadence-review markers by s.MarkerAuthorID,
 // per reviewer, for the cadence-review approver. A marker review whose
 // submittedAt does not parse is not counted here; checkOpenFindings refuses
-// it.
+// it. An edited one is counted, so it can be the latest, but never passes.
 func markersOf(f Facts, s config.MergeSettings) map[string][]marker {
 	byReviewer := map[string][]marker{}
 	for i, r := range f.Reviews {
@@ -543,21 +562,47 @@ func markersOf(f Facts, s config.MergeSettings) map[string][]marker {
 		if err != nil {
 			continue
 		}
-		byReviewer[m.Reviewer] = append(byReviewer[m.Reviewer], marker{Marker: m, at: at, commit: r.CommitOID, index: i})
+		byReviewer[m.Reviewer] = append(byReviewer[m.Reviewer], marker{Marker: m, at: at, commit: r.CommitOID, index: i,
+			edited: r.LastEditedAt != "" || r.EditUnread})
 	}
 	return byReviewer
 }
 
-// passingAt reports a marker that clears the head: it names head, was posted
-// at head, and reports no Critical or Important finding.
+// passingAt reports a marker that clears the head: never edited, it names
+// head, was posted at head, and reports no Critical or Important finding.
 func passingAt(m marker, head string) bool {
-	return m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0
+	return !m.edited && m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0
 }
 
-// looseMarker finds "cadence-review:" anywhere in a body, in any case, with
-// the token after it: the reviewer name the marker claims. The strict
-// markerPattern decides what passes; this decides what may hold a finding.
-var looseMarker = regexp.MustCompile(`(?i)cadence-review:[ \t]*(\S*)`)
+// looseMarker finds a mention of the marker's word, with the token after it
+// (the reviewer name the mention claims), in a body scanText has normalized:
+// any case, any run of space, backslash, underscore or hyphen (ASCII or
+// Unicode) between "cadence" and "review", and space before the colon. The
+// strict markerPattern decides what passes; this decides what may hold a
+// finding, so it errs wide.
+var looseMarker = regexp.MustCompile(`(?i)cadence[\s\\_\-\x{2010}-\x{2015}\x{2212}]*review\s*:[ \t]*(\S*)`)
+
+// scanText is a body as looseMarker reads it: invisible, zero-width, bidi
+// and control characters (other than space, tab and line ends) and invalid
+// UTF-8 removed, NFKC-normalized (so full-width letters and compatibility
+// hyphens and spaces fold to ASCII), HTML entities decoded, and then removed
+// and normalized again, since an entity can spell a hidden character.
+func scanText(body string) string {
+	once := func(s string) string { return norm.NFKC.String(stripHidden(s)) }
+	return once(html.UnescapeString(once(body)))
+}
+
+func stripHidden(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			return r
+		case r == utf8.RuneError || termsafe.IsUnsafeTerminalRune(r) || termsafe.IsInvisibleRune(r):
+			return -1
+		}
+		return r
+	}, s)
+}
 
 // reviewerName is a reviewer name a strict marker can carry.
 var reviewerName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
@@ -565,22 +610,34 @@ var reviewerName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 // maxQuotedLine caps a body line quoted in a reason.
 const maxQuotedLine = 120
 
-// markerPost is a review or conversation comment by marker_author_id whose
-// body mentions "cadence-review:".
+// Post kinds a marker can appear in.
+const (
+	postReview       = "pull request review"
+	postConversation = "conversation comment"
+	postInline       = "inline review comment"
+)
+
+// markerPost is a review, conversation comment or inline review comment by
+// marker_author_id whose body mentions the marker's word.
 type markerPost struct {
-	// where names it for a reason: "review <url>" or "conversation comment
-	// <url>".
-	where string
+	// kind is postReview, postConversation or postInline, and where names
+	// the post for a reason: "review <url>" or "<kind> <url>".
+	kind, where string
 	// stampField is the timestamp's GraphQL name, and stamp its value.
 	stampField, stamp string
-	body              string
-	mentions          [][]string
-	// review is nil for a conversation comment.
+	// edited is the post's lastEditedAt ("" when never edited), and
+	// editUnread says the read did not carry it.
+	edited     string
+	editUnread bool
+	body       string
+	mentions   [][]string
+	// review is nil for a comment.
 	review *Review
 }
 
-// markerPosts lists the reviews (any state, any commit) and conversation
-// comments by s.MarkerAuthorID that mention "cadence-review:" in any case.
+// markerPosts lists the reviews (any state, any commit), conversation
+// comments and inline review comments by s.MarkerAuthorID that mention the
+// marker's word (looseMarker over scanText).
 func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 	var out []markerPost
 	for i := range f.Reviews {
@@ -588,26 +645,34 @@ func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 		if r.Author.DatabaseID != s.MarkerAuthorID {
 			continue
 		}
-		if m := looseMarker.FindAllStringSubmatch(r.Body, -1); m != nil {
-			out = append(out, markerPost{where: "review " + nonEmpty(r.URL, "with no URL"), stampField: "submittedAt", stamp: r.SubmittedAt, body: r.Body, mentions: m, review: r})
+		if m := looseMarker.FindAllStringSubmatch(scanText(r.Body), -1); m != nil {
+			out = append(out, markerPost{kind: postReview, where: "review " + nonEmpty(r.URL, "with no URL"), stampField: "submittedAt", stamp: r.SubmittedAt,
+				edited: r.LastEditedAt, editUnread: r.EditUnread, body: r.Body, mentions: m, review: r})
 		}
 	}
-	for _, c := range f.Comments {
-		if c.Author.DatabaseID != s.MarkerAuthorID {
-			continue
-		}
-		if m := looseMarker.FindAllStringSubmatch(c.Body, -1); m != nil {
-			out = append(out, markerPost{where: "conversation comment " + nonEmpty(c.URL, "with no URL"), stampField: "createdAt", stamp: c.CreatedAt, body: c.Body, mentions: m})
+	for _, list := range []struct {
+		kind     string
+		comments []Comment
+	}{{postConversation, f.Comments}, {postInline, f.ReviewComments}} {
+		for _, c := range list.comments {
+			if c.Author.DatabaseID != s.MarkerAuthorID {
+				continue
+			}
+			if m := looseMarker.FindAllStringSubmatch(scanText(c.Body), -1); m != nil {
+				out = append(out, markerPost{kind: list.kind, where: list.kind + " " + nonEmpty(c.URL, "with no URL"), stampField: "createdAt", stamp: c.CreatedAt,
+					edited: c.LastEditedAt, editUnread: c.EditUnread, body: c.Body, mentions: m})
+			}
 		}
 	}
 	return out
 }
 
 // strictPass returns the marker when p is a review that passes at head: a
-// counted review whose body mentions "cadence-review:" once, in a first line
-// that is an exact marker naming head, posted at head, with crit=0 imp=0.
+// counted review, never edited, whose body mentions the marker's word once,
+// in a first line that is an exact marker naming head, posted at head, with
+// crit=0 imp=0.
 func strictPass(p markerPost, head string, s config.MergeSettings) (Marker, bool) {
-	if p.review == nil || !countedReview(*p.review, s) || len(p.mentions) != 1 {
+	if p.review == nil || p.edited != "" || p.editUnread || !countedReview(*p.review, s) || len(p.mentions) != 1 {
 		return Marker{}, false
 	}
 	m, ok := ParseMarker(p.body)
@@ -621,7 +686,7 @@ func strictPass(p markerPost, head string, s config.MergeSettings) (Marker, bool
 func whyNotPassing(p markerPost, head string) string {
 	var why []string
 	if p.review == nil {
-		why = append(why, "a conversation comment never counts as a passing marker")
+		why = append(why, "a "+p.kind+" never counts as a passing marker")
 	} else {
 		r := p.review
 		if r.Author.Typename != "User" {
@@ -630,6 +695,9 @@ func whyNotPassing(p markerPost, head string) string {
 		if r.State != "COMMENTED" && r.State != "APPROVED" {
 			why = append(why, fmt.Sprintf("its state is %s, expected COMMENTED or APPROVED", nonEmpty(r.State, "unknown")))
 		}
+	}
+	if p.edited != "" {
+		why = append(why, fmt.Sprintf("it was edited at %s; an edited post never counts as a passing marker", p.edited))
 	}
 	if n := len(p.mentions); n > 1 {
 		why = append(why, fmt.Sprintf("it mentions cadence-review: %d times, expected one marker", n))
@@ -651,16 +719,19 @@ func whyNotPassing(p markerPost, head string) string {
 }
 
 // checkOpenFindings fails closed on cadence-review markers. Every review
-// (any state, any commit) and conversation comment by marker_author_id whose
-// body mentions "cadence-review:" anywhere, in any case, and that is not a
-// strict passing marker at the head (strictPass) is an open finding for each
-// reviewer it names, unless a strict passing marker at the head by the same
-// reviewer was submitted later (a marker in the same second is not later);
-// each one not cleared adds its own reason. One that names a reviewer that
-// does not parse, or whose timestamp does not, refuses outright: no later
-// marker can be shown to clear it. It runs outside the approver loop, so it
-// refuses under every approver set (ADR-0011, 2026-10-09 amendment,
-// decision 1).
+// (any state, any commit), conversation comment and inline review comment by
+// marker_author_id whose body mentions the marker's word (looseMarker over
+// scanText) and that is not a strict passing marker at the head (strictPass)
+// is an open finding for each reviewer it names, unless a strict passing
+// marker at the head by the same reviewer was submitted later (a marker in
+// the same second is not later). A post counts at its last edit when it was
+// edited, and an edited post is never a strict pass, so an edit can neither
+// hide a finding behind an earlier pass nor turn a finding into a pass. Each
+// finding not cleared adds its own reason. One that names a reviewer that
+// does not parse, or whose timestamp or edit time does not, refuses
+// outright: no later marker can be shown to clear it. It runs outside the
+// approver loop, so it refuses under every approver set (ADR-0011,
+// 2026-10-09 amendment, decision 1).
 func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 	if s.MarkerAuthorID <= 0 {
 		add("[surface.merge] marker_author_id is not set, expected the operator's id: open cadence-review findings cannot be read without it")
@@ -678,6 +749,20 @@ func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 		if err != nil {
 			add("open finding: %s mentions cadence-review: and has %s %q, expected a timestamp, so no later passing marker can be shown to clear it; this refuses under every approver", p.where, p.stampField, p.stamp)
 			continue
+		}
+		if p.editUnread {
+			add("open finding: %s mentions cadence-review: and the read did not say whether it was edited (no lastEditedAt), so no later passing marker can be shown to clear it; this refuses under every approver", p.where)
+			continue
+		}
+		if p.edited != "" {
+			edit, err := time.Parse(time.RFC3339, p.edited)
+			if err != nil {
+				add("open finding: %s mentions cadence-review: and has lastEditedAt %q, expected a timestamp, so no later passing marker can be shown to clear it; this refuses under every approver", p.where, p.edited)
+				continue
+			}
+			if edit.After(at) {
+				at = edit // an edited post counts at its edit
+			}
 		}
 		if m, ok := strictPass(p, head, s); ok {
 			passes[m.Reviewer] = append(passes[m.Reviewer], at)
@@ -733,7 +818,11 @@ func cadenceReview(f Facts, s config.MergeSettings) []string {
 		}
 		last := latestMarker(ms)
 		if !passingAt(last, head) {
-			why = append(why, fmt.Sprintf("cadence-review: %s's latest marker is head=%s (review commit %s) crit=%d imp=%d, expected head=%s crit=0 imp=0", name, short(last.Head), short(last.commit), last.Crit, last.Imp, short(head)))
+			edited := ""
+			if last.edited {
+				edited = ", edited after it was posted (an edited marker never passes)"
+			}
+			why = append(why, fmt.Sprintf("cadence-review: %s's latest marker is head=%s (review commit %s) crit=%d imp=%d%s, expected head=%s crit=0 imp=0", name, short(last.Head), short(last.commit), last.Crit, last.Imp, edited, short(head)))
 		}
 	}
 	if len(s.RequiredReviewers) == 0 {

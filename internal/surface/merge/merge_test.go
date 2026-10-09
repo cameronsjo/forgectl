@@ -23,6 +23,10 @@ import (
 // keeps only status and the file list, and each tree keeps only the changed
 // files' entries. discover_synthetic_fork.json is the #1204 discovery with
 // three PRs added on the same head name that the filter must drop.
+// Every review node in the PR fixtures gained "lastEditedAt": null and an
+// empty inline "comments" connection by hand, after the query grew them; a
+// read-only live check on 2026-10-09 showed lastEditedAt null on every #1203
+// review and no inline comments.
 
 const (
 	head1204   = "3afe70e8bff88488d3aebd691ffb943829bf676c"
@@ -823,8 +827,8 @@ func TestDecodePRCommentFields(t *testing.T) {
 	if err != nil || len(r.Comments) != 1 || r.Comments[0].URL != "https://example.test/c/1" || r.Comments[0].CreatedAt != "2026-10-09T18:00:00Z" {
 		t.Fatalf("comments %+v, %v", r.Comments, err)
 	}
-	if !strings.Contains(PRQuery, "body url createdAt }") {
-		t.Fatal("PRQuery does not ask for the comment's url and createdAt")
+	if !strings.Contains(PRQuery, "body url createdAt lastEditedAt }") {
+		t.Fatal("PRQuery does not ask for the comment's url, createdAt and lastEditedAt")
 	}
 }
 
