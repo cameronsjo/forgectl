@@ -143,6 +143,8 @@ type Config struct {
 	// herdrOrganizeSet records that [herdr.organize] is present in the file,
 	// even as an empty table (what `forgectl init` writes).
 	herdrOrganizeSet bool
+	// mergeSet records that [surface.merge] is present in the file.
+	mergeSet bool
 	// decodeDegraded records that the config file existed but failed to
 	// decode, so this Config may be missing sections the operator wrote.
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
@@ -1234,6 +1236,7 @@ func DecodeStrict(data []byte) (Config, error) {
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
 	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
+	cfg.mergeSet = meta.IsDefined("surface", "merge")
 	for _, k := range meta.Undecoded() {
 		// A top-level on_update table is collected too, so Validate can point
 		// at [[resume.on_update]] instead of the table being silently ignored.
@@ -1244,6 +1247,11 @@ func DecodeStrict(data []byte) (Config, error) {
 		// widens whose issues intake takes, so Resolve refuses it.
 		if len(k) > 2 && k[0] == "surface" && k[1] == "intake" {
 			cfg.Surface.Intake.unknown = append(cfg.Surface.Intake.unknown, k.String())
+		}
+		// A misspelled [surface.merge] key would leave a policy field at its
+		// zero value, so Resolve refuses it and the mode resolves to off.
+		if len(k) > 2 && k[0] == "surface" && k[1] == "merge" {
+			cfg.Surface.Merge.unknown = append(cfg.Surface.Merge.unknown, k.String())
 		}
 	}
 	if err != nil {
@@ -1291,6 +1299,12 @@ func DecodeStrict(data []byte) (Config, error) {
 	if err := cfg.Surface.Intake.Validate(); err != nil && invalid == nil {
 		invalid = invalidValueError{message: err.Error()}
 	}
+	// [surface.merge] decides when a worker's PR merges without the
+	// operator. A bad value is refused at load like [surface.intake]'s, and
+	// ResolveMerge resolves the mode to off on it again.
+	if err := cfg.Surface.Merge.Validate(); err != nil && invalid == nil {
+		invalid = invalidValueError{message: err.Error()}
+	}
 	return cfg, invalid
 }
 
@@ -1308,7 +1322,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [surface.drain], [surface.intake], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [resume], and [theme]. [tasks] and log_level are checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
@@ -1339,6 +1353,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Surface.Intake.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Surface.Merge.Validate(); err != nil {
 		return err
 	}
 	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {

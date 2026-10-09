@@ -64,6 +64,18 @@ type Row struct {
 	// Begin. It is empty for a CLI launch. `surface drain` acts only on a
 	// row whose LaunchID matches the queue row it claimed.
 	LaunchID string `json:"launch_id,omitempty"`
+	// BranchFrom is where the worktree's branch came from: BranchNew,
+	// BranchLocal or BranchOrigin. It is written with the worktree; a row
+	// from before the field existed has none, and the merge policy refuses
+	// it.
+	BranchFrom string `json:"branch_from,omitempty"`
+	// GitHubRepo and GitHubRepoID are the repository's canonical
+	// nameWithOwner and numeric id, read from GitHub when the launch began
+	// (merge.IdentityQuery). Both are empty for a repository whose origin is
+	// not on github.com. The merge policy reads these, never the checkout's
+	// .git/config, which a worker can rewrite.
+	GitHubRepo   string `json:"github_repo,omitempty"`
+	GitHubRepoID int64  `json:"github_repo_id,omitempty"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is

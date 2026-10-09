@@ -1,0 +1,177 @@
+{
+ "data": {
+  "repository": {
+   "databaseId": 1252924951,
+   "nameWithOwner": "cameronsjo/forgectl",
+   "defaultBranchRef": {
+    "name": "main"
+   },
+   "pullRequest": {
+    "number": 1203,
+    "url": "https://github.com/cameronsjo/forgectl/pull/1203",
+    "title": "feat(surface): intake from GitHub labels (atelier P3)",
+    "state": "MERGED",
+    "isDraft": false,
+    "isCrossRepository": false,
+    "baseRefName": "main",
+    "baseRefOid": "a398e7258d0a755b14f2599afb277b7b8132b86e",
+    "headRefName": "plan/atelier-p3-intake",
+    "headRefOid": "d2a35ddc18851d85be5493211c3103b928ada66a",
+    "mergeable": "UNKNOWN",
+    "mergeStateStatus": "UNKNOWN",
+    "changedFiles": 24,
+    "author": {
+     "__typename": "User",
+     "login": "cameronsjo",
+     "databaseId": 4084915
+    },
+    "headRepository": {
+     "databaseId": 1252924951
+    },
+    "baseRepository": {
+     "databaseId": 1252924951
+    },
+    "reviews": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:19:01Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5471987710",
+       "body": "cadence-review: security head=8b6170f5bc3e934e351c19ea60abd661782e3012 crit=0 imp=0",
+       "commit": {
+        "oid": "8b6170f5bc3e934e351c19ea60abd661782e3012"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:19:02Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5471987873",
+       "body": "cadence-review: code head=8b6170f5bc3e934e351c19ea60abd661782e3012 crit=0 imp=0",
+       "commit": {
+        "oid": "8b6170f5bc3e934e351c19ea60abd661782e3012"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:42:16Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472236515",
+       "body": "cadence-review: security head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0",
+       "commit": {
+        "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:42:17Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472236731",
+       "body": "cadence-review: code head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0",
+       "commit": {
+        "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:43:55Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472253999",
+       "body": "<!-- cadence-review: cadence-forge-security-reviewer head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0 -->",
+       "commit": {
+        "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T15:43:57Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472254227",
+       "body": "<!-- cadence-review: polish head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0 -->",
+       "commit": {
+        "oid": "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T16:42:09Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472849640",
+       "body": "<!-- cadence-review: cadence-forge-security-reviewer head=d2a35ddc18851d85be5493211c3103b928ada66a crit=0 imp=0 -->",
+       "commit": {
+        "oid": "d2a35ddc18851d85be5493211c3103b928ada66a"
+       }
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T16:49:58Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472925623",
+       "body": "<!-- cadence-review: chief-of-staff head=d2a35ddc18851d85be5493211c3103b928ada66a crit=0 imp=0 -->",
+       "commit": {
+        "oid": "d2a35ddc18851d85be5493211c3103b928ada66a"
+       }
+      }
+     ]
+    },
+    "reviewThreads": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": []
+    },
+    "comments": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": [
+      {
+       "author": {
+        "__typename": "Bot",
+        "login": "coderabbitai",
+        "databaseId": 136622811
+       },
+       "body": "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"
+      }
+     ]
+    }
+   }
+  }
+ }
+}

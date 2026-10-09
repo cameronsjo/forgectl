@@ -73,7 +73,13 @@ drain start runs the detached process that launches them; drain status,
 events and stop inspect and end it:
 
   forgectl surface drain start
-  forgectl surface drain status`,
+  forgectl surface drain status
+
+status shows a worker's PR and what the merge policy ([surface.merge])
+decides about it; merge-machine prints this machine's policy value:
+
+  forgectl surface status fix-login --json
+  forgectl surface merge-machine`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -88,6 +94,8 @@ events and stop inspect and end it:
 	cmd.AddCommand(newSurfaceIntakeCmd(deps))
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
+	cmd.AddCommand(newSurfaceStatusCmd(deps))
+	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	return cmd
 }
 

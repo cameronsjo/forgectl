@@ -36,6 +36,9 @@ type workerLedger interface {
 // workerSteps are the three things a worker launch does, as functions so the
 // ledger bookkeeping between them can be tested without git or herdr.
 type workerSteps struct {
+	// identify reads the repository identity the row records, before the
+	// row is written; a drain launch also refuses a branch that exists.
+	identify    func(ctx context.Context) (repoIdentity, error)
 	addWorktree func(ctx context.Context) (worker.Worktree, error)
 	build       func(cwd string) (launch.BuiltInvocation, error)
 	launch      func(ctx context.Context, inv launch.Invocation) (backend.Ref, error)
@@ -59,7 +62,17 @@ type workerLaunched struct {
 // StageFailed with whatever the earlier steps recorded, so the next
 // coordinator can find a worktree or workspace a dead launch left behind.
 func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, s workerSteps) (workerLaunched, error) {
-	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID}); err != nil {
+	if s.identify == nil {
+		return workerLaunched{}, errNoIdentityStep
+	}
+	// Before Begin: a failed read, or a drain branch that already exists,
+	// leaves no row and nothing else.
+	id, err := s.identify(ctx)
+	if err != nil {
+		return workerLaunched{}, err
+	}
+	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID,
+		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -93,6 +106,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		r.Stage = worker.StageWorktree
 		r.Worktree = wt.Path
 		r.Base = wt.Base
+		r.BranchFrom = wt.BranchFrom
 	}); err != nil {
 		return fail(err)
 	}
@@ -173,6 +187,9 @@ type workerSpec struct {
 	configDir string
 	// model replaces the launch profile's model, or is empty.
 	model string
+	// drain marks the drain's launch: its branch must not exist yet, in the
+	// checkout or on GitHub (worker.ErrBranchExists).
+	drain bool
 }
 
 // request is the build request for this worker at cwd: the one a surface
@@ -241,6 +258,9 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, brief *worker.Brief, warn io.Writer) workerSteps {
 	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
 	return workerSteps{
+		identify: func(ctx context.Context) (repoIdentity, error) {
+			return workerRepoIdentity(ctx, deps.Runner, warn, s.top, spec.branch, spec.drain)
+		},
 		addWorktree: func(ctx context.Context) (worker.Worktree, error) {
 			return worker.AddWorktree(ctx, deps.Runner, s.top, spec.name, spec.branch, func() (string, error) {
 				return workerBase(ctx, deps.Runner, s.top, warn)

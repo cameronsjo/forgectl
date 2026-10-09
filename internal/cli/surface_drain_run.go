@@ -406,9 +406,21 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 	// claude rows are skipped unclaimed, and codex and pi rows, which are not
 	// claude sessions, still launch.
 	claudeHeld := false
+	// probe lets one launch through this tick when a GitHub-read pause from
+	// an earlier tick is the only one held: that launch's identity read is
+	// the re-check, and a success clears the pause. A pause set during this
+	// tick stops claiming until the next.
+	probe := d.onlyPause(drain.PauseGitHub)
 	for _, q := range plan {
-		if d.pauses.Paused() || d.stopping() {
+		if d.stopping() {
 			return
+		}
+		probing := false
+		if d.pauses.Paused() {
+			if !probe || !d.onlyPause(drain.PauseGitHub) {
+				return
+			}
+			probing = true
 		}
 		if claudeHeld && q.Launch().Harness == "claude" {
 			continue
@@ -451,10 +463,16 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 		if !a.CreatedNothing {
 			started++
 		}
+		if probing {
+			probe = false
+		}
 		a.Err = termsafe.SafeLineMax(a.Err, maxDrainErrorLen)
 		dec := drain.DecideLaunch(claimed, a)
 		if dec.Pause != "" {
 			d.pause(dec.Pause, dec.PauseReason)
+		}
+		if a.Class == drain.ErrNone {
+			d.resume(drain.PauseGitHub)
 		}
 		d.apply(claimed, dec.Change)
 	}
@@ -463,6 +481,11 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 func (d *drainer) pauseHeld(k drain.PauseKind) bool {
 	_, ok := d.pauses[k]
 	return ok
+}
+
+// onlyPause reports that k is the one pause held.
+func (d *drainer) onlyPause(k drain.PauseKind) bool {
+	return len(d.pauses) == 1 && d.pauseHeld(k)
 }
 
 // prune removes terminal rows past drain.PruneAfter, each only if it is
@@ -544,12 +567,12 @@ func drainLaunchWith(runner exec.Runner, launchFn workerLauncher) func(context.C
 }
 
 // drainSpec is the worker launch for a claimed row: the row's harness (claude
-// when it names none), branch worker/<name>, no $PATH binary, the row's
-// model, and the claim's launch id for the ledger. The row's profile is resolved by the caller, against the
+// when it names none), branch worker/<name>, which must not exist yet, no
+// $PATH binary, the row's model, and the claim's launch id for the ledger. The row's profile is resolved by the caller, against the
 // config it launches with.
 func drainSpec(row worker.QueueRow) workerSpec {
 	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: row.Launch().Harness, allowPATH: false,
-		launchID: row.LaunchID, model: row.Model}
+		launchID: row.LaunchID, model: row.Model, drain: true}
 }
 
 // attemptOf turns a workerAttempt and its error into the drain's view.
@@ -577,12 +600,20 @@ func classifyLaunchError(err error) drain.ErrClass {
 		return drain.ErrNone
 	case errors.Is(err, worker.ErrNameTaken):
 		return drain.ErrNameTaken
+	case errors.Is(err, worker.ErrBranchExists):
+		// The branch is there before the launch made anything; a retry
+		// would find it again.
+		return drain.ErrRowInvalid
 	case launchConfigFailure(err):
 		return drain.ErrLaunchConfig
 	case herdrUnavailable(err):
 		return drain.ErrHerdrDown
 	case githubAuthFailure(err):
 		return drain.ErrGitHubAuth
+	case errors.Is(err, errIdentityRead):
+		// GitHub could not be read before anything was created: pause and
+		// requeue, never spend the row's attempts on an outage.
+		return drain.ErrGitHubRead
 	}
 	return drain.ErrOther
 }

@@ -1,0 +1,366 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
+)
+
+const (
+	status1204Head = "3afe70e8bff88488d3aebd691ffb943829bf676c"
+	status1204Base = "a398e7258d0a755b14f2599afb277b7b8132b86e"
+)
+
+func mergeFixture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "surface", "merge", "testdata", name)) //nolint:gosec // G304: name is a literal at every call site
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// statusGH answers status's reads for #1204 from the merge package's
+// captured fixtures. fail makes every gh call fail.
+func statusGH(t *testing.T, fail bool) *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if fail {
+			return "", errors.New("HTTP 502")
+		}
+		j := strings.Join(args, " ")
+		switch {
+		case strings.Contains(j, "viewer { login databaseId }"):
+			return mergeFixture(t, "discover_1204.json"), nil
+		case strings.Contains(j, "reviews(first: 100)"):
+			return mergeFixture(t, "pr_1204.json"), nil
+		case strings.Contains(j, "checkSuites(first: 50)"):
+			return mergeFixture(t, "checks_1204.json"), nil
+		case strings.Contains(j, "compare/"+status1204Base+"..."+status1204Head):
+			return mergeFixture(t, "compare_1204.json"), nil
+		case strings.Contains(j, "compare/"):
+			return mergeFixture(t, "compare_ahead.json"), nil
+		case strings.Contains(j, "git/trees/"):
+			ref := j[strings.Index(j, "git/trees/")+len("git/trees/"):]
+			sha, dir, _ := strings.Cut(ref, ":")
+			return mergeFixture(t, "tree_"+sha[:8]+"_"+strings.ReplaceAll(dir, "/", "_")+".json"), nil
+		}
+		t.Fatalf("unexpected call %s %s", name, j)
+		return "", nil
+	}}
+}
+
+func statusRow1204() worker.Row {
+	return worker.Row{
+		Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: worker.BranchNew, Stage: worker.StageLaunched,
+		Base: "2e469107d375d1977085887813de99ce18bc91bf", GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: 1252924951,
+		LaunchID: "launch-abc", Transcript: "/t/session.jsonl",
+	}
+}
+
+func runStatusCmd(t *testing.T, d statusDeps, args ...string) (string, error) {
+	t.Helper()
+	cmd := newSurfaceStatusCmdWith(d)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+func statusTestDeps(t *testing.T, row worker.Row, gh *exec.FakeRunner, settings config.MergeSettings) statusDeps {
+	q := &worker.QueueRow{Name: row.Name, LaunchID: "launch-abc", State: worker.QueueReported}
+	return statusDeps{
+		rows: func(context.Context, io.Writer, string, string) (worker.Row, *worker.QueueRow, error) {
+			return row, q, nil
+		},
+		settings: func() config.MergeSettings { return settings },
+		reader:   func() merge.Reader { return merge.Reader{GH: gh} },
+		usage: func(_ context.Context, transcript string) *statusUsage {
+			if transcript != "/t/session.jsonl" {
+				t.Errorf("priced %q", transcript)
+			}
+			return &statusUsage{CostUSD: 1.25, ByModel: json.RawMessage(`{"claude-opus-5-5":{"costUsd":1.25}}`), Priced: true, UnpricedModels: []string{}}
+		},
+	}
+}
+
+func manualSettings() config.MergeSettings {
+	return config.MergeSettings{
+		Mode: config.MergeManual, Approvers: []string{config.MergeApproverCadenceReview}, MarkerAuthorID: 4084915,
+		RequiredReviewers: []string{"polish"}, Method: config.MergeMethodSquash,
+		Repos: []config.MergeRepo{{Name: "cameronsjo/forgectl", Workflow: ".github/workflows/ci.yml", RequiredChecks: []string{"build-test", "lint"}, Paths: []string{"docs/**"}}},
+	}
+}
+
+func TestSurfaceStatusJSON(t *testing.T) {
+	out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), manualSettings()), "gh1175-forgectl", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Name string `json:"name"`
+		Repo string `json:"repo"`
+		PR   *struct {
+			Number           int    `json:"number"`
+			URL              string `json:"url"`
+			State            string `json:"state"`
+			IsDraft          bool   `json:"isDraft"`
+			HeadSha          string `json:"headSha"`
+			BaseRef          string `json:"baseRef"`
+			Mergeable        string `json:"mergeable"`
+			MergeStateStatus string `json:"mergeStateStatus"`
+			ChangedFiles     int    `json:"changedFiles"`
+		} `json:"pr"`
+		Checks  []map[string]string `json:"checks"`
+		Reviews []struct {
+			Reviewer string `json:"reviewer"`
+			Sha      string `json:"sha"`
+			Crit     int    `json:"crit"`
+			Imp      int    `json:"imp"`
+			URL      string `json:"url"`
+		} `json:"reviews"`
+		Policy struct {
+			Mode    string   `json:"mode"`
+			Verdict string   `json:"verdict"`
+			Reasons []string `json:"reasons"`
+		} `json:"policy"`
+		Usage *struct {
+			CostUSD float64        `json:"costUsd"`
+			ByModel map[string]any `json:"byModel"`
+		} `json:"usage"`
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	if err := dec.Decode(&v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if v.Name != "gh1175-forgectl" || v.Repo != "cameronsjo/forgectl" || v.PR == nil || v.PR.Number != 1204 || v.PR.HeadSha != status1204Head ||
+		v.PR.State != "MERGED" || v.PR.BaseRef != "main" || v.PR.ChangedFiles != 4 || !strings.HasSuffix(v.PR.URL, "/pull/1204") {
+		t.Fatalf("pr %+v in %s", v.PR, out)
+	}
+	if len(v.Checks) != 6 || v.Checks[0]["workflow"] == "" || v.Checks[0]["event"] != "pull_request" {
+		t.Fatalf("checks %+v", v.Checks)
+	}
+	if len(v.Reviews) != 1 || v.Reviews[0].Reviewer != "chief-of-staff" || v.Reviews[0].Sha != status1204Head || v.Reviews[0].URL == "" {
+		t.Fatalf("reviews %+v", v.Reviews)
+	}
+	if v.Policy.Mode != "manual" || v.Policy.Verdict != "refuse" || !strings.Contains(strings.Join(v.Policy.Reasons, "\n"), "the PR is MERGED") {
+		t.Fatalf("policy %+v", v.Policy)
+	}
+	if v.Usage == nil || v.Usage.CostUSD != 1.25 {
+		t.Fatalf("usage %+v", v.Usage)
+	}
+	for _, key := range []string{`"name"`, `"repo"`, `"pr"`, `"checks"`, `"reviews"`, `"policy"`, `"usage"`, `"isDraft"`, `"mergeStateStatus"`, `"costUsd"`, `"byModel"`} {
+		if !strings.Contains(out, key) {
+			t.Errorf("JSON lacks %s", key)
+		}
+	}
+}
+
+func TestSurfaceStatusText(t *testing.T) {
+	out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), manualSettings()), "gh1175-forgectl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"cameronsjo/forgectl#1204 MERGED head 3afe70e8bff8", "checks: ", "markers: chief-of-staff 3afe70e8bff8 crit=0 imp=0", "policy: manual, refuse", "  - the PR is MERGED", "cost: $1.25"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("text lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSurfaceStatusOutcomes(t *testing.T) {
+	t.Run("mode off is a verdict, exit 0", func(t *testing.T) {
+		off := config.MergeSettings{Mode: config.MergeOff, OffReason: "[surface.merge] is not set"}
+		out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), off), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"verdict": "off"`) || !strings.Contains(out, "is not set") {
+			t.Fatalf("%v: %s", err, out)
+		}
+	})
+	t.Run("GitHub unreadable exits 1", func(t *testing.T) {
+		_, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, true), manualSettings()), "gh1175-forgectl")
+		if err == nil || ExitCode(err) != 1 || !errors.Is(err, merge.ErrRead) {
+			t.Fatalf("err %v, exit %d", err, ExitCode(err))
+		}
+	})
+	t.Run("markers are listed by marker_author_id, not the gh account", func(t *testing.T) {
+		other := manualSettings()
+		other.MarkerAuthorID = 556
+		out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), other), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"reviews": []`) {
+			t.Fatalf("another marker author: %v: %s", err, out)
+		}
+		unset := config.MergeSettings{Mode: config.MergeOff, OffReason: "[surface.merge] is not set"}
+		out, err = runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), unset), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"reviews": []`) || !strings.Contains(out, "marker_author_id is not set") {
+			t.Fatalf("no marker author: %v: %s", err, out)
+		}
+		text, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), unset), "gh1175-forgectl")
+		if err != nil || !strings.Contains(text, "note: no review markers listed") || strings.Contains(text, "markers: ") {
+			t.Fatalf("no marker author, text: %v: %s", err, text)
+		}
+	})
+	t.Run("a recorded base GitHub does not have is a refusal, exit 0", func(t *testing.T) {
+		gh := statusGH(t, false)
+		inner := gh.RunFunc
+		gh.RunFunc = func(name string, args []string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "compare/"+statusRow1204().Base) {
+				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", ExitCode: 1, Err: errors.New("exit status 1")}
+			}
+			return inner(name, args)
+		}
+		out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), gh, manualSettings()), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, "recorded base 2e469107d375 is not on GitHub") || !strings.Contains(out, `"verdict": "refuse"`) {
+			t.Fatalf("%v: %s", err, out)
+		}
+	})
+	t.Run("a row with no recorded repository exits 2", func(t *testing.T) {
+		row := statusRow1204()
+		row.GitHubRepo, row.GitHubRepoID = "", 0
+		_, err := runStatusCmd(t, statusTestDeps(t, row, statusGH(t, false), manualSettings()), "gh1175-forgectl")
+		if ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "records no GitHub repository") {
+			t.Fatalf("err %v, exit %d", err, ExitCode(err))
+		}
+	})
+	t.Run("a bad name exits 2", func(t *testing.T) {
+		_, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), manualSettings()), "Bad Name")
+		if ExitCode(err) != exitUsage {
+			t.Fatalf("err %v, exit %d", err, ExitCode(err))
+		}
+	})
+	t.Run("no PR on the branch", func(t *testing.T) {
+		row := statusRow1204()
+		row.Name, row.Branch = "other", "worker/other"
+		out, err := runStatusCmd(t, statusTestDeps(t, row, statusGH(t, false), manualSettings()), "other", "--json")
+		if err != nil || !strings.Contains(out, `"pr": null`) || !strings.Contains(out, "no PR: merge: no pull request on the worker's branch") || !strings.Contains(out, `"verdict": "refuse"`) {
+			t.Fatalf("%v: %s", err, out)
+		}
+		text, err := runStatusCmd(t, statusTestDeps(t, row, statusGH(t, false), manualSettings()), "other")
+		if err != nil || !strings.Contains(text, "no PR") {
+			t.Fatalf("%v: %s", err, text)
+		}
+	})
+	t.Run("no transcript, no usage", func(t *testing.T) {
+		row := statusRow1204()
+		row.Transcript = ""
+		d := statusTestDeps(t, row, statusGH(t, false), manualSettings())
+		d.usage = func(context.Context, string) *statusUsage { t.Fatal("priced with no transcript"); return nil }
+		out, err := runStatusCmd(t, d, "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"usage": null`) {
+			t.Fatalf("%v: %s", err, out)
+		}
+	})
+}
+
+type statusMemCache map[string][]byte
+
+func (m statusMemCache) Read(head string) ([]byte, error) { return m[head], nil }
+func (m statusMemCache) Write(head string, data []byte) error {
+	m[head] = data
+	return nil
+}
+
+// TestStatusReadNeverPassesOnCache: a planted cache entry whose file list
+// would pass is read again fresh, so the verdict comes from GitHub's file
+// list; a cached read that refuses is kept.
+func TestStatusReadNeverPassesOnCache(t *testing.T) {
+	planted := statusMemCache{status1204Head: []byte(`{"head":"` + status1204Head + `","base":"` + status1204Base +
+		`","merge_base":"` + status1204Base + `","files":[{"Path":"docs/x.md","Status":"modified","BaseMode":"100644","HeadMode":"100644"}]}`)}
+	planted1 := func(f merge.Facts) bool { return len(f.Files) == 1 && f.Files[0].Path == "docs/x.md" }
+	row := mergeRow(statusRow1204(), nil)
+
+	gh := statusGH(t, false)
+	snap, err := statusRead(context.Background(), merge.Reader{GH: gh, Cache: planted}, row, planted1)
+	if err != nil || snap.Cached || len(snap.Facts.Files) != 4 {
+		t.Fatalf("a would-pass cached read: cached %v, %d files, %v; want a fresh read of the 4 real files", snap.Cached, len(snap.Facts.Files), err)
+	}
+	compares := 0
+	for _, c := range gh.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "compare/"+status1204Base+"..."+status1204Head) {
+			compares++
+		}
+	}
+	if compares != 1 {
+		t.Fatalf("%d file-list compares; want the one fresh read", compares)
+	}
+
+	// Control: a cached read that refuses is kept as it is.
+	refuses := func(merge.Facts) bool { return false }
+	snap, err = statusRead(context.Background(), merge.Reader{GH: statusGH(t, false), Cache: planted}, row, refuses)
+	if err != nil || !snap.Cached || len(snap.Facts.Files) != 1 {
+		t.Fatalf("a refusing cached read: cached %v, %d files, %v", snap.Cached, len(snap.Facts.Files), err)
+	}
+}
+
+func TestPriceTranscript(t *testing.T) {
+	ctx := context.Background()
+	found := func(string) (string, error) { return "/opt/bin/cadence-hooks", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	answer := func(out string, err error) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, err }}
+	}
+	good := answer(`{"byModel":[{"costUsd":2.5,"model":"claude-opus-5-5","tokens":{"cacheCreate":0,"cacheCreate1h":0,"cacheRead":0,"input":10,"output":5}}],"costUsd":2.5,"unpricedModels":[]}`, nil)
+	u := priceTranscript(ctx, good, found, "/t/s.jsonl")
+	if u == nil || u.CostUSD != 2.5 || !strings.Contains(string(u.ByModel), "claude-opus-5-5") {
+		t.Fatalf("good: %+v", u)
+	}
+	if c := good.Calls[0]; c.Name != "/opt/bin/cadence-hooks" || strings.Join(c.Args, " ") != "metrics price --transcript /t/s.jsonl --json" {
+		t.Fatalf("call %+v", c)
+	}
+	for name, run := range map[string]*exec.FakeRunner{
+		"exit 1":            answer("", errors.New("exit status 1")),
+		"not JSON":          answer("nope", nil),
+		"no costUsd":        answer(`{"byModel":[]}`, nil),
+		"negative cost":     answer(`{"costUsd":-1,"byModel":[]}`, nil),
+		"byModel not rows":  answer(`{"costUsd":1,"byModel":[1]}`, nil),
+		"byModel object":    answer(`{"costUsd":1,"byModel":{"m":{}},"unpricedModels":[]}`, nil),
+		"row without model": answer(`{"costUsd":1,"byModel":[{"costUsd":1}],"unpricedModels":[]}`, nil),
+	} {
+		if u := priceTranscript(ctx, run, found, "/t/s.jsonl"); u != nil {
+			t.Errorf("%s: %+v, want nil", name, u)
+		}
+	}
+	// Partial: an unpriced model makes usage partial, never the session's
+	// cost, and model names lose control, bidi and invisible characters.
+	partial := answer(`{"costUsd":1.5,"byModel":[{"costUsd":1.5,"model":"claude-opus-5-5\u202e"}],"unpricedModels":["my-\u001b[31mmodel\u200b"]}`, nil)
+	u = priceTranscript(ctx, partial, found, "/t/s.jsonl")
+	if u == nil || u.Priced || len(u.UnpricedModels) != 1 || u.UnpricedModels[0] != "my-[31mmodel" {
+		t.Fatalf("partial: %+v", u)
+	}
+	if string(u.ByModel) != `[{"costUsd":1.5,"model":"claude-opus-5-5"}]` {
+		t.Fatalf("partial byModel %s", u.ByModel)
+	}
+	if g := priceTranscript(ctx, good, found, "/t/s.jsonl"); g == nil || !g.Priced || len(g.UnpricedModels) != 0 {
+		t.Fatal("a fully priced transcript is not priced")
+	}
+	if g := priceTranscript(ctx, answer(`{"costUsd":2.5,"byModel":[{"costUsd":2.5,"model":"m"}]}`, nil), found, "/t/s.jsonl"); g == nil || g.Priced {
+		t.Fatalf("no unpricedModels key must read as not priced: %+v", g)
+	}
+	collide := answer(`{"costUsd":1,"byModel":[{"model":"m"},{"model":"m\u200b"}],"unpricedModels":[]}`, nil)
+	if u := priceTranscript(ctx, collide, found, "/t/s.jsonl"); u != nil {
+		t.Fatalf("two names that strip to one: %+v, want nil", u)
+	}
+	var b strings.Builder
+	if err := renderWorkerStatus(&b, workerStatusView{Name: "w", Repo: "o/r", Policy: statusPolicy{Mode: "off", Verdict: "off"},
+		Usage: &statusUsage{CostUSD: 1.5, Priced: false, UnpricedModels: []string{"local-llm"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "cost: partial, $1.50 for the priced models only; no price for local-llm") || strings.Contains(b.String(), "cost: $") {
+		t.Fatalf("partial text: %s", b.String())
+	}
+	never := answer("", nil)
+	if u := priceTranscript(ctx, never, missing, "/t/s.jsonl"); u != nil || len(never.Calls) != 0 {
+		t.Fatalf("not on PATH: %+v, %d calls", u, len(never.Calls))
+	}
+}

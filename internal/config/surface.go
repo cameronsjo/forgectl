@@ -9,13 +9,15 @@ import (
 	"time"
 )
 
-// SurfaceConfig is the [surface] section: [surface.drain], [surface.intake]
-// and [surface.profiles]. A surface launch still names its backend on every
+// SurfaceConfig is the [surface] section: [surface.drain], [surface.intake],
+// [surface.merge] and [surface.profiles]. A surface launch still names its backend on every
 // call.
 type SurfaceConfig struct {
 	Drain SurfaceDrainConfig `toml:"drain"`
 	// Intake is how `surface intake gh` picks GitHub issues to queue.
 	Intake SurfaceIntakeConfig `toml:"intake"`
+	// Merge is the worker PR merge policy (ADR-0011).
+	Merge SurfaceMergeConfig `toml:"merge"`
 	// Profiles are the named Claude config directories a worker can run
 	// under (`--profile <name>`), keyed by name.
 	Profiles map[string]SurfaceProfile `toml:"profiles"`

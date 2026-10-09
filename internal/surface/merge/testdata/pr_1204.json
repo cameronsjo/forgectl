@@ -1,0 +1,79 @@
+{
+ "data": {
+  "repository": {
+   "databaseId": 1252924951,
+   "nameWithOwner": "cameronsjo/forgectl",
+   "defaultBranchRef": {
+    "name": "main"
+   },
+   "pullRequest": {
+    "number": 1204,
+    "url": "https://github.com/cameronsjo/forgectl/pull/1204",
+    "title": "fix(upgrade): say when brew's update lock is held",
+    "state": "MERGED",
+    "isDraft": false,
+    "isCrossRepository": false,
+    "baseRefName": "main",
+    "baseRefOid": "a398e7258d0a755b14f2599afb277b7b8132b86e",
+    "headRefName": "worker/gh1175-forgectl",
+    "headRefOid": "3afe70e8bff88488d3aebd691ffb943829bf676c",
+    "mergeable": "UNKNOWN",
+    "mergeStateStatus": "UNKNOWN",
+    "changedFiles": 4,
+    "author": {
+     "__typename": "User",
+     "login": "cameronsjo",
+     "databaseId": 4084915
+    },
+    "headRepository": {
+     "databaseId": 1252924951
+    },
+    "baseRepository": {
+     "databaseId": 1252924951
+    },
+    "reviews": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "cameronsjo",
+        "databaseId": 4084915
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-09T16:54:51Z",
+       "url": "https://github.com/cameronsjo/forgectl/pull/1204#pullrequestreview-5472971342",
+       "body": "<!-- cadence-review: chief-of-staff head=3afe70e8bff88488d3aebd691ffb943829bf676c crit=0 imp=0 -->",
+       "commit": {
+        "oid": "3afe70e8bff88488d3aebd691ffb943829bf676c"
+       }
+      }
+     ]
+    },
+    "reviewThreads": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": []
+    },
+    "comments": {
+     "pageInfo": {
+      "hasNextPage": false
+     },
+     "nodes": [
+      {
+       "author": {
+        "__typename": "Bot",
+        "login": "coderabbitai",
+        "databaseId": 136622811
+       },
+       "body": "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"
+      }
+     ]
+    }
+   }
+  }
+ }
+}

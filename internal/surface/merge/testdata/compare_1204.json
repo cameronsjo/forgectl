@@ -1,0 +1,28 @@
+{
+ "status": "ahead",
+ "ahead_by": 1,
+ "behind_by": 0,
+ "total_commits": 1,
+ "merge_base_commit": {
+  "sha": "a398e7258d0a755b14f2599afb277b7b8132b86e"
+ },
+ "commits": [],
+ "files": [
+  {
+   "filename": "internal/cli/upgrade.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/cli/upgrade_test.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/selfupdate/selfupdate.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/selfupdate/selfupdate_test.go",
+   "status": "modified"
+  }
+ ]
+}
