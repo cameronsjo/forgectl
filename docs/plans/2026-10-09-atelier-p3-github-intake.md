@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T9.1 security review findings fixed (I1, I2, N1, N2; N3-N5 recorded); next a live intake of one issue labeled queue:drain."
+next: "T9.1 shipped for review in cameronsjo/forgectl#1203; the live worker for cameronsjo/forgectl#1175 waits on the operator at a permission prompt, then its draft PR closes the live check."
 branch: plan/atelier-p3-intake
 pr: "cameronsjo/forgectl#1203"
 updated: 2026-10-09
@@ -68,6 +68,7 @@ Recorded boundary, not designed against: the brief's rules are instructions, not
 - [x] Docs: docs/herdr.md "Intake" section, help text.
 - [x] Security review (Opus) of the control's file set, not only the diff, before the live check: the T9.1 diff with the brief template and fixtures; `internal/surface/worker/brief.go`, `queue.go`; `internal/surface/drain/drain.go`; `internal/cli/surface_queue.go`; `internal/launch/invocation.go`. It checks the gate against the written code. `[surface.merge] mode` stays `off` (ADR-0011 Decision 10).
 - [ ] Live check: label one real issue `queue:drain` in cameronsjo/forgectl (user-owned by the `gh` account, so the default `authors` covers it), run intake with `--dry-run`, then for real; confirm the row, the brief, and a draft PR with `Closes #N`.
+  - 2026-10-09 result, branch build `8b6170f5`: `queue:drain` created and put on cameronsjo/forgectl#1175. `--dry-run` listed only #1175 (`gh1175-forgectl`, author `cameronsjo`, nothing skipped). The real run queued the row with `source: gh:cameronsjo/forgectl#1175` and `author: cameronsjo`; its brief carries the nonce fence and `Closes #1175`. The drain claimed and launched it, and the worker edited the four files the issue names from the brief alone, then stopped at a Bash permission prompt, shown as `needs-you`. The draft PR waits on the operator answering that prompt; the PR step is the drain's own path, proven in P2. Box stays open until the PR exists.
 
 ## Verification
 
