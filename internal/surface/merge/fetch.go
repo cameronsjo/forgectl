@@ -200,6 +200,71 @@ func (r Reader) Discover(ctx context.Context, row Row) (Candidate, error) {
 	return SelectPR(disc, row.Branch, row.StartedAt)
 }
 
+// Recheck reads the PR again by number with PRQuery, just before a merge,
+// and returns what changed since f was read (Moved). The merge aborts on any
+// change.
+func (r Reader) Recheck(ctx context.Context, f Facts) ([]string, error) {
+	owner, name, err := SplitNameWithOwner(f.Row.GitHubRepo)
+	if err != nil {
+		return nil, ErrNoRecordedRepo
+	}
+	data, err := r.graphQL(ctx, PRQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+strconv.Itoa(f.PR.Number))
+	if err != nil {
+		return nil, err
+	}
+	pr, err := DecodePR(data)
+	if err != nil {
+		return nil, decodeErr(err)
+	}
+	return Moved(f, pr), nil
+}
+
+// Landing is what a merge left: whether GitHub says the PR merged, at which
+// head, its merge commit, and whether that commit is on the default branch
+// (compare(mergeCommit...defaultHead) is ahead or identical).
+type Landing struct {
+	State       string
+	Merged      bool
+	HeadRefOid  string
+	MergeCommit string
+	// DefaultBranch and DefaultHead are the default branch and its head.
+	DefaultBranch string
+	DefaultHead   string
+	// Ancestry is the compare's status, "" when it was not run.
+	Ancestry  string
+	OnDefault bool
+}
+
+// Landed reads what a merge of f's PR left (LandedQuery), and when GitHub
+// names a merge commit, whether the default branch's head descends from it.
+func (r Reader) Landed(ctx context.Context, f Facts) (Landing, error) {
+	owner, name, err := SplitNameWithOwner(f.Row.GitHubRepo)
+	if err != nil {
+		return Landing{}, ErrNoRecordedRepo
+	}
+	data, err := r.graphQL(ctx, LandedQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+strconv.Itoa(f.PR.Number))
+	if err != nil {
+		return Landing{}, err
+	}
+	l, err := DecodeLanded(data)
+	if err != nil {
+		return Landing{}, decodeErr(err)
+	}
+	if l.Repository.DatabaseID != f.Repository.DatabaseID || l.Number != f.PR.Number {
+		return Landing{}, fmt.Errorf("%w: the landing read names repository %d PR #%d, expected %d #%d", ErrRead, l.Repository.DatabaseID, l.Number, f.Repository.DatabaseID, f.PR.Number)
+	}
+	out := Landing{State: l.State, Merged: l.Merged, HeadRefOid: l.HeadRefOid, MergeCommit: l.MergeCommit,
+		DefaultBranch: l.Repository.DefaultBranch, DefaultHead: l.DefaultHead}
+	if !l.Merged || !isSHA(l.MergeCommit) || !isSHA(l.DefaultHead) {
+		return out, nil
+	}
+	if out.Ancestry, err = r.compareStatus(ctx, owner, name, l.MergeCommit, l.DefaultHead); err != nil {
+		return Landing{}, err
+	}
+	out.OnDefault = out.Ancestry == CompareAhead || out.Ancestry == CompareIdentical
+	return out, nil
+}
+
 // compareStatus is compare(from...to).status. A compare GitHub answers
 // with 404 (a commit it does not have, such as a recorded base that was
 // never pushed) is CompareNotFound: a refusal reason, not a failed read.

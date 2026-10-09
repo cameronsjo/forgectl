@@ -677,3 +677,76 @@ func DecodeTree(data []byte) (map[string]string, error) {
 	}
 	return modes, nil
 }
+
+// LandedQuery reads, after a merge, whether the PR merged, its merge commit
+// and head, and the default branch's head commit.
+const LandedQuery = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    databaseId
+    nameWithOwner
+    defaultBranchRef { name target { oid } }
+    pullRequest(number: $number) { number state merged headRefOid mergeCommit { oid } }
+  }
+}`
+
+// LandedRead is a LandedQuery response.
+type LandedRead struct {
+	Repository  Repository
+	DefaultHead string
+	Number      int
+	State       string
+	Merged      bool
+	HeadRefOid  string
+	// MergeCommit is "" when GitHub names none.
+	MergeCommit string
+}
+
+// DecodeLanded reads a LandedQuery response.
+func DecodeLanded(data []byte) (LandedRead, error) {
+	var d struct {
+		Repository *struct {
+			repoNode
+			DefaultBranch *struct {
+				Name   string `json:"name"`
+				Target *struct {
+					OID string `json:"oid"`
+				} `json:"target"`
+			} `json:"defaultBranchRef"`
+			PullRequest *struct {
+				Number      int    `json:"number"`
+				State       string `json:"state"`
+				Merged      bool   `json:"merged"`
+				HeadRefOid  string `json:"headRefOid"`
+				MergeCommit *struct {
+					OID string `json:"oid"`
+				} `json:"mergeCommit"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	if err := graphQLEnvelope(data, &d); err != nil {
+		return LandedRead{}, err
+	}
+	if d.Repository == nil || d.Repository.PullRequest == nil {
+		return LandedRead{}, fmt.Errorf("%w: no repository or pull request in the response", ErrResponse)
+	}
+	node := d.Repository.repoNode
+	if d.Repository.DefaultBranch != nil {
+		node.DefaultBranchRef = &struct {
+			Name string `json:"name"`
+		}{Name: d.Repository.DefaultBranch.Name}
+	}
+	repo, err := node.repository()
+	if err != nil {
+		return LandedRead{}, err
+	}
+	out := LandedRead{Repository: repo}
+	if t := d.Repository.DefaultBranch.Target; t != nil {
+		out.DefaultHead = t.OID
+	}
+	p := d.Repository.PullRequest
+	out.Number, out.State, out.Merged, out.HeadRefOid = p.Number, p.State, p.Merged, p.HeadRefOid
+	if p.MergeCommit != nil {
+		out.MergeCommit = p.MergeCommit.OID
+	}
+	return out, nil
+}

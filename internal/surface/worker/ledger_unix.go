@@ -138,6 +138,12 @@ func listNames(dir int) ([]string, error) {
 
 // readAt returns the file's contents, or nil when it does not exist.
 func readAt(dir int, name string) ([]byte, error) {
+	return readAtMax(dir, name, maxLedgerBytes)
+}
+
+// readAtMax is readAt with its own size cap: a file larger than limit is
+// ErrLedgerUnreadable, never read in part.
+func readAtMax(dir int, name string, limit int) ([]byte, error) {
 	f, err := openVerified(dir, name, unix.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -146,12 +152,12 @@ func readAt(dir int, name string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	data, err := io.ReadAll(io.LimitReader(f, maxLedgerBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
 	}
-	if len(data) > maxLedgerBytes {
-		return nil, fmt.Errorf("%w: larger than %d bytes", ErrLedgerUnreadable, maxLedgerBytes)
+	if len(data) > limit {
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrLedgerUnreadable, name, limit)
 	}
 	return data, nil
 }

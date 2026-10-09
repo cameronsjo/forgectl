@@ -1,0 +1,386 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
+
+// `surface merge <name>` merges a worker's PR when the merge policy passes,
+// and `surface audit --pr` prints a PR's merge-audit.jsonl lines (atelier P4,
+// T10.4). Both the CLI and the drain's autopilot merge through merge.Land.
+
+// mergeTimeout bounds one merge: the reads, the re-read, gh pr merge and the
+// landing check.
+const mergeTimeout = 3 * time.Minute
+
+// mergeView is `surface merge --json`. Additive changes only (ADR-0008 rule
+// 2).
+type mergeView struct {
+	Name   string `json:"name"`
+	Repo   string `json:"repo"`
+	DryRun bool   `json:"dry_run"`
+	Mode   string `json:"mode"`
+	merge.Outcome
+}
+
+type mergeOptions struct {
+	Repo   string
+	Name   string
+	DryRun bool
+	JSON   bool
+}
+
+// landFunc is merge.Lander.Land with its I/O already wired.
+type landFunc func(ctx context.Context, s config.MergeSettings, by merge.By, row merge.Row, dryRun bool) merge.Outcome
+
+// mergeDeps are `surface merge`'s seams.
+type mergeDeps struct {
+	rows     func(ctx context.Context, warn io.Writer, repo, name string) (worker.Row, *worker.QueueRow, error)
+	settings func() config.MergeSettings
+	// land returns the merge path, or why its state cannot be opened.
+	land func() (landFunc, error)
+}
+
+func newSurfaceMergeCmd(deps module.Deps) *cobra.Command {
+	return newSurfaceMergeCmdWith(mergeDeps{
+		rows: func(ctx context.Context, warn io.Writer, repo, name string) (worker.Row, *worker.QueueRow, error) {
+			return statusRows(ctx, warn, deps, repo, name)
+		},
+		settings: localMergeSettings,
+		land: func() (landFunc, error) {
+			l, err := realLander(deps.Runner)
+			if err != nil {
+				return nil, err
+			}
+			return l.Land, nil
+		},
+	})
+}
+
+func newSurfaceMergeCmdWith(d mergeDeps) *cobra.Command {
+	opts := mergeOptions{}
+	cmd := &cobra.Command{
+		Use:   "merge <name>",
+		Short: "Merge a worker's PR when the merge policy passes",
+		Long: `merge squash-merges the named worker's pull request when the merge policy
+([surface.merge], ADR-0011) passes, and records an audit line either way.
+
+The policy is resolved from the config file and GitHub is read again on every
+call, with no cache: the PR is found as surface status finds it, and the
+verdict must pass with mode manual or auto. The PR title becomes the commit
+subject only when it matches
+^(fix|feat|docs|refactor|test|chore)(\([a-z0-9-]+\))?: [ -~]{1,72}$ and holds
+no issue reference; otherwise the merge refuses. Just before merging, the PR's
+head, base branch, draft flag, state, reviews and comments are read again,
+and any change refuses. forgectl then writes an audit line and runs
+gh pr merge <n> -R github.com/<owner>/<repo> --squash
+--match-head-commit <head> --subject <title> --body <body> from a new
+temporary directory, never --admin. The body is forgectl's own: the audit
+line's hash, the policy hash, the head, the checks and review markers
+counted, and a Merged-By: forgectl-cli trailer; no PR text is copied into
+it. After the merge, forgectl confirms the merge commit is on the default
+branch and records it.
+
+Every merge writes two lines to merge-audit.jsonl in the state directory (the
+attempt, whose hash the commit body carries, and the outcome), and every
+refusal one, unless the same refusal (actor, PR, head and reasons) is
+already there. --dry-run reads and decides and writes nothing, not even an
+audit line.
+
+--json prints {"name","repo","dry_run","mode","result","pr","url","head",
+"reasons","merge_commit","audit_line","audit_note"}; result is merged,
+would-merge, refused, unreadable, merge-failed or merged-unconfirmed.
+
+Exit 0: merged, or a dry run that would merge. Exit 1: refused, GitHub
+could not be read, the merge failed, or the merge commit could not be
+confirmed; the message says which. Exit 2: a usage or setup error (no such
+worker, a row that records no GitHub repository).
+
+  forgectl surface merge gh1175-forgectl --dry-run
+  forgectl surface merge fix-login --repo forgectl`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.Name = args[0]
+			return runSurfaceMerge(cmd, d, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read and decide; merge nothing and write no audit line")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","repo","dry_run","mode","result","pr","url","head","reasons","merge_commit","audit_line","audit_note"} as JSON`)
+	return cmd
+}
+
+func runSurfaceMerge(cmd *cobra.Command, d mergeDeps, opts mergeOptions) error {
+	if err := worker.ValidName(opts.Name); err != nil {
+		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
+	}
+	row, qrow, err := d.rows(cmd.Context(), cmd.ErrOrStderr(), opts.Repo, opts.Name)
+	if err != nil {
+		return err
+	}
+	if row.GitHubRepo == "" || row.GitHubRepoID == 0 {
+		return WithExitCode(fmt.Errorf("worker %q: %w; it was launched before forgectl recorded one, or its origin is not on github.com", opts.Name, merge.ErrNoRecordedRepo), exitUsage)
+	}
+	land, err := d.land()
+	if err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("open the merge audit file: %w", err)), exitFailed)
+	}
+	settings := d.settings()
+	ctx, cancel := context.WithTimeout(cmd.Context(), mergeTimeout)
+	defer cancel()
+	out := land(ctx, settings, merge.ByCLI, mergeRow(row, qrow), opts.DryRun)
+	view := mergeView{Name: row.Name, Repo: row.GitHubRepo, DryRun: opts.DryRun, Mode: string(settings.Mode), Outcome: out}
+	if view.Reasons == nil {
+		view.Reasons = []string{}
+	}
+	ok := out.Result == merge.LandMerged || out.Result == merge.LandWouldMerge
+	if opts.JSON {
+		if err := writeJSON(cmd.OutOrStdout(), view); err != nil {
+			return err
+		}
+		if !ok {
+			return newSilentCodedError(exitFailed)
+		}
+		return nil
+	}
+	if err := renderMerge(cmd.OutOrStdout(), view); err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return WithExitCode(fmt.Errorf("worker %s: %s", termsafe.SafeLineMax(row.Name, 64), mergeFailureSentence(out)), exitFailed)
+}
+
+// mergeFailureSentence says which kind of failure an outcome is.
+func mergeFailureSentence(out merge.Outcome) string {
+	switch out.Result {
+	case merge.LandRefused:
+		return fmt.Sprintf("merge refused (%d reasons above); nothing was merged", len(out.Reasons))
+	case merge.LandUnreadable:
+		return "GitHub could not be read; nothing was merged"
+	case merge.LandFailed:
+		return "the merge failed; nothing was merged"
+	case merge.LandUnconfirmed:
+		return "GitHub says the PR merged, but the merge commit could not be confirmed on the default branch; check it by hand"
+	}
+	return "unexpected merge result " + strconv.Quote(out.Result)
+}
+
+func renderMerge(w io.Writer, v mergeView) error {
+	safe := func(s string) string { return termsafe.SafeLineMax(s, maxStatusText) }
+	var b strings.Builder
+	switch {
+	case v.PR > 0:
+		fmt.Fprintf(&b, "%s  %s#%d head %s: %s\n", safe(v.Name), safe(v.Repo), v.PR, safe(shortSHA(v.Head)), v.Result)
+	default:
+		fmt.Fprintf(&b, "%s  %s: %s\n", safe(v.Name), safe(v.Repo), v.Result)
+	}
+	for _, r := range v.Reasons {
+		fmt.Fprintf(&b, "  - %s\n", termsafe.SafeLineMax(r, 400))
+	}
+	if v.MergeCommit != "" {
+		fmt.Fprintf(&b, "merge commit: %s\n", safe(v.MergeCommit))
+	}
+	if v.AuditLine != "" {
+		fmt.Fprintf(&b, "audit line: sha256:%s\n", safe(v.AuditLine))
+	}
+	if v.AuditNote != "" {
+		fmt.Fprintf(&b, "note: %s\n", safe(v.AuditNote))
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// realLander wires merge.Land: GitHub through the host-pinned runner with no
+// cache, merge-audit.jsonl in the state directory, and gh pr merge from a
+// new temporary directory.
+func realLander(run exec.Runner) (merge.Lander, error) {
+	audit, err := worker.OpenMergeAudit()
+	if err != nil {
+		return merge.Lander{}, err
+	}
+	gh := githubauth.Runner(run, githubauth.DefaultHost)
+	// No cache: a merge reads everything from GitHub.
+	r := merge.Reader{GH: gh}
+	return merge.Lander{
+		Read: r.Read, Recheck: r.Recheck, Landed: r.Landed,
+		Merge: func(ctx context.Context, args []string) error {
+			return ghInNeutralDir(ctx, gh, args, os.MkdirTemp, os.RemoveAll)
+		},
+		Audit: audit.Append,
+		Now:   time.Now,
+		Sleep: sleepCtx,
+	}, nil
+}
+
+// errNoDirRunner reports a runner that cannot run gh in a chosen directory.
+var errNoDirRunner = errors.New("forgectl: the runner cannot run gh in a chosen directory; refusing to merge from the current one")
+
+// ghInNeutralDir runs gh with args from a new private temporary directory,
+// so gh reads no checkout (a worker's worktree included), and removes the
+// directory after. run must implement exec.DirRunner.
+func ghInNeutralDir(ctx context.Context, run exec.Runner, args []string, mkdirTemp func(dir, pattern string) (string, error), removeAll func(string) error) error {
+	dr, ok := run.(exec.DirRunner)
+	if !ok {
+		return errNoDirRunner
+	}
+	dir, err := mkdirTemp("", "forgectl-merge-")
+	if err != nil {
+		return fmt.Errorf("forgectl: a temporary directory for gh pr merge: %w", err)
+	}
+	defer removeAll(dir) //nolint:errcheck // an empty temporary directory left behind costs nothing
+	_, err = dr.RunWithEnvFilteredInDir(ctx, dir, nil, nil, "gh", args...)
+	return err
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+// auditPRPattern is `surface audit --pr`'s argument: owner/repo#N.
+var auditPRPattern = regexp.MustCompile(`^([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9})$`)
+
+// auditView is `surface audit --json`. Additive changes only.
+type auditView struct {
+	PR    string          `json:"pr"`
+	Lines []auditViewLine `json:"lines"`
+	Chain auditChain      `json:"chain"`
+}
+
+type auditViewLine struct {
+	Line int    `json:"line"`
+	Hash string `json:"hash"`
+	merge.AuditLine
+}
+
+type auditChain struct {
+	OK    bool              `json:"ok"`
+	Lines int               `json:"lines"`
+	Break *merge.ChainBreak `json:"break"`
+}
+
+func newSurfaceAuditCmd(_ module.Deps) *cobra.Command {
+	return newSurfaceAuditCmdWith(func() ([]byte, error) {
+		a, err := worker.OpenMergeAudit()
+		if err != nil {
+			return nil, err
+		}
+		return a.Read()
+	})
+}
+
+func newSurfaceAuditCmdWith(read func() ([]byte, error)) *cobra.Command {
+	var prArg string
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "audit --pr <owner/repo#N>",
+		Short: "Print a PR's merge-audit lines and check the audit chain",
+		Long: `audit prints the merge-audit.jsonl lines for one pull request, written by
+surface merge and the drain's autopilot, and checks the hash chain over the
+whole file: each line names the SHA-256 of the line before it. The first
+place the chain does not hold is reported.
+
+The chain detects accidental damage (a write cut short, a line edited or
+removed by mistake). It does not detect tampering by your own user, who can
+rewrite the whole file; each merge's commit body on the default branch
+carries its attempt line's hash, which a rewritten file cannot change.
+
+--json prints {"pr","lines":[{"line","hash","time","actor","repo","repo_id",
+"pr","head","policy_hash","checks","markers","result","reasons",
+"merge_commit","attempt","prev"}],"chain":{"ok","lines","break"}}; break is
+{"line","reason"} or null.
+
+Exit 0: printed, and the chain holds. Exit 1: the file could not be read, or
+the chain is broken. Exit 2: a usage error.
+
+  forgectl surface audit --pr cameronsjo/forgectl#1204`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			m := auditPRPattern.FindStringSubmatch(prArg)
+			if m == nil {
+				return WithExitCode(fmt.Errorf("--pr: want owner/repo#N, got %s", strconv.Quote(termsafe.SafeLineMax(prArg, 120))), exitUsage)
+			}
+			number, err := strconv.Atoi(m[2])
+			if err != nil {
+				return WithExitCode(fmt.Errorf("--pr: %w", err), exitUsage)
+			}
+			data, err := read()
+			if err != nil {
+				return WithExitCode(termsafe.Error(fmt.Errorf("read merge-audit.jsonl: %w", err)), exitFailed)
+			}
+			entries, brk := merge.ParseAudit(data)
+			view := auditView{PR: prArg, Lines: []auditViewLine{}, Chain: auditChain{OK: brk == nil, Lines: len(entries), Break: brk}}
+			for _, e := range entries {
+				if e.OK && strings.EqualFold(e.Line.Repo, m[1]) && e.Line.PR == number {
+					view.Lines = append(view.Lines, auditViewLine{Line: e.N, Hash: e.Hash, AuditLine: e.Line})
+				}
+			}
+			if asJSON {
+				if err := writeJSON(cmd.OutOrStdout(), view); err != nil {
+					return err
+				}
+			} else if err := renderAudit(cmd.OutOrStdout(), view); err != nil {
+				return err
+			}
+			if brk != nil {
+				if asJSON {
+					return newSilentCodedError(exitFailed)
+				}
+				return WithExitCode(fmt.Errorf("merge-audit.jsonl: the chain is broken at line %d", brk.Line), exitFailed)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&prArg, "pr", "", "the pull request, as owner/repo#N")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"pr","lines","chain"} as JSON`)
+	return cmd
+}
+
+func renderAudit(w io.Writer, v auditView) error {
+	safe := func(s string) string { return termsafe.SafeLineMax(s, maxStatusText) }
+	var b strings.Builder
+	if len(v.Lines) == 0 {
+		fmt.Fprintf(&b, "no audit lines for %s\n", safe(v.PR))
+	}
+	for _, l := range v.Lines {
+		fmt.Fprintf(&b, "line %d  %s  %s  %s  head %s", l.Line, safe(l.Time), safe(string(l.Actor)), safe(l.Result), safe(shortSHA(l.Head)))
+		if l.MergeCommit != "" {
+			fmt.Fprintf(&b, "  merge %s", safe(shortSHA(l.MergeCommit)))
+		}
+		fmt.Fprintf(&b, "  hash %s\n", safe(shortSHA(l.Hash)))
+		for _, r := range l.Reasons {
+			fmt.Fprintf(&b, "  - %s\n", termsafe.SafeLineMax(r, 400))
+		}
+	}
+	if v.Chain.Break != nil {
+		fmt.Fprintf(&b, "chain: broken at line %d of %d: %s\n", v.Chain.Break.Line, v.Chain.Lines, termsafe.SafeLineMax(v.Chain.Break.Reason, 400))
+	} else {
+		fmt.Fprintf(&b, "chain: holds over %d lines\n", v.Chain.Lines)
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
+}
