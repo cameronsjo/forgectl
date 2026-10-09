@@ -346,14 +346,14 @@ func TestEvaluatePaths(t *testing.T) {
 		files []File
 		want  string
 	}{
-		"outside the allowlist":        {[]File{file("internal/pr/x.go", "modified")}, `"internal/pr/x.go" matches none of [surface.merge.paths]`},
+		"outside the allowlist":        {[]File{file("internal/tasks2/x.go", "modified")}, `"internal/tasks2/x.go" matches none of [surface.merge.paths]`},
 		"allowlist is case-sensitive":  {[]File{file("Docs/x.md", "modified")}, "matches none"},
 		"built-in: .github":            {[]File{file(".github/workflows/ci.yml", "modified")}, "built-in refused set (.github/**)"},
 		"built-in: .github any case":   {[]File{file(".GitHub/workflows/ci.yml", "modified")}, "built-in refused set (.github/**)"},
 		"built-in: .claude":            {[]File{file(".claude/settings.json", "added")}, "(.claude/**)"},
-		"built-in: coderabbit config":  {[]File{file(".coderabbit.yaml", "modified")}, "(.coderabbit.yaml)"},
+		"built-in: coderabbit config":  {[]File{file(".coderabbit.yaml", "modified")}, "top-level files"},
 		"built-in: the gate":           {[]File{file("internal/surface/merge/merge.go", "modified")}, "(internal/surface/**)"},
-		"built-in: surface cli":        {[]File{file("internal/cli/surface_status.go", "modified")}, "(internal/cli/surface_*)"},
+		"built-in: surface cli":        {[]File{file("internal/cli/surface_status.go", "modified")}, "(internal/cli/**)"},
 		"built-in: config":             {[]File{file("internal/config/surface_merge.go", "modified")}, "(internal/config/**)"},
 		"built-in: launch":             {[]File{file("internal/launch/x.go", "modified")}, "(internal/launch/**)"},
 		"built-in: gitenv":             {[]File{file("internal/gitenv/x.go", "modified")}, "(internal/gitenv/**)"},
@@ -361,11 +361,11 @@ func TestEvaluatePaths(t *testing.T) {
 		"built-in: githubauth":         {[]File{file("internal/githubauth/runner.go", "modified")}, "(internal/githubauth/**)"},
 		"built-in: bless":              {[]File{file("internal/bless/bless.go", "modified")}, "(internal/bless/**)"},
 		"built-in: selfupdate":         {[]File{file("internal/selfupdate/selfupdate.go", "modified")}, "(internal/selfupdate/**)"},
-		"built-in: go.mod at the root": {[]File{file("go.mod", "modified")}, "module files"},
+		"built-in: go.mod at the root": {[]File{file("go.mod", "modified")}, "top-level files"},
 		"built-in: go.sum nested":      {[]File{file("docs/x/go.sum", "added")}, "module files"},
 		"built-in: go.work":            {[]File{file("docs/go.work", "added")}, "module files"},
 		"renamed out of the gate":      {[]File{{Path: "docs/x.go", PreviousPath: "internal/surface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/surface/x.go" is refused`},
-		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"README.md" matches none`},
+		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "internal/tasks2/README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/tasks2/README.md" matches none`},
 		"removed test file":            {[]File{file("internal/tasks/x_test.go", "removed")}, "removes a test file"},
 		"test renamed away":            {[]File{{Path: "internal/tasks/x.go", PreviousPath: "internal/tasks/x_test.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, "removes a test file"},
 		"status copied":                {[]File{file("docs/a.md", "copied")}, `status "copied"`},
@@ -456,7 +456,7 @@ func TestEvaluatePaths(t *testing.T) {
 		f.PR.ChangedFiles = len(f.Files)
 		v := evalManual(f)
 		wantRefusal(t, v, `"internal/selfupdate/selfupdate.go" is refused whatever the config says`)
-		wantRefusal(t, v, `"internal/cli/upgrade.go" matches none`)
+		wantRefusal(t, v, `"internal/cli/upgrade.go" is refused whatever the config says`)
 	})
 }
 

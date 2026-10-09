@@ -57,27 +57,56 @@ func refusedRepoFor(name string, id int64) (refusedRepo, bool) {
 	return refusedRepo{}, false
 }
 
-// builtinRefusedGlobs are paths no drain merge may touch: CI and agent
-// configuration, CodeRabbit's config, and the gate's own code (the merge
-// policy, the status reads, config resolution, launch, git and process
-// plumbing, the host-pinned gh runner, and the bless and signing helpers).
-// They are matched case-insensitively, so a case-folding checkout cannot
-// slip a differently cased spelling past them.
+// builtinRefusedGlobs are paths no drain merge may touch, beside every
+// top-level file (builtinRefusal): CI, agent and release inputs (.github,
+// .claude, scripts, the shipped helper), and every package compiled into
+// the merge path: the merge policy and status reads, the whole CLI package,
+// config resolution, launch, git and process plumbing, the host-pinned gh
+// runner, the bless and signing helpers, self-update, and every package
+// those import. TestBuiltinRefusalsCoverTheGateClosure derives that closure
+// from `go list -deps` and fails when a new dependency is not listed here.
+//
+// They are matched case-insensitively. A changed path is printable ASCII
+// (config.CheckChangedPath), so ASCII case folding is all a case-folding
+// checkout can do to it.
 var builtinRefusedGlobs = []string{
 	".github/**",
 	".claude/**",
-	".coderabbit.yaml",
-	".coderabbit.yml",
-	"internal/surface/**",
-	"internal/cli/surface_*",
-	"internal/config/**",
-	"internal/launch/**",
-	"internal/gitenv/**",
-	"internal/exec/**",
-	"internal/githubauth/**",
+	"scripts/**",
+	"helper/**",
 	"internal/bless/**",
-	"internal/cli/workflow_bless*",
+	"internal/cli/**",
+	"internal/config/**",
+	"internal/desk/**",
+	"internal/exec/**",
+	"internal/forgive/**",
+	"internal/ghfail/**",
+	"internal/ghostty/**",
+	"internal/gitenv/**",
+	"internal/githubauth/**",
+	"internal/herdr/**",
+	"internal/keymap/**",
+	"internal/launch/**",
+	"internal/meta/**",
+	"internal/module/**",
+	"internal/notify/**",
+	"internal/pr/**",
+	"internal/privdir/**",
+	"internal/procstart/**",
+	"internal/projects/**",
+	"internal/quarantine/**",
+	"internal/redact/**",
+	"internal/resume/**",
+	"internal/runview/**",
+	"internal/sandbox/**",
 	"internal/selfupdate/**",
+	"internal/step/**",
+	"internal/surface/**",
+	"internal/termsafe/**",
+	"internal/theme/**",
+	"internal/tmux/**",
+	"internal/tomlerr/**",
+	"internal/tui/**",
 }
 
 // builtinRefusedBase are file names refused in any directory: the module
@@ -86,6 +115,13 @@ var builtinRefusedBase = []string{"go.mod", "go.sum", "go.work", "go.work.sum"}
 
 // builtinRefusal returns why p is refused whatever the config says, or "".
 func builtinRefusal(p string) string {
+	// The repository root holds the module, build, lint, release and agent
+	// configuration (main.go, go.mod, .golangci.yml, .goreleaser.yaml,
+	// release-please files, AGENTS.md, CLAUDE.md, a Makefile) and whatever
+	// root configuration comes next, so no top-level file is merged.
+	if !strings.Contains(p, "/") {
+		return "top-level files (the module, build, lint, release and agent configuration at the repository root) are refused"
+	}
 	base := path.Base(p)
 	for _, b := range builtinRefusedBase {
 		if strings.EqualFold(base, b) {

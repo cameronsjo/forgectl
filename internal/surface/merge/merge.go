@@ -186,9 +186,9 @@ type Policy struct {
 	ForDrain bool
 }
 
-// MarkerPattern is a cadence-review marker: the whole first line of a
+// markerPattern is a cadence-review marker: the whole first line of a
 // review body, no byte-order mark, no leading space.
-var MarkerPattern = regexp.MustCompile(`^<!-- cadence-review: ([a-z0-9-]{1,40}) head=([0-9a-f]{40}) crit=(0|[1-9][0-9]{0,3}) imp=(0|[1-9][0-9]{0,3}) -->$`)
+var markerPattern = regexp.MustCompile(`^<!-- cadence-review: ([a-z0-9-]{1,40}) head=([0-9a-f]{40}) crit=(0|[1-9][0-9]{0,3}) imp=(0|[1-9][0-9]{0,3}) -->$`)
 
 // Marker is a parsed cadence-review marker.
 type Marker struct {
@@ -201,7 +201,7 @@ type Marker struct {
 // ParseMarker reads a marker from a review body's first line.
 func ParseMarker(body string) (Marker, bool) {
 	line, _, _ := strings.Cut(body, "\n")
-	m := MarkerPattern.FindStringSubmatch(line)
+	m := markerPattern.FindStringSubmatch(line)
 	if m == nil {
 		return Marker{}, false
 	}
