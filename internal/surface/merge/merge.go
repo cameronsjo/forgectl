@@ -112,6 +112,11 @@ type CheckRun struct {
 	// trigger.
 	WorkflowPath string
 	Event        string
+	// SuiteBranch is the suite's head branch, and SuitePRs the open PRs
+	// GitHub matches the suite to (its matchingPullRequests). A run counts
+	// for a PR only when both name it.
+	SuiteBranch string
+	SuitePRs    []int
 }
 
 // Review is one pull request review.
@@ -355,13 +360,22 @@ func checkPR(f Facts, add addFunc) {
 	}
 }
 
-// checkChecks is predicate 5.
+// checkChecks is predicate 5. Only runs whose suite GitHub ties to this PR
+// count (the suite's head branch is the PR's, and its matching open PRs
+// include this one), so a run at the same commit for another PR cannot
+// stand in. Of those, for each required name: a run from another app or
+// workflow file, or with no workflow run, refuses; among the runs from the
+// pinned file on a pull_request event, any still running refuses, any that
+// concluded other than SUCCESS refuses, and at least one SUCCESS is needed.
 func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 	want := "/" + f.Repository.NameWithOwner + "/actions/workflows/" + path.Base(repo.Workflow)
+	tied := func(r CheckRun) bool {
+		return r.SuiteBranch != "" && r.SuiteBranch == f.PR.HeadRefName && slices.Contains(r.SuitePRs, f.PR.Number)
+	}
 	for _, name := range repo.RequiredChecks {
 		var pinned []CheckRun
 		for _, r := range f.Checks {
-			if r.Name != name {
+			if r.Name != name || !tied(r) {
 				continue
 			}
 			switch {
@@ -376,30 +390,24 @@ func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 			}
 		}
 		if len(pinned) == 0 {
-			add("check %q has no run at the head from %s on a pull_request event", name, repo.Workflow)
+			add("check %q has no run at the head tied to PR #%d from %s on a pull_request event", name, f.PR.Number, repo.Workflow)
 			continue
 		}
-		latest := latestRun(pinned)
-		if latest.Status != "COMPLETED" || latest.Conclusion != "SUCCESS" {
-			add("check %q's latest run (id %d) is %s/%s, expected COMPLETED/SUCCESS", name, latest.DatabaseID, nonEmpty(latest.Status, "unknown"), nonEmpty(latest.Conclusion, "none"))
+		passed := 0
+		for _, r := range pinned {
+			switch {
+			case r.Status != "COMPLETED":
+				add("check %q is still running: run id %d is %s, expected COMPLETED/SUCCESS", name, r.DatabaseID, nonEmpty(r.Status, "unknown"))
+			case r.Conclusion != "SUCCESS":
+				add("check %q has a run (id %d) that concluded %s, expected every run at the head to be SUCCESS", name, r.DatabaseID, nonEmpty(r.Conclusion, "none"))
+			default:
+				passed++
+			}
+		}
+		if passed == 0 {
+			add("check %q has no successful run at the head, expected at least one SUCCESS", name)
 		}
 	}
-}
-
-// latestRun is the run started last, by startedAt and then by id.
-func latestRun(runs []CheckRun) CheckRun {
-	sorted := slices.Clone(runs)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		ti, ei := time.Parse(time.RFC3339, sorted[i].StartedAt)
-		tj, ej := time.Parse(time.RFC3339, sorted[j].StartedAt)
-		switch {
-		case ei != nil || ej != nil || ti.Equal(tj):
-			return sorted[i].DatabaseID < sorted[j].DatabaseID
-		default:
-			return ti.Before(tj)
-		}
-	})
-	return sorted[len(sorted)-1]
 }
 
 // allowedStatus are the file statuses the policy judges.

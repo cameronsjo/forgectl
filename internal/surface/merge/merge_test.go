@@ -2,6 +2,7 @@ package merge
 
 import (
 	"errors"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -260,18 +261,52 @@ func TestEvaluateChecks(t *testing.T) {
 		"required check missing": {func(f *Facts) {
 			f.Checks = slices.DeleteFunc(f.Checks, func(r CheckRun) bool { return r.Name == "lint" })
 		}, `check "lint" has no run at the head`},
-		"latest run failed": {func(f *Facts) {
+		"a later failed run": {func(f *Facts) {
 			r := runNamed(*f, "lint")
 			r.DatabaseID, r.StartedAt, r.Conclusion = r.DatabaseID+1, "2099-01-01T00:00:00Z", "FAILURE"
 			f.Checks = append(f.Checks, r)
-		}, `check "lint"'s latest run`},
-		"latest run in progress": {func(f *Facts) {
+		}, `check "lint" has a run (id`},
+		// I3 (T10.2 security review): any tied run that is not SUCCESS
+		// refuses, so a later success does not hide an earlier failure.
+		"an earlier failed run beside a later success": {func(f *Facts) {
+			r := runNamed(*f, "lint")
+			r.DatabaseID, r.StartedAt, r.Conclusion = r.DatabaseID-1, "2000-01-01T00:00:00Z", "FAILURE"
+			f.Checks = append(f.Checks, r)
+		}, "concluded FAILURE, expected every run at the head to be SUCCESS"},
+		"a run in progress": {func(f *Facts) {
 			r := runNamed(*f, "build-test")
 			r.DatabaseID, r.StartedAt, r.Status, r.Conclusion = r.DatabaseID+1, "2099-01-01T00:00:00Z", "IN_PROGRESS", ""
 			f.Checks = append(f.Checks, r)
-		}, "IN_PROGRESS/none, expected COMPLETED/SUCCESS"},
+		}, `check "build-test" is still running: run id`},
+		"a queued run": {func(f *Facts) {
+			r := runNamed(*f, "build-test")
+			r.DatabaseID, r.StartedAt, r.Status, r.Conclusion = r.DatabaseID+1, "", "QUEUED", ""
+			f.Checks = append(f.Checks, r)
+		}, "is QUEUED, expected COMPLETED/SUCCESS"},
+		"the only success is tied to another PR": {func(f *Facts) {
+			for i := range f.Checks {
+				if f.Checks[i].Name == "lint" {
+					f.Checks[i].SuitePRs = []int{9999}
+				}
+			}
+		}, `check "lint" has no run at the head tied to PR #1204`},
+		"the only success is on another branch": {func(f *Facts) {
+			for i := range f.Checks {
+				if f.Checks[i].Name == "lint" {
+					f.Checks[i].SuiteBranch = "copy-of-worker"
+				}
+			}
+		}, `check "lint" has no run at the head tied to PR #1204`},
+		"the only success has no matching PR": {func(f *Facts) {
+			for i := range f.Checks {
+				if f.Checks[i].Name == "lint" {
+					f.Checks[i].SuitePRs = nil
+				}
+			}
+		}, `check "lint" has no run at the head tied to PR #1204`},
 		"a same-name run with no workflow run": {func(f *Facts) {
-			f.Checks = append(f.Checks, CheckRun{DatabaseID: 1, Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS", AppID: 999})
+			f.Checks = append(f.Checks, CheckRun{DatabaseID: 1, Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS", AppID: 999,
+				SuiteBranch: f.PR.HeadRefName, SuitePRs: []int{f.PR.Number}})
 		}, "no workflow run behind it"},
 		"a same-name run from another app": {func(f *Facts) {
 			r := runNamed(*f, "lint")
@@ -289,7 +324,7 @@ func TestEvaluateChecks(t *testing.T) {
 					f.Checks[i].Event = "push"
 				}
 			}
-		}, `check "macos-test" has no run at the head from .github/workflows/ci.yml on a pull_request event`},
+		}, `check "macos-test" has no run at the head tied to PR #1204 from .github/workflows/ci.yml on a pull_request event`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -298,13 +333,44 @@ func TestEvaluateChecks(t *testing.T) {
 			wantRefusal(t, evalManual(f), c.want)
 		})
 	}
-	t.Run("a later success over an earlier failure passes", func(t *testing.T) {
+	// I3: a run at the same commit for another PR (another base, a copy
+	// of the branch) is ignored, so its failure does not refuse and its
+	// success does not count.
+	t.Run("a failed run tied to another PR is ignored", func(t *testing.T) {
 		f := passingFacts(t)
 		r := runNamed(f, "lint")
-		r.DatabaseID, r.StartedAt, r.Conclusion = r.DatabaseID-1, "2000-01-01T00:00:00Z", "FAILURE"
+		r.DatabaseID, r.StartedAt, r.Conclusion, r.SuitePRs = r.DatabaseID+7, "2099-01-01T00:00:00Z", "FAILURE", []int{9999}
 		f.Checks = append(f.Checks, r)
 		if v := evalManual(f); v.Result != Pass {
 			t.Fatalf("%s %q", v.Result, v.Reasons)
+		}
+	})
+	t.Run("two successful runs pass", func(t *testing.T) {
+		f := passingFacts(t)
+		r := runNamed(f, "lint")
+		r.DatabaseID = r.DatabaseID + 9
+		f.Checks = append(f.Checks, r)
+		if v := evalManual(f); v.Result != Pass {
+			t.Fatalf("%s %q", v.Result, v.Reasons)
+		}
+	})
+	t.Run("the live #1207 capture ties its ci.yml runs to #1207", func(t *testing.T) {
+		const head1207 = "79c4c7f3905c8d92136b7933bed94eaa0788118f"
+		c, err := DecodeChecks(readFixture(t, "checks_1207.json"), head1207)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, r := range c.Runs {
+			if r.WorkflowPath == "/cameronsjo/forgectl/actions/workflows/ci.yml" {
+				n++
+				if r.SuiteBranch != "plan/atelier-p4" || !slices.Equal(r.SuitePRs, []int{1207}) {
+					t.Fatalf("run %+v; want branch plan/atelier-p4 and matching PR 1207", r)
+				}
+			}
+		}
+		if n < 3 {
+			t.Fatalf("%d ci.yml runs in the capture, expected build-test, lint and macos-test at least", n)
 		}
 	})
 	t.Run("a push-event run beside the pull_request run is ignored", func(t *testing.T) {
@@ -812,6 +878,13 @@ func TestDecodersRefuse(t *testing.T) {
 	}
 	if _, err := DecodeChecks([]byte(strings.Replace(checks, `"hasNextPage": false`, `"hasNextPage": true`, 1)), head1204); !errors.Is(err, ErrResponse) {
 		t.Errorf("checks page: %v", err)
+	}
+	morePRs := regexp.MustCompile(`("matchingPullRequests": \{\s*"pageInfo": \{\s*"hasNextPage": )false`).ReplaceAllString(checks, "${1}true")
+	if morePRs == checks {
+		t.Fatal("the matchingPullRequests page edit did not apply")
+	}
+	if _, err := DecodeChecks([]byte(morePRs), head1204); !errors.Is(err, ErrResponse) {
+		t.Errorf("matching pull requests page: %v", err)
 	}
 	if _, err := DecodeTree([]byte(`{"truncated":true,"tree":[]}`)); !errors.Is(err, ErrResponse) {
 		t.Errorf("truncated tree: %v", err)

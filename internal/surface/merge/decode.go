@@ -93,8 +93,8 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
 }`
 
 // ChecksQuery reads the check runs at commit $head, each with its suite's
-// app and workflow run, and the PR's head and base again, so a push between
-// the two queries is seen.
+// app, head branch, the open PRs GitHub matches it to, and workflow run, and
+// the PR's head and base again, so a push between the two queries is seen.
 const ChecksQuery = `query($owner: String!, $name: String!, $number: Int!, $head: GitObjectID!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) { headRefOid baseRefOid }
@@ -106,6 +106,8 @@ const ChecksQuery = `query($owner: String!, $name: String!, $number: Int!, $head
           pageInfo { hasNextPage }
           nodes {
             app { databaseId slug }
+            branch { name }
+            matchingPullRequests(first: 10) { pageInfo { hasNextPage } nodes { number } }
             workflowRun { databaseId event workflow { resourcePath } }
             checkRuns(first: 100) {
               pageInfo { hasNextPage }
@@ -459,6 +461,15 @@ func DecodeChecks(data []byte, head string) (ChecksRead, error) {
 						App *struct {
 							DatabaseID int64 `json:"databaseId"`
 						} `json:"app"`
+						Branch *struct {
+							Name string `json:"name"`
+						} `json:"branch"`
+						MatchingPullRequests *struct {
+							PageInfo pageInfo `json:"pageInfo"`
+							Nodes    []struct {
+								Number int `json:"number"`
+							} `json:"nodes"`
+						} `json:"matchingPullRequests"`
 						WorkflowRun *struct {
 							Event    string `json:"event"`
 							Workflow *struct {
@@ -509,8 +520,22 @@ func DecodeChecks(data []byte, head string) (ChecksRead, error) {
 		if s.App != nil {
 			app = s.App.DatabaseID
 		}
+		var branch string
+		if s.Branch != nil {
+			branch = s.Branch.Name
+		}
+		var prs []int
+		if s.MatchingPullRequests != nil {
+			if err := remaining("a check suite's matching pull request list", s.MatchingPullRequests.PageInfo); err != nil {
+				return ChecksRead{}, err
+			}
+			for _, n := range s.MatchingPullRequests.Nodes {
+				prs = append(prs, n.Number)
+			}
+		}
 		for _, r := range s.CheckRuns.Nodes {
-			run := CheckRun{DatabaseID: r.DatabaseID, Name: r.Name, Status: r.Status, Conclusion: r.Conclusion, StartedAt: r.StartedAt, AppID: app}
+			run := CheckRun{DatabaseID: r.DatabaseID, Name: r.Name, Status: r.Status, Conclusion: r.Conclusion, StartedAt: r.StartedAt, AppID: app,
+				SuiteBranch: branch, SuitePRs: prs}
 			if s.WorkflowRun != nil {
 				run.HasWorkflowRun = true
 				run.Event = s.WorkflowRun.Event
