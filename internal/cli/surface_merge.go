@@ -317,10 +317,13 @@ surface merge and the drain's autopilot, and checks the hash chain over the
 whole file: each line names the SHA-256 of the line before it. The first
 place the chain does not hold is reported.
 
-The chain detects accidental damage (a write cut short, a line edited or
-removed by mistake). It does not detect tampering by your own user, who can
-rewrite the whole file; each merge's commit body on the default branch
-carries its attempt line's hash, which a rewritten file cannot change.
+The chain detects truncation (a write cut short) and accidental damage to
+earlier lines (one edited or removed by mistake). It does not detect an edit
+to the last line, or removing the last lines whole, since no line after them
+names their hash; nor a deliberate rewrite by your own user, who can rewrite
+the whole file and every hash in it. Each merge's commit body on the default
+branch carries its attempt line's hash, which a rewritten file cannot
+change.
 
 --json prints {"pr","lines":[{"line","hash","time","actor","worker","repo",
 "repo_id","pr","head","policy_hash","checks","markers","result","reasons",

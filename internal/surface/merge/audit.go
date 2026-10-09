@@ -13,9 +13,11 @@ import (
 
 // merge-audit.jsonl (atelier P4, T10.4): one JSON line per merge attempt,
 // merge outcome and refusal, each carrying the SHA-256 of the line before it
-// ("prev"; "" on the first line). The chain detects accidental damage (a
-// truncated write, a line edited or removed by mistake), not tampering by
-// the operator's own user, who can rewrite the whole file. A merge's
+// ("prev"; "" on the first line). The chain detects truncation (a write
+// cut short) and accidental damage to earlier lines (one edited or removed
+// by mistake). It does not detect an edit to the last line, or the last
+// lines removed whole, which no later line names, nor a deliberate rewrite
+// by the operator's own user, who can rewrite the whole file. A merge's
 // attempt line's hash goes into the squash commit's body, so the record of
 // each merge also sits on the default branch. These are the pure parts;
 // internal/surface/worker holds the file.
