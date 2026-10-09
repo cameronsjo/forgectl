@@ -29,11 +29,23 @@ var subjectPattern = regexp.MustCompile(`^(fix|feat|docs|refactor|test|chore)(\(
 // closing #12, and a subject is the one piece of PR text a merge copies.
 var subjectIssueRef = regexp.MustCompile(`(?i)#[0-9]|\bgh-[0-9]`)
 
+// subjectIssueURL is an issue or PR link a subject may not hold, in any
+// case, with or without a scheme or "www.": GitHub may read
+// "fix: closes https://github.com/o/r/issues/12" on the default branch as
+// closing it.
+var subjectIssueURL = regexp.MustCompile(`(?i)github\.com/[^/ ]+/[^/ ]+/(issues|pulls?)/[0-9]`)
+
+// subjectSkipCI is a directive a subject may not hold: on the default
+// branch it skips every push-triggered workflow for the merge commit (CI,
+// release-please, the release tag, vulncheck).
+var subjectSkipCI = regexp.MustCompile(`(?i)\[\s*(skip\s+ci|ci\s+skip|no\s+ci|skip\s+actions|actions\s+skip)\s*\]|skip-checks`)
+
 // ErrSubject reports a PR title a merge will not take as its subject.
 var ErrSubject = fmt.Errorf("merge: the PR title is not a subject forgectl merges with")
 
 // Subject returns the squash commit's subject: the PR title, only when it
-// matches subjectPattern and holds no issue reference.
+// matches subjectPattern and holds no issue reference, issue or PR link, or
+// CI-skip directive.
 func Subject(title string) (string, error) {
 	if !subjectPattern.MatchString(title) {
 		return "", fmt.Errorf("%w: %q does not match %s (a type of fix, feat, docs, refactor, test or chore, an optional lowercase scope, no \"!\", \": \", then 1-72 printable ASCII characters)",
@@ -41,6 +53,12 @@ func Subject(title string) (string, error) {
 	}
 	if subjectIssueRef.MatchString(title) {
 		return "", fmt.Errorf("%w: %q holds an issue reference (#N or GH-N), which a commit on the default branch could read as closing it", ErrSubject, title)
+	}
+	if subjectIssueURL.MatchString(title) {
+		return "", fmt.Errorf("%w: %q holds an issue or PR link, which a commit on the default branch could read as closing it", ErrSubject, title)
+	}
+	if subjectSkipCI.MatchString(title) {
+		return "", fmt.Errorf("%w: %q holds a CI-skip directive ([skip ci], [ci skip], [no ci], [skip actions], [actions skip] or skip-checks), which would skip the default branch's workflows for the merge commit", ErrSubject, title)
 	}
 	return title, nil
 }

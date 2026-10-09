@@ -87,7 +87,8 @@ call, with no cache: the PR is found as surface status finds it, and the
 verdict must pass with mode manual or auto. The PR title becomes the commit
 subject only when it matches
 ^(fix|feat|docs|refactor|test|chore)(\([a-z0-9-]+\))?: [ -~]{1,72}$ and holds
-no issue reference; otherwise the merge refuses. Just before merging, the PR's
+no issue reference, issue or PR link, or CI-skip directive ([skip ci] and
+the like); otherwise the merge refuses. Just before merging, the PR's
 head, base branch, draft flag, state, reviews and comments are read again,
 and any change refuses. forgectl then writes an audit line and runs
 gh pr merge <n> -R github.com/<owner>/<repo> --squash
