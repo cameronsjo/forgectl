@@ -66,6 +66,10 @@ type closeResult struct {
 	Forgotten bool   `json:"forgotten"`
 	Reason    string `json:"reason,omitempty"`
 	Note      string `json:"note,omitempty"`
+	// ledgerFailed reports that the ledger row could not be marked closed or
+	// removed: it still says the worker is open. The drain's closers then
+	// leave the queue row reported and try again.
+	ledgerFailed bool
 }
 
 type closeOptions struct {
@@ -327,11 +331,13 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 	if res.Worktree == closeWorktreeKept {
 		if err := s.markClosed(now); err != nil {
 			res.Note = joinNote(res.Note, "the ledger row could not be marked closed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+			res.ledgerFailed = true
 		}
 		return res
 	}
 	if err := s.forget(); err != nil && !errors.Is(err, worker.ErrNoRow) {
 		res.Note = joinNote(res.Note, "the ledger row could not be removed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+		res.ledgerFailed = true
 		return res
 	}
 	res.Forgotten = true

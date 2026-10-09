@@ -69,6 +69,8 @@ type fakeDrain struct {
 	pruneRuns int
 	pruneDay  string
 	pruneErr  error
+	// pruneDayErr is what reading the recorded day returns.
+	pruneDayErr error
 }
 
 // checkOwnLedger fails the test when the drain hands the notifier a ledger
@@ -157,7 +159,7 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 			f.pruneRuns++
 			return pruneResult{}, f.pruneErr
 		},
-		pruneDay:    func() (string, error) { return f.pruneDay, nil },
+		pruneDay:    func() (string, error) { return f.pruneDay, f.pruneDayErr },
 		setPruneDay: func(day string) error { f.pruneDay = day; return nil },
 	}
 	return f, newDrainer(io, drainTestSession, func() bool { return false }), q

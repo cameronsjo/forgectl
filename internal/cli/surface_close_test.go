@@ -19,6 +19,9 @@ type fakeClose struct {
 	facts     worker.WorktreeFacts
 	inspErr   error
 	removeErr error
+	// markErr and forgetErr are what the ledger writes return.
+	markErr   error
+	forgetErr error
 	calls     []string
 }
 
@@ -36,8 +39,8 @@ func (f *fakeClose) steps() closeSteps {
 			f.calls = append(f.calls, "remove")
 			return f.removeErr
 		},
-		forget:     func() error { f.calls = append(f.calls, "forget"); return nil },
-		markClosed: func(time.Time) error { f.calls = append(f.calls, "mark-closed"); return nil },
+		forget:     func() error { f.calls = append(f.calls, "forget"); return f.forgetErr },
+		markClosed: func(time.Time) error { f.calls = append(f.calls, "mark-closed"); return f.markErr },
 	}
 }
 
@@ -246,5 +249,28 @@ func TestRealCloseStepsMarkClosedRecordsClosedAt(t *testing.T) {
 	}
 	if again := read(); again.ClosedAt == nil || !again.ClosedAt.Equal(first.Truncate(time.Second)) {
 		t.Fatalf("a second close moved closed_at to %v", again.ClosedAt)
+	}
+}
+
+// TestCloseWorkerLedgerWriteFailure pins that a close whose ledger write
+// fails says so in its note and marks the result, which the drain's closers
+// read to leave the queue row reported.
+func TestCloseWorkerLedgerWriteFailure(t *testing.T) {
+	stashed := cleanFacts
+	stashed.Stashes = 1
+	for name, fake := range map[string]fakeClose{
+		"mark closed fails": {result: backend.NewCloseClosed(), facts: stashed, markErr: errors.New("disk full")},
+		"forget fails":      {result: backend.NewCloseClosed(), facts: cleanFacts, forgetErr: errors.New("disk full")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := closeWorker(context.Background(), launchedRow(t), false, time.Now(), fake.steps())
+			if !res.Closed || !res.ledgerFailed || !strings.Contains(res.Note, "disk full") || res.Forgotten {
+				t.Fatalf("result %+v; want closed, ledgerFailed, the error in the note, not forgotten", res)
+			}
+		})
+	}
+	ok := fakeClose{result: backend.NewCloseClosed(), facts: cleanFacts}
+	if res := closeWorker(context.Background(), launchedRow(t), false, time.Now(), ok.steps()); res.ledgerFailed {
+		t.Fatalf("a clean close reported a ledger failure: %+v", res)
 	}
 }

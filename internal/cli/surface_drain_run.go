@@ -640,9 +640,25 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 		d.closerEvent(d.closerNote, q, drain.EventError, "close refused, the row stays reported: "+res.Reason)
 		return
 	}
+	if res.ledgerFailed {
+		// The workspace is closed but the ledger row still says the worker is
+		// open. The row stays reported, so the next read closes again (herdr
+		// then answers already gone) and retries the ledger write; a closed
+		// queue row over an open ledger row would never be looked at again.
+		note := "closed the worker, but its ledger row could not be updated; the row stays reported and the close is tried again: " + res.Note
+		if written, ok := d.apply(q, drain.Change{Name: q.Name, From: q.State, Error: note, SetError: true, CostUSD: cost}); ok {
+			q = written
+		}
+		d.closerEvent(d.closerNote, q, drain.EventError, note)
+		return
+	}
 	why := dec.Why
 	if res.Worktree == closeWorktreeKept {
 		why += "; worktree kept: " + strings.Join(res.KeptBecause, "; ")
+	}
+	if res.Note != "" {
+		why += "; " + res.Note
+		d.closerEvent(d.closerNote, q, drain.EventNote, "close: "+res.Note)
 	}
 	d.apply(q, drain.Change{Name: q.Name, From: q.State, To: worker.QueueClosed, Error: why, CostUSD: cost})
 }
@@ -650,13 +666,15 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 // dailyPrune runs `surface prune` with the default cutoff once per UTC day.
 // The day is recorded before the prune runs, so neither a failure nor a
 // restart runs it again that day; a failure is an error event and never
-// stops the drain.
+// stops the drain. A drain-prune-day that cannot be read counts as never:
+// one error event, and the prune runs and rewrites it with today.
 func (d *drainer) dailyPrune(ctx context.Context) {
 	now := d.io.now()
 	if !d.pruneDayRead {
 		day, err := d.io.pruneDay()
 		if err != nil {
-			d.event(drain.Event{Kind: drain.EventError, Error: "read the last daily prune day: " + err.Error()})
+			day = ""
+			d.event(drain.Event{Kind: drain.EventError, Error: "read the last daily prune day; pruning now and rewriting it with today: " + err.Error()})
 		}
 		d.pruneDay, d.pruneDayRead = day, true
 	}
@@ -1056,7 +1074,7 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 			if err != nil {
 				return pruneResult{}, err
 			}
-			ctx, cancel := context.WithTimeout(ctx, pruneTimeout)
+			ctx, cancel := context.WithTimeout(ctx, drainPruneTimeout)
 			defer cancel()
 			return runPrune(ctx, d, now, drain.PruneAfter, false)
 		},

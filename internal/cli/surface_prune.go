@@ -27,8 +27,15 @@ import (
 // usage-daily.jsonl first, one line per row. The drain runs it once a UTC
 // day.
 
-// pruneTimeout bounds one prune: herdr probes and the state files.
+// pruneTimeout bounds one `surface prune`: the herdr listing and the state
+// files.
 const pruneTimeout = 2 * time.Minute
+
+// drainPruneTimeout bounds the drain's daily prune, which runs inside a tick:
+// under the 3 intervals after which drain status calls the drain stale (45 s
+// at the default 15 s interval). An interval set below 10 s can still read as
+// stale during the one daily prune.
+const drainPruneTimeout = 30 * time.Second
 
 // pruneResult is what `surface prune --json` prints. Additive changes only
 // (ADR-0008 rule 2).
@@ -191,8 +198,8 @@ func pathGone(path string) (bool, error) {
 }
 
 // herdrWorkspaces probes ledger rows' workspaces through the herdr session
-// this process resolves. A row from another session cannot be seen from
-// here, so herdr cannot say.
+// this process resolves, against one herdr listing (Adapter.Prober). A row
+// from another session cannot be seen from here, so herdr cannot say.
 func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) drain.Workspace, error) {
 	adapter, err := newHerdrAdapter(io.Discard)
 	if err != nil {
@@ -205,6 +212,9 @@ func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) dra
 	if err := herdr.CheckReady(ctx); err != nil {
 		return nil, err
 	}
+	// One readiness read and one workspace listing for the whole prune, not
+	// two herdr calls per row.
+	probe := herdr.Prober()
 	return func(id worker.LedgerID, r worker.Row) drain.Workspace {
 		if id.Session != herdr.Session() {
 			return drain.WorkspaceUnknown
@@ -213,7 +223,7 @@ func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) dra
 		if err != nil {
 			return drain.WorkspaceUnknown
 		}
-		switch herdr.Probe(ctx, ref).State() {
+		switch probe(ctx, ref).State() {
 		case backend.ProbePresent:
 			return drain.WorkspaceLive
 		case backend.ProbeGone:

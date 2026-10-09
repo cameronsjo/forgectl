@@ -875,6 +875,42 @@ func TestProbeAnswersItsTwoPositiveOutcomes(t *testing.T) {
 	})
 }
 
+// TestProberListsOnce pins that a Prober reads herdr's readiness and its
+// workspace listing once for any number of probes, and still answers each
+// under Probe's rules.
+func TestProberListsOnce(t *testing.T) {
+	a, run, ref := startClean(t)
+	run.reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+	count := func(kind exec.CommandKind) int {
+		n := 0
+		for _, c := range run.calls() {
+			if c.Kind == kind {
+				n++
+			}
+		}
+		return n
+	}
+	total := func() int { return len(run.calls()) }
+	// One plain Probe is the cost of one read: its readiness commands and
+	// one listing.
+	before := total()
+	if got := a.Probe(context.Background(), ref); got.State() != backend.ProbePresent {
+		t.Fatalf("Probe state %v, want present", got.State())
+	}
+	one := total() - before
+	list0 := count(exec.KindHerdrProbe)
+	before = total()
+	probe := a.Prober()
+	for i := 0; i < 3; i++ {
+		if got := probe(context.Background(), ref); got.State() != backend.ProbePresent {
+			t.Fatalf("probe %d: state %v, want present", i, got.State())
+		}
+	}
+	if got := total() - before; got != one || count(exec.KindHerdrProbe)-list0 != 1 {
+		t.Fatalf("3 Prober probes made %d herdr calls (%d listings); one Probe makes %d with 1 listing", got, count(exec.KindHerdrProbe)-list0, one)
+	}
+}
+
 // TestAlreadyGoneIsMatchedOnTheStructuredCode is what herdr's error envelope
 // buys over cmux's prose. The code is machine-readable and stable; the message
 // beside it is explicitly reworded in the fixture to prove nothing reads it.

@@ -337,3 +337,83 @@ func TestDrainDailyPruneOncePerDay(t *testing.T) {
 		t.Fatalf("a failed prune ran again the same day (%d runs)", f.pruneRuns)
 	}
 }
+
+// TestDrainCloserLedgerWriteFailureStaysReported pins that a close whose
+// ledger row could not be marked closed or removed leaves the queue row
+// reported, with the note as an error event and as last_error, and that the
+// next read closes again and settles it.
+func TestDrainCloserLedgerWriteFailureStaysReported(t *testing.T) {
+	for name, note := range map[string]string{
+		"not marked closed": "the ledger row could not be marked closed: disk full",
+		"not removed":       "the ledger row could not be removed: disk full",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, d, q := newFakeDrain(t)
+			seedReported(t, q, "w", true)
+			f.prs["w"] = merge.Candidate{Number: 5, State: "MERGED"}
+			f.usage = &statusUsage{CostUSD: 1, Priced: true}
+			f.closeRes = &closeResult{Name: "w", Closed: true, Workspace: closeWorkspaceClosed, Worktree: closeWorktreeKept, Note: note, ledgerFailed: true}
+			d.tick(t.Context())
+			r := rowNamed(t, q, "w")
+			if r.State != worker.QueueReported || !strings.Contains(r.LastError, note) || r.CostUSD == nil || *r.CostUSD != 1 {
+				t.Fatalf("row %s %q cost %v; want reported, the note as last_error, the price kept", r.State, r.LastError, r.CostUSD)
+			}
+			if ev := eventsOf(f, "w", drain.EventError); len(ev) != 1 || !strings.Contains(ev[0].Error, note) {
+				t.Fatalf("events %+v; want one error carrying the note", ev)
+			}
+			f.closeRes = nil
+			f.now = f.now.Add(drain.CloserReadEvery)
+			d.tick(t.Context())
+			if r := rowNamed(t, q, "w"); r.State != worker.QueueClosed {
+				t.Fatalf("row %s after the ledger write works; want closed", r.State)
+			}
+		})
+	}
+}
+
+// TestDrainCloserCloseNoteRecorded pins that a close that worked but carries
+// a note (a recovery tag to check by hand) records it: a note event and the
+// closed row's last_error.
+func TestDrainCloserCloseNoteRecorded(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedReported(t, q, "w", true)
+	f.prs["w"] = merge.Candidate{Number: 5, State: "MERGED"}
+	const note = "a failed launch may have left a herdr workspace labeled fx-1"
+	f.closeRes = &closeResult{Name: "w", Closed: true, Workspace: closeWorkspaceNone, Worktree: closeWorktreeRemoved, Forgotten: true, Note: note}
+	d.tick(t.Context())
+	r := rowNamed(t, q, "w")
+	if r.State != worker.QueueClosed || !strings.Contains(r.LastError, "PR #5 merged") || !strings.Contains(r.LastError, note) {
+		t.Fatalf("row %s %q; want closed naming the merge and the note", r.State, r.LastError)
+	}
+	if ev := eventsOf(f, "w", drain.EventNote); len(ev) != 1 || !strings.Contains(ev[0].Error, note) {
+		t.Fatalf("notes %+v; want one carrying the close's note", ev)
+	}
+}
+
+// TestDrainDailyPruneUnreadableDay pins that an unreadable drain-prune-day
+// is one error event, the prune runs, and the day is rewritten with today
+// first, so a restart that day does not prune again.
+func TestDrainDailyPruneUnreadableDay(t *testing.T) {
+	f, d, _ := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	f.pruneDayErr = errors.New("drain-prune-day: not a day")
+	d.tick(t.Context())
+	if f.pruneRuns != 1 || f.pruneDay != "2026-10-07" {
+		t.Fatalf("prune ran %d times, day %q; want once, rewritten with today", f.pruneRuns, f.pruneDay)
+	}
+	n := 0
+	for _, e := range f.events {
+		if e.Kind == drain.EventError && strings.Contains(e.Error, "not a day") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d error events for the unreadable day; want 1: %+v", n, f.events)
+	}
+	f.pruneDayErr = nil
+	restarted := newDrainer(d.io, drainTestSession, func() bool { return false })
+	restarted.tick(t.Context())
+	if f.pruneRuns != 1 {
+		t.Fatalf("a restart after the rewrite pruned again (%d runs)", f.pruneRuns)
+	}
+}
