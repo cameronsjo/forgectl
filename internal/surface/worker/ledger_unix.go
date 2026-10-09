@@ -86,6 +86,50 @@ func (s fileStore) update(fn func([]byte) ([]byte, error)) error {
 	return writeAt(dir, s.tmpName(), s.dataName(), next)
 }
 
+// listLedgersAt lists the ledger files in the pinned surface directory under
+// stateBase. A directory that does not exist yet holds none.
+func listLedgersAt(stateBase string) ([]LedgerID, []string, error) {
+	dir, err := fileStore{stateBase: stateBase}.pin(false)
+	if errors.Is(err, privdir.ErrAbsent) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("worker: ledger directory: %w", err)
+	}
+	defer unix.Close(dir) //nolint:errcheck // read-only descriptor
+	// Listed through a duplicate of the pinned descriptor, so no path is
+	// resolved again.
+	dup, err := unix.Dup(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("worker: ledger directory: %w", err)
+	}
+	d := os.NewFile(uintptr(dup), "surface")
+	names, err := d.Readdirnames(-1)
+	d.Close() //nolint:errcheck,gosec // read-only directory descriptor
+	if err != nil {
+		return nil, nil, fmt.Errorf("worker: list the ledger directory: %w", err)
+	}
+	var ids []LedgerID
+	var bad []string
+	for _, name := range names {
+		if !isLedgerFileName(name) {
+			continue
+		}
+		data, err := readAt(dir, name)
+		if err != nil || data == nil {
+			bad = append(bad, name)
+			continue
+		}
+		id, err := ledgerIDOf(name, data)
+		if err != nil {
+			bad = append(bad, name)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, bad, nil
+}
+
 // readAt returns the file's contents, or nil when it does not exist.
 func readAt(dir int, name string) ([]byte, error) {
 	f, err := openVerified(dir, name, unix.O_RDONLY)

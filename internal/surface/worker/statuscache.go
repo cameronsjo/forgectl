@@ -2,6 +2,8 @@ package worker
 
 import (
 	"errors"
+	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -27,6 +29,31 @@ func OpenStatusCache() (StatusCache, error) {
 		return StatusCache{}, err
 	}
 	return StatusCache{stateBase: base}, nil
+}
+
+// StatusCacheEntry is one cache file: its head and modification time.
+type StatusCacheEntry struct {
+	Head    string
+	ModTime time.Time
+}
+
+// ErrStatusCacheChanged reports an entry rewritten since it was listed.
+var ErrStatusCacheChanged = errors.New("worker: the status cache entry changed since it was listed")
+
+// statusCacheHead returns the head a cache file name names.
+func statusCacheHead(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, "status-cache-")
+	if !ok {
+		return "", false
+	}
+	head, ok := strings.CutSuffix(rest, ".json")
+	if !ok {
+		return "", false
+	}
+	if _, err := statusCacheName(head); err != nil {
+		return "", false
+	}
+	return head, true
 }
 
 func statusCacheName(head string) (string, error) {

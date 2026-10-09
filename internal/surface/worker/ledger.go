@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -280,6 +281,58 @@ func (l *Ledger) NameTaken(name string) (bool, error) {
 	}
 	_, err = insertRow(slices.Clone(rows), Row{Name: name})
 	return errors.Is(err, ErrNameTaken), nil
+}
+
+// LedgerID names one ledger: the repo and herdr session it records.
+type LedgerID struct {
+	Repo    string
+	Session string
+}
+
+// ListLedgers returns the ledgers in $XDG_STATE_HOME/forgectl/surface, read
+// from each ledger file's own repo and session. A file named like a ledger
+// that does not parse, or whose name is not its repo and session's key, is
+// returned in bad by name, so `surface prune` can say what it skipped.
+func ListLedgers() (ids []LedgerID, bad []string, err error) {
+	base, err := config.LaunchUsageBase()
+	if err != nil {
+		return nil, nil, err
+	}
+	return listLedgersAt(base)
+}
+
+// isLedgerFileName reports a name of the form <32 hex>.json.
+func isLedgerFileName(name string) bool {
+	key, ok := strings.CutSuffix(name, ".json")
+	if !ok || len(key) != 32 {
+		return false
+	}
+	for _, r := range key {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ledgerIDOf reads a ledger file's repo and session and checks the file is
+// named by their key.
+func ledgerIDOf(name string, data []byte) (LedgerID, error) {
+	var head struct {
+		Version int    `json:"version"`
+		Repo    string `json:"repo"`
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return LedgerID{}, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
+	}
+	if head.Version != ledgerVersion || !filepath.IsAbs(head.Repo) || head.Session == "" {
+		return LedgerID{}, fmt.Errorf("%w: version %d, repo %q, session %q", ErrLedgerUnreadable, head.Version, head.Repo, head.Session)
+	}
+	if ledgerKey(head.Repo, head.Session)+".json" != name {
+		return LedgerID{}, fmt.Errorf("%w: it is not named for its repo and session", ErrLedgerUnreadable)
+	}
+	return LedgerID{Repo: head.Repo, Session: head.Session}, nil
 }
 
 // Rows returns every row.

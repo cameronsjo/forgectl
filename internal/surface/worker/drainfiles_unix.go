@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -124,6 +125,67 @@ func (d DrainFiles) ReadEvents() (older, current []byte, err error) {
 		return nil, nil, err
 	}
 	return older, current, nil
+}
+
+// AppendUsage appends data, whole lines ending in a newline, to
+// usage-daily.jsonl with O_APPEND. The file is never rotated or truncated.
+func (d DrainFiles) AppendUsage(data []byte) error {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return errors.New("worker: usage lines must end in a newline")
+	}
+	dir, err := d.pin(true)
+	if err != nil {
+		return fmt.Errorf("worker: drain directory: %w", err)
+	}
+	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
+	f, err := openVerified(dir, usageDailyName, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close() //nolint:errcheck,gosec // already failing
+		return fmt.Errorf("worker: append %s: %w", usageDailyName, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close() //nolint:errcheck,gosec // already failing
+		return fmt.Errorf("worker: sync %s: %w", usageDailyName, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("worker: close %s: %w", usageDailyName, err)
+	}
+	return nil
+}
+
+// ReadUsage returns usage-daily.jsonl, or nil when there is none.
+func (d DrainFiles) ReadUsage() ([]byte, error) {
+	return d.read(usageDailyName)
+}
+
+// ReadPruneDay returns the UTC day the drain last ran its daily prune, or
+// "" when it never has.
+func (d DrainFiles) ReadPruneDay() (string, error) {
+	data, err := d.read(drainPruneDayName)
+	if err != nil || data == nil {
+		return "", err
+	}
+	day := strings.TrimSuffix(string(data), "\n")
+	if err := checkDay(day); err != nil {
+		return "", fmt.Errorf("%w: %s: %w", ErrLedgerUnreadable, drainPruneDayName, err)
+	}
+	return day, nil
+}
+
+// WritePruneDay records day as the last daily prune, atomically.
+func (d DrainFiles) WritePruneDay(day string) error {
+	if err := checkDay(day); err != nil {
+		return err
+	}
+	dir, err := d.pin(true)
+	if err != nil {
+		return fmt.Errorf("worker: drain directory: %w", err)
+	}
+	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
+	return writeAt(dir, drainPruneDayTmpName, drainPruneDayName, []byte(day+"\n"))
 }
 
 func (d DrainFiles) read(name string) ([]byte, error) {
