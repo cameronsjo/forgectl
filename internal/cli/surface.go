@@ -253,6 +253,9 @@ func firstArg(args []string) string {
 // another local user can perturb is actionable at launch time and is routed to
 // this command's stderr explicitly rather than depending on optional logging.
 func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface launch"); err != nil {
+		return err
+	}
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)

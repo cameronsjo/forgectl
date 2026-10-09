@@ -201,10 +201,21 @@ for a repository the gh account does not own).
 }
 
 // errIntakeInWorker refuses intake inside a drain worker. The marker is a
-// courtesy refusal, not the gate: a worker runs as the operator and can
-// unset FORGECTL_DRAIN_WORKER. The gate is the terminal confirmation.
+// courtesy refusal, not a boundary: a worker runs as the operator and can
+// unset FORGECTL_DRAIN_WORKER. It stops a worker starting more work by
+// accident; nothing on this machine stops one that sets out to.
 var errIntakeInWorker = errors.New("intake refuses to run inside a drain worker (" + launch.DrainWorkerEnv +
 	" is set): a worker must not queue work for another worker; run intake from your own terminal")
+
+// refuseInDrainWorker refuses verb inside a drain worker, the same courtesy
+// refusal intake makes, for the other commands that start a worker:
+// surface enqueue and surface launch.
+func refuseInDrainWorker(getenv func(string) string, verb string) error {
+	if getenv(launch.DrainWorkerEnv) == "" {
+		return nil
+	}
+	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start another worker; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
+}
 
 func runSurfaceIntakeGH(cmd *cobra.Command, d intakeDeps, opts intakeOptions) error {
 	getenv := d.getenv
@@ -592,8 +603,8 @@ func writeIntakeCandidates(out io.Writer, cands []intakeCandidate) error {
 		return err
 	}
 	for _, c := range cands {
-		if _, err := fmt.Fprintf(out, "  #%d %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
-			c.Number, termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
+		if _, err := fmt.Fprintf(out, "  %s %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
+			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
 			termsafe.SafeLineMax(c.LabeledAt, 40), termsafe.SafeLineMax(c.Name, 64), termsafe.SafeLineMax(c.BriefSHA256, 64)); err != nil {
 			return err
 		}

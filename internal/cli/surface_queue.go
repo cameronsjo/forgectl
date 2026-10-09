@@ -136,6 +136,9 @@ setup error, such as an unusable brief or an unreadable queue file.
 }
 
 func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface enqueue"); err != nil {
+		return err
+	}
 	if opts.Repo == "" || opts.Name == "" || opts.Brief == "" {
 		return WithExitCode(errors.New("enqueue needs --repo, --name and --brief"), exitUsage)
 	}
