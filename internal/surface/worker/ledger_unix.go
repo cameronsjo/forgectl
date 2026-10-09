@@ -97,15 +97,7 @@ func listLedgersAt(stateBase string) ([]LedgerID, []string, error) {
 		return nil, nil, fmt.Errorf("worker: ledger directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // read-only descriptor
-	// Listed through a duplicate of the pinned descriptor, so no path is
-	// resolved again.
-	dup, err := unix.Dup(dir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("worker: ledger directory: %w", err)
-	}
-	d := os.NewFile(uintptr(dup), "surface")
-	names, err := d.Readdirnames(-1)
-	d.Close() //nolint:errcheck,gosec // read-only directory descriptor
+	names, err := listNames(dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("worker: list the ledger directory: %w", err)
 	}
@@ -128,6 +120,20 @@ func listLedgersAt(stateBase string) ([]LedgerID, []string, error) {
 		ids = append(ids, id)
 	}
 	return ids, bad, nil
+}
+
+// listNames lists the entries of the pinned directory dir through a
+// duplicate of its descriptor, so no path is resolved again and dir stays
+// open for the caller.
+func listNames(dir int) ([]string, error) {
+	dup, err := unix.Dup(dir)
+	if err != nil {
+		return nil, err
+	}
+	d := os.NewFile(uintptr(dup), "surface")
+	names, err := d.Readdirnames(-1)
+	d.Close() //nolint:errcheck,gosec // read-only directory descriptor
+	return names, err
 }
 
 // readAt returns the file's contents, or nil when it does not exist.

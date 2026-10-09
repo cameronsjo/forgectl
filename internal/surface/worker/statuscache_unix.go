@@ -5,7 +5,6 @@ package worker
 import (
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -41,13 +40,7 @@ func (c StatusCache) Entries() ([]StatusCacheEntry, error) {
 		return nil, fmt.Errorf("worker: status cache directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // read-only descriptor
-	dup, err := unix.Dup(dir)
-	if err != nil {
-		return nil, fmt.Errorf("worker: status cache directory: %w", err)
-	}
-	d := os.NewFile(uintptr(dup), "surface")
-	names, err := d.Readdirnames(-1)
-	d.Close() //nolint:errcheck,gosec // read-only directory descriptor
+	names, err := listNames(dir)
 	if err != nil {
 		return nil, fmt.Errorf("worker: list the status cache: %w", err)
 	}

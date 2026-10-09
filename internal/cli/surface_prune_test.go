@@ -382,7 +382,7 @@ func TestRunPruneKeepsRowsOfAnUnreadableLedgerFile(t *testing.T) {
 	seedPruneRow(t, q, "never-launched", worker.QueueExpired, old, false, nil)
 	const badName = "0123456789abcdef0123456789abcdef.json"
 	surface := filepath.Join(os.Getenv("XDG_STATE_HOME"), "forgectl", "surface")
-	if err := os.WriteFile(filepath.Join(surface, badName), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(surface, badName), []byte("{not json"), 0o600); err != nil { //nolint:gosec // G703: the test's own t.TempDir state directory
 		t.Fatal(err)
 	}
 	res, err := runPrune(t.Context(), testPruneDeps(t, q, nil, nil), pruneNow, drain.PruneAfter, false)

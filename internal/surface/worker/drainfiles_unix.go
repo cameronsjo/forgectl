@@ -87,32 +87,23 @@ func (d DrainFiles) AppendEvent(_ *DrainLock, line []byte) error {
 		return fmt.Errorf("worker: drain directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
+	// The size is read from the verified file, so a symlink or another
+	// user's file is refused before anything is rotated.
 	f, err := openVerified(dir, drainEventsName, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND)
 	if err != nil {
 		return err
 	}
 	st, err := f.Stat()
+	f.Close() //nolint:errcheck,gosec // only stat was read; appendAt reopens it
 	if err != nil {
-		f.Close() //nolint:errcheck,gosec // already failing
 		return fmt.Errorf("worker: stat %s: %w", drainEventsName, err)
 	}
 	if st.Size()+int64(len(line)) > MaxDrainEventsBytes {
-		f.Close() //nolint:errcheck,gosec // replaced below
 		if err := unix.Renameat(dir, drainEventsName, dir, drainEventsOldName); err != nil {
 			return fmt.Errorf("worker: rotate %s: %w", drainEventsName, err)
 		}
-		if f, err = openVerified(dir, drainEventsName, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND); err != nil {
-			return err
-		}
 	}
-	if _, err := f.Write(line); err != nil {
-		f.Close() //nolint:errcheck,gosec // already failing
-		return fmt.Errorf("worker: append %s: %w", drainEventsName, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("worker: close %s: %w", drainEventsName, err)
-	}
-	return nil
+	return appendAt(dir, drainEventsName, line)
 }
 
 // ReadEvents returns drain-events.jsonl.1 and drain-events.jsonl, each nil
@@ -138,20 +129,30 @@ func (d DrainFiles) AppendUsage(data []byte) error {
 		return fmt.Errorf("worker: drain directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
-	f, err := openVerified(dir, usageDailyName, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND)
+	return appendAt(dir, usageDailyName, data)
+}
+
+// appendAt appends data to name under dir with O_APPEND and syncs it before
+// returning, through openVerified. drain-events.jsonl and usage-daily.jsonl
+// both go through it, so both sync: a line the caller was told is written is
+// on disk, which the usage file needs (it is the only record of a pruned
+// row's cost), and events are written once per condition, rarely enough that
+// the sync costs nothing that matters.
+func appendAt(dir int, name string, data []byte) error {
+	f, err := openVerified(dir, name, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close() //nolint:errcheck,gosec // already failing
-		return fmt.Errorf("worker: append %s: %w", usageDailyName, err)
+		return fmt.Errorf("worker: append %s: %w", name, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close() //nolint:errcheck,gosec // already failing
-		return fmt.Errorf("worker: sync %s: %w", usageDailyName, err)
+		return fmt.Errorf("worker: sync %s: %w", name, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("worker: close %s: %w", usageDailyName, err)
+		return fmt.Errorf("worker: close %s: %w", name, err)
 	}
 	return nil
 }
