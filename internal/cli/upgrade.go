@@ -231,11 +231,15 @@ func upgradeFailed(ctx context.Context, out, errOut io.Writer, err error, asJSON
 // cancelled some other way, a caller's deadline or a test. It comes first
 // because os/exec reports a brew killed by that cancellation as a signal
 // exit, not as context.Canceled, so the context itself is consulted too, and
-// a cancellation must not read as a network fault.
+// a cancellation must not read as a network fault. A `brew update` that lost
+// brew's own lock to another `brew update` is not a network fault either
+// (forgectl#1175).
 func upgradeFailure(ctx context.Context, err error) string {
 	switch {
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
 		return "upgrade: interrupted before brew finished; run `forgectl --version` to see what is installed"
+	case selfupdate.UpdateLocked(err):
+		return "upgrade: another brew update is running; wait for it, then rerun `forgectl upgrade`"
 	case errors.Is(err, selfupdate.ErrTapUpdate):
 		return "upgrade: brew update failed; check network access to the Homebrew tap"
 	default:
