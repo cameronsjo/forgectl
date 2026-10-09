@@ -9,10 +9,13 @@ import (
 	"time"
 )
 
-// SurfaceConfig is the [surface] section: [surface.drain] and
-// [surface.profiles]. A surface launch still names its backend on every call.
+// SurfaceConfig is the [surface] section: [surface.drain], [surface.intake]
+// and [surface.profiles]. A surface launch still names its backend on every
+// call.
 type SurfaceConfig struct {
 	Drain SurfaceDrainConfig `toml:"drain"`
+	// Intake is how `surface intake gh` picks GitHub issues to queue.
+	Intake SurfaceIntakeConfig `toml:"intake"`
 	// Profiles are the named Claude config directories a worker can run
 	// under (`--profile <name>`), keyed by name.
 	Profiles map[string]SurfaceProfile `toml:"profiles"`
@@ -242,6 +245,118 @@ func (c SurfaceDrainConfig) Resolve() (DrainSettings, error) {
 
 // Validate reports the first out-of-range [surface.drain] value.
 func (c SurfaceDrainConfig) Validate() error {
+	_, err := c.Resolve()
+	return err
+}
+
+// SurfaceIntakeConfig is [surface.intake]: which GitHub issues `forgectl
+// surface intake gh` may turn into queue rows. Every field is optional; an
+// absent one takes its default. A present one that is out of shape is an
+// error, refused when the file loads and again by intake itself; it never
+// falls back to a default, because a default here widens who can write a
+// worker's brief.
+type SurfaceIntakeConfig struct {
+	// Authors are the GitHub logins whose issues, labeled by one of them,
+	// intake takes. Empty means the repository owner's login for a
+	// user-owned repository; intake refuses an organization-owned one.
+	Authors []string `toml:"authors"`
+	// Labels are the eligible label names. Absent means DefaultIntakeLabels.
+	Labels []string `toml:"labels"`
+	// MaxPerRun caps the rows one intake run adds.
+	MaxPerRun *int `toml:"max_per_run"`
+}
+
+// Intake defaults and limits.
+const (
+	DefaultIntakeMaxPerRun = 5
+	MaxIntakeMaxPerRun     = 50
+	// maxIntakeLabelLen is GitHub's own limit on a label name.
+	maxIntakeLabelLen = 50
+	// maxIntakeLoginLen is GitHub's own limit on a login.
+	maxIntakeLoginLen = 39
+	maxIntakeListLen  = 32
+)
+
+// DefaultIntakeLabels are the eligible labels when [surface.intake] labels
+// is absent.
+var DefaultIntakeLabels = []string{"exec:mechanical", "exec:guided"}
+
+// IntakeSettings is [surface.intake] resolved. Authors stays empty when none
+// are configured: the default depends on the repository's owner, which only
+// intake knows.
+type IntakeSettings struct {
+	Authors   []string
+	Labels    []string
+	MaxPerRun int
+}
+
+// CheckGitHubLogin refuses a value that is not a GitHub user login: 1-39
+// characters of letters, digits and '-', not starting or ending with '-'. A
+// bot's "[bot]" suffix is outside the charset, so no bot login passes.
+func CheckGitHubLogin(login string) error {
+	if login == "" || len(login) > maxIntakeLoginLen || login[0] == '-' || login[len(login)-1] == '-' {
+		return errors.New("want a GitHub login: 1-39 characters of letters, digits and '-', not starting or ending with '-'")
+	}
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return errors.New("want a GitHub login: 1-39 characters of letters, digits and '-', not starting or ending with '-'")
+		}
+	}
+	return nil
+}
+
+// checkIntakeLabel refuses a label name intake will not pass to GitHub: empty,
+// longer than GitHub allows, padded with spaces, or holding anything but
+// printable ASCII.
+func checkIntakeLabel(label string) error {
+	if label == "" || len(label) > maxIntakeLabelLen || strings.TrimSpace(label) != label {
+		return fmt.Errorf("want a label name of 1-%d characters with no leading or trailing space", maxIntakeLabelLen)
+	}
+	for _, r := range label {
+		if r < ' ' || r > '~' {
+			return errors.New("want a label name of printable ASCII characters")
+		}
+	}
+	return nil
+}
+
+// Resolve fills absent fields with their defaults and refuses a present one
+// out of shape, naming the key and the value seen.
+func (c SurfaceIntakeConfig) Resolve() (IntakeSettings, error) {
+	s := IntakeSettings{Labels: DefaultIntakeLabels, MaxPerRun: DefaultIntakeMaxPerRun}
+	if len(c.Authors) > maxIntakeListLen {
+		return IntakeSettings{}, fmt.Errorf("[surface.intake] authors: at most %d entries, got %d", maxIntakeListLen, len(c.Authors))
+	}
+	for _, a := range c.Authors {
+		if err := CheckGitHubLogin(a); err != nil {
+			return IntakeSettings{}, fmt.Errorf("[surface.intake] authors: %w, got %s", err, quoteConfigValue(a))
+		}
+	}
+	s.Authors = append([]string(nil), c.Authors...)
+	if c.Labels != nil {
+		if len(c.Labels) == 0 || len(c.Labels) > maxIntakeListLen {
+			return IntakeSettings{}, fmt.Errorf("[surface.intake] labels: want 1 to %d label names, got %d", maxIntakeListLen, len(c.Labels))
+		}
+		for _, l := range c.Labels {
+			if err := checkIntakeLabel(l); err != nil {
+				return IntakeSettings{}, fmt.Errorf("[surface.intake] labels: %w, got %s", err, quoteConfigValue(l))
+			}
+		}
+		s.Labels = append([]string(nil), c.Labels...)
+	}
+	if c.MaxPerRun != nil {
+		if *c.MaxPerRun < 1 || *c.MaxPerRun > MaxIntakeMaxPerRun {
+			return IntakeSettings{}, fmt.Errorf("[surface.intake] max_per_run: want 1 to %d, got %d", MaxIntakeMaxPerRun, *c.MaxPerRun)
+		}
+		s.MaxPerRun = *c.MaxPerRun
+	}
+	return s, nil
+}
+
+// Validate reports the first out-of-shape [surface.intake] value.
+func (c SurfaceIntakeConfig) Validate() error {
 	_, err := c.Resolve()
 	return err
 }

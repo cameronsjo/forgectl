@@ -414,3 +414,45 @@ func TestQueueEnqueueLaunchStoresTheProfileName(t *testing.T) {
 		}
 	}
 }
+
+// TestQueueEnqueueFromRecordsTheOrigin pins the intake row's source and
+// author: stored, part of the idempotence check, and shape-checked.
+func TestQueueEnqueueFromRecordsTheOrigin(t *testing.T) {
+	q, dir := testQueue(t)
+	origin := QueueOrigin{Source: "gh:o/r#7", Author: "alice"}
+	row, added, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, origin, queueNow)
+	if err != nil || !added || row.Source != origin.Source || row.Author != origin.Author {
+		t.Fatalf("EnqueueFrom: %+v, added %v, err %v", row, added, err)
+	}
+	//nolint:gosec // G304: reading back the queue file this test wrote under its own temp dir
+	data, err := os.ReadFile(filepath.Join(dir, "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"source": "gh:o/r#7"`)) || !bytes.Contains(data, []byte(`"author": "alice"`)) {
+		t.Fatalf("queue.json does not carry the origin:\n%s", data)
+	}
+	if _, added, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, origin, queueNow); err != nil || added {
+		t.Fatalf("same origin: added %v, err %v; want a no-op", added, err)
+	}
+	if _, _, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, QueueOrigin{Source: "gh:o/r#7", Author: "mallory"}, queueNow); !errors.Is(err, ErrQueueNameTaken) {
+		t.Fatalf("another author: %v, want ErrQueueNameTaken", err)
+	}
+	if row, _, err := q.Enqueue("plain", "/repo/one", "brief", "", queueNow); err != nil || row.Source != "" || row.Author != "" {
+		t.Fatalf("Enqueue: %+v, %v", row, err)
+	}
+	//nolint:gosec // G304: reading back the queue file this test wrote under its own temp dir
+	if data, err = os.ReadFile(filepath.Join(dir, "queue.json")); err != nil || bytes.Count(data, []byte(`"source"`)) != 1 {
+		t.Fatalf("a row with no origin wrote a source key (%v):\n%s", err, data)
+	}
+	for name, o := range map[string]QueueOrigin{
+		"author without source": {Author: "alice"},
+		"control in source":     {Source: "gh:o/r#7\x1b"},
+		"space in author":       {Source: "s", Author: "a b"},
+		"source too long":       {Source: strings.Repeat("s", 201)},
+	} {
+		if _, _, err := q.EnqueueFrom("w9", "/repo/one", "brief", "", QueueLaunch{}, o, queueNow); err == nil {
+			t.Errorf("%s: %+v accepted", name, o)
+		}
+	}
+}

@@ -1279,6 +1279,13 @@ func DecodeStrict(data []byte) (Config, error) {
 			invalid = invalidValueError{message: err.Error()}
 		}
 	}
+	// [surface.intake] decides whose GitHub issue text becomes a worker's
+	// brief, so a bad value is refused at load too. The section is kept, not
+	// dropped: dropping it would select the defaults, and intake resolves it
+	// again and refuses the same value.
+	if err := cfg.Surface.Intake.Validate(); err != nil && invalid == nil {
+		invalid = invalidValueError{message: err.Error()}
+	}
 	return cfg, invalid
 }
 
@@ -1296,7 +1303,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [surface.drain], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [surface.intake], [resume], and [theme]. [tasks] and log_level are checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
@@ -1324,6 +1331,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Surface.Drain.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Surface.Intake.Validate(); err != nil {
 		return err
 	}
 	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {
