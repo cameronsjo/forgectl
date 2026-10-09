@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.39.0](https://github.com/cameronsjo/forgectl/compare/v0.38.0...v0.39.0) (2026-10-09)
+
+
+### Features
+
+* **surface:** drain closers and surface prune (atelier P4 T10.3) ([#1209](https://github.com/cameronsjo/forgectl/issues/1209)) ([d5b32e0](https://github.com/cameronsjo/forgectl/commit/d5b32e0c709f6b1da3f0db73679b17ce0b05c0cd))
+* **surface:** merge policy core and surface status (atelier P4 T10.2) ([#1207](https://github.com/cameronsjo/forgectl/issues/1207)) ([20203f4](https://github.com/cameronsjo/forgectl/commit/20203f4c0a54eddce4d65558794d6be486149acf))
+
+
+### Bug Fixes
+
+* **upgrade:** say when brew's update lock is held ([#1204](https://github.com/cameronsjo/forgectl/issues/1204)) ([d53727f](https://github.com/cameronsjo/forgectl/commit/d53727f8b2a11ddd367120ba5053664869ad7b82)), closes [#1175](https://github.com/cameronsjo/forgectl/issues/1175)
+
 ## [0.38.0](https://github.com/cameronsjo/forgectl/compare/v0.37.0...v0.38.0) (2026-10-09)
 
 
