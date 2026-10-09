@@ -28,7 +28,8 @@ type SurfaceMergeConfig struct {
 	// MergeApproverCadenceReview and MergeApproverCodeRabbit.
 	Approvers []string `toml:"approvers"`
 	// MarkerAuthorID is the operator's numeric GitHub user id: only
-	// cadence-review markers posted by it count.
+	// cadence-review markers posted by it count. Required whenever mode is
+	// manual or auto, whatever approvers lists.
 	MarkerAuthorID *int64 `toml:"marker_author_id"`
 	// RequiredReviewers are the cadence-review reviewer names that each need
 	// a passing marker at the head.
@@ -226,10 +227,13 @@ func (c SurfaceMergeConfig) Resolve() (MergeSettings, error) {
 		}
 		s.RequiredReviewers = append(s.RequiredReviewers, r)
 	}
+	// Every approver set reads the markers: a reviewer's open Critical or
+	// Important finding refuses the merge whichever approver passes, so the
+	// id whose markers count is needed whenever the policy is on.
+	if s.Mode != MergeOff && s.MarkerAuthorID == 0 {
+		return fail("marker_author_id: required whenever mode is manual or auto: a cadence-review marker with an open finding refuses the merge under every approver set, and only markers by this id are read")
+	}
 	if s.HasApprover(MergeApproverCadenceReview) {
-		if s.MarkerAuthorID == 0 {
-			return fail("marker_author_id: required when approvers lists %q", MergeApproverCadenceReview)
-		}
 		if len(s.RequiredReviewers) == 0 {
 			return fail("required_reviewers: at least one reviewer name is required when approvers lists %q", MergeApproverCadenceReview)
 		}

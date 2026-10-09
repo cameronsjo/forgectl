@@ -632,6 +632,41 @@ func TestEvaluateCodeRabbit(t *testing.T) {
 			wantRefusal(t, Evaluate(f, Policy{Settings: s}), c.want)
 		})
 	}
+	// C1 (T10.2 security review): an open cadence-review finding refuses
+	// under every approver set, so a passing CodeRabbit review never
+	// silences it.
+	t.Run("a passing CodeRabbit review does not silence an open finding", func(t *testing.T) {
+		both := goodSettings()
+		both.Approvers = []string{config.MergeApproverCadenceReview, config.MergeApproverCodeRabbit}
+		for name, settings := range map[string]config.MergeSettings{"coderabbit only": s, "cadence-review and coderabbit": both} {
+			t.Run(name, func(t *testing.T) {
+				f := at1195(t)
+				resolve(&f, bot)
+				if v := Evaluate(f, Policy{Settings: settings}); v.Result != Pass {
+					t.Fatalf("control: CodeRabbit passing alone: %s %q", v.Result, v.Reasons)
+				}
+				f.Reviews = append(f.Reviews, markerReview("cadence-forge-security-reviewer", head1195, 2, 0, "2026-10-09T23:00:00Z"))
+				wantRefusal(t, Evaluate(f, Policy{Settings: settings}), "open finding: cadence-forge-security-reviewer reported crit=2 imp=0")
+			})
+		}
+	})
+	t.Run("an open finding at an older head, cleared later at the head, passes", func(t *testing.T) {
+		f := at1195(t)
+		resolve(&f, bot)
+		f.Reviews = append(f.Reviews,
+			markerReview("cadence-forge-security-reviewer", head1204, 1, 1, "2026-10-09T22:00:00Z"),
+			markerReview("cadence-forge-security-reviewer", head1195, 0, 0, "2026-10-09T23:00:00Z"))
+		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
+			t.Fatalf("%s %q", v.Result, v.Reasons)
+		}
+	})
+	t.Run("no marker_author_id refuses under coderabbit too", func(t *testing.T) {
+		f := at1195(t)
+		resolve(&f, bot)
+		noID := s
+		noID.MarkerAuthorID = 0
+		wantRefusal(t, Evaluate(f, Policy{Settings: noID}), "marker_author_id is not set")
+	})
 	t.Run("the real #1199: rate limited, no review", func(t *testing.T) {
 		pr := decodePRFixture(t, "pr_1199.json")
 		f := passingFacts(t)

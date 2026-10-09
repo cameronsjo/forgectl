@@ -139,18 +139,26 @@ func TestSurfaceMergeConfig_Resolve(t *testing.T) {
 	if s, err := (SurfaceMergeConfig{}).Resolve(); err != nil || s.Mode != MergeOff {
 		t.Fatalf("empty: %+v, %v", s, err)
 	}
+	rabbit := good()
+	rabbit.Approvers, rabbit.RequiredReviewers = []string{"coderabbit"}, nil
+	if s, err := rabbit.Resolve(); err != nil || s.MarkerAuthorID != 4084915 {
+		t.Fatalf("coderabbit only, with marker_author_id: %+v, %v", s, err)
+	}
 	cases := map[string]struct {
 		mutate func(*SurfaceMergeConfig)
 		want   string
 	}{
-		"unknown key":                 {func(c *SurfaceMergeConfig) { c.unknown = []string{"surface.merge.methd"} }, "unknown key"},
-		"bad mode":                    {func(c *SurfaceMergeConfig) { c.Mode = "Auto" }, "mode: want off, manual or auto"},
-		"bad machine":                 {func(c *SurfaceMergeConfig) { c.Machine = "0123456789AB" }, "machine: want the 12 lowercase hex"},
-		"short machine":               {func(c *SurfaceMergeConfig) { c.Machine = "0123" }, "machine"},
-		"method merge":                {func(c *SurfaceMergeConfig) { c.Method = "merge" }, `method: want "squash"`},
-		"unknown approver":            {func(c *SurfaceMergeConfig) { c.Approvers = []string{"chief-of-staff"} }, "approvers: want"},
-		"duplicate approver":          {func(c *SurfaceMergeConfig) { c.Approvers = []string{"coderabbit", "coderabbit"} }, "listed twice"},
-		"marker author missing":       {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = nil }, "marker_author_id: required"},
+		"unknown key":           {func(c *SurfaceMergeConfig) { c.unknown = []string{"surface.merge.methd"} }, "unknown key"},
+		"bad mode":              {func(c *SurfaceMergeConfig) { c.Mode = "Auto" }, "mode: want off, manual or auto"},
+		"bad machine":           {func(c *SurfaceMergeConfig) { c.Machine = "0123456789AB" }, "machine: want the 12 lowercase hex"},
+		"short machine":         {func(c *SurfaceMergeConfig) { c.Machine = "0123" }, "machine"},
+		"method merge":          {func(c *SurfaceMergeConfig) { c.Method = "merge" }, `method: want "squash"`},
+		"unknown approver":      {func(c *SurfaceMergeConfig) { c.Approvers = []string{"chief-of-staff"} }, "approvers: want"},
+		"duplicate approver":    {func(c *SurfaceMergeConfig) { c.Approvers = []string{"coderabbit", "coderabbit"} }, "listed twice"},
+		"marker author missing": {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = nil }, "marker_author_id: required"},
+		"marker author missing, coderabbit only": {func(c *SurfaceMergeConfig) {
+			c.Approvers, c.RequiredReviewers, c.MarkerAuthorID = []string{"coderabbit"}, nil, nil
+		}, "marker_author_id: required whenever mode is manual or auto"},
 		"marker author zero":          {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = id(0) }, "marker_author_id: want"},
 		"required reviewers empty":    {func(c *SurfaceMergeConfig) { c.RequiredReviewers = nil }, "required_reviewers: at least one"},
 		"bad reviewer name":           {func(c *SurfaceMergeConfig) { c.RequiredReviewers = []string{"Polish"} }, "required_reviewers: want"},

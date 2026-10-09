@@ -240,6 +240,7 @@ func Evaluate(f Facts, p Policy) Verdict {
 		checkPaths(f, repo, add)
 	}
 	checkApprovers(f, s, add)
+	checkOpenFindings(f, s, add)
 	for _, u := range f.Unread {
 		add("not read: %s", u)
 	}
@@ -470,6 +471,8 @@ func checkModes(file File, add addFunc) {
 }
 
 // checkApprovers is predicate 7: at least one configured approver passes.
+// Open cadence-review findings refuse on their own (checkOpenFindings),
+// whichever approver passes.
 func checkApprovers(f Facts, s config.MergeSettings, add addFunc) {
 	if len(s.Approvers) == 0 {
 		add("[surface.merge] approvers is empty, expected cadence-review or coderabbit")
@@ -502,11 +505,11 @@ type marker struct {
 	index  int
 }
 
-// cadenceReview returns why the cadence-review approver does not pass, or
-// nothing when it does.
-func cadenceReview(f Facts, s config.MergeSettings) []string {
-	var why []string
-	head := f.PR.HeadRefOid
+// markersOf collects the cadence-review markers by s.MarkerAuthorID, per
+// reviewer. A marker review whose submittedAt does not parse is not counted
+// and comes back as a reason: it may hold a finding.
+func markersOf(f Facts, s config.MergeSettings) (map[string][]marker, []string) {
+	var bad []string
 	byReviewer := map[string][]marker{}
 	for i, r := range f.Reviews {
 		if r.Author.Typename != "User" || r.Author.DatabaseID != s.MarkerAuthorID || r.Author.DatabaseID == 0 {
@@ -521,22 +524,33 @@ func cadenceReview(f Facts, s config.MergeSettings) []string {
 		}
 		at, err := time.Parse(time.RFC3339, r.SubmittedAt)
 		if err != nil {
-			why = append(why, fmt.Sprintf("cadence-review: a %s marker has submittedAt %q, expected a timestamp", m.Reviewer, r.SubmittedAt))
+			bad = append(bad, fmt.Sprintf("cadence-review: a %s marker has submittedAt %q, expected a timestamp", m.Reviewer, r.SubmittedAt))
 			continue
 		}
 		byReviewer[m.Reviewer] = append(byReviewer[m.Reviewer], marker{Marker: m, at: at, commit: r.CommitOID, index: i})
 	}
-	passing := func(m marker) bool { return m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0 }
-	for _, name := range s.RequiredReviewers {
-		ms := byReviewer[name]
-		if len(ms) == 0 {
-			why = append(why, fmt.Sprintf("cadence-review: no %s marker by user %d, expected one at head %s", name, s.MarkerAuthorID, short(head)))
-			continue
-		}
-		last := latestMarker(ms)
-		if !passing(last) {
-			why = append(why, fmt.Sprintf("cadence-review: %s's latest marker is head=%s (review commit %s) crit=%d imp=%d, expected head=%s crit=0 imp=0", name, short(last.Head), short(last.commit), last.Crit, last.Imp, short(head)))
-		}
+	return byReviewer, bad
+}
+
+// passingAt reports a marker that clears the head: it names head, was posted
+// at head, and reports no Critical or Important finding.
+func passingAt(m marker, head string) bool {
+	return m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0
+}
+
+// checkOpenFindings refuses a reviewer whose latest marker with a Critical
+// or Important finding, at any commit, has no later passing marker at the
+// head. It runs under every approver set (ADR-0011, 2026-10-09 amendment,
+// decision 1): a passing CodeRabbit review never silences an open finding.
+func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
+	if s.MarkerAuthorID <= 0 {
+		add("[surface.merge] marker_author_id is not set, expected the operator's id: open cadence-review findings cannot be read without it")
+		return
+	}
+	head := f.PR.HeadRefOid
+	byReviewer, bad := markersOf(f, s)
+	for _, b := range bad {
+		add("%s", b)
 	}
 	reviewers := make([]string, 0, len(byReviewer))
 	for name := range byReviewer {
@@ -555,10 +569,34 @@ func cadenceReview(f Facts, s config.MergeSettings) []string {
 		if failed == nil {
 			continue
 		}
-		cleared := slices.ContainsFunc(ms, func(m marker) bool { return passing(m) && m.at.After(failedAt) })
+		cleared := slices.ContainsFunc(ms, func(m marker) bool { return passingAt(m, head) && m.at.After(failedAt) })
 		if !cleared {
-			why = append(why, fmt.Sprintf("cadence-review: %s reported crit=%d imp=%d at head %s (%s), expected a later passing marker at head %s", name, failed.Crit, failed.Imp, short(failed.Head), failedAt.UTC().Format(time.RFC3339), short(head)))
+			add("open finding: %s reported crit=%d imp=%d at head %s (%s), expected a later passing marker at head %s; this refuses under every approver",
+				name, failed.Crit, failed.Imp, short(failed.Head), failedAt.UTC().Format(time.RFC3339), short(head))
 		}
+	}
+}
+
+// cadenceReview returns why the cadence-review approver does not pass, or
+// nothing when it does: each required reviewer's latest marker must pass at
+// the head. Open findings from any reviewer are checkOpenFindings'.
+func cadenceReview(f Facts, s config.MergeSettings) []string {
+	var why []string
+	head := f.PR.HeadRefOid
+	byReviewer, _ := markersOf(f, s)
+	for _, name := range s.RequiredReviewers {
+		ms := byReviewer[name]
+		if len(ms) == 0 {
+			why = append(why, fmt.Sprintf("cadence-review: no %s marker by user %d, expected one at head %s", name, s.MarkerAuthorID, short(head)))
+			continue
+		}
+		last := latestMarker(ms)
+		if !passingAt(last, head) {
+			why = append(why, fmt.Sprintf("cadence-review: %s's latest marker is head=%s (review commit %s) crit=%d imp=%d, expected head=%s crit=0 imp=0", name, short(last.Head), short(last.commit), last.Crit, last.Imp, short(head)))
+		}
+	}
+	if len(s.RequiredReviewers) == 0 {
+		why = append(why, "cadence-review: [surface.merge] required_reviewers is empty, expected at least one reviewer name")
 	}
 	return why
 }

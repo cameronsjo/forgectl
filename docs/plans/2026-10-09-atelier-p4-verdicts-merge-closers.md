@@ -58,7 +58,7 @@ A session on the operator's identity, a misled worker included, can post a passi
 mode = "off"                       # off | manual | auto; missing table or any error resolves to off
 machine = "<12-hex>"               # digest of hostname + salt; a mismatch resolves to off
 approvers = ["cadence-review"]     # cadence-review and coderabbit are implemented
-marker_author_id = 0               # the operator's numeric GitHub user id; required for cadence-review
+marker_author_id = 0               # the operator's numeric GitHub user id; required whenever mode is not off
 required_reviewers = ["cadence-forge-security-reviewer", "polish"]
 method = "squash"
 repos = ["cameronsjo/forgectl"]
@@ -189,6 +189,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.2, checks:** a required-name run from another workflow file or another app refuses; a run from the pinned file on another event (`push`) is ignored.
 - **T10.2, reads:** the "head descends from Base" half of predicate 3 is a second compare (`{Base}...{head}`); modes come from one tree listing per changed directory at the compare's merge base and at the head, not from base; the compare API lists files on its first page only (up to 300), so the file list is one page, count-checked. The checks query reads the PR's head and base again and fails the read if either moved.
 - **T10.2, launch identity:** an origin not on github.com records no identity and the launch goes on (that row is never eligible to merge); a drain launch also asks GitHub whether `worker/<name>` exists, in the identity query.
+- **T10.2 review fix C1, open findings:** the "latest marker with crit or imp above 0 and no later passing marker at the head refuses" rule runs outside the approver loop, so it refuses under every approver set (`coderabbit` alone included). `marker_author_id` is therefore required whenever `mode` is not `off`, not only with `cadence-review`; `required_reviewers` stays a `cadence-review` setting. A marker whose `submittedAt` does not parse now refuses under every approver too.
 - **T10.2, fixtures:** #1203 carries no crit>0 marker; the earlier-crit rule is tested on edited copies. A read-only live check (`FORGECTL_MERGE_LIVE=1`) reads #1204.
 
 ## Learnings
