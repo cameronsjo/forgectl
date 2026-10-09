@@ -187,7 +187,7 @@ Exit 0: the run finished, whatever it skipped. Exit 1: the answer was not `yes`,
 - **Each removal** is conditional: a row that changed since prune read it stays, with that reason.
 - **`--dry-run`** reads everything and writes nothing. `--json` prints `{dry_run, older_than, cutoff, removed, kept, usage, notes}`, each row `{kind, name, repo, session, state, at, cost_usd, reason}` with `kind` `queue`, `ledger` or `status-cache` (named by its head); with `--dry-run`, `removed` is what would go.
 
-Exit 0: pruned or previewed. Exit 1: the queue or the ledger directory could not be read, or the queue could not be written. Exit 2: a usage error.
+Exit 0: pruned or previewed. Exit 1: the state could not be read or written (the queue, the drain files, the status cache or the ledger directory). Exit 2: a usage error only, such as `--older-than` under `1h`.
 
 The drain runs prune with the default cutoff once each UTC day, at the end of the first tick of the day. It records the day in `drain-prune-day` beside `drain.json` before it runs, so neither a restart nor a failed prune runs it again that day; a `drain-prune-day` that cannot be read is one `error` event, and the prune runs and rewrites it with today. The daily prune is capped at 30 s, so it cannot hold a tick long enough for `drain status` to call the drain stale at the default interval, and herdr is read once per prune (one readiness check and one workspace listing), not once per row. A failure is one `error` event and never stops the drain; each removed row is a `state` event with state `pruned`.
 

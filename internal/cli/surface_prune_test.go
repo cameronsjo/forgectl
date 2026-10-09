@@ -304,6 +304,20 @@ func TestSurfacePruneUsageErrors(t *testing.T) {
 	}
 }
 
+// TestSurfacePruneStateUnreadableExitsOne pins ADR-0015's split: state
+// prune cannot open is exit 1 (failed), and 2 stays for usage errors.
+func TestSurfacePruneStateUnreadableExitsOne(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "relative/state")
+	cmd := newSurfacePruneCmd(module.Deps{})
+	cmd.SetArgs([]string{"--dry-run"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	if err == nil || ExitCode(err) != exitFailed {
+		t.Fatalf("%v: exit %d, want %d", err, ExitCode(err), exitFailed)
+	}
+}
+
 func TestDrainFilesPruneDayAndUsage(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	files, err := worker.OpenDrainFiles()

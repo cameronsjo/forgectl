@@ -125,9 +125,9 @@ pruned; it is the long-term cost record.
 what would be removed. The drain runs prune with the default cutoff once
 each UTC day.
 
-Exit 0: pruned (or previewed). Exit 1: the queue or the ledger directory
-could not be read or written. Exit 2: a usage error, such as --older-than
-under 1h.
+Exit 0: pruned (or previewed). Exit 1: the state could not be read or
+written (the queue, the drain files, the status cache or the ledger
+directory). Exit 2: a usage error only, such as --older-than under 1h.
 
   forgectl surface prune --dry-run
   forgectl surface prune --older-than 14d --json`,
@@ -139,7 +139,9 @@ under 1h.
 			}
 			d, err := realPruneDeps()
 			if err != nil {
-				return WithExitCode(termsafe.Error(err), exitUsage)
+				// The state could not be opened: the verb ran and failed (ADR-0015
+				// exit 1), not a call to fix.
+				return WithExitCode(termsafe.Error(err), exitFailed)
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), pruneTimeout)
 			defer cancel()
