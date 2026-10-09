@@ -38,6 +38,8 @@ type queueRowView struct {
 	Harness     string    `json:"harness"`
 	Source      string    `json:"source,omitempty"`
 	Author      string    `json:"author,omitempty"`
+	Labeler     string    `json:"labeler,omitempty"`
+	LabeledAt   string    `json:"labeled_at,omitempty"`
 	BriefSHA256 string    `json:"brief_sha256"`
 	EnqueuedAt  time.Time `json:"enqueued_at"`
 	StateAt     time.Time `json:"state_at"`
@@ -49,7 +51,7 @@ func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
 	return queueRowView{
 		Name: r.Name, Repo: r.Repo, Batch: r.Batch, State: string(r.State), Attempts: r.Attempts,
 		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, Profile: r.Profile, Model: r.Model, Harness: r.Launch().Harness,
-		Source: r.Source, Author: r.Author, BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
+		Source: r.Source, Author: r.Author, Labeler: r.Labeler, LabeledAt: r.LabeledAt, BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
 	}
 }
 
@@ -104,11 +106,12 @@ refused naming both brief hashes, as is another --harness, --profile or --model.
 queue file stays under 768 KiB; an enqueue past that is refused before
 anything is written. --json prints {"added","name","repo","batch","state",
 "attempts","last_error","launch_id","session","profile","model","harness",
-"source","author","brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
-holds another brief, repository, launch setting, or intake source and author,
+holds another brief, repository, launch setting, or intake origin (source,
+author, labeler, labeled_at),
 or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
@@ -223,7 +226,7 @@ may be running (claimed, launched, needs-you): run surface close first. After
 dequeue the same name can be enqueued again, which is how a failed row is
 retried. --json prints the removed row as it was: {"name","repo","batch",
 "state","attempts","last_error","launch_id","session","profile","model","harness",
-"source","author","brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: removed. Exit 1: refused, the worker is live. Exit 2: no such row,
 or a usage or setup error.
@@ -234,7 +237,7 @@ or a usage or setup error.
 			return runSurfaceDequeue(cmd, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
 	return cmd
 }
 
@@ -274,9 +277,10 @@ reported, failed, closed, expired. A dequeued row is removed, not kept.
 
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
 "launch_id","session","profile","model","harness","source","author",
-"brief_sha256","enqueued_at","state_at","age_seconds"}]}. source and author
-are set on rows surface intake made: gh:<owner>/<repo>#<number> and the
-issue's author.
+"labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}]}.
+source, author, labeler and labeled_at are set on rows surface intake made:
+gh:<owner>/<repo>#<number>, the issue's author, and the login and RFC 3339
+time of the labeling that admitted it.
 
 Exit 0: listed. Exit 2: the queue file cannot be read.
 
@@ -295,7 +299,7 @@ Exit 0: listed. Exit 2: the queue file cannot be read.
 			return reportQueue(cmd.OutOrStdout(), rows, time.Now(), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
 	return cmd
 }
 

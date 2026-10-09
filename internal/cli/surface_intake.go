@@ -1,20 +1,24 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -39,6 +43,8 @@ type intakeItem struct {
 	Name        string `json:"name"`
 	Source      string `json:"source"`
 	Author      string `json:"author,omitempty"`
+	Labeler     string `json:"labeler,omitempty"`
+	LabeledAt   string `json:"labeled_at,omitempty"`
 	BriefSHA256 string `json:"brief_sha256,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 }
@@ -79,7 +85,40 @@ gh reads open GitHub issues carrying an eligible label.`,
 	return cmd
 }
 
+// intakeConfirmer shows a person the candidates a run would queue and
+// returns nil only when that person typed "yes" at a terminal. stdin is the
+// command's input, which must itself be a terminal.
+type intakeConfirmer func(stdin io.Reader, candidates []intakeCandidate) error
+
+// intakeDeps is what `surface intake gh` runs with: the module's deps, the
+// confirmer, and the environment lookup the drain-worker refusal reads.
+// newSurfaceIntakeGHCmd fills confirm with confirmIntakeAtTerminal and
+// getenv with os.Getenv; tests build the command with their own. No flag or
+// variable replaces the confirmer, so production has no path that skips it.
+type intakeDeps struct {
+	module.Deps
+	confirm intakeConfirmer
+	getenv  func(string) string
+}
+
+// intakeCandidate is one issue a run would queue, as the confirmation shows
+// it. Title is the issue's raw title; the confirmer sanitizes it.
+type intakeCandidate struct {
+	Number      int
+	Title       string
+	Author      string
+	Labeler     string
+	LabeledAt   string
+	Name        string
+	Source      string
+	BriefSHA256 string
+}
+
 func newSurfaceIntakeGHCmd(deps module.Deps) *cobra.Command {
+	return newSurfaceIntakeGHCmdWith(intakeDeps{Deps: deps, confirm: confirmIntakeAtTerminal, getenv: os.Getenv})
+}
+
+func newSurfaceIntakeGHCmdWith(deps intakeDeps) *cobra.Command {
 	opts := intakeOptions{}
 	cmd := &cobra.Command{
 		Use:   "gh --repo <path>",
@@ -107,24 +146,41 @@ issues or labels, and to open a draft pull request whose body says
 "Closes #<number>". The rules are instructions, not a sandbox.
 
 The row is named gh<number>-<repo name> (cut to 48 characters) and records
-source gh:<owner>/<repo>#<number> and the issue's author. An existing row of
-that name, in any state, skips the issue (a failed row: dequeue it to
-retry). Each skip names the issue and its reason, and the run goes on.
-[surface.intake] labels (default queue:drain, a label no triage sweep
-applies) are the eligible labels; --label narrows to one of them. [surface.intake]
-max_per_run (default 5) caps the rows one run adds. --harness, --model and
---profile apply to every row, as on enqueue.
+source gh:<owner>/<repo>#<number>, the issue's author, and the labeling that
+admitted it: labeler (the login that applied the eligible label) and
+labeled_at (when, as RFC 3339). An existing row of that name, in any state,
+skips the issue (a failed row: dequeue it to retry). Each skip names the
+issue and its reason, and the run goes on. [surface.intake] labels (default
+queue:drain, a label no triage sweep applies) are the eligible labels;
+--label narrows to one of them. [surface.intake] max_per_run (default 5)
+caps the rows one run adds. --harness, --model and --profile apply to every
+row, as on enqueue.
 
---dry-run reads GitHub and the queue and writes nothing. --json prints
-{"dry_run","repo","github","authors","labels","enqueued":[{"number","name",
-"source","author","brief_sha256"}],"skipped":[{"number","name","source",
-"author","reason"}],"stopped"}; with --dry-run, "enqueued" lists what would
-be queued.
+A person confirms every run that would queue something. A worker runs with
+the operator's gh login, so the author and labeler checks cannot tell the
+operator's labeling from a worker's. intake first shows each candidate
+(number, title, author, labeler, labeled-at time, row name, brief sha256)
+on the terminal, then queues them only if "yes" is typed there. The answer
+is read from /dev/tty, never from stdin, and stdin must be a terminal as
+well, so a piped "yes" does not count. No terminal, end of input, or any
+other answer queues nothing. No flag skips this. A run with nothing to
+queue asks nothing. intake refuses to run at all, before reading GitHub,
+when FORGECTL_DRAIN_WORKER is set, as it is in every drain worker.
 
-Exit 0: the run finished, whatever it skipped. Exit 1: the queue filled, or
-GitHub could not be read; what was queued before stays queued. Exit 2: a
-usage or setup error (an invalid [surface.intake], an origin not on
-github.com, no authors set for a repository the gh account does not own).
+--dry-run reads GitHub and the queue, asks nothing, and writes nothing.
+--json prints {"dry_run","repo","github","authors","labels","enqueued":
+[{"number","name","source","author","labeler","labeled_at","brief_sha256"}],
+"skipped":[{"number","name","source","author","labeler","labeled_at",
+"reason"}],"stopped"} on stdout; with --dry-run, "enqueued" lists what
+would be queued. The candidate list and the prompt go to the terminal, never
+to stdout, with or without --json.
+
+Exit 0: the run finished, whatever it skipped. Exit 1: the answer was not
+"yes", the queue filled, or GitHub could not be read. A GitHub read failure
+queues nothing; a full queue keeps the rows queued before it. Exit 2: a
+usage or setup error (no terminal to confirm at, run inside a drain worker,
+an invalid [surface.intake], an origin not on github.com, no authors set
+for a repository the gh account does not own).
 
   forgectl surface intake gh --repo forgectl --dry-run
   forgectl surface intake gh --repo . --label queue:drain --json
@@ -139,12 +195,28 @@ github.com, no authors set for a repository the gh account does not own).
 	cmd.Flags().StringVar(&opts.Profile, "profile", "", "[surface.profiles] name every row's worker runs under (main: the drain's own CLAUDE_CONFIG_DIR)")
 	cmd.Flags().StringVar(&opts.Model, "model", "", "model every row's worker runs on, instead of the launch profile's")
 	cmd.Flags().StringVar(&opts.Harness, "harness", worker.DefaultQueueHarness, "harness the drain launches every row with: claude, codex, or pi")
-	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list what would be queued and skipped; write nothing")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"dry_run","repo","github","authors","labels","enqueued","skipped","stopped"} as JSON`)
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list what would be queued and skipped; ask nothing, write nothing")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"dry_run","repo","github","authors","labels","enqueued","skipped","stopped"} as JSON on stdout (the confirmation stays on the terminal)`)
 	return cmd
 }
 
-func runSurfaceIntakeGH(cmd *cobra.Command, deps module.Deps, opts intakeOptions) error {
+// errIntakeInWorker refuses intake inside a drain worker. The marker is a
+// courtesy refusal, not the gate: a worker runs as the operator and can
+// unset FORGECTL_DRAIN_WORKER. The gate is the terminal confirmation.
+var errIntakeInWorker = errors.New("intake refuses to run inside a drain worker (" + launch.DrainWorkerEnv +
+	" is set): a worker must not queue work for another worker; run intake from your own terminal")
+
+func runSurfaceIntakeGH(cmd *cobra.Command, d intakeDeps, opts intakeOptions) error {
+	getenv := d.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	// First of all, so a worker that runs intake reads nothing from GitHub.
+	// Any non-empty value counts.
+	if getenv(launch.DrainWorkerEnv) != "" {
+		return WithExitCode(errIntakeInWorker, exitUsage)
+	}
+	deps := d.Deps
 	if opts.Repo == "" {
 		return WithExitCode(errors.New("intake gh needs --repo"), exitUsage)
 	}
@@ -185,6 +257,12 @@ func runSurfaceIntakeGH(cmd *cobra.Command, deps module.Deps, opts intakeOptions
 		top: top, owner: owner, repo: repo, labels: labels, configured: settings.Authors, max: settings.MaxPerRun,
 		launch: worker.QueueLaunch{Profile: opts.Profile, Model: opts.Model, Harness: opts.Harness},
 		dryRun: opts.DryRun, now: time.Now, nonce: worker.NewMarker,
+		confirm: func(c []intakeCandidate) error {
+			if d.confirm == nil {
+				return WithExitCode(errIntakeNoTerminal, exitUsage)
+			}
+			return d.confirm(cmd.InOrStdin(), c)
+		},
 	}
 	res, runErr := in.run()
 	if err := reportIntake(cmd.OutOrStdout(), res, opts.JSON); err != nil {
@@ -229,15 +307,21 @@ type intakeRun struct {
 	dryRun     bool
 	now        func() time.Time
 	nonce      func() (string, error)
+	// confirm asks a person to approve the candidates; nil error means they
+	// typed "yes". A real run calls it once, before any queue write.
+	confirm func([]intakeCandidate) error
 }
 
 // errIntakeStopped marks a run that ended early on something other than
 // max_per_run or the page limit; the command exits 1 on it.
 var errIntakeStopped = errors.New("intake stopped")
 
-// run reads GitHub page by page and queues each issue the gate takes. It
-// returns the result so far with every error, so the caller can print what
-// was queued before the run stopped.
+// run reads GitHub page by page and gathers each issue the gate takes, up to
+// max_per_run. A dry run reports them; a real run shows them to a person and
+// queues them only when that person confirms. It returns the result so far
+// with every error, so the caller can print what was queued before the run
+// stopped. Nothing is queued before the confirmation, so a GitHub read
+// failure queues nothing.
 func (in intakeRun) run() (intakeResult, error) {
 	res := intakeResult{
 		DryRun: in.dryRun, Repo: in.top, GitHub: in.owner + "/" + in.repo, Labels: in.labels,
@@ -248,15 +332,16 @@ func (in intakeRun) run() (intakeResult, error) {
 		return res, WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	var rules intake.Rules
+	var picked []considered
 	after := ""
 	for page := 0; ; page++ {
 		if page == intakeMaxPages {
 			res.Stopped = fmt.Sprintf("read %d pages of issues, the most one run reads; run intake again for the rest", intakeMaxPages)
-			return res, nil
+			return in.finish(res, picked)
 		}
 		p, err := in.fetch(after)
 		if err != nil {
-			res.Stopped = "GitHub could not be read: " + err.Error()
+			res.Stopped = "GitHub could not be read, so nothing was queued: " + err.Error()
 			return res, fmt.Errorf("%w: %w", errIntakeStopped, termsafe.Error(err))
 		}
 		if !strings.EqualFold(p.OwnerLogin, in.owner) {
@@ -275,42 +360,80 @@ func (in intakeRun) run() (intakeResult, error) {
 			res.Authors = authors
 		}
 		for _, is := range p.Issues {
-			item, enqueue := in.consider(is, rules, rows)
-			if !enqueue {
+			item, take := in.consider(is, rules, rows)
+			if !take {
 				res.Skipped = append(res.Skipped, item.view)
 				continue
 			}
-			if len(res.Enqueued) >= in.max {
+			if len(picked) >= in.max {
 				res.Stopped = fmt.Sprintf("max_per_run (%d) reached; run intake again for the rest", in.max)
-				return res, nil
+				return in.finish(res, picked)
 			}
-			if in.dryRun {
-				res.Enqueued = append(res.Enqueued, item.view)
-				continue
-			}
-			row, added, err := in.q.EnqueueFrom(item.view.Name, in.top, item.brief, "", in.launch,
-				worker.QueueOrigin{Source: item.view.Source, Author: item.view.Author}, in.now())
-			switch {
-			case errors.Is(err, worker.ErrQueueFull):
-				res.Stopped = "the queue is full; dequeue finished rows first"
-				return res, fmt.Errorf("%w: %w", errIntakeStopped, termsafe.Error(err))
-			case err != nil:
-				item.view.Reason = err.Error()
-				item.view.BriefSHA256 = ""
-				res.Skipped = append(res.Skipped, item.view)
-			case !added:
-				item.view.Reason = fmt.Sprintf("already in the queue (state %s)", row.State)
-				item.view.BriefSHA256 = ""
-				res.Skipped = append(res.Skipped, item.view)
-			default:
-				res.Enqueued = append(res.Enqueued, item.view)
-			}
+			picked = append(picked, item)
 		}
 		if !p.HasNextPage {
-			return res, nil
+			return in.finish(res, picked)
 		}
 		after = p.EndCursor
 	}
+}
+
+// errIntakeNoTerminal refuses a real run nobody can confirm.
+var errIntakeNoTerminal = errors.New("intake needs a person at a terminal to confirm; run it from a plain terminal, or use --dry-run")
+
+// errIntakeNotConfirmed reports an answer other than "yes".
+var errIntakeNotConfirmed = errors.New(`intake: the answer was not "yes"; nothing was queued`)
+
+// finish ends a run with the issues it gathered. A dry run, or a run that
+// gathered nothing, only reports; a real run asks for confirmation and then
+// queues each one.
+//
+// The confirmation is the gate (ADR-0010, 2026-10-09 amendment). A worker
+// runs with the operator's gh login, so it could file and label an issue
+// that passes every check in intake.Admit; a person reading the candidates
+// at a terminal is what tells the operator's request from a worker's.
+func (in intakeRun) finish(res intakeResult, picked []considered) (intakeResult, error) {
+	if in.dryRun || len(picked) == 0 {
+		for _, c := range picked {
+			res.Enqueued = append(res.Enqueued, c.view)
+		}
+		return res, nil
+	}
+	cands := make([]intakeCandidate, 0, len(picked))
+	for _, c := range picked {
+		cands = append(cands, intakeCandidate{
+			Number: c.view.Number, Title: c.title, Author: c.view.Author, Labeler: c.view.Labeler,
+			LabeledAt: c.view.LabeledAt, Name: c.view.Name, Source: c.view.Source, BriefSHA256: c.view.BriefSHA256,
+		})
+	}
+	if err := in.confirm(cands); err != nil {
+		for _, c := range picked {
+			c.view.Reason = "not confirmed at a terminal"
+			c.view.BriefSHA256 = ""
+			res.Skipped = append(res.Skipped, c.view)
+		}
+		res.Stopped = "not confirmed; nothing was queued"
+		return res, err
+	}
+	for _, item := range picked {
+		row, added, err := in.q.EnqueueFrom(item.view.Name, in.top, item.brief, "", in.launch, item.origin(), in.now())
+		switch {
+		case errors.Is(err, worker.ErrQueueFull):
+			res.Stopped = "the queue is full; dequeue finished rows first"
+			return res, fmt.Errorf("%w: %w", errIntakeStopped, termsafe.Error(err))
+		case err != nil:
+			item.view.Reason = err.Error()
+			item.view.BriefSHA256 = ""
+			res.Skipped = append(res.Skipped, item.view)
+		case !added:
+			item.view.Reason = fmt.Sprintf("already in the queue (state %s)", row.State)
+			item.view.BriefSHA256 = ""
+			res.Skipped = append(res.Skipped, item.view)
+		default:
+			res.Enqueued = append(res.Enqueued, item.view)
+		}
+	}
+	return res, nil
 }
 
 // fetch runs the query for one page, pinned to github.com.
@@ -333,15 +456,22 @@ func (in intakeRun) fetch(after string) (intake.Page, error) {
 }
 
 // considered is one issue's outcome before the queue write: the item to
-// report and, when the gate took it, the brief.
+// report and, when the gate took it, the brief and the issue's raw title,
+// which the confirmation shows.
 type considered struct {
 	view  intakeItem
 	brief string
+	title string
 }
 
-// consider decides one issue: skip, with a reason, or enqueue, with its
-// brief. rows is the queue as read when the run began; a row written since
-// is caught by the enqueue itself.
+// origin is the row origin the item records.
+func (c considered) origin() worker.QueueOrigin {
+	return worker.QueueOrigin{Source: c.view.Source, Author: c.view.Author, Labeler: c.view.Labeler, LabeledAt: c.view.LabeledAt}
+}
+
+// consider decides one issue: skip, with a reason, or take, with its brief.
+// rows is the queue as read when the run began; a row written since is
+// caught by the enqueue itself.
 func (in intakeRun) consider(is intake.Issue, rules intake.Rules, rows []worker.QueueRow) (considered, bool) {
 	c := considered{view: intakeItem{
 		Number: is.Number, Name: intake.RowName(is.Number, in.repo), Source: intake.Source(in.owner, in.repo, is.Number),
@@ -368,9 +498,11 @@ func (in intakeRun) consider(is intake.Issue, rules intake.Rules, rows []worker.
 		}
 		return skip(fmt.Sprintf("already in the queue (state %s)", r.State))
 	}
-	if err := intake.Admit(is, rules); err != nil {
+	adm, err := intake.Admit(is, rules)
+	if err != nil {
 		return skip(err.Error())
 	}
+	c.view.Labeler, c.view.LabeledAt = adm.Labeler, adm.LabeledAt.UTC().Format(time.RFC3339)
 	brief, err := intake.Brief(in.owner+"/"+in.repo, is, in.nonce)
 	if err != nil {
 		return skip(err.Error())
@@ -378,12 +510,95 @@ func (in intakeRun) consider(is intake.Issue, rules intake.Rules, rows []worker.
 	if err := worker.CheckQueueBrief(brief); err != nil {
 		return skip(err.Error())
 	}
-	if err := (worker.QueueOrigin{Source: c.view.Source, Author: c.view.Author}).Check(); err != nil {
+	if err := c.origin().Check(); err != nil {
 		return skip(err.Error())
 	}
 	c.view.BriefSHA256 = worker.BriefSHA256(brief)
 	c.brief = brief
+	c.title = is.Title
 	return c, true
+}
+
+// confirmIntakeAtTerminal is the production confirmer: stdin must be a
+// terminal, /dev/tty must open as one, and the answer is read from /dev/tty.
+func confirmIntakeAtTerminal(stdin io.Reader, cands []intakeCandidate) error {
+	return intakeTerminal{stdinIsTerminal: docsReadInputIsTerminal, openTTY: openIntakeTTY}.confirm(stdin, cands)
+}
+
+// intakeTerminal is the confirmation's two terminal checks, as seams.
+type intakeTerminal struct {
+	stdinIsTerminal func(io.Reader) bool
+	openTTY         func() (io.ReadWriteCloser, error)
+}
+
+// confirm shows the candidates on the controlling terminal and reads the
+// answer from it. Both checks are required: stdin a terminal says the
+// command was started by a person rather than fed by a pipe, and reading
+// /dev/tty rather than stdin means text piped or redirected into the
+// command is never taken as the answer.
+func (t intakeTerminal) confirm(stdin io.Reader, cands []intakeCandidate) error {
+	if t.stdinIsTerminal == nil || t.openTTY == nil || !t.stdinIsTerminal(stdin) {
+		return WithExitCode(errIntakeNoTerminal, exitUsage)
+	}
+	tty, err := t.openTTY()
+	if err != nil {
+		return WithExitCode(errIntakeNoTerminal, exitUsage)
+	}
+	answer := askIntake(tty, tty, cands)
+	if err := tty.Close(); err != nil && answer == nil {
+		return WithExitCode(errIntakeNoTerminal, exitUsage)
+	}
+	return answer
+}
+
+// openIntakeTTY opens the controlling terminal for reading and writing, and
+// refuses one that is not a terminal.
+func openIntakeTTY() (io.ReadWriteCloser, error) {
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !term.IsTerminal(int(f.Fd())) {
+		_ = f.Close() // the refusal below is the result; a close error adds nothing
+		return nil, errors.New("/dev/tty is not a terminal")
+	}
+	return f, nil
+}
+
+// maxIntakeAnswer bounds the answer line read from the terminal.
+const maxIntakeAnswer = 256
+
+// askIntake writes the candidates and the question to out and reads one line
+// from in. Only a complete line that is exactly "yes", once surrounding
+// space is trimmed, confirms; end of input before a newline does not.
+func askIntake(in io.Reader, out io.Writer, cands []intakeCandidate) error {
+	if err := writeIntakeCandidates(out, cands); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprint(out, `Type "yes" to queue them, anything else to cancel: `); err != nil {
+		return err
+	}
+	line, err := bufio.NewReader(io.LimitReader(in, maxIntakeAnswer)).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != "yes" {
+		return WithExitCode(errIntakeNotConfirmed, exitFailed)
+	}
+	return nil
+}
+
+// writeIntakeCandidates lists what a run would queue, one issue per block.
+// The title is issue text, so it is cut to one sanitized line.
+func writeIntakeCandidates(out io.Writer, cands []intakeCandidate) error {
+	if _, err := fmt.Fprintf(out, "intake would queue %d issue(s), each for an unattended worker that runs as you:\n", len(cands)); err != nil {
+		return err
+	}
+	for _, c := range cands {
+		if _, err := fmt.Fprintf(out, "  #%d %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
+			c.Number, termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
+			termsafe.SafeLineMax(c.LabeledAt, 40), termsafe.SafeLineMax(c.Name, 64), termsafe.SafeLineMax(c.BriefSHA256, 64)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func reportIntake(out io.Writer, r intakeResult, asJSON bool) error {

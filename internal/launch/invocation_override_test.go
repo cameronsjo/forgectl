@@ -551,3 +551,41 @@ func TestWorkerEnvAllowlist(t *testing.T) {
 		t.Error("an ordinary launch lost its inherited environment")
 	}
 }
+
+// TestWorkerEnvCarriesTheDrainWorkerMarker: every worker launch sets
+// FORGECTL_DRAIN_WORKER=1, over an inherited value and a profile's env, and
+// an ordinary launch does not add it.
+func TestWorkerEnvCarriesTheDrainWorkerMarker(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	build := func(worker bool, base []string, injected map[string]string) []string {
+		built, err := BuildInvocation(InvocationRequest{
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
+			CWD:            target, Worker: worker, Resolve: bin, BaseEnv: base, InjectedEnv: injected,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		return built.Invocation.Env
+	}
+	if DrainWorkerEnv != "FORGECTL_DRAIN_WORKER" {
+		t.Fatalf("DrainWorkerEnv is %q; intake and the docs name FORGECTL_DRAIN_WORKER", DrainWorkerEnv)
+	}
+	marker := DrainWorkerEnv + "=1"
+	env := build(true, []string{"PATH=/usr/bin", DrainWorkerEnv + "=0"}, map[string]string{DrainWorkerEnv: ""})
+	var seen []string
+	for _, e := range env {
+		if strings.HasPrefix(e, DrainWorkerEnv+"=") {
+			seen = append(seen, e)
+		}
+	}
+	if !slices.Equal(seen, []string{marker}) {
+		t.Fatalf("worker env carries %q, want exactly %q: %q", seen, marker, env)
+	}
+	for _, e := range build(false, []string{"PATH=/usr/bin"}, nil) {
+		if strings.HasPrefix(e, DrainWorkerEnv+"=") {
+			t.Fatalf("an ordinary launch carries %s", e)
+		}
+	}
+}

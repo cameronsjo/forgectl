@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const owner = "cameronsjo"
@@ -51,8 +52,30 @@ func addLabel(is *Issue, name string) {
 }
 
 func TestAdmitTakesTheBaseIssue(t *testing.T) {
-	if err := Admit(baseIssue(t), ownerRules); err != nil {
+	adm, err := Admit(baseIssue(t), ownerRules)
+	if err != nil {
 		t.Fatalf("Admit: %v", err)
+	}
+	if adm.Labeler != owner || !adm.LabeledAt.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("admission %+v, want the owner's 10:00 queue:drain labeling", adm)
+	}
+}
+
+// TestAdmitReportsTheEarliestLabeling: with two eligible labels, the
+// admission is the earlier of their latest labelings, and names its labeler.
+func TestAdmitReportsTheEarliestLabeling(t *testing.T) {
+	is := baseIssue(t)
+	is.Author = user("alice")
+	addLabel(&is, "ready")
+	is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
+		labelEvent(typeLabeled, "2026-10-01T09:30:00Z", user("Alice"), "ready"))
+	is.LastEditedAt = json.RawMessage(`null`)
+	adm, err := Admit(is, Rules{Authors: []string{owner, "alice"}, Labels: ownerRules.Labels})
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if adm.Labeler != "Alice" || !adm.LabeledAt.Equal(time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC)) {
+		t.Fatalf("admission %+v, want Alice's 09:30 ready labeling", adm)
 	}
 }
 
@@ -60,12 +83,12 @@ func TestAdmitComparesLoginsCaseInsensitively(t *testing.T) {
 	is := baseIssue(t)
 	is.Author = user("CameronSjo")
 	is.TimelineItems.Nodes[2].Actor = user("CAMERONSJO")
-	if err := Admit(is, ownerRules); err != nil {
+	if _, err := Admit(is, ownerRules); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	// Case-insensitive, but exact: a longer or shorter login is someone else.
 	is.Author = user("cameronsjo2")
-	if err := Admit(is, ownerRules); err == nil {
+	if _, err := Admit(is, ownerRules); err == nil {
 		t.Fatal("a login that only starts with an allowed one was taken")
 	}
 }
@@ -205,7 +228,7 @@ func TestAdmitRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			is := baseIssue(t)
 			tc.change(&is)
-			err := Admit(is, ownerRules)
+			_, err := Admit(is, ownerRules)
 			var refusal *Refusal
 			if !errors.As(err, &refusal) {
 				t.Fatalf("Admit = %v, want a refusal", err)
@@ -220,11 +243,11 @@ func TestAdmitRefuses(t *testing.T) {
 func TestAdmitTakesAnEditStrictlyBeforeTheLabeling(t *testing.T) {
 	is := baseIssue(t)
 	is.LastEditedAt = json.RawMessage(`"2026-10-01T09:59:59Z"`)
-	if err := Admit(is, ownerRules); err != nil {
+	if _, err := Admit(is, ownerRules); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	is.LastEditedAt = json.RawMessage(`null`)
-	if err := Admit(is, ownerRules); err != nil {
+	if _, err := Admit(is, ownerRules); err != nil {
 		t.Fatalf("Admit, never edited: %v", err)
 	}
 }
@@ -235,7 +258,7 @@ func TestAdmitTakesARelabelByTheOwnerAfterAnOutsider(t *testing.T) {
 		labelEvent(typeLabeled, "2026-10-01T07:00:00Z", user("someone-else"), "queue:drain"),
 		labelEvent(typeUnlabeled, "2026-10-01T07:30:00Z", user(owner), "queue:drain"),
 	}, is.TimelineItems.Nodes...)
-	if err := Admit(is, ownerRules); err != nil {
+	if _, err := Admit(is, ownerRules); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 }
@@ -267,7 +290,7 @@ func TestDecodeKeepsMissingAndNullLastEditedAtApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Admit(p.Issues[0], ownerRules); err != nil {
+	if _, err := Admit(p.Issues[0], ownerRules); err != nil {
 		t.Fatalf("explicit null: %v", err)
 	}
 
@@ -276,7 +299,7 @@ func TestDecodeKeepsMissingAndNullLastEditedAtApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Admit(p.Issues[0], ownerRules); err == nil || !strings.Contains(err.Error(), "does not say whether its body was edited") {
+	if _, err := Admit(p.Issues[0], ownerRules); err == nil || !strings.Contains(err.Error(), "does not say whether its body was edited") {
 		t.Fatalf("missing field: %v", err)
 	}
 }
@@ -295,7 +318,7 @@ func TestDecodePageCaptured(t *testing.T) {
 	}
 	rules := Rules{Authors: authors, Labels: []string{"exec:guided"}}
 	for _, is := range p.Issues {
-		if err := Admit(is, rules); err != nil {
+		if _, err := Admit(is, rules); err != nil {
 			t.Errorf("#%d: %v", is.Number, err)
 		}
 	}

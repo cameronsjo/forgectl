@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -135,9 +136,32 @@ func intakeTestEnv(t *testing.T, origin string, pages map[string]string) (module
 	return module.Deps{Runner: run}, run, repo
 }
 
+// confirmRecorder is a test confirmer: it records each call's candidates and
+// answers with answer (nil approves).
+type confirmRecorder struct {
+	answer error
+	calls  [][]intakeCandidate
+}
+
+func (c *confirmRecorder) confirm(_ io.Reader, cands []intakeCandidate) error {
+	c.calls = append(c.calls, cands)
+	return c.answer
+}
+
+// noEnv is a getenv that finds nothing, so a test run inside a drain worker
+// (FORGECTL_DRAIN_WORKER set) still runs intake.
+func noEnv(string) string { return "" }
+
+// runIntake runs intake with --json, a confirmer that approves, and no
+// drain-worker marker.
 func runIntake(t *testing.T, deps module.Deps, args ...string) (intakeResult, string, error) {
 	t.Helper()
-	out, err := runQueueCmd(t, newSurfaceIntakeGHCmd(deps), append(args, "--json")...)
+	return runIntakeWith(t, intakeDeps{Deps: deps, confirm: (&confirmRecorder{}).confirm, getenv: noEnv}, args...)
+}
+
+func runIntakeWith(t *testing.T, d intakeDeps, args ...string) (intakeResult, string, error) {
+	t.Helper()
+	out, err := runQueueCmd(t, newSurfaceIntakeGHCmdWith(d), append(args, "--json")...)
 	var res intakeResult
 	if out != "" {
 		if jerr := json.Unmarshal([]byte(out), &res); jerr != nil {
@@ -477,5 +501,290 @@ func TestSurfaceIntakeStopsOnAFullQueue(t *testing.T) {
 	res, _, err := runIntake(t, deps, "--repo", repo)
 	if ExitCode(err) != exitFailed || !strings.Contains(res.Stopped, "the queue is full") {
 		t.Fatalf("full queue: %v, %+v", err, res)
+	}
+}
+
+// TestSurfaceIntakeQueuesOnlyAfterConfirmation: a real run hands the
+// confirmer every candidate, with the labeling that admitted it, before any
+// queue write, and the rows record labeler and labeled_at, which `surface
+// queue --json` shows.
+func TestSurfaceIntakeQueuesOnlyAfterConfirmation(t *testing.T) {
+	titled := baseIssueNode(t, 2, "two")
+	titled["title"] = "Second issue"
+	page := intakePage(t, "User", "", baseIssueNode(t, 1, "one"), titled)
+	deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+	rec := &confirmRecorder{}
+	confirm := func(in io.Reader, cands []intakeCandidate) error {
+		if rows := queueRows(t); len(rows) != 0 {
+			t.Errorf("rows written before the confirmation: %+v", rows)
+		}
+		return rec.confirm(in, cands)
+	}
+	res, _, err := runIntakeWith(t, intakeDeps{Deps: deps, confirm: confirm, getenv: noEnv}, "--repo", repo)
+	if err != nil {
+		t.Fatalf("intake: %v", err)
+	}
+	if len(rec.calls) != 1 || len(rec.calls[0]) != 2 {
+		t.Fatalf("confirmer calls %+v, want one call with two candidates", rec.calls)
+	}
+	first := rec.calls[0][0]
+	if first.Number != 1 || first.Name != "gh1-forgectl" || first.Title != "Tidy the queue listing" || first.Author != "cameronsjo" ||
+		first.Labeler != "cameronsjo" || first.LabeledAt != "2026-10-01T10:00:00Z" || first.Source != "gh:cameronsjo/forgectl#1" ||
+		first.BriefSHA256 == "" || first.BriefSHA256 != res.Enqueued[0].BriefSHA256 {
+		t.Fatalf("candidate %+v", first)
+	}
+	if got := names(res.Enqueued); !slices.Equal(got, []string{"gh1-forgectl", "gh2-forgectl"}) {
+		t.Fatalf("enqueued %v", got)
+	}
+	if res.Enqueued[0].Labeler != "cameronsjo" || res.Enqueued[0].LabeledAt != "2026-10-01T10:00:00Z" {
+		t.Fatalf("result item %+v", res.Enqueued[0])
+	}
+	rows := queueRows(t)
+	if len(rows) != 2 || rows[0].Labeler != "cameronsjo" || rows[0].LabeledAt != "2026-10-01T10:00:00Z" {
+		t.Fatalf("rows %+v", rows)
+	}
+	out, err := runQueueCmd(t, newSurfaceQueueCmd(deps), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed queueResult
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		t.Fatalf("json: %v\n%s", err, out)
+	}
+	if listed.Rows[0].Labeler != "cameronsjo" || listed.Rows[0].LabeledAt != "2026-10-01T10:00:00Z" {
+		t.Fatalf("surface queue --json %+v", listed.Rows[0])
+	}
+	var shown strings.Builder
+	// The gate refuses an escape in a title (CheckQueueBrief), so the list's
+	// own sanitizing is pinned with a candidate built here.
+	shownCands := append(slices.Clone(rec.calls[0]), intakeCandidate{Number: 9, Title: "Title with \x1b[2J an escape\nand a second line"})
+	if err := writeIntakeCandidates(&shown, shownCands); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"#1 Tidy the queue listing", "labeled by cameronsjo at 2026-10-01T10:00:00Z", "row gh1-forgectl, brief sha256 " + first.BriefSHA256} {
+		if !strings.Contains(shown.String(), want) {
+			t.Errorf("candidate list lacks %q:\n%s", want, shown.String())
+		}
+	}
+	if strings.Contains(shown.String(), "\x1b") || strings.Contains(shown.String(), "\nand a second line") {
+		t.Errorf("candidate list carries a raw escape or a second title line:\n%q", shown.String())
+	}
+}
+
+// TestSurfaceIntakeDeclinedQueuesNothing: any refusal from the confirmer
+// queues nothing, exits non-zero, and reports each candidate as skipped.
+func TestSurfaceIntakeDeclinedQueuesNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sentinel error
+		exit     int
+	}{
+		"not yes":     {errIntakeNotConfirmed, exitFailed},
+		"no terminal": {errIntakeNoTerminal, exitUsage},
+	} {
+		t.Run(name, func(t *testing.T) {
+			page := intakePage(t, "User", "", baseIssueNode(t, 1, "one"))
+			deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+			rec := &confirmRecorder{answer: WithExitCode(tc.sentinel, tc.exit)}
+			res, _, err := runIntakeWith(t, intakeDeps{Deps: deps, confirm: rec.confirm, getenv: noEnv}, "--repo", repo)
+			if ExitCode(err) != tc.exit || !errors.Is(err, tc.sentinel) {
+				t.Fatalf("err %v (exit %d), want %v (exit %d)", err, ExitCode(err), tc.sentinel, tc.exit)
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("confirmer called %d times", len(rec.calls))
+			}
+			if len(res.Enqueued) != 0 || skipReason(t, res, 1) != "not confirmed at a terminal" || !strings.Contains(res.Stopped, "nothing was queued") {
+				t.Fatalf("result %+v", res)
+			}
+			if rows := queueRows(t); len(rows) != 0 {
+				t.Fatalf("a declined run wrote %+v", rows)
+			}
+		})
+	}
+}
+
+// TestSurfaceIntakeNeverPromptsWithoutCandidates: --dry-run, and a run the
+// gate admits nothing in, never call the confirmer.
+func TestSurfaceIntakeNeverPromptsWithoutCandidates(t *testing.T) {
+	outsider := baseIssueNode(t, 3, "from someone else")
+	outsider["author"] = map[string]any{"__typename": "User", "login": "someone-else"}
+	for name, tc := range map[string]struct {
+		page string
+		args []string
+	}{
+		"dry run":           {intakePage(t, "User", "", baseIssueNode(t, 1, "one")), []string{"--dry-run"}},
+		"nothing admitted":  {intakePage(t, "User", "", outsider), nil},
+		"no labeled issues": {intakePage(t, "User", ""), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": tc.page})
+			rec := &confirmRecorder{answer: errors.New("the confirmer was called")}
+			if _, _, err := runIntakeWith(t, intakeDeps{Deps: deps, confirm: rec.confirm, getenv: noEnv}, append([]string{"--repo", repo}, tc.args...)...); err != nil {
+				t.Fatalf("intake: %v", err)
+			}
+			if len(rec.calls) != 0 {
+				t.Fatalf("confirmer called with %+v", rec.calls)
+			}
+			if rows := queueRows(t); len(rows) != 0 {
+				t.Fatalf("rows %+v", rows)
+			}
+		})
+	}
+}
+
+// TestSurfaceIntakeRefusesInADrainWorker: FORGECTL_DRAIN_WORKER set to any
+// non-empty value refuses with exit 2 before gh is called or anyone is
+// asked, through the injected lookup and through the production command.
+func TestSurfaceIntakeRefusesInADrainWorker(t *testing.T) {
+	page := intakePage(t, "User", "", baseIssueNode(t, 1, "one"))
+	check := func(t *testing.T, run *ghFixtureRunner, rec *confirmRecorder, err error) {
+		t.Helper()
+		if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeInWorker) {
+			t.Fatalf("err %v (exit %d), want errIntakeInWorker, exit 2", err, ExitCode(err))
+		}
+		if len(run.calls) != 0 {
+			t.Fatalf("gh was called: %v", run.calls)
+		}
+		if rec != nil && len(rec.calls) != 0 {
+			t.Fatal("the confirmer was called")
+		}
+		if rows := queueRows(t); len(rows) != 0 {
+			t.Fatalf("rows %+v", rows)
+		}
+	}
+	t.Run("injected", func(t *testing.T) {
+		deps, run, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+		rec := &confirmRecorder{}
+		getenv := func(k string) string {
+			if k == "FORGECTL_DRAIN_WORKER" {
+				return "yes-any-value"
+			}
+			return ""
+		}
+		_, _, err := runIntakeWith(t, intakeDeps{Deps: deps, confirm: rec.confirm, getenv: getenv}, "--repo", repo)
+		check(t, run, rec, err)
+	})
+	t.Run("production", func(t *testing.T) {
+		deps, run, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+		t.Setenv("FORGECTL_DRAIN_WORKER", "1")
+		_, err := runQueueCmd(t, newSurfaceIntakeGHCmd(deps), "--repo", repo, "--json")
+		check(t, run, nil, err)
+	})
+}
+
+// TestSurfaceIntakeProductionRefusesAPipedYes: the production command, with
+// "yes" piped into stdin, refuses as having no terminal and queues nothing.
+func TestSurfaceIntakeProductionRefusesAPipedYes(t *testing.T) {
+	page := intakePage(t, "User", "", baseIssueNode(t, 1, "one"))
+	deps, run, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+	t.Setenv("FORGECTL_DRAIN_WORKER", "")
+	cmd := newSurfaceIntakeGHCmd(deps)
+	cmd.SetIn(strings.NewReader("yes\n"))
+	_, err := runQueueCmd(t, cmd, "--repo", repo, "--json")
+	if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeNoTerminal) {
+		t.Fatalf("err %v (exit %d), want errIntakeNoTerminal, exit 2", err, ExitCode(err))
+	}
+	if len(run.calls) == 0 {
+		t.Fatal("gh was not read; the refusal should come at the confirmation")
+	}
+	if rows := queueRows(t); len(rows) != 0 {
+		t.Fatalf("a piped yes queued %+v", rows)
+	}
+}
+
+// fakeTTY is a terminal stand-in: answers are read from in, and what the
+// confirmation writes lands in out.
+type fakeTTY struct {
+	in     io.Reader
+	out    strings.Builder
+	closed bool
+}
+
+func (f *fakeTTY) Read(p []byte) (int, error)  { return f.in.Read(p) }
+func (f *fakeTTY) Write(p []byte) (int, error) { return f.out.Write(p) }
+func (f *fakeTTY) Close() error                { f.closed = true; return nil }
+
+var sampleCandidates = []intakeCandidate{{
+	Number: 7, Title: "Fix the thing", Author: "cameronsjo", Labeler: "cameronsjo",
+	LabeledAt: "2026-10-01T10:00:00Z", Name: "gh7-forgectl", Source: "gh:cameronsjo/forgectl#7", BriefSHA256: "abc123",
+}}
+
+// TestIntakeTerminalNeedsBothTerminals: stdin must be a terminal and
+// /dev/tty must open as one; the answer comes from the tty, never stdin.
+func TestIntakeTerminalNeedsBothTerminals(t *testing.T) {
+	stdinTerminal := func(v bool) func(io.Reader) bool { return func(io.Reader) bool { return v } }
+
+	opened := false
+	open := func(tty *fakeTTY, err error) func() (io.ReadWriteCloser, error) {
+		return func() (io.ReadWriteCloser, error) {
+			opened = true
+			if err != nil {
+				return nil, err
+			}
+			return tty, nil
+		}
+	}
+
+	// stdin not a terminal: refused before /dev/tty is opened, whatever stdin holds.
+	tty := &fakeTTY{in: strings.NewReader("yes\n")}
+	err := intakeTerminal{stdinIsTerminal: stdinTerminal(false), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), sampleCandidates)
+	if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeNoTerminal) || opened {
+		t.Fatalf("stdin not a terminal: %v (exit %d), opened %v", err, ExitCode(err), opened)
+	}
+	if !strings.Contains(err.Error(), "run it from a plain terminal, or use --dry-run") {
+		t.Fatalf("message %q", err)
+	}
+
+	// /dev/tty does not open as a terminal.
+	err = intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(nil, errors.New("not a terminal"))}.confirm(nil, sampleCandidates)
+	if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeNoTerminal) {
+		t.Fatalf("no tty: %v (exit %d)", err, ExitCode(err))
+	}
+
+	// Both terminals: the answer is the tty's, not stdin's.
+	tty = &fakeTTY{in: strings.NewReader("no\n")}
+	err = intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), sampleCandidates)
+	if ExitCode(err) != exitFailed || !errors.Is(err, errIntakeNotConfirmed) || !tty.closed {
+		t.Fatalf("tty says no, stdin says yes: %v (exit %d), closed %v", err, ExitCode(err), tty.closed)
+	}
+	tty = &fakeTTY{in: strings.NewReader("yes\n")}
+	if err := (intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}).confirm(strings.NewReader(""), sampleCandidates); err != nil {
+		t.Fatalf("tty says yes: %v", err)
+	}
+	if !strings.Contains(tty.out.String(), "#7 Fix the thing") || !strings.Contains(tty.out.String(), `Type "yes" to queue them`) {
+		t.Fatalf("the tty did not get the candidates and the question:\n%s", tty.out.String())
+	}
+
+	// The zero value refuses.
+	if err := (intakeTerminal{}).confirm(nil, sampleCandidates); !errors.Is(err, errIntakeNoTerminal) {
+		t.Fatalf("zero intakeTerminal: %v", err)
+	}
+}
+
+// TestAskIntakeTakesOnlyYes: only a complete line that is exactly "yes",
+// trimmed, confirms.
+func TestAskIntakeTakesOnlyYes(t *testing.T) {
+	for answer, want := range map[string]bool{
+		"yes\n":        true,
+		"  yes \t\n":   true,
+		"yes\r\n":      true,
+		"no\n":         false,
+		"YES please\n": false,
+		"YES\n":        false,
+		"y\n":          false,
+		"yes yes\n":    false,
+		"\n":           false,
+		"":             false, // end of input
+		"yes":          false, // end of input before the newline
+		"nope\nyes\n":  false, // only the first line counts
+		strings.Repeat(" ", maxIntakeAnswer) + "yes\n": false,
+	} {
+		var out strings.Builder
+		err := askIntake(strings.NewReader(answer), &out, sampleCandidates)
+		if got := err == nil; got != want {
+			t.Errorf("answer %q: confirmed %v, want %v (%v)", answer, got, want, err)
+		}
+		if err != nil && (ExitCode(err) != exitFailed || !errors.Is(err, errIntakeNotConfirmed)) {
+			t.Errorf("answer %q: %v (exit %d), want errIntakeNotConfirmed, exit 1", answer, err, ExitCode(err))
+		}
 	}
 }

@@ -41,7 +41,7 @@ Recorded boundary, not designed against: the brief's rules are instructions, not
 - **Dedupe:** an existing row with the same name, in any state, is a skip naming its state (`failed` says "dequeue to retry"). `dequeue` makes the issue eligible again on the next run if it still carries the label; removing the label stops later runs from taking it, and a row already queued stays until dequeued.
 - **Per issue:** each refusal or skip is reported with the issue number and reason and the run goes on. A full queue (`ErrQueueFull`) stops the run and says so. `[surface.intake] max_per_run`, default 5, caps rows added per run.
 - **`--dry-run --json`** lists what would be enqueued and what would be skipped, with reasons, and changes nothing.
-- **Manual:** the operator or the coordinator session runs intake; the drain does not call GitHub for intake.
+- **Manual:** the operator runs intake at a terminal and confirms what it queues (amended 2026-10-09, Deviations (T9.1)); the coordinator session can run `--dry-run`; the drain does not call GitHub for intake.
 
 ## Loop
 
@@ -55,7 +55,7 @@ Recorded boundary, not designed against: the brief's rules are instructions, not
 - **An `exec:queued` marker label (parent plan).** Its add, remove and reconcile steps had no reliable closer, flapped against dequeue, and duplicated what the queue row name already prevents. The eligible label is the request; the row name is the dedupe.
 - **Board intake in this phase.** Board cards carry no repository or brief structure, and their close needs the operator's confirmation. Deferred until a card format exists.
 - **The drain polling GitHub.** A second loop and a credential in the background.
-- **Interactive confirmation of every intake run.** It would stop the coordinator from running intake; the author, labeler and edit checks plus `max_per_run` are the gate instead.
+- **Interactive confirmation of every intake run.** It would stop the coordinator from running intake; the author, labeler and edit checks plus `max_per_run` are the gate instead. Reversed 2026-10-09 (see Deviations (T9.1)): an independent security review showed those checks prove only that something holding the operator's `gh` login acted, and the operator ruled that a person confirms at a terminal.
 
 ## Tasks
 
@@ -85,7 +85,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 1 Critical, 9 Imp
 
 ## Panel review findings declined
 
-- **[Security posture] Interactive confirmation before enqueue.** Declined (Alternatives declined): the operator wants the coordinator able to run intake; the brief rule and the recorded boundary stand instead.
+- **[Security posture] Interactive confirmation before enqueue.** Declined (Alternatives declined): the operator wants the coordinator able to run intake; the brief rule and the recorded boundary stand instead. Reversed 2026-10-09: taken on the operator's ruling after an independent security review (Deviations (T9.1)).
 - **[Plan reviewer] Per-source queue depth cap.** `max_per_run` is enough for manual runs; recorded as a deviation.
 - **[Plan reviewer] Split the queue-schema change into its own PR.** The two fields are small and omitempty; one PR.
 
@@ -108,6 +108,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 1 Critical, 9 Imp
 - **The default eligible label is `queue:drain`, not `exec:mechanical`/`exec:guided`.** Those two are applied in bulk by the delegability classifier as the owner, so their labeler check proves nothing about a person asking for the work (security review I2). The brief now says only that an account on the intake allowlist labeled the issue.
 - **The default author needs the owner to be the `gh` account.** The query also reads `viewer { login }`; with no `authors`, a user-owned repository whose owner is not the viewer refuses with exit 2, and a response with no viewer login refuses (security review I1).
 - **An unknown `[surface.intake]` key makes the config invalid,** so a misspelled `lables` cannot select the default (security review N2).
+- **Interactive confirmation, once declined, is now taken.** An independent Opus review found that the author, labeler and edit checks prove only that something holding the operator's `gh` login acted, so a prompt-injected worker could file and label an issue and the next intake run would launch another worker from it. On the operator's ruling: a real run shows its candidates and queues them only when `yes` is typed at a terminal (stdin a terminal, answer read from `/dev/tty`, no skip flag; tests inject the confirmer); every worker launch sets `FORGECTL_DRAIN_WORKER=1` and intake refuses when it is set, before any GitHub read; rows record `labeler` and `labeled_at`. Nothing is queued before the confirmation, so a GitHub read failure now queues nothing and `max_per_run` caps candidates rather than rows written. ADR-0010 gains a 2026-10-09 amendment; a separate worker identity remains the real fix. The coordinator can still run `--dry-run`.
 
 ## Learnings
 

@@ -288,8 +288,16 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
-// Admit is the gate. It returns nil when intake may queue is, or a *Refusal
-// naming the first check it fails:
+// Admission is the labeling that let an issue in: the earliest of the latest
+// labelings of the eligible labels it carries, which is the time its text
+// was checked against, and the login that applied it.
+type Admission struct {
+	Labeler   string
+	LabeledAt time.Time
+}
+
+// Admit is the gate. It returns the admitting labeling when intake may queue
+// is, or a *Refusal naming the first check it fails:
 //
 //   - is is an issue, authored by a user on r.Authors (never a bot);
 //   - its labels and timeline fit in one page each, so nothing is unseen;
@@ -303,18 +311,18 @@ func parseTime(s string) (time.Time, error) {
 //
 // The earliest labeling is the one that counts: every eligible label on the
 // issue has to have been put there after the text it carries was final.
-func Admit(is Issue, r Rules) error {
+func Admit(is Issue, r Rules) (Admission, error) {
 	if is.Typename != typeIssue {
-		return refuse("it is a %q, not an issue", is.Typename)
+		return Admission{}, refuse("it is a %q, not an issue", is.Typename)
 	}
 	if !r.allowed(is.Author) {
-		return refuse("its author, %s, is not on [surface.intake] authors", who(is.Author))
+		return Admission{}, refuse("its author, %s, is not on [surface.intake] authors", who(is.Author))
 	}
 	if is.Labels.PageInfo.HasNextPage {
-		return refuse("it has more labels than one query reads")
+		return Admission{}, refuse("it has more labels than one query reads")
 	}
 	if is.TimelineItems.PageInfo.HasNextPage {
-		return refuse("its label and title history is longer than one query reads")
+		return Admission{}, refuse("its label and title history is longer than one query reads")
 	}
 	var present []string
 	for _, l := range is.Labels.Nodes {
@@ -323,41 +331,41 @@ func Admit(is Issue, r Rules) error {
 		}
 	}
 	if len(present) == 0 {
-		return refuse("it carries no eligible label")
+		return Admission{}, refuse("it carries no eligible label")
 	}
 	for _, ev := range is.TimelineItems.Nodes {
 		if ev == nil {
-			return refuse("its timeline holds an unreadable event")
+			return Admission{}, refuse("its timeline holds an unreadable event")
 		}
 		if ev.Typename == typeTransferred {
-			return refuse("it was transferred from another repository")
+			return Admission{}, refuse("it was transferred from another repository")
 		}
 	}
-	var attested time.Time
+	var adm Admission
 	for _, name := range present {
-		at, err := latestLabeling(is.TimelineItems.Nodes, name, r)
+		at, by, err := latestLabeling(is.TimelineItems.Nodes, name, r)
 		if err != nil {
-			return err
+			return Admission{}, err
 		}
-		if attested.IsZero() || at.Before(attested) {
-			attested = at
+		if adm.LabeledAt.IsZero() || at.Before(adm.LabeledAt) {
+			adm = Admission{Labeler: by, LabeledAt: at}
 		}
 	}
 	switch edited := bytes.TrimSpace(is.LastEditedAt); {
 	case len(edited) == 0:
-		return refuse("the response does not say whether its body was edited")
+		return Admission{}, refuse("the response does not say whether its body was edited")
 	case bytes.Equal(edited, []byte("null")):
 	default:
 		var s string
 		if err := json.Unmarshal(edited, &s); err != nil {
-			return refuse("its lastEditedAt is not a timestamp")
+			return Admission{}, refuse("its lastEditedAt is not a timestamp")
 		}
 		t, err := parseTime(s)
 		if err != nil {
-			return refuse("its lastEditedAt %q is not a timestamp", s)
+			return Admission{}, refuse("its lastEditedAt %q is not a timestamp", s)
 		}
-		if !t.Before(attested) {
-			return refuse("its body was edited at %s, not before it was labeled at %s", t.UTC().Format(time.RFC3339), attested.UTC().Format(time.RFC3339))
+		if !t.Before(adm.LabeledAt) {
+			return Admission{}, refuse("its body was edited at %s, not before it was labeled at %s", t.UTC().Format(time.RFC3339), adm.LabeledAt.UTC().Format(time.RFC3339))
 		}
 	}
 	for _, ev := range is.TimelineItems.Nodes {
@@ -366,21 +374,23 @@ func Admit(is Issue, r Rules) error {
 		}
 		t, err := parseTime(ev.CreatedAt)
 		if err != nil {
-			return refuse("a title rename has no readable time")
+			return Admission{}, refuse("a title rename has no readable time")
 		}
-		if !t.Before(attested) {
-			return refuse("its title was renamed at %s, not before it was labeled at %s", t.UTC().Format(time.RFC3339), attested.UTC().Format(time.RFC3339))
+		if !t.Before(adm.LabeledAt) {
+			return Admission{}, refuse("its title was renamed at %s, not before it was labeled at %s", t.UTC().Format(time.RFC3339), adm.LabeledAt.UTC().Format(time.RFC3339))
 		}
 	}
-	return nil
+	return adm, nil
 }
 
 // latestLabeling returns the time of the latest labeled event for name, after
 // checking that every labeled event at that time is by an allowed user and no
 // unlabeled event for name is at or after it. GitHub's timestamps are whole
 // seconds and its timeline lists same-second events in no reliable order, so
-// a same-second unlabel refuses rather than being read as earlier.
-func latestLabeling(events []*Event, name string, r Rules) (time.Time, error) {
+// a same-second unlabel refuses rather than being read as earlier. It also
+// returns the login of the first labeled event at that time; when several
+// share the second, every one is by an allowed user.
+func latestLabeling(events []*Event, name string, r Rules) (time.Time, string, error) {
 	var latest time.Time
 	var at []*Event
 	for _, ev := range events {
@@ -389,7 +399,7 @@ func latestLabeling(events []*Event, name string, r Rules) (time.Time, error) {
 		}
 		t, err := parseTime(ev.CreatedAt)
 		if err != nil {
-			return time.Time{}, refuse("a %q labeling has no readable time", name)
+			return time.Time{}, "", refuse("a %q labeling has no readable time", name)
 		}
 		switch {
 		case latest.IsZero() || t.After(latest):
@@ -399,11 +409,11 @@ func latestLabeling(events []*Event, name string, r Rules) (time.Time, error) {
 		}
 	}
 	if latest.IsZero() {
-		return time.Time{}, refuse("its timeline has no labeled event for %q", name)
+		return time.Time{}, "", refuse("its timeline has no labeled event for %q", name)
 	}
 	for _, ev := range at {
 		if !r.allowed(ev.Actor) {
-			return time.Time{}, refuse("its %q label was last added by %s, who is not on [surface.intake] authors", name, who(ev.Actor))
+			return time.Time{}, "", refuse("its %q label was last added by %s, who is not on [surface.intake] authors", name, who(ev.Actor))
 		}
 	}
 	for _, ev := range events {
@@ -411,18 +421,18 @@ func latestLabeling(events []*Event, name string, r Rules) (time.Time, error) {
 			continue
 		}
 		if ev.Label == nil {
-			return time.Time{}, refuse("its timeline has an unlabeled event with no label")
+			return time.Time{}, "", refuse("its timeline has an unlabeled event with no label")
 		}
 		if !strings.EqualFold(ev.Label.Name, name) {
 			continue
 		}
 		t, err := parseTime(ev.CreatedAt)
 		if err != nil {
-			return time.Time{}, refuse("a %q unlabeling has no readable time", name)
+			return time.Time{}, "", refuse("a %q unlabeling has no readable time", name)
 		}
 		if !t.Before(latest) {
-			return time.Time{}, refuse("its %q label was removed at %s, not before it was last added at %s", name, t.UTC().Format(time.RFC3339), latest.UTC().Format(time.RFC3339))
+			return time.Time{}, "", refuse("its %q label was removed at %s, not before it was last added at %s", name, t.UTC().Format(time.RFC3339), latest.UTC().Format(time.RFC3339))
 		}
 	}
-	return latest, nil
+	return latest, at[0].Actor.Login, nil
 }
