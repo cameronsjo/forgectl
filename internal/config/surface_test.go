@@ -211,7 +211,7 @@ func TestCheckModelName(t *testing.T) {
 
 func TestSurfaceIntakeConfig_Resolve(t *testing.T) {
 	s, err := SurfaceIntakeConfig{}.Resolve()
-	if err != nil || len(s.Authors) != 0 || len(s.Labels) != 2 || s.Labels[0] != "exec:mechanical" || s.MaxPerRun != DefaultIntakeMaxPerRun {
+	if err != nil || len(s.Authors) != 0 || len(s.Labels) != 1 || s.Labels[0] != "queue:drain" || s.MaxPerRun != DefaultIntakeMaxPerRun {
 		t.Fatalf("defaults: %+v, %v", s, err)
 	}
 	seven := 7
@@ -264,5 +264,37 @@ func TestSurfaceIntake_RefusedAtLoad(t *testing.T) {
 	}
 	if _, err := cfg.Surface.Intake.Resolve(); err == nil {
 		t.Fatal("the loaded section resolves; a caller that goes on would use it")
+	}
+}
+
+// TestSurfaceIntake_UnknownKeyRefused pins security review N2: a misspelled
+// key under [surface.intake] makes the file invalid instead of leaving its
+// field absent, which would select the default labels.
+func TestSurfaceIntake_UnknownKeyRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	for name, body := range map[string]string{
+		"misspelled key": "[surface.intake]\nlables = [\"ready\"]\n",
+		"nested table":   "[surface.intake.labels_extra]\nx = 1\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidatePath(path); err == nil || !strings.Contains(err.Error(), "[surface.intake]: unknown key") {
+			t.Errorf("%s: ValidatePath %v, want an unknown-key error", name, err)
+		}
+		cfg := LoadPath(path)
+		if err := cfg.DecodeError(); err == nil || !strings.Contains(err.Error(), "is not valid") {
+			t.Errorf("%s: LoadPath decode error %v, want the file reported invalid", name, err)
+		}
+		if _, err := cfg.Surface.Intake.Resolve(); err == nil {
+			t.Errorf("%s: the loaded section resolves to defaults", name)
+		}
+	}
+	// The correctly spelled key still loads.
+	if err := os.WriteFile(path, []byte("[surface.intake]\nlabels = [\"ready\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err != nil {
+		t.Fatalf("valid intake: %v", err)
 	}
 }

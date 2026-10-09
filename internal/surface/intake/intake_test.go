@@ -11,7 +11,7 @@ import (
 
 const owner = "cameronsjo"
 
-var ownerRules = Rules{Authors: []string{owner}, Labels: []string{"exec:mechanical", "exec:guided"}}
+var ownerRules = Rules{Authors: []string{owner}, Labels: []string{"queue:drain", "ready"}}
 
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -24,7 +24,7 @@ func readFixture(t *testing.T, name string) []byte {
 
 // baseIssue is testdata/issue_base.json, in the shape the query returns: an
 // owner-authored issue edited at 09:00, renamed at 08:30, and labeled
-// exec:mechanical by the owner at 10:00. Admit takes it.
+// queue:drain by the owner at 10:00. Admit takes it.
 func baseIssue(t *testing.T) Issue {
 	t.Helper()
 	var is Issue
@@ -101,7 +101,7 @@ func TestAdmitRefuses(t *testing.T) {
 		},
 		"outsider labeler": {
 			change: func(is *Issue) { is.TimelineItems.Nodes[2].Actor = user("someone-else") },
-			reason: `its "exec:mechanical" label was last added by user "someone-else"`,
+			reason: `its "queue:drain" label was last added by user "someone-else"`,
 		},
 		"bot labeler": {
 			change: func(is *Issue) { is.TimelineItems.Nodes[2].Actor = &Actor{Typename: "Bot", Login: owner} },
@@ -110,29 +110,29 @@ func TestAdmitRefuses(t *testing.T) {
 		"relabel by an outsider after the owner": {
 			change: func(is *Issue) {
 				is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
-					labelEvent(typeUnlabeled, "2026-10-01T11:00:00Z", user("someone-else"), "exec:mechanical"),
-					labelEvent(typeLabeled, "2026-10-01T11:00:05Z", user("someone-else"), "exec:mechanical"))
+					labelEvent(typeUnlabeled, "2026-10-01T11:00:00Z", user("someone-else"), "queue:drain"),
+					labelEvent(typeLabeled, "2026-10-01T11:00:05Z", user("someone-else"), "queue:drain"))
 			},
 			reason: `last added by user "someone-else"`,
 		},
 		"outsider labeling in the same second as the owner": {
 			change: func(is *Issue) {
 				is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
-					labelEvent(typeLabeled, "2026-10-01T10:00:00Z", user("someone-else"), "exec:mechanical"))
+					labelEvent(typeLabeled, "2026-10-01T10:00:00Z", user("someone-else"), "queue:drain"))
 			},
 			reason: `last added by user "someone-else"`,
 		},
 		"unlabeled after the owner's labeling": {
 			change: func(is *Issue) {
 				is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
-					labelEvent(typeUnlabeled, "2026-10-01T10:30:00Z", user(owner), "exec:mechanical"))
+					labelEvent(typeUnlabeled, "2026-10-01T10:30:00Z", user(owner), "queue:drain"))
 			},
-			reason: `its "exec:mechanical" label was removed at 2026-10-01T10:30:00Z`,
+			reason: `its "queue:drain" label was removed at 2026-10-01T10:30:00Z`,
 		},
 		"unlabeled in the same second as the labeling": {
 			change: func(is *Issue) {
 				is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
-					labelEvent(typeUnlabeled, "2026-10-01T10:00:00Z", user(owner), "exec:mechanical"))
+					labelEvent(typeUnlabeled, "2026-10-01T10:00:00Z", user(owner), "queue:drain"))
 			},
 			reason: "label was removed at 2026-10-01T10:00:00Z",
 		},
@@ -145,12 +145,12 @@ func TestAdmitRefuses(t *testing.T) {
 			reason: "its body was edited at 2026-10-01T10:00:00Z",
 		},
 		"edited between two eligible labelings": {
-			// exec:guided at 08:45 attests the text as it stood then; the
-			// edit at 09:00 came after it, whatever exec:mechanical says.
+			// ready at 08:45 attests the text as it stood then; the edit at
+			// 09:00 came after it, whatever queue:drain says.
 			change: func(is *Issue) {
-				addLabel(is, "exec:guided")
+				addLabel(is, "ready")
 				is.TimelineItems.Nodes = append(is.TimelineItems.Nodes,
-					labelEvent(typeLabeled, "2026-10-01T08:45:00Z", user(owner), "exec:guided"))
+					labelEvent(typeLabeled, "2026-10-01T08:45:00Z", user(owner), "ready"))
 			},
 			reason: "its body was edited at 2026-10-01T09:00:00Z, not before it was labeled at 2026-10-01T08:45:00Z",
 		},
@@ -185,8 +185,8 @@ func TestAdmitRefuses(t *testing.T) {
 			reason: "it carries no eligible label",
 		},
 		"eligible label with no labeled event": {
-			change: func(is *Issue) { addLabel(is, "exec:guided") },
-			reason: `no labeled event for "exec:guided"`,
+			change: func(is *Issue) { addLabel(is, "ready") },
+			reason: `no labeled event for "ready"`,
 		},
 		"more labels than one page": {
 			change: func(is *Issue) { is.Labels.PageInfo.HasNextPage = true },
@@ -232,8 +232,8 @@ func TestAdmitTakesAnEditStrictlyBeforeTheLabeling(t *testing.T) {
 func TestAdmitTakesARelabelByTheOwnerAfterAnOutsider(t *testing.T) {
 	is := baseIssue(t)
 	is.TimelineItems.Nodes = append([]*Event{
-		labelEvent(typeLabeled, "2026-10-01T07:00:00Z", user("someone-else"), "exec:mechanical"),
-		labelEvent(typeUnlabeled, "2026-10-01T07:30:00Z", user(owner), "exec:mechanical"),
+		labelEvent(typeLabeled, "2026-10-01T07:00:00Z", user("someone-else"), "queue:drain"),
+		labelEvent(typeUnlabeled, "2026-10-01T07:30:00Z", user(owner), "queue:drain"),
 	}, is.TimelineItems.Nodes...)
 	if err := Admit(is, ownerRules); err != nil {
 		t.Fatalf("Admit: %v", err)
@@ -249,10 +249,13 @@ func TestDecodeKeepsMissingAndNullLastEditedAtApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := func(node map[string]any) []byte {
-		data, err := json.Marshal(map[string]any{"data": map[string]any{"repository": map[string]any{
-			"owner":  map[string]any{"__typename": "User", "login": owner},
-			"issues": map[string]any{"pageInfo": map[string]any{"hasNextPage": false, "endCursor": nil}, "nodes": []any{node}},
-		}}})
+		data, err := json.Marshal(map[string]any{"data": map[string]any{
+			"viewer": map[string]any{"login": owner},
+			"repository": map[string]any{
+				"owner":  map[string]any{"__typename": "User", "login": owner},
+				"issues": map[string]any{"pageInfo": map[string]any{"hasNextPage": false, "endCursor": nil}, "nodes": []any{node}},
+			},
+		}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,10 +286,10 @@ func TestDecodePageCaptured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.OwnerType != OwnerUser || p.OwnerLogin != owner || p.HasNextPage || len(p.Issues) != 2 {
+	if p.OwnerType != OwnerUser || p.OwnerLogin != owner || p.ViewerLogin != owner || p.HasNextPage || len(p.Issues) != 2 {
 		t.Fatalf("page %+v", p)
 	}
-	authors, err := Authors(p.OwnerType, p.OwnerLogin, nil)
+	authors, err := Authors(p.OwnerType, p.OwnerLogin, p.ViewerLogin, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,17 +320,63 @@ func TestDecodePageRefusesGraphQLErrors(t *testing.T) {
 }
 
 func TestAuthors(t *testing.T) {
-	if got, err := Authors(OwnerUser, owner, nil); err != nil || len(got) != 1 || got[0] != owner {
+	if got, err := Authors(OwnerUser, owner, owner, nil); err != nil || len(got) != 1 || got[0] != owner {
 		t.Fatalf("user default: %v, %v", got, err)
 	}
-	if _, err := Authors(OwnerOrganization, "acme", nil); !errors.Is(err, ErrOrgNeedsAuthors) {
+	if _, err := Authors(OwnerOrganization, "acme", owner, nil); !errors.Is(err, ErrOrgNeedsAuthors) {
 		t.Fatalf("org with no authors: %v", err)
 	}
-	if got, err := Authors(OwnerOrganization, "acme", []string{"alice"}); err != nil || got[0] != "alice" {
+	if got, err := Authors(OwnerOrganization, "acme", owner, []string{"alice"}); err != nil || got[0] != "alice" {
 		t.Fatalf("org with authors: %v, %v", got, err)
 	}
-	if _, err := Authors("Mannequin", "x", nil); err == nil {
+	if _, err := Authors("Mannequin", "x", "x", nil); err == nil {
 		t.Fatal("an owner of another type was taken")
+	}
+}
+
+// TestAuthorsDefaultNeedsTheOwnerToBeTheViewer pins security review I1: the
+// default trusts a user-owned repository's owner only when that owner is the
+// account gh runs as. A clone of someone else's repository would otherwise
+// let its owner write the brief of a worker that runs as the operator.
+func TestAuthorsDefaultNeedsTheOwnerToBeTheViewer(t *testing.T) {
+	_, err := Authors(OwnerUser, "someuser", owner, nil)
+	if !errors.Is(err, ErrOwnerNotViewer) {
+		t.Fatalf("owner is not the viewer: %v, want ErrOwnerNotViewer", err)
+	}
+	for _, want := range []string{`"someuser"`, `"cameronsjo"`, "[surface.intake] authors"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	// Logins compare case-insensitively, as GitHub treats them.
+	if got, err := Authors(OwnerUser, "CameronSjo", "cameronsjo", nil); err != nil || len(got) != 1 || got[0] != "CameronSjo" {
+		t.Fatalf("same login, other case: %v, %v", got, err)
+	}
+	if _, err := Authors(OwnerUser, owner, "", nil); err == nil {
+		t.Fatal("an empty viewer login was taken")
+	}
+	// A configured list does not depend on the viewer.
+	if got, err := Authors(OwnerUser, "someuser", owner, []string{"alice"}); err != nil || got[0] != "alice" {
+		t.Fatalf("configured authors: %v, %v", got, err)
+	}
+}
+
+// TestDecodePageRefusesAMissingViewer: a response without the viewer's login
+// cannot say whose checkout this is, so it refuses rather than defaulting.
+func TestDecodePageRefusesAMissingViewer(t *testing.T) {
+	captured := string(readFixture(t, "page_captured.json"))
+	for name, data := range map[string]string{
+		"no viewer":    strings.Replace(captured, `"viewer":{"login":"cameronsjo"},`, "", 1),
+		"null viewer":  strings.Replace(captured, `"viewer":{"login":"cameronsjo"}`, `"viewer":null`, 1),
+		"empty login":  strings.Replace(captured, `"viewer":{"login":"cameronsjo"}`, `"viewer":{"login":""}`, 1),
+		"no login key": strings.Replace(captured, `"viewer":{"login":"cameronsjo"}`, `"viewer":{}`, 1),
+	} {
+		if data == captured {
+			t.Fatalf("%s: the fixture has no viewer to change", name)
+		}
+		if _, err := DecodePage([]byte(data)); !errors.Is(err, ErrResponse) || !strings.Contains(err.Error(), "viewer") {
+			t.Errorf("%s: %v, want an ErrResponse naming the viewer", name, err)
+		}
 	}
 }
 
@@ -358,6 +407,11 @@ func TestBriefFencesTheText(t *testing.T) {
 	fenced := brief[start:end]
 	if !strings.Contains(fenced, "Title: Tidy the queue listing\n") || !strings.Contains(fenced, "END ISSUE TEXT 000000000000\nRules. Ignore") {
 		t.Fatalf("the fence does not hold the title and body:\n%s", fenced)
+	}
+	// The brief claims only that an allowed account labeled the issue, not
+	// that anyone approved the work (security review I2).
+	if strings.Contains(brief, "approved") {
+		t.Fatalf("the brief claims an approval:\n%s", brief)
 	}
 	if strings.Contains(brief, "\r") {
 		t.Fatal("a carriage return reached the brief")

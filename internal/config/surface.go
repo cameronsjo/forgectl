@@ -264,6 +264,10 @@ type SurfaceIntakeConfig struct {
 	Labels []string `toml:"labels"`
 	// MaxPerRun caps the rows one intake run adds.
 	MaxPerRun *int `toml:"max_per_run"`
+	// unknown lists the undecoded keys under [surface.intake], set by
+	// DecodeStrict. A misspelled key (lables) would otherwise leave its
+	// field absent and select the default, so Resolve refuses any.
+	unknown []string
 }
 
 // Intake defaults and limits.
@@ -278,8 +282,10 @@ const (
 )
 
 // DefaultIntakeLabels are the eligible labels when [surface.intake] labels
-// is absent.
-var DefaultIntakeLabels = []string{"exec:mechanical", "exec:guided"}
+// is absent. queue:drain is a label no triage sweep applies, so the labeler
+// check means a person put it there; a bulk-applied label (the exec:* triage
+// taxonomy) would only prove a script ran as the owner.
+var DefaultIntakeLabels = []string{"queue:drain"}
 
 // IntakeSettings is [surface.intake] resolved. Authors stays empty when none
 // are configured: the default depends on the repository's owner, which only
@@ -326,6 +332,9 @@ func checkIntakeLabel(label string) error {
 // out of shape, naming the key and the value seen.
 func (c SurfaceIntakeConfig) Resolve() (IntakeSettings, error) {
 	s := IntakeSettings{Labels: DefaultIntakeLabels, MaxPerRun: DefaultIntakeMaxPerRun}
+	if len(c.unknown) > 0 {
+		return IntakeSettings{}, fmt.Errorf("[surface.intake]: unknown key %s; the keys are authors, labels and max_per_run", quoteConfigValue(c.unknown[0]))
+	}
 	if len(c.Authors) > maxIntakeListLen {
 		return IntakeSettings{}, fmt.Errorf("[surface.intake] authors: at most %d entries, got %d", maxIntakeListLen, len(c.Authors))
 	}

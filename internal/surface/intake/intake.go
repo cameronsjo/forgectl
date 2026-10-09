@@ -22,10 +22,13 @@ import (
 )
 
 // Query reads one page of open issues carrying any of $labels, oldest first,
-// with everything the gate needs. repository.issues holds issues only: its
+// with everything the gate needs, and the login gh is authenticated as
+// (viewer), which the default author list is checked against.
+// repository.issues holds issues only: its
 // nodes are of GraphQL type Issue, never PullRequest. The timeline asks for
 // only the four event types the gate reads.
 const Query = `query($owner: String!, $name: String!, $labels: [String!], $first: Int!, $after: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     owner { __typename login }
     issues(states: OPEN, labels: $labels, first: $first, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
@@ -117,15 +120,18 @@ type Issue struct {
 
 // Page is one decoded query response.
 type Page struct {
-	OwnerType   string
-	OwnerLogin  string
+	OwnerType  string
+	OwnerLogin string
+	// ViewerLogin is the login gh is authenticated as: the operator.
+	ViewerLogin string
 	Issues      []Issue
 	HasNextPage bool
 	EndCursor   string
 }
 
 // ErrResponse reports a GraphQL response intake will not read: one carrying
-// errors, or missing the repository, its owner, or its issues.
+// errors, or missing the viewer's login, the repository, its owner, or its
+// issues.
 var ErrResponse = errors.New("intake: unusable GitHub response")
 
 // maxErrorText bounds the GraphQL error message quoted in ErrResponse.
@@ -137,6 +143,9 @@ const maxErrorText = 200
 func DecodePage(data []byte) (Page, error) {
 	var resp struct {
 		Data *struct {
+			Viewer *struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
 			Repository *struct {
 				Owner  *Actor `json:"owner"`
 				Issues *struct {
@@ -162,6 +171,9 @@ func DecodePage(data []byte) (Page, error) {
 	if resp.Data == nil || resp.Data.Repository == nil {
 		return Page{}, fmt.Errorf("%w: no repository in the response", ErrResponse)
 	}
+	if resp.Data.Viewer == nil || resp.Data.Viewer.Login == "" {
+		return Page{}, fmt.Errorf("%w: no viewer login in the response", ErrResponse)
+	}
 	repo := resp.Data.Repository
 	if repo.Owner == nil || repo.Owner.Login == "" || repo.Owner.Typename == "" {
 		return Page{}, fmt.Errorf("%w: no repository owner in the response", ErrResponse)
@@ -170,7 +182,7 @@ func DecodePage(data []byte) (Page, error) {
 		return Page{}, fmt.Errorf("%w: no issues connection in the response", ErrResponse)
 	}
 	p := Page{
-		OwnerType: repo.Owner.Typename, OwnerLogin: repo.Owner.Login,
+		OwnerType: repo.Owner.Typename, OwnerLogin: repo.Owner.Login, ViewerLogin: resp.Data.Viewer.Login,
 		HasNextPage: repo.Issues.PageInfo.HasNextPage, EndCursor: repo.Issues.PageInfo.EndCursor,
 	}
 	if p.HasNextPage && p.EndCursor == "" {
@@ -196,10 +208,18 @@ func DecodePage(data []byte) (Page, error) {
 // [surface.intake] authors: its owner's login names no person.
 var ErrOrgNeedsAuthors = errors.New("intake: the repository is owned by an organization; set [surface.intake] authors to the logins whose issues intake may take")
 
+// ErrOwnerNotViewer reports a user-owned repository, with no [surface.intake]
+// authors, whose owner is not the account gh is authenticated as. The default
+// trusts the owner because the owner is the operator; here it is not.
+var ErrOwnerNotViewer = errors.New("intake: the repository's owner is not the account gh is authenticated as")
+
 // Authors returns the logins the gate allows: configured when it is not
-// empty, else the owner's login for a user-owned repository. Any other owner
-// with no configured authors is refused.
-func Authors(ownerType, ownerLogin string, configured []string) ([]string, error) {
+// empty, else the owner's login for a user-owned repository whose owner is
+// the viewer (the account gh is authenticated as), compared
+// case-insensitively. Any other owner with no configured authors is refused:
+// a repository someone else owns would let that someone write the brief of a
+// worker that runs as the operator.
+func Authors(ownerType, ownerLogin, viewerLogin string, configured []string) ([]string, error) {
 	if len(configured) > 0 {
 		return configured, nil
 	}
@@ -207,6 +227,12 @@ func Authors(ownerType, ownerLogin string, configured []string) ([]string, error
 	case OwnerUser:
 		if ownerLogin == "" {
 			return nil, fmt.Errorf("%w: the owner has no login", ErrResponse)
+		}
+		if viewerLogin == "" {
+			return nil, fmt.Errorf("%w: no viewer login", ErrResponse)
+		}
+		if !strings.EqualFold(ownerLogin, viewerLogin) {
+			return nil, fmt.Errorf("%w: the owner is %q and gh is authenticated as %q; set [surface.intake] authors to the logins whose issues intake may take", ErrOwnerNotViewer, ownerLogin, viewerLogin)
 		}
 		return []string{ownerLogin}, nil
 	case OwnerOrganization:

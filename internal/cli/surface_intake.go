@@ -86,11 +86,14 @@ func newSurfaceIntakeGHCmd(deps module.Deps) *cobra.Command {
 		Short: "Queue a brief for each open GitHub issue the operator labeled",
 		Long: `gh reads the open issues of the repository --repo's origin remote names (on
 github.com only) that carry an eligible label, and queues one row per issue
-for surface drain. The label is the request: removing it is how to say no.
+for surface drain. The label is the request. Removing it stops future
+intake runs from taking the issue; a row already queued stays until
+"forgectl surface dequeue <name>".
 
 An issue is taken only when all of these hold, read from one GraphQL query:
 its author is on [surface.intake] authors (default: the repository owner,
-for a user-owned repository; an organization-owned one needs authors set);
+for a user-owned repository whose owner is the account gh is authenticated
+as; any other repository needs authors set);
 for each eligible label it carries, the latest labeling is by an allowed
 author with no later removal; its body was never edited, or last edited
 strictly before that labeling; its title was not renamed at or after it; it
@@ -107,8 +110,8 @@ The row is named gh<number>-<repo name> (cut to 48 characters) and records
 source gh:<owner>/<repo>#<number> and the issue's author. An existing row of
 that name, in any state, skips the issue (a failed row: dequeue it to
 retry). Each skip names the issue and its reason, and the run goes on.
-[surface.intake] labels (default exec:mechanical and exec:guided) are the
-eligible labels; --label narrows to one of them. [surface.intake]
+[surface.intake] labels (default queue:drain, a label no triage sweep
+applies) are the eligible labels; --label narrows to one of them. [surface.intake]
 max_per_run (default 5) caps the rows one run adds. --harness, --model and
 --profile apply to every row, as on enqueue.
 
@@ -121,10 +124,10 @@ be queued.
 Exit 0: the run finished, whatever it skipped. Exit 1: the queue filled, or
 GitHub could not be read; what was queued before stays queued. Exit 2: a
 usage or setup error (an invalid [surface.intake], an origin not on
-github.com, an organization-owned repository with no authors).
+github.com, no authors set for a repository the gh account does not own).
 
   forgectl surface intake gh --repo forgectl --dry-run
-  forgectl surface intake gh --repo . --label exec:mechanical --json
+  forgectl surface intake gh --repo . --label queue:drain --json
   forgectl surface intake gh --repo forgectl --harness codex --model gpt-5`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -263,7 +266,7 @@ func (in intakeRun) run() (intakeResult, error) {
 			return res, WithExitCode(errors.New("intake: "+res.Stopped), exitUsage)
 		}
 		if page == 0 {
-			authors, err := intake.Authors(p.OwnerType, p.OwnerLogin, in.configured)
+			authors, err := intake.Authors(p.OwnerType, p.OwnerLogin, p.ViewerLogin, in.configured)
 			if err != nil {
 				res.Stopped = err.Error()
 				return res, WithExitCode(err, exitUsage)

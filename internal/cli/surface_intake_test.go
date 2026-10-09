@@ -90,20 +90,30 @@ func baseIssueNode(t *testing.T, number int, body string) map[string]any {
 	return node
 }
 
-// intakePage wraps issue nodes in the query's response shape.
+// intakePage wraps issue nodes in the query's response shape, with
+// cameronsjo as both the owner and the viewer.
 func intakePage(t *testing.T, ownerType string, next string, nodes ...map[string]any) string {
+	t.Helper()
+	return intakePageAs(t, "cameronsjo", ownerType, next, nodes...)
+}
+
+// intakePageAs is intakePage with gh authenticated as viewer.
+func intakePageAs(t *testing.T, viewer, ownerType string, next string, nodes ...map[string]any) string {
 	t.Helper()
 	items := make([]any, len(nodes))
 	for i, n := range nodes {
 		items[i] = n
 	}
-	data, err := json.Marshal(map[string]any{"data": map[string]any{"repository": map[string]any{
-		"owner": map[string]any{"__typename": ownerType, "login": "cameronsjo"},
-		"issues": map[string]any{
-			"pageInfo": map[string]any{"hasNextPage": next != "", "endCursor": next},
-			"nodes":    items,
+	data, err := json.Marshal(map[string]any{"data": map[string]any{
+		"viewer": map[string]any{"login": viewer},
+		"repository": map[string]any{
+			"owner": map[string]any{"__typename": ownerType, "login": "cameronsjo"},
+			"issues": map[string]any{
+				"pageInfo": map[string]any{"hasNextPage": next != "", "endCursor": next},
+				"nodes":    items,
+			},
 		},
-	}}})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,11 +181,18 @@ func queueRows(t *testing.T) []worker.QueueRow {
 
 const forgectlOrigin = "https://github.com/cameronsjo/forgectl.git"
 
+// capturedLabels makes the captured page's label eligible. exec:guided is a
+// triage label a sweep applies, so it is not a default (security review I2);
+// the capture predates the queue:drain default.
+var capturedLabels = config.SurfaceIntakeConfig{Labels: []string{"queue:drain", "exec:guided"}}
+
 // TestSurfaceIntakeCapturedPage runs intake against the live capture: two
-// owner-authored issues the owner labeled exec:guided. Both are queued once,
-// a second run queues nothing, and the query is pinned to github.com.
+// owner-authored issues the owner labeled exec:guided, read as the owner. Both
+// are queued once, a second run queues nothing, and the query is pinned to
+// github.com.
 func TestSurfaceIntakeCapturedPage(t *testing.T) {
 	deps, run, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": readIntakeFixture(t, "page_captured.json")})
+	deps.Cfg.Surface.Intake = capturedLabels
 
 	res, _, err := runIntake(t, deps, "--repo", repo, "--label", "exec:guided", "--harness", "codex", "--model", "gpt-5")
 	if err != nil {
@@ -205,7 +222,7 @@ func TestSurfaceIntakeCapturedPage(t *testing.T) {
 	if !slices.Contains(call, "--hostname") || call[slices.Index(call, "--hostname")+1] != "github.com" || run.envs[0]["GH_HOST"] != "github.com" {
 		t.Fatalf("gh call not pinned: %v %v", call, run.envs[0])
 	}
-	if !slices.Contains(call, "labels[]=exec:guided") || slices.Contains(call, "labels[]=exec:mechanical") {
+	if !slices.Contains(call, "labels[]=exec:guided") || slices.Contains(call, "labels[]=queue:drain") {
 		t.Fatalf("--label did not narrow the query: %v", call)
 	}
 
@@ -224,6 +241,7 @@ func TestSurfaceIntakeCapturedPage(t *testing.T) {
 
 func TestSurfaceIntakeDryRunWritesNothing(t *testing.T) {
 	deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": readIntakeFixture(t, "page_captured.json")})
+	deps.Cfg.Surface.Intake = capturedLabels
 	res, _, err := runIntake(t, deps, "--repo", repo, "--dry-run")
 	if err != nil {
 		t.Fatal(err)
@@ -252,10 +270,20 @@ func TestSurfaceIntakeSkipsAndGoesOn(t *testing.T) {
 		baseIssueNode(t, 7, "escape \x1b[2J in the body"),
 		baseIssueNode(t, 8, "last, taken"),
 	)
-	deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+	deps, run, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
 	res, _, err := runIntake(t, deps, "--repo", repo)
 	if err != nil {
 		t.Fatalf("intake: %v", err)
+	}
+	// The default eligible label is queue:drain alone (security review I2).
+	var queried []string
+	for _, a := range run.calls[0] {
+		if strings.HasPrefix(a, "labels[]=") {
+			queried = append(queried, a)
+		}
+	}
+	if !slices.Equal(queried, []string{"labels[]=queue:drain"}) || !slices.Equal(res.Labels, []string{"queue:drain"}) {
+		t.Fatalf("default labels: queried %v, result %v", queried, res.Labels)
 	}
 	if got := names(res.Enqueued); !slices.Equal(got, []string{"gh1-forgectl", "gh8-forgectl"}) {
 		t.Fatalf("enqueued %v; skipped %+v", got, res.Skipped)
@@ -274,6 +302,21 @@ func TestSurfaceIntakeSkipsAndGoesOn(t *testing.T) {
 	}
 	if len(queueRows(t)) != 2 {
 		t.Fatal("a skipped issue was queued")
+	}
+}
+
+// TestSurfaceIntakeViewerCase: the owner-is-viewer check compares logins
+// case-insensitively, so gh authenticated as CameronSjo owns cameronsjo's
+// repository.
+func TestSurfaceIntakeViewerCase(t *testing.T) {
+	page := intakePageAs(t, "CameronSjo", "User", "", baseIssueNode(t, 1, "one"))
+	deps, _, repo := intakeTestEnv(t, forgectlOrigin, map[string]string{"": page})
+	res, _, err := runIntake(t, deps, "--repo", repo)
+	if err != nil {
+		t.Fatalf("intake: %v", err)
+	}
+	if got := names(res.Enqueued); !slices.Equal(got, []string{"gh1-forgectl"}) || !slices.Equal(res.Authors, []string{"cameronsjo"}) {
+		t.Fatalf("result %+v", res)
 	}
 }
 
@@ -348,6 +391,16 @@ func TestSurfaceIntakeRefusesTheRun(t *testing.T) {
 	}{
 		"non-github remote": {
 			origin: "https://gitlab.com/cameronsjo/forgectl.git", exit: exitUsage, want: `origin's host "gitlab.com" is not github.com`,
+		},
+		"owner is not the viewer": {
+			// A clone of someone else's user-owned repository: its owner is
+			// not the operator, so the default author list does not apply.
+			pages: map[string]string{"": intakePageAs(t, "operator", "User", "", baseIssueNode(t, 1, "one"))},
+			exit:  exitUsage, want: `the owner is "cameronsjo" and gh is authenticated as "operator"; set [surface.intake] authors`,
+		},
+		"captured page with no viewer": {
+			pages: map[string]string{"": strings.Replace(captured, `"viewer":{"login":"cameronsjo"},`, "", 1)},
+			exit:  exitFailed, want: "no viewer login",
 		},
 		"organization owner with no authors": {
 			pages: map[string]string{"": intakePage(t, "Organization", "", baseIssueNode(t, 1, "one"))},

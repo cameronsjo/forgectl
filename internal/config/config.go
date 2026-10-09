@@ -1240,6 +1240,11 @@ func DecodeStrict(data []byte) (Config, error) {
 		if len(k) > 0 && (k[0] == "resume" || k[0] == "on_update") {
 			cfg.resumeUnknown = append(cfg.resumeUnknown, k.String())
 		}
+		// A misspelled [surface.intake] key would select a default that
+		// widens whose issues intake takes, so Resolve refuses it.
+		if len(k) > 2 && k[0] == "surface" && k[1] == "intake" {
+			cfg.Surface.Intake.unknown = append(cfg.Surface.Intake.unknown, k.String())
+		}
 	}
 	if err != nil {
 		return cfg, tomlerr.Scrub(err)
