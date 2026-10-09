@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. Next: T10.3 (closers, prune) and T10.4 (merge, audit, autopilot) as separate PRs."
+next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. T10.3 (closers, prune) built on feat/p4-closers, PR not opened yet. Next: T10.4 (merge, audit, autopilot)."
 branch: plan/atelier-p4
 pr: "cameronsjo/forgectl#1207"
 updated: 2026-10-09
@@ -142,9 +142,9 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 
 ### T10.3: closers and prune (forgectl, one PR; after T10.2)
 
-- [ ] Settle transitions and the 24-hour timer; `pr_closed_at`, `cost_usd`.
-- [ ] `surface prune` with the live-workspace skip and the usage rollup; daily in the drain; `--dry-run`.
-- [ ] Tests: each settle transition, a fork PR on the head name ignored, prune keeps live rows, rollup sums.
+- [x] Settle transitions and the 24-hour timer; `pr_closed_at`, `cost_usd`.
+- [x] `surface prune` with the live-workspace skip and the usage rollup; daily in the drain; `--dry-run`.
+- [x] Tests: each settle transition, a fork PR on the head name ignored, prune keeps live rows, rollup sums.
 
 ### T10.4: merge, audit, autopilot (forgectl, one PR; after T10.2)
 
@@ -197,5 +197,12 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.2 review fixes, launch identity:** a drain launch whose `worker/<name>` exists stays refused, and the error now names the way out (delete the branch locally and on origin, then dequeue and enqueue; or enqueue under a new name), since `surface close` keeps the branch. A hand launch reads the identity best-effort: a failed read warns once, records none, and goes on. A drain launch's failed read is a new class, `ErrGitHubRead`, that requeues the row with no attempt counted and pauses claiming (`github`); the pause is re-checked each tick by letting one claim through, and a successful launch clears it. This supersedes the earlier "a failed read fails the launch" for hand launches.
 - **T10.2 review fixes, status:** a compare GitHub answers 404 (a recorded base it does not have) is a refusal reason, exit 0, not a failed read; `reviews` lists markers by `marker_author_id`, not the gh account, and none with a note when it is unset; `usage` gained `priced` and `unpricedModels`, and an unpriced model makes the cost partial, shown as such; model names are stripped of control, bidi and invisible characters.
 - **T10.2, fixtures:** #1203 carries no crit>0 marker; the earlier-crit rule is tested on edited copies. A read-only live check (`FORGECTL_MERGE_LIVE=1`) reads #1204.
+- **T10.3, the drain's old prune is gone:** the per-tick removal of every terminal row past 30 days is replaced by the daily `surface prune`, so a priced row never leaves without its cost in `usage-daily.jsonl`. A `reported` row is no longer removed by age; it waits for the closers or `surface close`.
+- **T10.3, ledger rows:** a ledger row has no closed time, so prune ages a `closed` ledger row by `started_at`. A `closed` ledger row is not probed in herdr (its close already closed the workspace); the live-workspace skip applies to queue rows, through their own ledger row (same name and `launch_id`), and keeps a row herdr cannot rule out. Prune reads every ledger file in the state directory, not only those the queue names.
+- **T10.3, status cache entries (Loop row):** rows do not record the head a cache entry serves, so prune removes `status-cache-<head>.json` entries last written before the cutoff instead of "with their row".
+- **T10.3, closer reads:** at most 4 rows a tick, oldest read first, each at most every 5 minutes; the read times and once-per-condition events live in the drain process, so a restart reads every reported row again. A repository whose id is no longer the recorded one (`merge.ErrRepoChanged`), two open PRs, or any non-transient failure is an `error` event; a network, server or rate-limit failure an `unreadable` event; neither changes the row nor pauses claiming. The read is a new `merge.Reader.Discover` (the discovery query and `SelectPR` alone).
+- **T10.3, a refused close:** the row stays `reported` with one `error` event naming why, and `cost_usd` is still written when the session was priced; the close is tried again at the next read.
+- **T10.3, usage rollup:** one line per UTC day per prune run; a later run that removes more rows from the same day appends another line for it (sum per day to read). The lines are appended under the queue lock before the rows go, and nothing is removed when they cannot be written.
+- **T10.3, daily prune day:** recorded in `drain-prune-day` before the prune runs, so a failed prune is not retried the same day.
 
 ## Learnings
