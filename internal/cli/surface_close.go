@@ -167,10 +167,20 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 func realCloseSteps(run exec.Runner, herdr backend.Closer, led *worker.Ledger, top string, row worker.Row) closeSteps {
 	return closeSteps{
 		close: herdr.Close,
+		// The worktree is found by name, so inspect and remove each check
+		// first that the ledger row is still the one close read: a close or
+		// relaunch under the same name while the workspace closed leaves the
+		// new launch's worktree alone.
 		inspect: func(ctx context.Context) (worker.WorktreeFacts, error) {
+			if why := ledgerRowChanged(led, row); why != "" {
+				return worker.WorktreeFacts{}, errors.New(why)
+			}
 			return worker.InspectWorktree(ctx, run, top, row.Name, row.Base)
 		},
 		remove: func(ctx context.Context, path string) error {
+			if why := ledgerRowChanged(led, row); why != "" {
+				return errors.New(why)
+			}
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
 			defer cancel()
 			return worker.RemoveWorktree(ctx, run, top, path)
