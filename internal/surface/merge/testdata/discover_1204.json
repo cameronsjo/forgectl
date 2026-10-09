@@ -1,0 +1,37 @@
+{
+ "data": {
+  "viewer": {
+   "login": "cameronsjo",
+   "databaseId": 4084915
+  },
+  "repository": {
+   "databaseId": 1252924951,
+   "nameWithOwner": "cameronsjo/forgectl",
+   "defaultBranchRef": {
+    "name": "main"
+   },
+   "pullRequests": {
+    "pageInfo": {
+     "hasNextPage": false
+    },
+    "nodes": [
+     {
+      "number": 1204,
+      "state": "MERGED",
+      "isCrossRepository": false,
+      "createdAt": "2026-10-09T16:05:34Z",
+      "headRefName": "worker/gh1175-forgectl",
+      "headRepository": {
+       "databaseId": 1252924951
+      },
+      "author": {
+       "__typename": "User",
+       "login": "cameronsjo",
+       "databaseId": 4084915
+      }
+     }
+    ]
+   }
+  }
+ }
+}

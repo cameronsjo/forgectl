@@ -1,0 +1,25 @@
+{
+ "status": "ahead",
+ "ahead_by": 1,
+ "behind_by": 0,
+ "total_commits": 1,
+ "commits": [],
+ "files": [
+  {
+   "filename": "internal/cli/upgrade.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/cli/upgrade_test.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/selfupdate/selfupdate.go",
+   "status": "modified"
+  },
+  {
+   "filename": "internal/selfupdate/selfupdate_test.go",
+   "status": "modified"
+  }
+ ]
+}

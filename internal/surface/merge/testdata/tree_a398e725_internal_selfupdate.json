@@ -1,0 +1,15 @@
+{
+ "tree": [
+  {
+   "mode": "100644",
+   "path": "selfupdate.go",
+   "type": "blob"
+  },
+  {
+   "mode": "100644",
+   "path": "selfupdate_test.go",
+   "type": "blob"
+  }
+ ],
+ "truncated": false
+}
