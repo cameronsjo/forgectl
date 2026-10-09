@@ -149,6 +149,11 @@ const (
 	// EventNote: a notice that is neither a state change nor an error, such
 	// as running without claude-slots.
 	EventNote = "note"
+	// EventMerged: the autopilot merged a worker's PR.
+	EventMerged = "merged"
+	// EventMergeRefused: the autopilot's merge was refused, failed or
+	// could not be confirmed; recorded once per row, head and reasons.
+	EventMergeRefused = "merge-refused"
 )
 
 // EventVersion is the events file's line format version.

@@ -71,6 +71,13 @@ type fakeDrain struct {
 	pruneErr  error
 	// pruneDayErr is what reading the recorded day returns.
 	pruneDayErr error
+	// mergeSettings is what [surface.merge] resolves to (mode off unless a
+	// test sets it); landed lists the rows the autopilot tried, landBy who
+	// it tried as, and landOut is what each try returns.
+	mergeSettings config.MergeSettings
+	landed        []merge.Row
+	landBy        []merge.By
+	landOut       merge.Outcome
 }
 
 // checkOwnLedger fails the test when the drain hands the notifier a ledger
@@ -161,6 +168,17 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 		},
 		pruneDay:    func() (string, error) { return f.pruneDay, f.pruneDayErr },
 		setPruneDay: func(day string) error { f.pruneDay = day; return nil },
+		mergeSettings: func() config.MergeSettings {
+			if f.mergeSettings.Mode == "" {
+				return config.MergeSettings{Mode: config.MergeOff}
+			}
+			return f.mergeSettings
+		},
+		land: func(_ context.Context, _ config.MergeSettings, by merge.By, row merge.Row, _ bool) merge.Outcome {
+			f.landed = append(f.landed, row)
+			f.landBy = append(f.landBy, by)
+			return f.landOut
+		},
 	}
 	return f, newDrainer(io, drainTestSession, func() bool { return false }), q
 }
