@@ -241,7 +241,7 @@ var errIntakeStopped = errors.New("intake stopped")
 func (in intakeRun) run() (intakeResult, error) {
 	res := intakeResult{
 		DryRun: in.dryRun, Repo: in.top, GitHub: in.owner + "/" + in.repo, Labels: in.labels,
-		Enqueued: []intakeItem{}, Skipped: []intakeItem{},
+		Authors: []string{}, Enqueued: []intakeItem{}, Skipped: []intakeItem{},
 	}
 	rows, err := in.q.Rows()
 	if err != nil {

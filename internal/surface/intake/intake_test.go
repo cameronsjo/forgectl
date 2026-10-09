@@ -427,6 +427,25 @@ func TestBriefFencesTheText(t *testing.T) {
 	}
 }
 
+// A lone carriage return (old Mac line ends, pasted text) becomes a line
+// end in the body and a space in the title, so CheckQueueBrief does not skip
+// the issue forever for a control character.
+func TestBriefTurnsLoneCarriageReturns(t *testing.T) {
+	is := baseIssue(t)
+	is.Title = "Tidy\rthe listing"
+	is.Body = "one\rtwo\r\nthree"
+	brief, err := Brief("cameronsjo/forgectl", is, fixedNonces("a1b2c3d4e5f6"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(brief, "\r") {
+		t.Fatalf("a carriage return reached the brief:\n%q", brief)
+	}
+	if !strings.Contains(brief, "Title: Tidy the listing\n") || !strings.Contains(brief, "one\ntwo\nthree\n") {
+		t.Fatalf("carriage returns not turned as expected:\n%s", brief)
+	}
+}
+
 func TestBriefGivesUpOnTextHoldingEveryNonce(t *testing.T) {
 	is := baseIssue(t)
 	is.Body = "aaaaaaaaaaaa"

@@ -2,9 +2,9 @@
 status: in-flight
 next: "T9.1 security review findings fixed (I1, I2, N1, N2; N3-N5 recorded); next a live intake of one issue labeled queue:drain."
 branch: plan/atelier-p3-intake
-pr: "—"
+pr: "cameronsjo/forgectl#1203"
 updated: 2026-10-09
-approved_session_id: "— (operator: 'own it and get it done', 2026-10-09; P3 is in the approved atelier plan)"
+approved_session_id: 30dd3ebb-3720-463f-aa15-9570c1ff88a9  # operator: 'own it and get it done', 2026-10-09; P3 is in the approved atelier plan
 date: 2026-10-09
 session_id: 30dd3ebb-3720-463f-aa15-9570c1ff88a9
 model: claude-opus-5-5
@@ -111,7 +111,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 1 Critical, 9 Imp
 ## Learnings
 
 - **Captured shapes (gh 2.101.0, 2026-10-09):** `gh api graphql` exits 1 on any GraphQL error and prints the error JSON on stdout, both for an undefined field (`errors` only) and for a missing repository (`data.repository: null` beside `errors`). `repository.issues` nodes are GraphQL type `Issue` (introspection: `IssueConnection.nodes: [Issue]`), so a pull request cannot appear there; the `__typename` check stays. Array variables pass as `-f 'labels[]=<name>'`, and the `labels` filter is any-of.
-- **Same-second timeline events.** Timestamps are whole seconds and several label events often share one (the capture of #13 and #32 has unlabel and label pairs in one second). GitHub documents no order within a second, so a same-second unlabel of the label, or a same-second edit or rename, refuses.
+- **Same-second timeline events.** Timestamps are whole seconds and several label events often share one (the capture of cameronsjo/forgectl#13 and cameronsjo/forgectl#32 has unlabel and label pairs in one second). GitHub documents no order within a second, so a same-second unlabel of the label, or a same-second edit or rename, refuses.
 - **Bots.** GraphQL gives a `Bot` actor's login without the REST `[bot]` suffix, so the gate reads `__typename` (only `User` is allowed) and refuses a `[bot]` login too. No bot event was in this repository's capture to observe it.
 - **Re-intake dedupe is by name only.** Each brief carries a fresh nonce, so the queue's same-brief no-op never fires on a second run; intake checks the row name against the queue first, and a row written in between is caught as `ErrQueueNameTaken`.
-- **Before the live check:** a read-only `--dry-run` against cameronsjo/forgectl (temporary state dir) would queue #13 and #32, which the owner already labeled `exec:guided`. Superseded by the `queue:drain` default: neither #13 nor #32 carries it, so the live check labels its test issue `queue:drain` and needs no `--label`.
+- **Before the live check:** a read-only `--dry-run` against cameronsjo/forgectl (temporary state dir) would queue cameronsjo/forgectl#13 and cameronsjo/forgectl#32, which the owner already labeled `exec:guided`. Superseded by the `queue:drain` default: neither of them carries it, so the live check labels its test issue `queue:drain` and needs no `--label`.

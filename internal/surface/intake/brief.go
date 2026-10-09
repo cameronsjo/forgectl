@@ -40,12 +40,12 @@ var ErrNonce = errors.New("intake: could not draw a fence nonce the issue text d
 
 // Brief returns the brief for is in ownerRepo, fencing its title and body
 // with a nonce from newNonce. A nonce the title or body already contains is
-// drawn again. The body's CRLF line ends become LF: a carriage return is a
-// control character a launch brief may not carry, and GitHub's web editor
-// writes CRLF.
+// drawn again. The body's CRLF and lone CR line ends become LF, and a CR in
+// the title becomes a space: a carriage return is a control character a
+// launch brief may not carry, and GitHub's web editor writes CRLF.
 func Brief(ownerRepo string, is Issue, newNonce func() (string, error)) (string, error) {
-	body := strings.TrimRight(strings.ReplaceAll(is.Body, "\r\n", "\n"), " \t\n")
-	title := strings.TrimSpace(is.Title)
+	body := strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(is.Body, "\r\n", "\n"), "\r", "\n"), " \t\n")
+	title := strings.TrimSpace(strings.ReplaceAll(is.Title, "\r", " "))
 	for range maxNonceTries {
 		nonce, err := newNonce()
 		if err != nil {

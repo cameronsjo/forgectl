@@ -298,3 +298,16 @@ func TestSurfaceIntake_UnknownKeyRefused(t *testing.T) {
 		t.Fatalf("valid intake: %v", err)
 	}
 }
+
+func TestCheckGitHubLogin(t *testing.T) {
+	for _, ok := range []string{"cameronsjo", "Alice-B", "alice_acme", "a"} {
+		if err := CheckGitHubLogin(ok); err != nil {
+			t.Errorf("CheckGitHubLogin(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "-alice", "alice-", "dependabot[bot]", "a b", "al.ice", strings.Repeat("a", 40)} {
+		if err := CheckGitHubLogin(bad); err == nil {
+			t.Errorf("CheckGitHubLogin(%q) = nil, want an error", bad)
+		}
+	}
+}

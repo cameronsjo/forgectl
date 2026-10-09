@@ -108,7 +108,8 @@ anything is written. --json prints {"added","name","repo","batch","state",
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
-holds another brief or repository, or the queue is full). Exit 2: a usage or
+holds another brief, repository, launch setting, or intake source and author,
+or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md

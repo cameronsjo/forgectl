@@ -297,17 +297,18 @@ type IntakeSettings struct {
 }
 
 // CheckGitHubLogin refuses a value that is not a GitHub user login: 1-39
-// characters of letters, digits and '-', not starting or ending with '-'. A
-// bot's "[bot]" suffix is outside the charset, so no bot login passes.
+// characters of letters, digits, '-' and '_' (an Enterprise Managed User's
+// login ends in _<shortcode>), not starting or ending with '-'. A bot's
+// "[bot]" suffix is outside the charset, so no bot login passes.
 func CheckGitHubLogin(login string) error {
 	if login == "" || len(login) > maxIntakeLoginLen || login[0] == '-' || login[len(login)-1] == '-' {
-		return errors.New("want a GitHub login: 1-39 characters of letters, digits and '-', not starting or ending with '-'")
+		return errors.New("want a GitHub login: 1-39 characters of letters, digits, '-' and '_', not starting or ending with '-'")
 	}
 	for _, r := range login {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 		default:
-			return errors.New("want a GitHub login: 1-39 characters of letters, digits and '-', not starting or ending with '-'")
+			return errors.New("want a GitHub login: 1-39 characters of letters, digits, '-' and '_', not starting or ending with '-'")
 		}
 	}
 	return nil
