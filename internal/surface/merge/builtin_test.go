@@ -70,16 +70,27 @@ func mergePathRoots(t *testing.T, root string) []string {
 	return roots
 }
 
+// blessRoots are the packages of the other gate ADR-0011 names: the bless
+// ceremony (internal/bless and the workflow package that runs it and hashes
+// with internal/digest), self-update, and the shipped agent skill.
+var blessRoots = []string{
+	modulePath + "/internal/bless",
+	modulePath + "/internal/workflow",
+	modulePath + "/internal/selfupdate",
+	modulePath + "/internal/skill",
+}
+
 // TestBuiltinRefusalsCoverTheGateClosure derives the module packages the
-// merge path compiles in, for each target OS, and checks a file in each one
-// is a built-in refusal. A new dependency of the gate fails here until
-// builtinRefusedGlobs lists it (T10.2 security review I2).
+// merge path and the bless ceremony compile in, for each target OS, and
+// checks a file in each one is a built-in refusal. A new dependency of
+// either gate fails here until builtinRefusedGlobs lists it (T10.2 security
+// review I2, T10.4 security review I1).
 func TestBuiltinRefusalsCoverTheGateClosure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs go list")
 	}
 	root := moduleRoot(t)
-	roots := mergePathRoots(t, root)
+	roots := append(mergePathRoots(t, root), blessRoots...)
 	seen := map[string]bool{}
 	for _, goos := range []string{"darwin", "linux", "windows"} {
 		args := append([]string{"list", "-deps", "-f", "{{.ImportPath}}"}, roots...)
@@ -96,7 +107,8 @@ func TestBuiltinRefusalsCoverTheGateClosure(t *testing.T) {
 			}
 		}
 	}
-	for _, want := range []string{"internal/surface/merge", "internal/githubauth", "internal/exec", "internal/termsafe", "internal/privdir"} {
+	for _, want := range []string{"internal/surface/merge", "internal/githubauth", "internal/exec", "internal/termsafe", "internal/privdir",
+		"internal/bless", "internal/workflow", "internal/digest", "internal/skill"} {
 		if !seen[modulePath+"/"+want] {
 			t.Fatalf("the closure lacks %s; the derivation is broken", want)
 		}
@@ -109,13 +121,24 @@ func TestBuiltinRefusalsCoverTheGateClosure(t *testing.T) {
 	for _, pkg := range pkgs {
 		file := strings.TrimPrefix(pkg, modulePath+"/") + "/x.go"
 		if builtinRefusal(file) == "" {
-			t.Errorf("%s is in the merge path's closure, but %s is not a built-in refusal: add its directory to builtinRefusedGlobs", pkg, file)
+			t.Errorf("%s is in a gate's closure (the merge path or the bless ceremony), but %s is not a built-in refusal: add its directory to builtinRefusedGlobs", pkg, file)
 		}
 	}
 	if t.Failed() {
 		return
 	}
-	t.Logf("%d module packages in the merge path's closure, all refused", len(pkgs))
+	t.Logf("%d module packages in the merge path's and the bless ceremony's closures, all refused", len(pkgs))
+}
+
+// TestBuiltinRefusalsShippedSkill pins that the agent skill the binary
+// embeds and installs is refused, not only its Go package.
+func TestBuiltinRefusalsShippedSkill(t *testing.T) {
+	for _, p := range []string{"internal/skill/skill/SKILL.md", "internal/skill/skill/references/x.md", "internal/skill/skill.go",
+		"internal/digest/digest.go", "internal/workflow/exec.go"} {
+		if builtinRefusal(p) == "" {
+			t.Errorf("%s is not refused", p)
+		}
+	}
 }
 
 // TestBuiltinRefusalsTopLevel pins that no file at the repository root is

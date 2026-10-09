@@ -63,9 +63,13 @@ func refusedRepoFor(name string, id int64) (refusedRepo, bool) {
 // .claude, scripts, the shipped helper), and every package compiled into
 // the merge path: the merge policy and status reads, the whole CLI package,
 // config resolution, launch, git and process plumbing, the host-pinned gh
-// runner, the bless and signing helpers, self-update, and every package
-// those import. TestBuiltinRefusalsCoverTheGateClosure derives that closure
-// from `go list -deps` and fails when a new dependency is not listed here.
+// runner, the bless and signing helpers with the workflow package the bless
+// ceremony runs in and the digest both hash with, self-update, the shipped
+// agent skill (internal/skill embeds SKILL.md and its references into the
+// binary, and `forgectl --skill --install` writes them into an agent's skills
+// directory), and every package those import.
+// TestBuiltinRefusalsCoverTheGateClosure derives that closure from
+// `go list -deps` and fails when a new dependency is not listed here.
 //
 // They are matched case-insensitively. A changed path is printable ASCII
 // (config.CheckChangedPath), so ASCII case folding is all a case-folding
@@ -79,6 +83,7 @@ var builtinRefusedGlobs = []string{
 	"internal/cli/**",
 	"internal/config/**",
 	"internal/desk/**",
+	"internal/digest/**",
 	"internal/exec/**",
 	"internal/forgive/**",
 	"internal/ghfail/**",
@@ -101,6 +106,7 @@ var builtinRefusedGlobs = []string{
 	"internal/runview/**",
 	"internal/sandbox/**",
 	"internal/selfupdate/**",
+	"internal/skill/**",
 	"internal/step/**",
 	"internal/surface/**",
 	"internal/termsafe/**",
@@ -108,6 +114,7 @@ var builtinRefusedGlobs = []string{
 	"internal/tmux/**",
 	"internal/tomlerr/**",
 	"internal/tui/**",
+	"internal/workflow/**",
 }
 
 // builtinRefusedBase are file names refused in any directory: the module
