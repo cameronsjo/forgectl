@@ -2,7 +2,7 @@
 status: in-flight
 next: "T10.1 (cadence-hooks metrics price) and T10.2 (ADR-0011 amendment, [surface.merge], surface status) in parallel; then T10.3 and T10.4."
 branch: plan/atelier-p4
-pr: "—"
+pr: "cameronsjo/forgectl#1207"
 updated: 2026-10-09
 approved_session_id: 30dd3ebb-3720-463f-aa15-9570c1ff88a9  # operator: 'own it and get it done', 2026-10-09; auto-merge approver chosen by the operator the same day
 date: 2026-10-09
@@ -134,11 +134,11 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 
 ### T10.2: ADR amendment, `[surface.merge]`, `surface status` (forgectl, one PR)
 
-- [ ] First commit: ADR-0011 amendment (2026-10-09): marker approver and its boundary, the deferred gate App, the built-in refusals, the honest audit claim, the composed merge message, and that `mode = "auto"` waits for the T10.4 security review.
-- [ ] Launch records `BranchFrom`, the repository's canonical `nameWithOwner` and `databaseId` on the ledger row; a drain launch whose `worker/<name>` already exists locally or on origin fails without creating anything.
-- [ ] `[surface.merge]` with the resolution rules above; `internal/surface/merge` with `Facts`, `Policy`, `Evaluate`.
-- [ ] `surface status` with the discovery filter, bound reads, cache and usage.
-- [ ] Fixtures captured first: cameronsjo/forgectl#1204 (merged worker PR), #1203 (markers at head and an earlier crit>0 marker), #1199 (rate-limited CodeRabbit status), #1195 (completed CodeRabbit review), plus a synthetic fork PR on the same head name. One test per predicate.
+- [x] First commit: ADR-0011 amendment (2026-10-09): marker approver and its boundary, the deferred gate App, the built-in refusals, the honest audit claim, the composed merge message, and that `mode = "auto"` waits for the T10.4 security review.
+- [x] Launch records `BranchFrom`, the repository's canonical `nameWithOwner` and `databaseId` on the ledger row; a drain launch whose `worker/<name>` already exists locally or on origin fails without creating anything.
+- [x] `[surface.merge]` with the resolution rules above; `internal/surface/merge` with `Facts`, `Policy`, `Evaluate`.
+- [x] `surface status` with the discovery filter, bound reads, cache and usage.
+- [x] Fixtures captured first: cameronsjo/forgectl#1204 (merged worker PR), #1203 (markers at head and an earlier crit>0 marker), #1199 (rate-limited CodeRabbit status), #1195 (completed CodeRabbit review), plus a synthetic fork PR on the same head name. One test per predicate.
 
 ### T10.3: closers and prune (forgectl, one PR; after T10.2)
 
@@ -180,5 +180,15 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **No gate App or ruleset check** (deferred with the worker App).
 - **No board `ready-to-close` and no issue-marker removal.**
 - **No CHANGELOG task for forgectl:** release-please writes it from commits.
+
+## Deviations
+
+- **T10.2, plan status:** set to `in-flight` in the first T10.2 commit, not the last: `planned` is outside the plans index's closed set and failed `TestPlansIndex` on the branch tip.
+- **T10.2, built-in path refusals:** besides the listed set, `internal/githubauth/**` (the host-pinned runner every gate read goes through), `internal/selfupdate/**`, `internal/bless/**` and `internal/cli/workflow_bless*` (the bless and signing helpers, named), `.coderabbit.yml` and `go.work.sum`; built-in refusals match case-insensitively, the per-repository globs case-sensitively. The ADR-0011 amendment names `internal/githubauth/**`.
+- **T10.2, approvers:** any one listed approver passing is enough, and CodeRabbit's thread, resolution and mention rules apply to the `coderabbit` approver only. A CodeRabbit thread counts as resolved only when `resolvedBy` is CodeRabbit's id; no capture shows what GitHub reports when CodeRabbit resolves its own thread, so the T10.4 live check should confirm it.
+- **T10.2, checks:** a required-name run from another workflow file or another app refuses; a run from the pinned file on another event (`push`) is ignored.
+- **T10.2, reads:** the "head descends from Base" half of predicate 3 is a second compare (`{Base}...{head}`); modes come from one tree listing per changed directory at the compare's merge base and at the head, not from base; the compare API lists files on its first page only (up to 300), so the file list is one page, count-checked. The checks query reads the PR's head and base again and fails the read if either moved.
+- **T10.2, launch identity:** an origin not on github.com records no identity and the launch goes on (that row is never eligible to merge); a drain launch also asks GitHub whether `worker/<name>` exists, in the identity query.
+- **T10.2, fixtures:** #1203 carries no crit>0 marker; the earlier-crit rule is tested on edited copies. A read-only live check (`FORGECTL_MERGE_LIVE=1`) reads #1204.
 
 ## Learnings
