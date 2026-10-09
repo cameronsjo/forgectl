@@ -491,7 +491,7 @@ func TestEvaluatePaths(t *testing.T) {
 	t.Run("file count differs from changedFiles", func(t *testing.T) {
 		f := passingFacts(t)
 		f.PR.ChangedFiles = 5
-		wantRefusal(t, evalManual(f), "has 4 entries, expected the PR's changedFiles 5")
+		wantRefusal(t, evalManual(f), "has 4 entries, expected the PR's changedFiles 5 (GitHub's compare lists at most 300 files")
 	})
 	t.Run("the real #1204 file list touches the built-in set", func(t *testing.T) {
 		cmp, err := DecodeCompare(readFixture(t, "compare_1204.json"))

@@ -6,7 +6,6 @@
 package merge
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -54,31 +53,26 @@ func firstError(errs []graphQLError) string {
 	return fmt.Sprintf("GitHub returned %d error(s), the first %q", len(errs), msg)
 }
 
-// DecodeIdentity reads an IdentityQuery response. Any GraphQL error refuses
-// it, as does a repository with no name or a non-positive id.
+// DecodeIdentity reads an IdentityQuery response through graphQLEnvelope:
+// any GraphQL error refuses it, as does a repository with no name or a
+// non-positive id. Every error wraps ErrIdentityResponse.
 func DecodeIdentity(data []byte) (Identity, error) {
-	var resp struct {
-		Data *struct {
-			Repository *struct {
-				DatabaseID    int64  `json:"databaseId"`
-				NameWithOwner string `json:"nameWithOwner"`
-				Ref           *struct {
-					Name string `json:"name"`
-				} `json:"ref"`
-			} `json:"repository"`
-		} `json:"data"`
-		Errors []graphQLError `json:"errors"`
+	var d struct {
+		Repository *struct {
+			DatabaseID    int64  `json:"databaseId"`
+			NameWithOwner string `json:"nameWithOwner"`
+			Ref           *struct {
+				Name string `json:"name"`
+			} `json:"ref"`
+		} `json:"repository"`
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return Identity{}, fmt.Errorf("%w: not JSON: %w", ErrIdentityResponse, err)
+	if err := graphQLEnvelope(data, &d); err != nil {
+		return Identity{}, fmt.Errorf("%w: %w", ErrIdentityResponse, err)
 	}
-	if len(resp.Errors) > 0 {
-		return Identity{}, fmt.Errorf("%w: %s", ErrIdentityResponse, firstError(resp.Errors))
-	}
-	if resp.Data == nil || resp.Data.Repository == nil {
+	r := d.Repository
+	if r == nil {
 		return Identity{}, fmt.Errorf("%w: no repository in the response", ErrIdentityResponse)
 	}
-	r := resp.Data.Repository
 	if r.DatabaseID <= 0 {
 		return Identity{}, fmt.Errorf("%w: the repository's databaseId is %d, expected a positive id", ErrIdentityResponse, r.DatabaseID)
 	}

@@ -426,7 +426,7 @@ var allowedStatus = []string{"added", "modified", "removed", "renamed"}
 // checkPaths is predicate 6.
 func checkPaths(f Facts, repo config.MergeRepo, add addFunc) {
 	if len(f.Files) != f.PR.ChangedFiles {
-		add("the file list has %d entries, expected the PR's changedFiles %d", len(f.Files), f.PR.ChangedFiles)
+		add("the file list has %d entries, expected the PR's changedFiles %d (GitHub's compare lists at most %d files, so a larger PR never passes)", len(f.Files), f.PR.ChangedFiles, MaxCompareFiles)
 	}
 	if len(f.Files) == 0 {
 		add("the PR changes no files, expected at least one")
