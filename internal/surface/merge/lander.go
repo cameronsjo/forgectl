@@ -60,8 +60,9 @@ type Outcome struct {
 type Lander struct {
 	// Read reads the facts with no cache (Reader.Read).
 	Read func(ctx context.Context, row Row) (Snapshot, error)
-	// Recheck reads the PR again (Reader.Recheck).
-	Recheck func(ctx context.Context, f Facts) ([]string, error)
+	// Recheck reads the PR and the named required checks again
+	// (Reader.Recheck).
+	Recheck func(ctx context.Context, f Facts, checks []string) ([]string, error)
 	// Landed reads what the merge left (Reader.Landed).
 	Landed func(ctx context.Context, f Facts) (Landing, error)
 	// Merge runs gh with args from a neutral working directory, through the
@@ -125,7 +126,8 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 	if err != nil {
 		return refuse([]string{err.Error()})
 	}
-	moved, err := l.Recheck(ctx, f)
+	repo, _ := s.Repo(f.Row.GitHubRepo) // Evaluate passed, so the repository is listed
+	moved, err := l.Recheck(ctx, f, repo.RequiredChecks)
 	if err != nil {
 		out.Result, out.Err = LandUnreadable, err
 		out.Reasons = []string{"the PR could not be read again before the merge: " + termsafe.SafeLineMax(err.Error(), maxGHError)}

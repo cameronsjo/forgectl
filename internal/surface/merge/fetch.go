@@ -200,15 +200,18 @@ func (r Reader) Discover(ctx context.Context, row Row) (Candidate, error) {
 	return SelectPR(disc, row.Branch, row.StartedAt)
 }
 
-// Recheck reads the PR again by number with PRQuery, just before a merge,
-// and returns what changed since f was read (Moved). The merge aborts on any
-// change.
-func (r Reader) Recheck(ctx context.Context, f Facts) ([]string, error) {
+// Recheck reads the PR again by number with PRQuery, and the check runs at
+// the verdict's head with ChecksQuery, just before a merge, and returns what
+// changed since f was read: Moved, a head or base the checks query names
+// differently, and ChecksMoved for the required checks named in checks. The
+// merge aborts on any change.
+func (r Reader) Recheck(ctx context.Context, f Facts, checks []string) ([]string, error) {
 	owner, name, err := SplitNameWithOwner(f.Row.GitHubRepo)
 	if err != nil {
 		return nil, ErrNoRecordedRepo
 	}
-	data, err := r.graphQL(ctx, PRQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+strconv.Itoa(f.PR.Number))
+	number := strconv.Itoa(f.PR.Number)
+	data, err := r.graphQL(ctx, PRQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +219,20 @@ func (r Reader) Recheck(ctx context.Context, f Facts) ([]string, error) {
 	if err != nil {
 		return nil, decodeErr(err)
 	}
-	return Moved(f, pr), nil
+	why := Moved(f, pr)
+	data, err = r.graphQL(ctx, ChecksQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number, "-f", "head="+f.PR.HeadRefOid)
+	if err != nil {
+		return nil, err
+	}
+	read, err := DecodeChecks(data, f.PR.HeadRefOid)
+	if err != nil {
+		return nil, decodeErr(err)
+	}
+	if read.HeadRefOid != f.PR.HeadRefOid || read.BaseRefOid != f.PR.BaseRefOid {
+		why = append(why, fmt.Sprintf("the checks read names head %s and base %s, the verdict had %s and %s",
+			short(read.HeadRefOid), short(read.BaseRefOid), short(f.PR.HeadRefOid), short(f.PR.BaseRefOid)))
+	}
+	return append(why, ChecksMoved(f.Checks, read.Runs, checks)...), nil
 }
 
 // Landing is what a merge left: whether GitHub says the PR merged, at which

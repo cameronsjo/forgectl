@@ -179,16 +179,62 @@ func TestRecheckAndLanded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	why, err := Reader{GH: fixtureGH{t: t}.runner()}.Recheck(ctx, snap.Facts)
+	required := []string{"build-test", "lint", "macos-test"}
+	why, err := Reader{GH: fixtureGH{t: t}.runner()}.Recheck(ctx, snap.Facts, required)
 	if err != nil || len(why) != 0 {
 		t.Fatalf("recheck of the same fixture: %q, %v", why, err)
 	}
+	// A required check re-run at the head between the verdict and the merge
+	// (T10.4 security review): running again, or failed, refuses.
+	checks := string(readFixture(t, "checks_1204.json"))
+	for name, edit := range map[string]func(string) string{
+		"re-run, in progress": func(c string) string {
+			return strings.Replace(c, `"name": "lint",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS"`, `"name": "lint",
+          "status": "IN_PROGRESS",
+          "conclusion": null`, 1)
+		},
+		"failed": func(c string) string {
+			return strings.Replace(c, `"name": "build-test",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS"`, `"name": "build-test",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE"`, 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := edit(checks)
+			if changed == checks {
+				t.Fatal("the fixture edit did not apply")
+			}
+			why, err := Reader{GH: fixtureGH{t: t, override: map[string]string{"checkSuites(first: 50)": changed}}.runner()}.Recheck(ctx, snap.Facts, required)
+			if err != nil || len(why) != 1 || !strings.Contains(why[0], "the runs of required check") {
+				t.Fatalf("recheck after a check changed: %q, %v", why, err)
+			}
+		})
+	}
+	// A run of a check outside the required set may change.
+	unrequired := strings.Replace(checks, `"name": "govulncheck",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS"`, `"name": "govulncheck",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE"`, 1)
+	if unrequired == checks {
+		t.Fatal("the govulncheck edit did not apply")
+	}
+	if why, err := (Reader{GH: fixtureGH{t: t, override: map[string]string{"checkSuites(first: 50)": unrequired}}.runner()}).Recheck(ctx, snap.Facts, required); err != nil || len(why) != 0 {
+		t.Fatalf("a change outside the required checks: %q, %v", why, err)
+	}
+	if _, err := (Reader{GH: fixtureGH{t: t, failOn: "checkSuites(first"}.runner()}).Recheck(ctx, snap.Facts, required); !errors.Is(err, ErrRead) {
+		t.Fatalf("a failed checks re-read: %v, want ErrRead", err)
+	}
 	moved := strings.Replace(string(readFixture(t, "pr_1204.json")), `"isDraft": false`, `"isDraft": true`, 1)
-	why, err = Reader{GH: fixtureGH{t: t, override: map[string]string{"reviews(first: 100)": moved}}.runner()}.Recheck(ctx, snap.Facts)
+	why, err = Reader{GH: fixtureGH{t: t, override: map[string]string{"reviews(first: 100)": moved}}.runner()}.Recheck(ctx, snap.Facts, required)
 	if err != nil || len(why) != 1 || !strings.Contains(why[0], "draft") {
 		t.Fatalf("recheck of a PR turned draft: %q, %v", why, err)
 	}
-	if _, err := (Reader{GH: fixtureGH{t: t, failOn: "reviews(first"}.runner()}).Recheck(ctx, snap.Facts); !errors.Is(err, ErrRead) {
+	if _, err := (Reader{GH: fixtureGH{t: t, failOn: "reviews(first"}.runner()}).Recheck(ctx, snap.Facts, required); !errors.Is(err, ErrRead) {
 		t.Fatalf("a failed recheck: %v, want ErrRead", err)
 	}
 

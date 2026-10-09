@@ -18,19 +18,21 @@ const (
 
 // fakeLand is a Lander over in-memory facts and an in-memory audit file.
 type fakeLand struct {
-	facts    Facts
-	hasPR    bool
-	readErr  error
-	moved    []string
-	recheck  error
-	merges   [][]string
-	mergeErr error
-	landing  Landing
-	landErr  error
-	landings int
-	sleeps   int
-	audit    []byte
-	auditErr error
+	facts   Facts
+	hasPR   bool
+	readErr error
+	moved   []string
+	recheck error
+	// recheckNames are the required checks Land asked Recheck to compare.
+	recheckNames []string
+	merges       [][]string
+	mergeErr     error
+	landing      Landing
+	landErr      error
+	landings     int
+	sleeps       int
+	audit        []byte
+	auditErr     error
 }
 
 func newFakeLand(t *testing.T) *fakeLand {
@@ -44,7 +46,10 @@ func (fl *fakeLand) lander() Lander {
 		Read: func(context.Context, Row) (Snapshot, error) {
 			return Snapshot{Facts: fl.facts, HasPR: fl.hasPR, NoPR: "merge: no pull request on the worker's branch"}, fl.readErr
 		},
-		Recheck: func(context.Context, Facts) ([]string, error) { return fl.moved, fl.recheck },
+		Recheck: func(_ context.Context, _ Facts, checks []string) ([]string, error) {
+			fl.recheckNames = checks
+			return fl.moved, fl.recheck
+		},
 		Landed: func(context.Context, Facts) (Landing, error) {
 			fl.landings++
 			return fl.landing, fl.landErr
@@ -94,6 +99,9 @@ func TestLandMerges(t *testing.T) {
 	}
 	if len(fl.merges) != 1 {
 		t.Fatalf("%d merges", len(fl.merges))
+	}
+	if want := goodSettings().Repos[0].RequiredChecks; len(want) == 0 || !slices.Equal(fl.recheckNames, want) {
+		t.Fatalf("the re-read compared checks %q, want the required %q", fl.recheckNames, want)
 	}
 	args := fl.merges[0]
 	want := []string{"pr", "merge", "1204", "-R", "github.com/cameronsjo/forgectl", "--squash", "--match-head-commit", head1204,

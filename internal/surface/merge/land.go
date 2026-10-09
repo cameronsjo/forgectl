@@ -1,6 +1,7 @@
 package merge
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -215,6 +216,62 @@ func Body(in BodyInput) string {
 	}
 	b.WriteString("\n" + in.By.Trailer() + "\n")
 	return b.String()
+}
+
+// ChecksMoved compares the check runs a verdict passed on with a fresh
+// checks read made just before the merge, and names each required check
+// whose runs changed: a run added or removed, or another status,
+// conclusion, event, workflow, app, branch or matched PR list. A re-run at
+// the head that turns a check from success to running or failed is such a
+// change. With no names, every run is compared.
+func ChecksMoved(before, after []CheckRun, names []string) []string {
+	if len(names) == 0 {
+		set := map[string]bool{}
+		for _, r := range slices.Concat(before, after) {
+			set[r.Name] = true
+		}
+		for n := range set {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+	}
+	runsOf := func(runs []CheckRun, name string) []CheckRun {
+		var out []CheckRun
+		for _, r := range runs {
+			if r.Name == name {
+				out = append(out, r)
+			}
+		}
+		slices.SortFunc(out, func(a, b CheckRun) int { return cmp.Compare(a.DatabaseID, b.DatabaseID) })
+		return out
+	}
+	var why []string
+	for _, name := range names {
+		a, b := runsOf(before, name), runsOf(after, name)
+		if !slices.EqualFunc(a, b, sameRun) {
+			why = append(why, fmt.Sprintf("the runs of required check %q changed (%s now, %s before)", name, runsSummary(b), runsSummary(a)))
+		}
+	}
+	return why
+}
+
+// sameRun reports whether two reads of a check run say the same thing.
+func sameRun(a, b CheckRun) bool {
+	return a.DatabaseID == b.DatabaseID && a.Name == b.Name && a.Status == b.Status && a.Conclusion == b.Conclusion &&
+		a.StartedAt == b.StartedAt && a.AppID == b.AppID && a.HasWorkflowRun == b.HasWorkflowRun && a.WorkflowPath == b.WorkflowPath &&
+		a.Event == b.Event && a.SuiteBranch == b.SuiteBranch && slices.Equal(a.SuitePRs, b.SuitePRs)
+}
+
+// runsSummary is a short list of runs for a reason: "run N STATUS/CONCLUSION".
+func runsSummary(runs []CheckRun) string {
+	if len(runs) == 0 {
+		return "no runs"
+	}
+	parts := make([]string, 0, len(runs))
+	for _, r := range runs {
+		parts = append(parts, fmt.Sprintf("run %d %s/%s", r.DatabaseID, r.Status, r.Conclusion))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Moved compares the facts a verdict passed on with a fresh PR read made

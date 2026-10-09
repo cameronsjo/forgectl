@@ -89,8 +89,8 @@ subject only when it matches
 ^(fix|feat|docs|refactor|test|chore)(\([a-z0-9-]+\))?: [ -~]{1,72}$ and holds
 no issue reference, issue or PR link, or CI-skip directive ([skip ci] and
 the like); otherwise the merge refuses. Just before merging, the PR's
-head, base branch, draft flag, state, reviews and comments are read again,
-and any change refuses. forgectl then writes an audit line and runs
+head, base branch, draft flag, state, reviews, comments and required check
+runs are read again, and any change refuses. forgectl then writes an audit line and runs
 gh pr merge <n> -R github.com/<owner>/<repo> --squash
 --match-head-commit <head> --subject <title> --body <body> from a new
 temporary directory, never --admin. The body is forgectl's own: the audit
