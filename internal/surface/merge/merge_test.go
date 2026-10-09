@@ -373,10 +373,26 @@ func TestEvaluateChecks(t *testing.T) {
 			t.Fatalf("%d ci.yml runs in the capture, expected build-test, lint and macos-test at least", n)
 		}
 	})
-	t.Run("a push-event run beside the pull_request run is ignored", func(t *testing.T) {
+	// A run of the pinned workflow on another event never counts toward a
+	// pass, but one that is not SUCCESS refuses, naming its event.
+	for name, c := range map[string]struct{ event, status, conclusion, want string }{
+		"a failed push run":                {"push", "COMPLETED", "FAILURE", `on event "push" that is COMPLETED/FAILURE`},
+		"a running workflow_dispatch run":  {"workflow_dispatch", "IN_PROGRESS", "", `on event "workflow_dispatch" that is IN_PROGRESS/none`},
+		"a cancelled schedule run":         {"schedule", "COMPLETED", "CANCELLED", `on event "schedule" that is COMPLETED/CANCELLED`},
+		"a failed run with no event named": {"", "COMPLETED", "FAILURE", `on event "" that is COMPLETED/FAILURE`},
+	} {
+		t.Run(name+" beside the pull_request run refuses", func(t *testing.T) {
+			f := passingFacts(t)
+			r := runNamed(f, "lint")
+			r.DatabaseID, r.StartedAt, r.Event, r.Status, r.Conclusion = r.DatabaseID+5, "2099-01-01T00:00:00Z", c.event, c.status, c.conclusion
+			f.Checks = append(f.Checks, r)
+			wantRefusal(t, evalManual(f), c.want)
+		})
+	}
+	t.Run("a successful push run beside the pull_request run passes", func(t *testing.T) {
 		f := passingFacts(t)
 		r := runNamed(f, "lint")
-		r.DatabaseID, r.StartedAt, r.Event, r.Conclusion = r.DatabaseID+5, "2099-01-01T00:00:00Z", "push", "FAILURE"
+		r.DatabaseID, r.StartedAt, r.Event = r.DatabaseID+5, "2099-01-01T00:00:00Z", "push"
 		f.Checks = append(f.Checks, r)
 		if v := evalManual(f); v.Result != Pass {
 			t.Fatalf("%s %q", v.Result, v.Reasons)

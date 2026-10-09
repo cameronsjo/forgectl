@@ -374,9 +374,11 @@ func checkPR(f Facts, add addFunc) {
 // count (the suite's head branch is the PR's, and its matching open PRs
 // include this one), so a run at the same commit for another PR cannot
 // stand in. Of those, for each required name: a run from another app or
-// workflow file, or with no workflow run, refuses; among the runs from the
-// pinned file on a pull_request event, any still running refuses, any that
-// concluded other than SUCCESS refuses, and at least one SUCCESS is needed.
+// workflow file, or with no workflow run, refuses; a run from the pinned
+// file on any other event (push, workflow_dispatch, schedule) never counts
+// and refuses unless it is SUCCESS; among the runs from the pinned file on a
+// pull_request event, any still running refuses, any that concluded other
+// than SUCCESS refuses, and at least one SUCCESS is needed.
 func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 	want := "/" + f.Repository.NameWithOwner + "/actions/workflows/" + path.Base(repo.Workflow)
 	tied := func(r CheckRun) bool {
@@ -397,6 +399,12 @@ func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 				add("check %q has a run (id %d) from workflow %s, expected only %s", name, r.DatabaseID, r.WorkflowPath, want)
 			case r.Event == "pull_request":
 				pinned = append(pinned, r)
+			case r.Status != "COMPLETED" || r.Conclusion != "SUCCESS":
+				// A run of the pinned file on another event (push,
+				// workflow_dispatch, schedule) never counts, but one that is
+				// not SUCCESS still refuses.
+				add("check %q has a run (id %d) from %s on event %q that is %s/%s, expected every run of the pinned workflow at the head to be COMPLETED/SUCCESS",
+					name, r.DatabaseID, repo.Workflow, r.Event, nonEmpty(r.Status, "unknown"), nonEmpty(r.Conclusion, "none"))
 			}
 		}
 		if len(pinned) == 0 {
