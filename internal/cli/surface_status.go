@@ -11,6 +11,7 @@ import (
 	osexec "os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -83,9 +84,14 @@ type statusPolicy struct {
 	Reasons []string `json:"reasons"`
 }
 
+// statusUsage is the session's cost. Priced is false when the transcript
+// used a model cadence-hooks has no price for: CostUSD then covers only the
+// priced models and is not the session's cost.
 type statusUsage struct {
-	CostUSD float64         `json:"costUsd"`
-	ByModel json.RawMessage `json:"byModel"`
+	CostUSD        float64         `json:"costUsd"`
+	ByModel        json.RawMessage `json:"byModel"`
+	Priced         bool            `json:"priced"`
+	UnpricedModels []string        `json:"unpricedModels"`
 }
 
 type statusOptions struct {
@@ -147,16 +153,21 @@ to be run again. The file list and modes are cached per head commit in the
 state directory.
 
 usage is the session's cost from "cadence-hooks metrics price" when
-cadence-hooks is on PATH and the row has a transcript, else null.
+cadence-hooks is on PATH and the row has a transcript, else null. When the
+transcript used a model with no price, priced is false and costUsd covers
+only the priced models: it is not the session's cost.
 
 --json prints {"name","repo","pr":{"number","url","state","isDraft",
 "headSha","baseRef","mergeable","mergeStateStatus","changedFiles"},
 "checks":[{"name","workflow","event","conclusion"}],"reviews":[{"reviewer",
 "sha","crit","imp","url"}],"policy":{"mode","verdict","reasons"},"usage":
-{"costUsd","byModel"}}; pr is null when the branch has no PR, and usage is
-null when it could not be priced. verdict is pass, refuse or off.
+{"costUsd","byModel","priced","unpricedModels"}}; pr is null when the branch
+has no PR, and usage is null when it could not be priced. verdict is pass,
+refuse or off. reviews lists the markers by [surface.merge]
+marker_author_id, the ones the verdict counts.
 
-Exit 0: status was read, whatever the verdict. Exit 1: GitHub could not be
+Exit 0: status was read, whatever the verdict (a recorded base GitHub does
+not have is a refusal reason). Exit 1: GitHub could not be
 read. Exit 2: a usage or setup error (no such worker, a row that records no
 GitHub repository).
 
@@ -296,13 +307,19 @@ func buildWorkerStatus(row worker.Row, snap merge.Snapshot, settings config.Merg
 			}
 			view.Checks = append(view.Checks, statusCheck{Name: c.Name, Workflow: c.WorkflowPath, Event: c.Event, Conclusion: c.Conclusion})
 		}
-		for _, r := range f.Reviews {
-			if r.Author.Typename != "User" || r.Author.DatabaseID != f.OperatorID {
-				continue
+		// The markers listed are the ones Evaluate counts: by
+		// marker_author_id, never by whoever gh is logged in as.
+		if settings.MarkerAuthorID > 0 {
+			for _, r := range f.Reviews {
+				if r.Author.Typename != "User" || r.Author.DatabaseID != settings.MarkerAuthorID {
+					continue
+				}
+				if m, ok := merge.ParseMarker(r.Body); ok {
+					view.Reviews = append(view.Reviews, statusReview{Reviewer: m.Reviewer, Sha: m.Head, Crit: m.Crit, Imp: m.Imp, URL: r.URL})
+				}
 			}
-			if m, ok := merge.ParseMarker(r.Body); ok {
-				view.Reviews = append(view.Reviews, statusReview{Reviewer: m.Reviewer, Sha: m.Head, Crit: m.Crit, Imp: m.Imp, URL: r.URL})
-			}
+		} else {
+			view.Notes = append(view.Notes, "no review markers listed: [surface.merge] marker_author_id is not set (or the policy did not resolve), so no account's markers count")
 		}
 		v = merge.Evaluate(f, merge.Policy{Settings: settings})
 		if snap.Cached {
@@ -344,12 +361,23 @@ func renderWorkerStatus(out io.Writer, v workerStatusView) error {
 		}
 		fmt.Fprintf(&b, "markers: %s\n", strings.Join(parts, ", "))
 	}
+	for _, n := range v.Notes {
+		fmt.Fprintf(&b, "note: %s\n", safe(n))
+	}
 	fmt.Fprintf(&b, "policy: %s, %s\n", safe(v.Policy.Mode), safe(v.Policy.Verdict))
 	for _, r := range v.Policy.Reasons {
 		fmt.Fprintf(&b, "  - %s\n", termsafe.SafeLineMax(r, 400))
 	}
-	if v.Usage != nil {
-		fmt.Fprintf(&b, "cost: $%.2f\n", v.Usage.CostUSD)
+	if u := v.Usage; u != nil {
+		if u.Priced {
+			fmt.Fprintf(&b, "cost: $%.2f\n", u.CostUSD)
+		} else {
+			names := make([]string, len(u.UnpricedModels))
+			for i, m := range u.UnpricedModels {
+				names[i] = safe(m)
+			}
+			fmt.Fprintf(&b, "cost: partial, $%.2f for the priced models only; no price for %s\n", u.CostUSD, strings.Join(names, ", "))
+		}
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
@@ -380,7 +408,9 @@ func nonEmptyStr(s, fallback string) string {
 // --json` (cameronsjo/cadence-hooks, T10.1) when cadence-hooks resolves on
 // PATH, with a timeout. Any failure (not on PATH, a non-zero exit, a
 // timeout, output that is not the expected JSON) is nil: usage is a nicety
-// and never fails status.
+// and never fails status. Model names come from the transcript, so control,
+// bidi and invisible characters are stripped from them before they are
+// shown; two names that strip to the same text drop usage.
 func priceTranscript(ctx context.Context, run exec.Runner, lookPath func(string) (string, error), transcript string) *statusUsage {
 	bin, err := lookPath("cadence-hooks")
 	if err != nil || bin == "" {
@@ -393,8 +423,9 @@ func priceTranscript(ctx context.Context, run exec.Runner, lookPath func(string)
 		return nil
 	}
 	var got struct {
-		CostUSD *float64        `json:"costUsd"`
-		ByModel json.RawMessage `json:"byModel"`
+		CostUSD        *float64        `json:"costUsd"`
+		ByModel        json.RawMessage `json:"byModel"`
+		UnpricedModels []string        `json:"unpricedModels"`
 	}
 	if json.Unmarshal([]byte(out), &got) != nil || got.CostUSD == nil || *got.CostUSD < 0 || math.IsNaN(*got.CostUSD) || math.IsInf(*got.CostUSD, 0) {
 		return nil
@@ -407,5 +438,43 @@ func priceTranscript(ctx context.Context, run exec.Runner, lookPath func(string)
 	if json.Unmarshal(by, &obj) != nil {
 		return nil
 	}
-	return &statusUsage{CostUSD: *got.CostUSD, ByModel: by}
+	clean := make(map[string]json.RawMessage, len(obj))
+	for k, v := range obj {
+		ck := cleanModelName(k)
+		if _, dup := clean[ck]; dup {
+			return nil
+		}
+		clean[ck] = v
+	}
+	// termsafe:allow-raw-json re-encodes a map of already-decoded JSON values; the document is written through writeJSON
+	cleanBy, err := json.Marshal(clean)
+	if err != nil {
+		return nil
+	}
+	unpriced := make([]string, 0, len(got.UnpricedModels))
+	for _, m := range got.UnpricedModels {
+		unpriced = append(unpriced, cleanModelName(m))
+	}
+	return &statusUsage{CostUSD: *got.CostUSD, ByModel: cleanBy, Priced: len(unpriced) == 0, UnpricedModels: unpriced}
+}
+
+// maxModelName caps a model name shown in usage.
+const maxModelName = 100
+
+// cleanModelName drops control, bidi and invisible characters and invalid
+// UTF-8 from a model name read from a transcript, and caps its length.
+func cleanModelName(s string) string {
+	kept := strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || termsafe.IsUnsafeTerminalRune(r) || termsafe.IsInvisibleRune(r) {
+			return -1
+		}
+		return r
+	}, s)
+	if r := []rune(kept); len(r) > maxModelName {
+		kept = string(r[:maxModelName])
+	}
+	if strings.TrimSpace(kept) == "" {
+		return "(unnamed model)"
+	}
+	return kept
 }

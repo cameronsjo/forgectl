@@ -162,6 +162,9 @@ type File struct {
 const (
 	CompareAhead     = "ahead"
 	CompareIdentical = "identical"
+	// CompareNotFound is not GitHub's: the compare answered 404, so one of
+	// its commits is not on GitHub.
+	CompareNotFound = "not-found"
 )
 
 // Facts is everything read for one worker's PR at one head SHA.
@@ -325,6 +328,10 @@ func checkRow(f Facts, add addFunc) {
 	}
 	if f.PR.HeadRefName != row.Branch {
 		add("the PR's head branch is %q, expected the worker's %q", f.PR.HeadRefName, row.Branch)
+	}
+	if f.BaseAncestry == CompareNotFound || f.HeadAncestry == CompareNotFound {
+		add("the worker's recorded base %s is not on GitHub (the compare answered 404), expected a commit the PR's base and head descend from", short(row.Base))
+		return
 	}
 	if f.BaseAncestry != CompareAhead && f.BaseAncestry != CompareIdentical {
 		add("the worker's base %s is not an ancestor of the PR's base %s (compare status %q, expected \"ahead\" or \"identical\")", short(row.Base), short(f.PR.BaseRefOid), f.BaseAncestry)

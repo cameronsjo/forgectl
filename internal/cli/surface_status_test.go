@@ -91,7 +91,7 @@ func statusTestDeps(t *testing.T, row worker.Row, gh *exec.FakeRunner, settings 
 			if transcript != "/t/session.jsonl" {
 				t.Errorf("priced %q", transcript)
 			}
-			return &statusUsage{CostUSD: 1.25, ByModel: json.RawMessage(`{"claude-opus-5-5":{"costUsd":1.25}}`)}
+			return &statusUsage{CostUSD: 1.25, ByModel: json.RawMessage(`{"claude-opus-5-5":{"costUsd":1.25}}`), Priced: true, UnpricedModels: []string{}}
 		},
 	}
 }
@@ -192,6 +192,37 @@ func TestSurfaceStatusOutcomes(t *testing.T) {
 		_, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, true), manualSettings()), "gh1175-forgectl")
 		if err == nil || ExitCode(err) != 1 || !errors.Is(err, merge.ErrRead) {
 			t.Fatalf("err %v, exit %d", err, ExitCode(err))
+		}
+	})
+	t.Run("markers are listed by marker_author_id, not the gh account", func(t *testing.T) {
+		other := manualSettings()
+		other.MarkerAuthorID = 556
+		out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), other), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"reviews": []`) {
+			t.Fatalf("another marker author: %v: %s", err, out)
+		}
+		unset := config.MergeSettings{Mode: config.MergeOff, OffReason: "[surface.merge] is not set"}
+		out, err = runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), unset), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, `"reviews": []`) || !strings.Contains(out, "marker_author_id is not set") {
+			t.Fatalf("no marker author: %v: %s", err, out)
+		}
+		text, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), statusGH(t, false), unset), "gh1175-forgectl")
+		if err != nil || !strings.Contains(text, "note: no review markers listed") || strings.Contains(text, "markers: ") {
+			t.Fatalf("no marker author, text: %v: %s", err, text)
+		}
+	})
+	t.Run("a recorded base GitHub does not have is a refusal, exit 0", func(t *testing.T) {
+		gh := statusGH(t, false)
+		inner := gh.RunFunc
+		gh.RunFunc = func(name string, args []string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "compare/"+statusRow1204().Base) {
+				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", ExitCode: 1, Err: errors.New("exit status 1")}
+			}
+			return inner(name, args)
+		}
+		out, err := runStatusCmd(t, statusTestDeps(t, statusRow1204(), gh, manualSettings()), "gh1175-forgectl", "--json")
+		if err != nil || !strings.Contains(out, "recorded base 2e469107d375 is not on GitHub") || !strings.Contains(out, `"verdict": "refuse"`) {
+			t.Fatalf("%v: %s", err, out)
 		}
 	})
 	t.Run("a row with no recorded repository exits 2", func(t *testing.T) {
@@ -297,6 +328,31 @@ func TestPriceTranscript(t *testing.T) {
 		if u := priceTranscript(ctx, run, found, "/t/s.jsonl"); u != nil {
 			t.Errorf("%s: %+v, want nil", name, u)
 		}
+	}
+	// Partial: an unpriced model makes usage partial, never the session's
+	// cost, and model names lose control, bidi and invisible characters.
+	partial := answer(`{"costUsd":1.5,"byModel":{"claude-opus-5-5\u202e":{"costUsd":1.5}},"unpricedModels":["my-\u001b[31mmodel\u200b"]}`, nil)
+	u = priceTranscript(ctx, partial, found, "/t/s.jsonl")
+	if u == nil || u.Priced || len(u.UnpricedModels) != 1 || u.UnpricedModels[0] != "my-[31mmodel" {
+		t.Fatalf("partial: %+v", u)
+	}
+	if string(u.ByModel) != `{"claude-opus-5-5":{"costUsd":1.5}}` {
+		t.Fatalf("partial byModel %s", u.ByModel)
+	}
+	if g := priceTranscript(ctx, good, found, "/t/s.jsonl"); g == nil || !g.Priced || len(g.UnpricedModels) != 0 {
+		t.Fatal("a fully priced transcript is not priced")
+	}
+	collide := answer(`{"costUsd":1,"byModel":{"m":{},"m\u200b":{}},"unpricedModels":[]}`, nil)
+	if u := priceTranscript(ctx, collide, found, "/t/s.jsonl"); u != nil {
+		t.Fatalf("two names that strip to one: %+v, want nil", u)
+	}
+	var b strings.Builder
+	if err := renderWorkerStatus(&b, workerStatusView{Name: "w", Repo: "o/r", Policy: statusPolicy{Mode: "off", Verdict: "off"},
+		Usage: &statusUsage{CostUSD: 1.5, Priced: false, UnpricedModels: []string{"local-llm"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "cost: partial, $1.50 for the priced models only; no price for local-llm") || strings.Contains(b.String(), "cost: $") {
+		t.Fatalf("partial text: %s", b.String())
 	}
 	never := answer("", nil)
 	if u := priceTranscript(ctx, never, missing, "/t/s.jsonl"); u != nil || len(never.Calls) != 0 {

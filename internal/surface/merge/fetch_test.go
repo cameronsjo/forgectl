@@ -3,6 +3,7 @@ package merge
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +17,8 @@ type fixtureGH struct {
 	t        *testing.T
 	override map[string]string // a key's substring to a replacement body
 	failOn   string
+	// notFoundOn makes the matching call fail as gh does on HTTP 404.
+	notFoundOn string
 }
 
 func (g fixtureGH) runner() *exec.FakeRunner {
@@ -26,6 +29,9 @@ func (g fixtureGH) runner() *exec.FakeRunner {
 		joined := strings.Join(args, " ")
 		if g.failOn != "" && strings.Contains(joined, g.failOn) {
 			return "", errors.New("HTTP 502")
+		}
+		if g.notFoundOn != "" && strings.Contains(joined, g.notFoundOn) {
+			return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", ExitCode: 1, Err: errors.New("exit status 1")}
 		}
 		for k, v := range g.override {
 			if strings.Contains(joined, k) {
@@ -140,5 +146,27 @@ func TestReaderReadRefuses(t *testing.T) {
 	snap, err := Reader{GH: fixtureGH{t: t, override: map[string]string{"viewer { login": noPR}}.runner()}.Read(ctx, row1204())
 	if err != nil || snap.HasPR || !strings.Contains(snap.NoPR, "no pull request") {
 		t.Fatalf("no PR: %+v, %v", snap, err)
+	}
+}
+
+// TestReaderReadBaseNotOnGitHub: a recorded base GitHub does not have makes
+// the ancestry compares answer 404, which is a refusal reason, not a failed
+// read.
+func TestReaderReadBaseNotOnGitHub(t *testing.T) {
+	snap, err := Reader{GH: fixtureGH{t: t, notFoundOn: "compare/" + rowBase1204}.runner()}.Read(context.Background(), row1204())
+	if err != nil {
+		t.Fatalf("a 404 compare failed the read: %v", err)
+	}
+	if snap.Facts.BaseAncestry != CompareNotFound || snap.Facts.HeadAncestry != CompareNotFound {
+		t.Fatalf("ancestry %q %q, want %q", snap.Facts.BaseAncestry, snap.Facts.HeadAncestry, CompareNotFound)
+	}
+	v := evalManual(snap.Facts)
+	wantRefusal(t, v, "the worker's recorded base 2e469107d375 is not on GitHub")
+	if slices.ContainsFunc(v.Reasons, func(r string) bool { return strings.Contains(r, "compare status") }) {
+		t.Fatalf("reasons %q; the 404 should be said once, not as an ancestry status", v.Reasons)
+	}
+	// Any other failure of the same compare is still a failed read.
+	if _, err := (Reader{GH: fixtureGH{t: t, failOn: "compare/" + rowBase1204}.runner()}).Read(context.Background(), row1204()); !errors.Is(err, ErrRead) {
+		t.Fatalf("a 502 compare: %v, want ErrRead", err)
 	}
 }

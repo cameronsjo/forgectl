@@ -87,6 +87,13 @@ func (r Reader) rest(ctx context.Context, p string) ([]byte, error) {
 	return []byte(out), nil
 }
 
+// notFound reports a gh call GitHub answered with HTTP 404.
+func notFound(err error) bool {
+	var ce *exec.CommandError
+	// Matched against the raw stderr, never rendered: Error() redacts it.
+	return errors.As(err, &ce) && ce.Name == "gh" && strings.Contains(ce.Stderr, "HTTP 404")
+}
+
 func decodeErr(err error) error {
 	if err == nil {
 		return nil
@@ -163,8 +170,14 @@ func (r Reader) Read(ctx context.Context, row Row) (Snapshot, error) {
 	return snap, nil
 }
 
+// compareStatus is compare(from...to).status. A compare GitHub answers
+// with 404 (a commit it does not have, such as a recorded base that was
+// never pushed) is CompareNotFound: a refusal reason, not a failed read.
 func (r Reader) compareStatus(ctx context.Context, owner, name, from, to string) (string, error) {
 	data, err := r.rest(ctx, "repos/"+owner+"/"+name+"/compare/"+from+"..."+to+"?per_page=1")
+	if notFound(err) {
+		return CompareNotFound, nil
+	}
 	if err != nil {
 		return "", err
 	}
