@@ -274,3 +274,37 @@ func TestCloseWorkerLedgerWriteFailure(t *testing.T) {
 		t.Fatalf("a clean close reported a ledger failure: %+v", res)
 	}
 }
+
+// A relaunch under the same name after close read the row (here, between
+// steps) refuses inspect and remove before either touches the worktree,
+// which is found by name and would be the new launch's.
+func TestRealCloseStepsRefuseARelaunchedRow(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const repo = "/repo/relaunch"
+	led, err := worker.Open(repo, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := led.Rows()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %+v, %v", rows, err)
+	}
+	steps := realCloseSteps(nil, noCloser{}, led, repo, rows[0])
+	// The old row is closed and forgotten, and the name launched again.
+	if err := led.RemoveIf("w", worker.SameRow(rows[0])); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := steps.inspect(t.Context()); err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("inspect after a relaunch: %v, want a refusal", err)
+	}
+	if err := steps.remove(t.Context(), "/repo/relaunch/.claude/worktrees/w"); err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("remove after a relaunch: %v, want a refusal", err)
+	}
+}

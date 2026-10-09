@@ -291,4 +291,6 @@ Each row forces one check to pass with a temporary edit (cp backup, the edit, `g
 | 11i | audit: refusals limited | `TestAuditRefusalsAreRateLimited`, `TestLandRefusesAndAudits` |
 | 11j | audit: the chain check | `TestAuditChain` |
 
+- **T10.3 independent review (chief-of-staff), closer race:** the closer acts on a ledger row read at the start of the tick, after the watch, the PR reads and pricing. It now checks the queue row is still the one read (`worker.SameRead`) before the close, and the drain's close re-reads the ledger row and requires `worker.SameRow` right before anything is closed or inspected, so a close or relaunch by hand in that window is left alone. A closed ledger row with `closed_at` also stays while the worktree it records exists, like a row without `closed_at`.
+
 ## Learnings

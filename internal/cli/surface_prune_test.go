@@ -46,6 +46,8 @@ func testPruneDeps(t *testing.T, q *worker.Queue, live map[string]bool, herdrErr
 		},
 		appendUsage: files.AppendUsage,
 		cache:       mustStatusCache(t),
+		// The seeded worktree paths do not exist.
+		worktreeGone: func(string) (bool, error) { return true, nil },
 	}
 }
 

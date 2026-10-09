@@ -131,6 +131,7 @@ func TestPlanPruneClosedLedgerRows(t *testing.T) {
 		Ledgers: []PruneLedger{{ID: pid, Rows: []worker.Row{
 			withWT(closedAt(lrow("closed-yesterday", "", worker.StageClosed, old, false), young), "/wt/a"),
 			withWT(closedAt(lrow("closed-long-ago", "", worker.StageClosed, old, false), old), "/wt/b"),
+			withWT(closedAt(lrow("closed-long-ago-kept", "", worker.StageClosed, old, false), old), "/wt/present"),
 			withWT(lrow("untimed-gone", "", worker.StageClosed, old, false), "/wt/gone"),
 			withWT(lrow("untimed-present", "", worker.StageClosed, old, false), "/wt/present"),
 			withWT(lrow("untimed-unknown", "", worker.StageClosed, old, false), "/wt/unknown"),
@@ -153,18 +154,22 @@ func TestPlanPruneClosedLedgerRows(t *testing.T) {
 		t.Fatalf("remove %s, want %s", got, want)
 	}
 	for name, want := range map[string]string{
-		"closed-yesterday": "not older than the cutoff",
-		"untimed-present":  "still exists",
-		"untimed-unknown":  "cannot be checked: permission denied",
-		"untimed-no-path":  "no recorded worktree path",
-		"untimed-young":    "has no closed_at, not older than the cutoff",
+		"closed-yesterday":     "not older than the cutoff",
+		"untimed-present":      "still exists",
+		"closed-long-ago-kept": "kept worktree /wt/present still exists",
+		"untimed-unknown":      "cannot be checked: permission denied",
+		"untimed-no-path":      "no recorded worktree path",
+		"untimed-young":        "has no closed_at, not older than the cutoff",
 	} {
 		if got := reasonOf(t, p.Keep, PruneKindLedger, name); !strings.Contains(got, want) {
 			t.Errorf("%s kept for %q, want %q", name, got, want)
 		}
 	}
-	if asked["/wt/a"] || asked["/wt/b"] || asked["/wt/gone-young"] {
-		t.Fatalf("the worktree was checked for a row with closed_at or inside the cutoff: %v", asked)
+	if asked["/wt/a"] || asked["/wt/gone-young"] {
+		t.Fatalf("the worktree was checked for a row inside the cutoff: %v", asked)
+	}
+	if !asked["/wt/b"] {
+		t.Fatal("an old closed row's worktree was not checked before removing it")
 	}
 }
 

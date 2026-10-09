@@ -177,6 +177,12 @@ func PlanPrune(in PruneInput) PrunePlan {
 					it.Reason = fmt.Sprintf("started %s and has no closed_at, not older than the cutoff %s", it.At.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
 				}
 			case r.ClosedAt != nil:
+				// The row is the only record of a worktree its close kept, so
+				// it stays while that worktree exists.
+				if why := keptWorktreeReason(r, in.WorktreeGone); why != "" {
+					it.Reason = why
+					break
+				}
 				it.Reason = fmt.Sprintf("closed %s, older than the cutoff", it.At.UTC().Format(time.RFC3339))
 				p.Remove = append(p.Remove, it)
 				continue
@@ -292,4 +298,24 @@ func UsageLines(rows []worker.QueueRow) []UsageLine {
 // the UTC day it last ran ("" for never).
 func PruneDue(lastDay string, now time.Time) bool {
 	return lastDay != now.UTC().Format(worker.UTCDayLayout)
+}
+
+// keptWorktreeReason returns why a closed ledger row with a closed_at must
+// stay because its recorded worktree may still exist, or "" when it records
+// no worktree or the worktree is gone.
+func keptWorktreeReason(r worker.Row, gone func(string) (bool, error)) string {
+	if r.Worktree == "" {
+		return ""
+	}
+	if gone == nil {
+		return fmt.Sprintf("closed, and its worktree %s cannot be checked", r.Worktree)
+	}
+	ok, err := gone(r.Worktree)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("closed, and its worktree %s cannot be checked: %v", r.Worktree, err)
+	case !ok:
+		return fmt.Sprintf("closed, and its kept worktree %s still exists; run surface close %s once its work is saved", r.Worktree, r.Name)
+	}
+	return ""
 }
