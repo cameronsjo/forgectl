@@ -57,7 +57,7 @@ A session on the operator's identity, a misled worker included, can post a passi
 [surface.merge]
 mode = "off"                       # off | manual | auto; missing table or any error resolves to off
 machine = "<12-hex>"               # digest of hostname + salt; a mismatch resolves to off
-approvers = ["cadence-review"]     # cadence-review and coderabbit are implemented
+approvers = ["cadence-review"]     # cadence-review is the one approver implemented
 marker_author_id = 0               # the operator's numeric GitHub user id; required whenever mode is not off
 required_reviewers = ["cadence-forge-security-reviewer", "polish"]
 method = "squash"
@@ -82,7 +82,7 @@ The verdict is `pass` only when every predicate holds at one head SHA:
 6. **Paths:** every changed path matches the repo's globs, segment-wise, case-sensitively, against the exact bytes. Refused whatever the config says: a path with an empty, `.` or `..` segment, a leading `/`, a backslash, a control byte, a non-ASCII byte or invalid UTF-8; file status other than added, modified, removed or renamed (renames checked under both names); any mode other than `100644` or a mode change; a removed `*_test.go`; any `go.mod`, `go.sum` or `go.work`; every top-level file (any path with no `/`: `main.go`, `go.mod`, `.golangci.yml`, `.goreleaser.yaml`, the release-please files, `AGENTS.md`, `CLAUDE.md`, `.coderabbit.yaml`, and any root configuration added later); `.github/**`, `.claude/**`, `scripts/**`, `helper/**`, `internal/cli/**`, and the bless, signing and self-update helpers; and every package compiled into the merge path (`internal/surface/**`, `internal/config/**`, `internal/launch/**`, `internal/pr/**`, `internal/module/**`, `internal/termsafe/**`, `internal/privdir/**`, `internal/gitenv/**`, `internal/exec/**`, `internal/githubauth/**` and the rest of their imports, listed in `internal/surface/merge/builtin.go`), derived by a `go list -deps` test.
 7. **Approver:**
    - **`cadence-review`:** reviews by `marker_author_id` (`User`, state `COMMENTED` or `APPROVED`, `submittedAt` set, never `PENDING`), whose first line matches `^<!-- cadence-review: [a-z0-9-]{1,40} head=[0-9a-f]{40} crit=(0|[1-9][0-9]{0,3}) imp=(0|[1-9][0-9]{0,3}) -->$` with no BOM or leading space. Each name in `required_reviewers` needs its latest marker at the head, with `head=` equal to the review's commit and `crit=0 imp=0`. Any reviewer whose latest marker anywhere reports crit or imp above 0 and has no later passing marker at the head refuses.
-   - **`coderabbit`:** a review by user id 136622811 at the head with a completed-review body (shape pinned by the cameronsjo/forgectl#1195 fixture), no unresolved bot threads, no non-bot resolution of a bot thread, and no non-bot `@coderabbitai` mention.
+   - **`coderabbit`:** dropped (see Deviations, T10.2 independent review): it reviewed only 2 to 5 of the last 25 merged PRs per repository, and its findings live only in review bodies and its mentions are editable comments, so no rule over them could be made sound. Any `approvers` entry other than `cadence-review` refuses at load; the key stays a list for a future approver with an identity a worker cannot use.
 
 ### Merging (T10.4)
 
@@ -119,7 +119,7 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 ## Alternatives declined
 
 - **Defer the autopilot until workers have their own identity.** Recommended; declined by the operator for the marker.
-- **CodeRabbit only.** Rarely fires while CodeRabbit is rate limited; kept as a second approver.
+- **CodeRabbit only.** Rarely fires while CodeRabbit is rate limited. It was first kept as a second approver, then dropped in the T10.2 independent review (see Deviations).
 - **The gate App and required ruleset check (ADR-0011 item 1).** Deferred with the worker App (forgectl#1134); without a worker App it adds no protection against a worker that can merge directly.
 - **Ship-gate refusing releases that contain a drain merge.** The built-in path refusals keep the gate and CI out of drain merges; the rest is what auto-merge is for.
 - **A refused-paths denylist alone.** Kept only as the built-in floor under the per-repo allowlist.
@@ -176,7 +176,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 
 ## Deviations from the parent plan
 
-- **Approver:** `cadence-review` markers beside `coderabbit` (operator, 2026-10-09). The parent plan's Goal, Alternatives declined and Global Constraints still name CodeRabbit only; its Deviations section records this.
+- **Approver:** `cadence-review` markers, first beside `coderabbit` (operator, 2026-10-09), then alone once `coderabbit` was dropped the same day (see Deviations). The parent plan's Goal, Alternatives declined and Global Constraints still name CodeRabbit only; its Deviations section records this.
 - **No gate App or ruleset check** (deferred with the worker App).
 - **No board `ready-to-close` and no issue-marker removal.**
 - **No CHANGELOG task for forgectl:** release-please writes it from commits.
@@ -197,5 +197,6 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.2 review fixes, launch identity:** a drain launch whose `worker/<name>` exists stays refused, and the error now names the way out (delete the branch locally and on origin, then dequeue and enqueue; or enqueue under a new name), since `surface close` keeps the branch. A hand launch reads the identity best-effort: a failed read warns once, records none, and goes on. A drain launch's failed read is a new class, `ErrGitHubRead`, that requeues the row with no attempt counted and pauses claiming (`github`); the pause is re-checked each tick by letting one claim through, and a successful launch clears it. This supersedes the earlier "a failed read fails the launch" for hand launches.
 - **T10.2 review fixes, status:** a compare GitHub answers 404 (a recorded base it does not have) is a refusal reason, exit 0, not a failed read; `reviews` lists markers by `marker_author_id`, not the gh account, and none with a note when it is unset; `usage` gained `priced` and `unpricedModels`, and an unpriced model makes the cost partial, shown as such; model names are stripped of control, bidi and invisible characters.
 - **T10.2, fixtures:** #1203 carries no crit>0 marker; the earlier-crit rule is tested on edited copies. A read-only live check (`FORGECTL_MERGE_LIVE=1`) reads #1204.
+- **T10.2 independent review (chief-of-staff), `coderabbit` dropped:** the `coderabbit` approver is removed from the implemented set, config validation (an `approvers` entry other than `cadence-review` refuses at load), `Evaluate`, the docs and ADR-0011's amendment: it reviewed only 2 to 5 of the last 25 merged PRs per repository, and its findings live only in review bodies and its mentions are editable comments, so no rule over them could be made sound. The PR query no longer reads review threads or the PR description, which only its thread and mention rules used, and the `pr_1195.json` and `pr_1199.json` fixtures are gone (`checks_1199.json` stays for the commit-status test). This supersedes the "T10.2, approvers" entry, the `coderabbit` case in "review fix C1" and the PR-description part of "review nits".
 
 ## Learnings

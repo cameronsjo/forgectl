@@ -13,14 +13,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// GitHub identities the policy matches by numeric id, never by login.
-const (
-	// CodeRabbitUserID is coderabbitai[bot]'s user id.
-	CodeRabbitUserID int64 = 136622811
-	// GitHubActionsAppID is the GitHub Actions app's id; a required check
-	// run must come from it.
-	GitHubActionsAppID int64 = 15368
-)
+// GitHubActionsAppID is the GitHub Actions app's id, matched by number,
+// never by name; a required check run must come from it.
+const GitHubActionsAppID int64 = 15368
 
 // Result is a verdict's outcome.
 type Result string
@@ -77,12 +72,9 @@ type Repository struct {
 
 // PullRequest is the PR's state, read in one query bound to HeadRefOid.
 type PullRequest struct {
-	Number int
-	URL    string
-	Title  string
-	// Body is the PR description; only the @coderabbitai mention rule
-	// reads it.
-	Body              string
+	Number            int
+	URL               string
+	Title             string
 	State             string
 	IsDraft           bool
 	IsCrossRepository bool
@@ -133,18 +125,10 @@ type Review struct {
 	CommitOID string
 }
 
-// Comment is a PR or review-thread comment.
+// Comment is a PR conversation comment.
 type Comment struct {
 	Author Actor
 	Body   string
-}
-
-// Thread is a review thread.
-type Thread struct {
-	IsResolved bool
-	// ResolvedBy is nil when no one, or no readable account, resolved it.
-	ResolvedBy *Actor
-	Comments   []Comment
 }
 
 // File is one changed file, from the compare of base and head, with its
@@ -176,7 +160,6 @@ type Facts struct {
 	PR         PullRequest
 	Checks     []CheckRun
 	Reviews    []Review
-	Threads    []Thread
 	// Comments are the PR's conversation comments.
 	Comments []Comment
 	Files    []File
@@ -501,7 +484,7 @@ func checkModes(file File, add addFunc) {
 // whichever approver passes.
 func checkApprovers(f Facts, s config.MergeSettings, add addFunc) {
 	if len(s.Approvers) == 0 {
-		add("[surface.merge] approvers is empty, expected cadence-review or coderabbit")
+		add("[surface.merge] approvers is empty, expected cadence-review")
 		return
 	}
 	var why []string
@@ -510,8 +493,6 @@ func checkApprovers(f Facts, s config.MergeSettings, add addFunc) {
 		switch a {
 		case config.MergeApproverCadenceReview:
 			r = cadenceReview(f, s)
-		case config.MergeApproverCodeRabbit:
-			r = codeRabbit(f)
 		default:
 			r = []string{fmt.Sprintf("approver %q is not implemented", a)}
 		}
@@ -566,8 +547,8 @@ func passingAt(m marker, head string) bool {
 
 // checkOpenFindings refuses a reviewer whose latest marker with a Critical
 // or Important finding, at any commit, has no later passing marker at the
-// head. It runs under every approver set (ADR-0011, 2026-10-09 amendment,
-// decision 1): a passing CodeRabbit review never silences an open finding.
+// head. It runs outside the approver loop, so it refuses under every approver
+// set (ADR-0011, 2026-10-09 amendment, decision 1).
 func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 	if s.MarkerAuthorID <= 0 {
 		add("[surface.merge] marker_author_id is not set, expected the operator's id: open cadence-review findings cannot be read without it")
@@ -637,75 +618,6 @@ func latestMarker(ms []marker) marker {
 		}
 	}
 	return last
-}
-
-// codeRabbitStatusLine marks a completed CodeRabbit review body, as the
-// captured cameronsjo/forgectl#1195 review carries it.
-const codeRabbitStatusLine = "<!-- This is an auto-generated comment by CodeRabbit for review status -->"
-
-var (
-	codeRabbitFirstLine = regexp.MustCompile(`^\*\*Actionable comments posted: (0|[1-9][0-9]{0,3})\*\*$`)
-	codeRabbitRange     = regexp.MustCompile(`(?m)^Reviewing files that changed from the base of the PR and between [0-9a-f]{40} and ([0-9a-f]{40})\.$`)
-)
-
-// CompletedCodeRabbitReview reports whether body has the shape of a
-// completed CodeRabbit review of head: the "Actionable comments posted"
-// first line, the review-status marker, and the commit range ending at
-// head.
-func CompletedCodeRabbitReview(body, head string) bool {
-	first, _, _ := strings.Cut(body, "\n")
-	if !codeRabbitFirstLine.MatchString(first) || !strings.Contains(body, codeRabbitStatusLine) {
-		return false
-	}
-	m := codeRabbitRange.FindAllStringSubmatch(body, -1)
-	return len(m) == 1 && m[0][1] == head
-}
-
-func isCodeRabbit(a Actor) bool { return a.DatabaseID == CodeRabbitUserID }
-
-// codeRabbit returns why the coderabbit approver does not pass, or nothing
-// when it does.
-func codeRabbit(f Facts) []string {
-	var why []string
-	head := f.PR.HeadRefOid
-	if !slices.ContainsFunc(f.Reviews, func(r Review) bool {
-		return isCodeRabbit(r.Author) && r.Author.Typename == "Bot" && r.CommitOID == head &&
-			(r.State == "COMMENTED" || r.State == "APPROVED") && CompletedCodeRabbitReview(r.Body, head)
-	}) {
-		why = append(why, fmt.Sprintf("coderabbit: no completed review by user %d at head %s (a commit status such as \"Review rate limited\" never counts)", CodeRabbitUserID, short(head)))
-	}
-	for _, t := range f.Threads {
-		if len(t.Comments) == 0 || !isCodeRabbit(t.Comments[0].Author) {
-			continue
-		}
-		switch {
-		case !t.IsResolved:
-			why = append(why, "coderabbit: a CodeRabbit review thread is unresolved, expected every bot thread resolved by the bot")
-		case t.ResolvedBy == nil || !isCodeRabbit(*t.ResolvedBy):
-			by := "an unreadable account"
-			if t.ResolvedBy != nil {
-				by = who(*t.ResolvedBy)
-			}
-			why = append(why, fmt.Sprintf("coderabbit: a CodeRabbit thread was resolved by %s, expected the bot (%d)", by, CodeRabbitUserID))
-		}
-	}
-	mention := func(c Comment) bool {
-		return !isCodeRabbit(c.Author) && strings.Contains(strings.ToLower(c.Body), "@coderabbitai")
-	}
-	all := append(slices.Clone(f.Comments), Comment{Author: f.PR.Author, Body: f.PR.Body})
-	for _, r := range f.Reviews {
-		all = append(all, Comment{Author: r.Author, Body: r.Body})
-	}
-	for _, t := range f.Threads {
-		all = append(all, t.Comments...)
-	}
-	for _, c := range all {
-		if mention(c) {
-			why = append(why, fmt.Sprintf("coderabbit: %s mentioned @coderabbitai, expected no non-bot mention", who(c.Author)))
-			break
-		}
-	}
-	return why
 }
 
 func who(a Actor) string {

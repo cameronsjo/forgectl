@@ -42,7 +42,7 @@ func statusGH(t *testing.T, fail bool) *exec.FakeRunner {
 		switch {
 		case strings.Contains(j, "viewer { login databaseId }"):
 			return mergeFixture(t, "discover_1204.json"), nil
-		case strings.Contains(j, "reviewThreads(first: 100)"):
+		case strings.Contains(j, "reviews(first: 100)"):
 			return mergeFixture(t, "pr_1204.json"), nil
 		case strings.Contains(j, "checkSuites(first: 50)"):
 			return mergeFixture(t, "checks_1204.json"), nil

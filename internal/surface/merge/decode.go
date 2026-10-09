@@ -38,8 +38,8 @@ const DiscoverQuery = `query($owner: String!, $name: String!, $head: String!) {
   }
 }`
 
-// PRQuery reads one PR: its state, its reviews, review threads and
-// conversation comments.
+// PRQuery reads one PR: its state, its reviews and its conversation
+// comments.
 const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     databaseId
@@ -49,7 +49,6 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
       number
       url
       title
-      body
       state
       isDraft
       isCrossRepository
@@ -72,17 +71,6 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
           url
           body
           commit { oid }
-        }
-      }
-      reviewThreads(first: 100) {
-        pageInfo { hasNextPage }
-        nodes {
-          isResolved
-          resolvedBy { __typename login databaseId }
-          comments(first: 100) {
-            pageInfo { hasNextPage }
-            nodes { author { ` + actorFields + ` } body }
-          }
         }
       }
       comments(first: 100) {
@@ -293,7 +281,6 @@ type PRRead struct {
 	Repository Repository
 	PR         PullRequest
 	Reviews    []Review
-	Threads    []Thread
 	Comments   []Comment
 }
 
@@ -310,7 +297,6 @@ func DecodePR(data []byte) (PRRead, error) {
 				Number            int    `json:"number"`
 				URL               string `json:"url"`
 				Title             string `json:"title"`
-				Body              string `json:"body"`
 				State             string `json:"state"`
 				IsDraft           bool   `json:"isDraft"`
 				IsCrossRepository bool   `json:"isCrossRepository"`
@@ -341,17 +327,6 @@ func DecodePR(data []byte) (PRRead, error) {
 						} `json:"commit"`
 					} `json:"nodes"`
 				} `json:"reviews"`
-				ReviewThreads *struct {
-					PageInfo pageInfo `json:"pageInfo"`
-					Nodes    []struct {
-						IsResolved bool   `json:"isResolved"`
-						ResolvedBy *Actor `json:"resolvedBy"`
-						Comments   struct {
-							PageInfo pageInfo  `json:"pageInfo"`
-							Nodes    []comment `json:"nodes"`
-						} `json:"comments"`
-					} `json:"nodes"`
-				} `json:"reviewThreads"`
 				Comments *struct {
 					PageInfo pageInfo  `json:"pageInfo"`
 					Nodes    []comment `json:"nodes"`
@@ -373,13 +348,13 @@ func DecodePR(data []byte) (PRRead, error) {
 	if p == nil {
 		return PRRead{}, fmt.Errorf("%w: no pull request in the response", ErrResponse)
 	}
-	if p.Reviews == nil || p.ReviewThreads == nil || p.Comments == nil {
-		return PRRead{}, fmt.Errorf("%w: the pull request has no reviews, reviewThreads or comments connection", ErrResponse)
+	if p.Reviews == nil || p.Comments == nil {
+		return PRRead{}, fmt.Errorf("%w: the pull request has no reviews or comments connection", ErrResponse)
 	}
 	for _, c := range []struct {
 		what string
 		pi   pageInfo
-	}{{"the review list", p.Reviews.PageInfo}, {"the review thread list", p.ReviewThreads.PageInfo}, {"the comment list", p.Comments.PageInfo}} {
+	}{{"the review list", p.Reviews.PageInfo}, {"the comment list", p.Comments.PageInfo}} {
 		if err := remaining(c.what, c.pi); err != nil {
 			return PRRead{}, err
 		}
@@ -391,7 +366,7 @@ func DecodePR(data []byte) (PRRead, error) {
 		return *a
 	}
 	out := PRRead{Repository: repo, PR: PullRequest{
-		Number: p.Number, URL: p.URL, Title: p.Title, Body: p.Body, State: p.State, IsDraft: p.IsDraft, IsCrossRepository: p.IsCrossRepository,
+		Number: p.Number, URL: p.URL, Title: p.Title, State: p.State, IsDraft: p.IsDraft, IsCrossRepository: p.IsCrossRepository,
 		Author: actor(p.Author), BaseRefName: p.BaseRefName, BaseRefOid: p.BaseRefOid, HeadRefName: p.HeadRefName, HeadRefOid: p.HeadRefOid,
 		Mergeable: p.Mergeable, MergeStateStatus: p.MergeStateStatus, ChangedFiles: p.ChangedFiles,
 	}}
@@ -413,20 +388,6 @@ func DecodePR(data []byte) (PRRead, error) {
 			rv.CommitOID = r.Commit.OID
 		}
 		out.Reviews = append(out.Reviews, rv)
-	}
-	for _, t := range p.ReviewThreads.Nodes {
-		if err := remaining("a review thread's comment list", t.Comments.PageInfo); err != nil {
-			return PRRead{}, err
-		}
-		th := Thread{IsResolved: t.IsResolved}
-		if t.ResolvedBy != nil {
-			a := *t.ResolvedBy
-			th.ResolvedBy = &a
-		}
-		for _, c := range t.Comments.Nodes {
-			th.Comments = append(th.Comments, Comment{Author: actor(c.Author), Body: c.Body})
-		}
-		out.Threads = append(out.Threads, th)
 	}
 	for _, c := range p.Comments.Nodes {
 		out.Comments = append(out.Comments, Comment{Author: actor(c.Author), Body: c.Body})

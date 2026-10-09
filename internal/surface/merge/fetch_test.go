@@ -42,7 +42,7 @@ func (g fixtureGH) runner() *exec.FakeRunner {
 		switch {
 		case strings.Contains(joined, "viewer { login databaseId }"):
 			file = "discover_1204.json"
-		case strings.Contains(joined, "reviewThreads(first: 100)"):
+		case strings.Contains(joined, "reviews(first: 100)"):
 			file = "pr_1204.json"
 		case strings.Contains(joined, "checkSuites(first: 50)"):
 			file = "checks_1204.json"
@@ -132,7 +132,7 @@ func TestReaderReadRefuses(t *testing.T) {
 	if _, err := (Reader{GH: fixtureGH{t: t}.runner()}).Read(ctx, Row{Name: "x", Branch: "worker/x"}); !errors.Is(err, ErrNoRecordedRepo) {
 		t.Fatalf("no recorded repo: %v", err)
 	}
-	for _, fail := range []string{"viewer { login", "reviewThreads(first", "checkSuites(first", "compare/" + base1204, "git/trees/", "compare/" + rowBase1204} {
+	for _, fail := range []string{"viewer { login", "reviews(first", "checkSuites(first", "compare/" + base1204, "git/trees/", "compare/" + rowBase1204} {
 		_, err := Reader{GH: fixtureGH{t: t, failOn: fail}.runner()}.Read(ctx, row1204())
 		if !errors.Is(err, ErrRead) {
 			t.Errorf("failing %q: %v, want ErrRead", fail, err)

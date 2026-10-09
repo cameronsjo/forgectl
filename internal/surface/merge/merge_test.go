@@ -14,11 +14,11 @@ import (
 // Fixtures (testdata) are live, read-only captures from cameronsjo/forgectl
 // on 2026-10-09, made with the exact DiscoverQuery, PRQuery and ChecksQuery
 // in decode.go: #1204 (a merged drain worker PR on worker/gh1175-forgectl),
-// #1203 (cadence-review markers at head d2a35ddc and earlier heads), #1199
-// (a "Review rate limited" CodeRabbit commit status and no CodeRabbit
-// review), #1195 (a completed CodeRabbit review with one unresolved thread).
-// They are trimmed to keep them small: review and comment bodies other than
-// CodeRabbit's review are cut to their first line, the compare response
+// #1203 (cadence-review markers at head d2a35ddc and earlier heads), and the
+// #1199 checks (a "Review rate limited" CodeRabbit commit status). The PR
+// fixtures were captured with a query that also read review threads and is
+// a superset of today's. They are trimmed to keep them small: review and
+// comment bodies are cut to their first line, the compare response
 // keeps only status and the file list, and each tree keeps only the changed
 // files' entries. discover_synthetic_fork.json is the #1204 discovery with
 // three PRs added on the same head name that the filter must drop.
@@ -87,7 +87,7 @@ func passingFacts(t *testing.T) Facts {
 			Base: base1204, GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: forgectlID, QueueLaunchID: "launch-abc", QueueState: "reported",
 		},
 		Repository: pr.Repository, OperatorID: operatorID, PR: pr.PR, Checks: checks.Runs, Reviews: reviews,
-		Threads: pr.Threads, Comments: pr.Comments, Files: files,
+		Comments: pr.Comments, Files: files,
 		BaseAncestry: CompareIdentical, HeadAncestry: CompareAhead,
 	}
 }
@@ -590,6 +590,11 @@ func TestEvaluateCadenceReview(t *testing.T) {
 			t.Fatalf("%s %q", v.Result, v.Reasons)
 		}
 	})
+	t.Run("no marker_author_id refuses", func(t *testing.T) {
+		s := goodSettings()
+		s.MarkerAuthorID = 0
+		wantRefusal(t, Evaluate(passingFacts(t), Policy{Settings: s}), "marker_author_id is not set")
+	})
 	// Each of these marker reviews is not counted, so polish has no marker.
 	notCounted := map[string]func(Review) Review{
 		"another author id": func(r Review) Review { r.Author.DatabaseID = 556; return r },
@@ -675,180 +680,6 @@ func TestParseMarker(t *testing.T) {
 		if _, ok := ParseMarker(line); ok {
 			t.Errorf("%s parsed: %q", name, line)
 		}
-	}
-}
-
-// Predicate 7: the coderabbit approver.
-func TestEvaluateCodeRabbit(t *testing.T) {
-	s := goodSettings()
-	s.Approvers = []string{config.MergeApproverCodeRabbit}
-	pr1195 := decodePRFixture(t, "pr_1195.json")
-	const head1195 = "1f01561d92018670e354cb381780908fd3286f3d"
-	at1195 := func(t *testing.T) Facts {
-		f := passingFacts(t)
-		// Clones: the subtests below edit these in place.
-		f.PR.HeadRefOid, f.Reviews, f.Threads, f.Comments = head1195, slices.Clone(pr1195.Reviews), slices.Clone(pr1195.Threads), slices.Clone(pr1195.Comments)
-		return f
-	}
-	t.Run("the real #1195: a completed review, one unresolved thread", func(t *testing.T) {
-		wantRefusal(t, Evaluate(at1195(t), Policy{Settings: s}), "a CodeRabbit review thread is unresolved")
-	})
-	resolve := func(f *Facts, by *Actor) {
-		for i := range f.Threads {
-			f.Threads[i].IsResolved, f.Threads[i].ResolvedBy = true, by
-		}
-	}
-	bot := &Actor{Typename: "User", Login: "coderabbitai", DatabaseID: CodeRabbitUserID}
-	t.Run("the thread resolved by the bot passes", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
-			t.Fatalf("%s %q", v.Result, v.Reasons)
-		}
-	})
-	cases := map[string]struct {
-		mutate func(*Facts)
-		want   string
-	}{
-		"thread resolved by the operator": {func(f *Facts) { resolve(f, &Actor{Typename: "User", Login: "cameronsjo", DatabaseID: operatorID}) },
-			`resolved by user "cameronsjo"`},
-		"thread resolved by no one readable": {func(f *Facts) { resolve(f, nil) }, "resolved by an unreadable account"},
-		"a non-bot @coderabbitai mention": {func(f *Facts) {
-			resolve(f, bot)
-			f.Comments = append(f.Comments, Comment{Author: Actor{Typename: "User", Login: "cameronsjo", DatabaseID: operatorID}, Body: "@CodeRabbitAI resolve"})
-		}, "mentioned @coderabbitai"},
-		"a mention in a review body": {func(f *Facts) {
-			resolve(f, bot)
-			f.Reviews = append(f.Reviews, Review{Author: Actor{Typename: "User", DatabaseID: operatorID, Login: "cameronsjo"}, Body: "ping @coderabbitai", State: "COMMENTED"})
-		}, "mentioned @coderabbitai"},
-		"a mention in the PR body": {func(f *Facts) {
-			resolve(f, bot)
-			f.PR.Body = "Summary\n\n@coderabbitai summary"
-		}, "mentioned @coderabbitai"},
-		"the review is at an older head": {func(f *Facts) {
-			resolve(f, bot)
-			f.PR.HeadRefOid = head1204
-		}, "no completed review by user 136622811 at head 3afe70e8bff8"},
-		"the review is by another id": {func(f *Facts) {
-			resolve(f, bot)
-			for i := range f.Reviews {
-				f.Reviews[i].Author.DatabaseID = 1
-			}
-		}, "no completed review by user 136622811"},
-		"the review body is not a completed review": {func(f *Facts) {
-			resolve(f, bot)
-			for i := range f.Reviews {
-				if isCodeRabbit(f.Reviews[i].Author) {
-					f.Reviews[i].Body = "Review skipped"
-				}
-			}
-		}, "no completed review"},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := at1195(t)
-			c.mutate(&f)
-			wantRefusal(t, Evaluate(f, Policy{Settings: s}), c.want)
-		})
-	}
-	// C1 (T10.2 security review): an open cadence-review finding refuses
-	// under every approver set, so a passing CodeRabbit review never
-	// silences it.
-	t.Run("a passing CodeRabbit review does not silence an open finding", func(t *testing.T) {
-		both := goodSettings()
-		both.Approvers = []string{config.MergeApproverCadenceReview, config.MergeApproverCodeRabbit}
-		for name, settings := range map[string]config.MergeSettings{"coderabbit only": s, "cadence-review and coderabbit": both} {
-			t.Run(name, func(t *testing.T) {
-				f := at1195(t)
-				resolve(&f, bot)
-				if v := Evaluate(f, Policy{Settings: settings}); v.Result != Pass {
-					t.Fatalf("control: CodeRabbit passing alone: %s %q", v.Result, v.Reasons)
-				}
-				f.Reviews = append(f.Reviews, markerReview("cadence-forge-security-reviewer", head1195, 2, 0, "2026-10-09T23:00:00Z"))
-				wantRefusal(t, Evaluate(f, Policy{Settings: settings}), "open finding: cadence-forge-security-reviewer reported crit=2 imp=0")
-			})
-		}
-	})
-	t.Run("an open finding at an older head, cleared later at the head, passes", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		f.Reviews = append(f.Reviews,
-			markerReview("cadence-forge-security-reviewer", head1204, 1, 1, "2026-10-09T22:00:00Z"),
-			markerReview("cadence-forge-security-reviewer", head1195, 0, 0, "2026-10-09T23:00:00Z"))
-		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
-			t.Fatalf("%s %q", v.Result, v.Reasons)
-		}
-	})
-	t.Run("no marker_author_id refuses under coderabbit too", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		noID := s
-		noID.MarkerAuthorID = 0
-		wantRefusal(t, Evaluate(f, Policy{Settings: noID}), "marker_author_id is not set")
-	})
-	t.Run("the real #1199: rate limited, no review", func(t *testing.T) {
-		pr := decodePRFixture(t, "pr_1199.json")
-		f := passingFacts(t)
-		f.PR.HeadRefOid, f.Reviews, f.Threads, f.Comments = pr.PR.HeadRefOid, pr.Reviews, pr.Threads, pr.Comments
-		wantRefusal(t, Evaluate(f, Policy{Settings: s}), "a commit status such as \"Review rate limited\" never counts")
-	})
-	t.Run("either approver passing is enough", func(t *testing.T) {
-		both := goodSettings()
-		both.Approvers = []string{config.MergeApproverCadenceReview, config.MergeApproverCodeRabbit}
-		if v := Evaluate(passingFacts(t), Policy{Settings: both}); v.Result != Pass {
-			t.Fatalf("cadence-review passing, coderabbit not: %s %q", v.Result, v.Reasons)
-		}
-		f := at1195(t)
-		resolve(&f, bot)
-		f.Reviews = slices.DeleteFunc(f.Reviews, func(r Review) bool { return !isCodeRabbit(r.Author) })
-		if v := Evaluate(f, Policy{Settings: both}); v.Result != Pass {
-			t.Fatalf("coderabbit passing, cadence-review not: %s %q", v.Result, v.Reasons)
-		}
-		// #1195's own cadence-review markers pass at its head; drop them so
-		// neither approver passes.
-		f = at1195(t)
-		f.Reviews = slices.DeleteFunc(f.Reviews, func(r Review) bool { return !isCodeRabbit(r.Author) })
-		v := Evaluate(f, Policy{Settings: both})
-		wantRefusal(t, v, "no approver passed the head")
-		wantRefusal(t, v, "cadence-review: no cadence-forge-security-reviewer marker")
-		wantRefusal(t, v, "coderabbit: a CodeRabbit review thread is unresolved")
-	})
-}
-
-// TestDecodePRBody pins that the PR body is read, so the @coderabbitai
-// mention rule can see it. The captured fixtures predate the field.
-func TestDecodePRBody(t *testing.T) {
-	pr := string(readFixture(t, "pr_1204.json"))
-	withBody := strings.Replace(pr, `"title": `, `"body": "ping @coderabbitai", "title": `, 1)
-	if withBody == pr {
-		t.Fatal("the fixture edit did not apply")
-	}
-	r, err := DecodePR([]byte(withBody))
-	if err != nil || r.PR.Body != "ping @coderabbitai" {
-		t.Fatalf("body %q, %v", r.PR.Body, err)
-	}
-}
-
-func TestCompletedCodeRabbitReview(t *testing.T) {
-	pr := decodePRFixture(t, "pr_1195.json")
-	const head = "1f01561d92018670e354cb381780908fd3286f3d"
-	var body string
-	for _, r := range pr.Reviews {
-		if isCodeRabbit(r.Author) {
-			body = r.Body
-		}
-	}
-	if !CompletedCodeRabbitReview(body, head) {
-		t.Fatal("the captured #1195 review is not read as completed")
-	}
-	if CompletedCodeRabbitReview(body, head1204) {
-		t.Fatal("a review of another head counted")
-	}
-	if CompletedCodeRabbitReview(strings.Replace(body, codeRabbitStatusLine, "", 1), head) {
-		t.Fatal("a body without the review-status marker counted")
-	}
-	if CompletedCodeRabbitReview(" "+body, head) {
-		t.Fatal("a body with a different first line counted")
 	}
 }
 
