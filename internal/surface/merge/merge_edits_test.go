@@ -246,3 +246,11 @@ func TestDecodePRReadsEditsAndInlineComments(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateUnreadFactsRefuse pins that a fact the reads could not gather
+// (too many directories to read modes from, say) refuses.
+func TestEvaluateUnreadFactsRefuse(t *testing.T) {
+	f := passingFacts(t)
+	f.Unread = []string{"file modes: the changes span 101 directory listings, more than the 100 one read makes"}
+	wantRefusal(t, evalManual(f), "not read: file modes: the changes span 101 directory listings")
+}
