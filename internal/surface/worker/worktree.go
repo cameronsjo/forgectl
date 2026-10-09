@@ -154,11 +154,20 @@ var ErrBranchExists = errors.New("worker: the branch already exists")
 func CheckBranchNew(ctx context.Context, run GitRunner, top, branch string) error {
 	switch branchSource(ctx, run, top, branch) {
 	case BranchLocal:
-		return fmt.Errorf("%w: %q is a local branch in %s; a drain worker starts on a new branch", ErrBranchExists, branch, top)
+		return fmt.Errorf("%w: %q is a local branch in %s; a drain worker starts on a new branch: %s", ErrBranchExists, branch, top, BranchExistsRemedy(top, branch))
 	case BranchOrigin:
-		return fmt.Errorf("%w: origin/%s exists in %s; a drain worker starts on a new branch", ErrBranchExists, branch, top)
+		return fmt.Errorf("%w: origin/%s exists in %s; a drain worker starts on a new branch: %s", ErrBranchExists, branch, top, BranchExistsRemedy(top, branch))
 	}
 	return nil
+}
+
+// BranchExistsRemedy is the way out of ErrBranchExists for a queued row: the
+// old branch goes, locally and on origin, and the row is queued again, or
+// the work is queued under another name (and so another branch). A branch
+// left by `surface close` is the usual case: close keeps the branch.
+func BranchExistsRemedy(top, branch string) string {
+	return fmt.Sprintf("delete the old branch locally and on origin (git -C %s branch -D %s, then git -C %s push origin --delete %s) and run surface dequeue and surface enqueue again, or enqueue under a new name",
+		top, branch, top, branch)
 }
 
 // Where a worker's branch comes from.

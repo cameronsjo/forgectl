@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestWorkerRepoIdentity(t *testing.T) {
 	ctx := context.Background()
 	t.Run("github origin records GitHub's name and id", func(t *testing.T) {
 		run := identityFake("git@github.com:CameronSjo/ForgeCtl.git", identityFound, nil, "")
-		id, err := workerRepoIdentity(ctx, run, "/top", "worker/w1", true)
+		id, err := workerRepoIdentity(ctx, run, io.Discard, "/top", "worker/w1", true)
 		if err != nil || id != (repoIdentity{NameWithOwner: "cameronsjo/forgectl", DatabaseID: 1252924951}) {
 			t.Fatalf("identity %+v, %v", id, err)
 		}
@@ -73,39 +74,64 @@ func TestWorkerRepoIdentity(t *testing.T) {
 	t.Run("a non-GitHub origin records nothing and asks GitHub nothing", func(t *testing.T) {
 		for _, origin := range []string{"git@gitlab.com:o/r.git", ""} {
 			run := identityFake(origin, identityFound, nil, "")
-			if id, err := workerRepoIdentity(ctx, run, "/top", "worker/w1", false); err != nil || id != (repoIdentity{}) || ghCalls(run) != 0 {
+			if id, err := workerRepoIdentity(ctx, run, io.Discard, "/top", "worker/w1", false); err != nil || id != (repoIdentity{}) || ghCalls(run) != 0 {
 				t.Fatalf("origin %q: %+v, %v, %d gh calls", origin, id, err, ghCalls(run))
 			}
 		}
 	})
-	t.Run("a GitHub read failure fails the launch", func(t *testing.T) {
-		for name, run := range map[string]*exec.FakeRunner{
+	failing := func() map[string]*exec.FakeRunner {
+		return map[string]*exec.FakeRunner{
 			"gh fails":      identityFake("git@github.com:o/r.git", "", errors.New("HTTP 502"), ""),
 			"bad response":  identityFake("git@github.com:o/r.git", `{"data":{"repository":null}}`, nil, ""),
 			"graphql error": identityFake("git@github.com:o/r.git", `{"errors":[{"message":"nope"}]}`, nil, ""),
-		} {
-			if _, err := workerRepoIdentity(ctx, run, "/top", "worker/w1", false); err == nil || !strings.Contains(err.Error(), "which a worker launch records") {
-				t.Errorf("%s: %v, want a launch failure naming the identity read", name, err)
+		}
+	}
+	t.Run("a GitHub read failure fails a drain launch, classed GitHub unreadable", func(t *testing.T) {
+		for name, run := range failing() {
+			_, err := workerRepoIdentity(ctx, run, io.Discard, "/top", "worker/w1", true)
+			if !errors.Is(err, errIdentityRead) || !strings.Contains(err.Error(), "which a worker launch records") {
+				t.Errorf("%s: %v, want errIdentityRead naming the identity read", name, err)
+			}
+			if got := classifyLaunchError(err); got != drain.ErrGitHubRead {
+				t.Errorf("%s: class %v, want ErrGitHubRead (pause, no attempt spent)", name, got)
+			}
+		}
+	})
+	t.Run("a GitHub read failure warns once and goes on for a launch by hand", func(t *testing.T) {
+		for name, run := range failing() {
+			var warn strings.Builder
+			id, err := workerRepoIdentity(ctx, run, &warn, "/top", "worker/w1", false)
+			if err != nil || id != (repoIdentity{}) {
+				t.Errorf("%s: %+v, %v; want no identity and no error", name, id, err)
+			}
+			if w := warn.String(); strings.Count(w, "\n") != 1 || !strings.HasPrefix(w, "forgectl: warning: ") || !strings.Contains(w, "the merge policy never passes it") {
+				t.Errorf("%s: warning %q; want one line", name, w)
 			}
 		}
 	})
 	t.Run("a drain branch that exists is refused", func(t *testing.T) {
 		local := identityFake("git@github.com:o/r.git", identityFound, nil, "refs/heads/worker/w1")
-		if _, err := workerRepoIdentity(ctx, local, "/top", "worker/w1", true); !errors.Is(err, worker.ErrBranchExists) || ghCalls(local) != 0 {
+		if _, err := workerRepoIdentity(ctx, local, io.Discard, "/top", "worker/w1", true); !errors.Is(err, worker.ErrBranchExists) || ghCalls(local) != 0 {
 			t.Fatalf("local branch: %v, %d gh calls; want ErrBranchExists before any GitHub call", err, ghCalls(local))
 		}
 		tracking := identityFake("git@github.com:o/r.git", identityFound, nil, "refs/remotes/origin/worker/w1")
-		if _, err := workerRepoIdentity(ctx, tracking, "/top", "worker/w1", true); !errors.Is(err, worker.ErrBranchExists) {
+		if _, err := workerRepoIdentity(ctx, tracking, io.Discard, "/top", "worker/w1", true); !errors.Is(err, worker.ErrBranchExists) {
 			t.Fatalf("origin/<branch>: %v, want ErrBranchExists", err)
 		}
 		remote := identityFake("git@github.com:o/r.git", identityHasRef, nil, "")
-		if _, err := workerRepoIdentity(ctx, remote, "/top", "worker/w1", true); !errors.Is(err, worker.ErrBranchExists) || !strings.Contains(err.Error(), "exists on GitHub") {
+		_, err := workerRepoIdentity(ctx, remote, io.Discard, "/top", "worker/w1", true)
+		if !errors.Is(err, worker.ErrBranchExists) || !strings.Contains(err.Error(), "exists on GitHub") {
 			t.Fatalf("GitHub branch: %v, want ErrBranchExists naming GitHub", err)
+		}
+		for _, want := range []string{"git -C /top branch -D worker/w1", "git -C /top push origin --delete worker/w1", "enqueue under a new name"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("GitHub branch: %q does not name the way out %q", err, want)
+			}
 		}
 	})
 	t.Run("a CLI launch keeps an existing branch", func(t *testing.T) {
 		run := identityFake("git@github.com:o/r.git", identityHasRef, nil, "refs/heads/worker/w1")
-		if id, err := workerRepoIdentity(ctx, run, "/top", "worker/w1", false); err != nil || id.DatabaseID == 0 {
+		if id, err := workerRepoIdentity(ctx, run, io.Discard, "/top", "worker/w1", false); err != nil || id.DatabaseID == 0 {
 			t.Fatalf("CLI launch: %+v, %v", id, err)
 		}
 	})

@@ -28,6 +28,10 @@ const (
 	ErrLaunchConfig
 	// ErrOther: anything else.
 	ErrOther
+	// ErrGitHubRead: GitHub could not be read for the repository identity
+	// the launch records (gh failed, or its answer was unusable), before
+	// anything was created.
+	ErrGitHubRead
 )
 
 // Attempt is what one launch left: the error class and text, whether it is
@@ -59,6 +63,9 @@ const (
 	// Cleared only by the next drain start, after the operator fixes [launch]
 	// or TMPDIR.
 	PauseLaunchConfig PauseKind = "launch-config"
+	// PauseGitHub: GitHub could not be read at launch. Re-checked each tick:
+	// one claim goes through, and its read is the check.
+	PauseGitHub PauseKind = "github"
 )
 
 // LaunchDecision is the row change a launch attempt leads to, and a pause to
@@ -75,8 +82,8 @@ type LaunchDecision struct {
 //   - the row failed its re-check: failed, no attempt counted.
 //   - a ledger row already holds the name: failed. The attempt created
 //     nothing, but a retry would only hit that row again.
-//   - GitHub auth, herdr unreachable, or a launch config that cannot build
-//     a worker, having created nothing: back to
+//   - GitHub auth, GitHub unreadable, herdr unreachable, or a launch config
+//     that cannot build a worker, having created nothing: back to
 //     queued, no attempt counted, and claiming pauses with that reason.
 //   - any other failure that created nothing: back to queued with one more
 //     attempt, or failed at MaxAttempts.
@@ -96,6 +103,8 @@ func DecideLaunch(q worker.QueueRow, a Attempt) LaunchDecision {
 		d.Pause, d.PauseReason = PauseHerdr, "herdr is unreachable: "+a.Err
 	case ErrLaunchConfig:
 		d.Pause, d.PauseReason = PauseLaunchConfig, "the launch configuration cannot build a worker: "+a.Err
+	case ErrGitHubRead:
+		d.Pause, d.PauseReason = PauseGitHub, "GitHub could not be read: "+a.Err
 	}
 	switch {
 	case a.Class == ErrNone:

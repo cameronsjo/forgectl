@@ -280,6 +280,46 @@ func TestDrainTickPauses(t *testing.T) {
 			t.Fatalf("status %s, want paused", st.Status)
 		}
 	})
+	t.Run("github unreadable: requeued, no attempt, one probe a tick, cleared by a launch", func(t *testing.T) {
+		f, d, q := newFakeDrain(t)
+		enqueueAt(t, q, "w", "/repo/a", drainT0)
+		enqueueAt(t, q, "x", "/repo/b", drainT0.Add(time.Minute))
+		down := true
+		f.launch = func(worker.QueueRow) drain.Attempt {
+			if down {
+				return drain.Attempt{Class: drain.ErrGitHubRead, Err: "HTTP 502", CreatedNothing: true}
+			}
+			return drain.Attempt{}
+		}
+		for tick := 1; tick <= 3; tick++ {
+			d.tick(t.Context())
+			if len(f.launched) != tick {
+				t.Fatalf("tick %d: launched %v; want one probe per tick while GitHub is unreadable", tick, f.launched)
+			}
+			for _, name := range []string{"w", "x"} {
+				if r := rowNamed(t, q, name); r.State != worker.QueueQueued || r.Attempts != 0 {
+					t.Fatalf("tick %d: row %s is %s with %d attempts; want queued, no attempt spent", tick, name, r.State, r.Attempts)
+				}
+			}
+			if !strings.Contains(d.pauses.Reason(), "GitHub could not be read: HTTP 502") {
+				t.Fatalf("tick %d: pause %q", tick, d.pauses.Reason())
+			}
+		}
+		down = false
+		d.tick(t.Context())
+		if d.pauses.Paused() {
+			t.Fatalf("GitHub back: pause %q still held", d.pauses.Reason())
+		}
+		if r := rowNamed(t, q, "w"); r.State != worker.QueueLaunched {
+			t.Fatalf("GitHub back: row w is %s", r.State)
+		}
+	})
+	t.Run("an identity read failure classifies as GitHub unreadable", func(t *testing.T) {
+		err := fmt.Errorf("forgectl: read o/r's repository name and id from GitHub, which a worker launch records: %w: %w", errIdentityRead, errors.New("HTTP 502"))
+		if got := classifyLaunchError(err); got != drain.ErrGitHubRead {
+			t.Fatalf("class %v, want ErrGitHubRead", got)
+		}
+	})
 	t.Run("herdr down: no claim, retried each tick", func(t *testing.T) {
 		f, d, q := newFakeDrain(t)
 		enqueueAt(t, q, "w", "/repo/a", drainT0)

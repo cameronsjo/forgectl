@@ -259,7 +259,7 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
 	return workerSteps{
 		identify: func(ctx context.Context) (repoIdentity, error) {
-			return workerRepoIdentity(ctx, deps.Runner, s.top, spec.branch, spec.drain)
+			return workerRepoIdentity(ctx, deps.Runner, warn, s.top, spec.branch, spec.drain)
 		},
 		addWorktree: func(ctx context.Context) (worker.Worktree, error) {
 			return worker.AddWorktree(ctx, deps.Runner, s.top, spec.name, spec.branch, func() (string, error) {

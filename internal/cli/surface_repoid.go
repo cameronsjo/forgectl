@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
@@ -11,6 +12,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // A worker launch records which GitHub repository it worked on, as GitHub
@@ -50,10 +52,17 @@ func githubOriginOf(ctx context.Context, run exec.Runner, top string) (owner, na
 // is not on github.com records none, and the launch goes on; its row is
 // never eligible for a merge.
 //
+// A launch by hand (drain false) reads it best-effort: a failed read prints
+// one warning line to warn, records no identity (so the row can never pass
+// the merge policy), and the launch goes on. A drain launch fails on it,
+// wrapping errIdentityRead, so the drain pauses claiming rather than spend
+// the row's attempts on a GitHub outage.
+//
 // A drain launch (drain true) also refuses a branch that already exists: in
 // the checkout, as origin/<branch>, or on GitHub. Its error wraps
-// worker.ErrBranchExists, and nothing has been created when it returns.
-func workerRepoIdentity(ctx context.Context, run exec.Runner, top, branch string, drain bool) (repoIdentity, error) {
+// worker.ErrBranchExists and names the way out, and nothing has been
+// created when it returns.
+func workerRepoIdentity(ctx context.Context, run exec.Runner, warn io.Writer, top, branch string, drain bool) (repoIdentity, error) {
 	if drain {
 		if err := worker.CheckBranchNew(ctx, run, top, branch); err != nil {
 			return repoIdentity{}, err
@@ -63,22 +72,45 @@ func workerRepoIdentity(ctx context.Context, run exec.Runner, top, branch string
 	if !ok {
 		return repoIdentity{}, nil
 	}
+	id, err := readRepoIdentity(ctx, run, owner, name, branch)
+	if err != nil {
+		if !drain {
+			_, _ = fmt.Fprintf(warn, "forgectl: warning: %s; this worker records no GitHub repository, so the merge policy never passes it\n",
+				termsafe.SafeLineMax(err.Error(), maxIdentityWarning))
+			return repoIdentity{}, nil
+		}
+		return repoIdentity{}, err
+	}
+	if drain && id.RefExists {
+		return repoIdentity{}, fmt.Errorf("%w: %s exists on GitHub (%s); a drain worker starts on a new branch: %s",
+			worker.ErrBranchExists, branch, id.NameWithOwner, worker.BranchExistsRemedy(top, branch))
+	}
+	return repoIdentity{NameWithOwner: id.NameWithOwner, DatabaseID: id.DatabaseID}, nil
+}
+
+// maxIdentityWarning caps the identity-read error a hand launch prints.
+const maxIdentityWarning = 300
+
+// errIdentityRead marks a failed read of the repository identity: gh failed
+// or GitHub's answer was unusable. The drain pauses claiming on it
+// (drain.ErrGitHubRead) instead of counting an attempt.
+var errIdentityRead = errors.New("the repository identity could not be read from GitHub")
+
+// readRepoIdentity runs IdentityQuery for owner/name and branch.
+func readRepoIdentity(ctx context.Context, run exec.Runner, owner, name, branch string) (merge.Identity, error) {
 	slug := owner + "/" + name
 	gh := githubauth.Runner(run, githubauth.DefaultHost)
 	out, err := gh.Run(ctx, "gh", "api", "graphql", "--hostname", githubauth.DefaultHost,
 		"-f", "query="+merge.IdentityQuery,
 		"-f", "owner="+owner, "-f", "name="+name, "-f", "ref=refs/heads/"+branch)
 	if err != nil {
-		return repoIdentity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w", slug, err)
+		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, errIdentityRead, err)
 	}
 	id, err := merge.DecodeIdentity([]byte(out))
 	if err != nil {
-		return repoIdentity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w", slug, err)
+		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, errIdentityRead, err)
 	}
-	if drain && id.RefExists {
-		return repoIdentity{}, fmt.Errorf("%w: %s exists on GitHub (%s); a drain worker starts on a new branch", worker.ErrBranchExists, branch, id.NameWithOwner)
-	}
-	return repoIdentity{NameWithOwner: id.NameWithOwner, DatabaseID: id.DatabaseID}, nil
+	return id, nil
 }
 
 // errNoIdentityStep refuses a worker launch wired without its identity

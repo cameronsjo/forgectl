@@ -271,3 +271,33 @@ func TestBranchFromAndCheckBranchNew(t *testing.T) {
 		t.Fatalf("origin branch: %+v, %v; want BranchFrom %q", wt, err, BranchOrigin)
 	}
 }
+
+// TestBranchExistsRemedyClearsTheRefusal runs the two commands the refusal
+// names against a real origin and checks the same branch is then new.
+func TestBranchExistsRemedyClearsTheRefusal(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	mustGit(t, top, "init", "-q", "--bare", origin)
+	mustGit(t, top, "remote", "add", "origin", origin)
+	mustGit(t, top, "branch", "worker/old")
+	mustGit(t, top, "push", "-q", "origin", "worker/old")
+	err := CheckBranchNew(ctx, run, top, "worker/old")
+	if !errors.Is(err, ErrBranchExists) {
+		t.Fatalf("before: %v, want ErrBranchExists", err)
+	}
+	for _, want := range []string{"git -C " + top + " branch -D worker/old", "git -C " + top + " push origin --delete worker/old", "enqueue under a new name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal %q does not name %q", err, want)
+		}
+	}
+	mustGit(t, top, "branch", "-D", "worker/old")
+	if err := CheckBranchNew(ctx, run, top, "worker/old"); !errors.Is(err, ErrBranchExists) || !strings.Contains(err.Error(), "origin/worker/old") {
+		t.Fatalf("after the local delete only: %v, want origin/worker/old refused", err)
+	}
+	mustGit(t, top, "push", "-q", "origin", "--delete", "worker/old")
+	if err := CheckBranchNew(ctx, run, top, "worker/old"); err != nil {
+		t.Fatalf("after both deletes: %v, want the branch new", err)
+	}
+}

@@ -207,6 +207,7 @@ func TestDecideLaunch(t *testing.T) {
 		"herdr down after a worktree fails, too":              {0, Attempt{Class: ErrHerdrDown, Err: "not running", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, PauseHerdr, []string{failedRow.Worktree}, false},
 		"launch config after a worktree fails and pauses":     {0, Attempt{Class: ErrLaunchConfig, Err: "binary found on PATH", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, PauseLaunchConfig, []string{failedRow.Worktree, "binary found on PATH"}, false},
 		"launch config with nothing made requeues and pauses": {0, Attempt{Class: ErrLaunchConfig, Err: "posture", CreatedNothing: true}, worker.QueueQueued, -1, PauseLaunchConfig, nil, true},
+		"GitHub unreadable requeues and pauses, no attempt":   {2, Attempt{Class: ErrGitHubRead, Err: "HTTP 502", CreatedNothing: true}, worker.QueueQueued, -1, PauseGitHub, []string{"HTTP 502"}, true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
