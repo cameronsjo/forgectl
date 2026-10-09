@@ -414,3 +414,59 @@ func TestQueueEnqueueLaunchStoresTheProfileName(t *testing.T) {
 		}
 	}
 }
+
+// TestQueueEnqueueFromRecordsTheOrigin pins the intake row's source and
+// author: stored, part of the idempotence check, and shape-checked.
+func TestQueueEnqueueFromRecordsTheOrigin(t *testing.T) {
+	q, dir := testQueue(t)
+	origin := QueueOrigin{Source: "gh:o/r#7", Author: "alice", Labeler: "bob", LabeledAt: "2026-10-01T10:00:00Z"}
+	row, added, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, origin, queueNow)
+	if err != nil || !added || row.Source != origin.Source || row.Author != origin.Author || row.Labeler != origin.Labeler || row.LabeledAt != origin.LabeledAt {
+		t.Fatalf("EnqueueFrom: %+v, added %v, err %v", row, added, err)
+	}
+	//nolint:gosec // G304: reading back the queue file this test wrote under its own temp dir
+	data, err := os.ReadFile(filepath.Join(dir, "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"source": "gh:o/r#7"`, `"author": "alice"`, `"labeler": "bob"`, `"labeled_at": "2026-10-01T10:00:00Z"`} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("queue.json does not carry %s:\n%s", want, data)
+		}
+	}
+	if _, added, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, origin, queueNow); err != nil || added {
+		t.Fatalf("same origin: added %v, err %v; want a no-op", added, err)
+	}
+	for name, other := range map[string]QueueOrigin{
+		"author":     {Source: "gh:o/r#7", Author: "mallory", Labeler: "bob", LabeledAt: origin.LabeledAt},
+		"labeler":    {Source: "gh:o/r#7", Author: "alice", Labeler: "mallory", LabeledAt: origin.LabeledAt},
+		"labeled_at": {Source: "gh:o/r#7", Author: "alice", Labeler: "bob", LabeledAt: "2026-10-02T10:00:00Z"},
+	} {
+		if _, _, err := q.EnqueueFrom("gh7-r", "/repo/one", "brief", "", QueueLaunch{}, other, queueNow); !errors.Is(err, ErrQueueNameTaken) {
+			t.Fatalf("another %s: %v, want ErrQueueNameTaken", name, err)
+		}
+	}
+	if row, _, err := q.Enqueue("plain", "/repo/one", "brief", "", queueNow); err != nil || row.Source != "" || row.Author != "" {
+		t.Fatalf("Enqueue: %+v, %v", row, err)
+	}
+	//nolint:gosec // G304: reading back the queue file this test wrote under its own temp dir
+	if data, err = os.ReadFile(filepath.Join(dir, "queue.json")); err != nil || bytes.Count(data, []byte(`"source"`)) != 1 {
+		t.Fatalf("a row with no origin wrote a source key (%v):\n%s", err, data)
+	}
+	for name, o := range map[string]QueueOrigin{
+		"author without source":  {Author: "alice"},
+		"control in source":      {Source: "gh:o/r#7\x1b"},
+		"space in author":        {Source: "s", Author: "a b"},
+		"source too long":        {Source: strings.Repeat("s", 201)},
+		"labeler without time":   {Source: "s", Labeler: "bob"},
+		"time without labeler":   {Source: "s", LabeledAt: "2026-10-01T10:00:00Z"},
+		"labeler not a login":    {Source: "s", Labeler: "-bob", LabeledAt: "2026-10-01T10:00:00Z"},
+		"labeler with a space":   {Source: "s", Labeler: "b ob", LabeledAt: "2026-10-01T10:00:00Z"},
+		"labeled_at not 3339":    {Source: "s", Labeler: "bob", LabeledAt: "2026-10-01 10:00"},
+		"labeler without source": {Labeler: "bob", LabeledAt: "2026-10-01T10:00:00Z"},
+	} {
+		if _, _, err := q.EnqueueFrom("w9", "/repo/one", "brief", "", QueueLaunch{}, o, queueNow); err == nil {
+			t.Errorf("%s: %+v accepted", name, o)
+		}
+	}
+}

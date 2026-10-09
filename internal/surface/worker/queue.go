@@ -97,6 +97,76 @@ type QueueRow struct {
 	// codex, or pi. A row written before the field existed has none, and
 	// runs claude.
 	Harness string `json:"harness,omitempty"`
+	// Source names where the row came from when something other than the
+	// operator wrote its brief: "gh:<owner>/<repo>#<number>" for a row
+	// `surface intake gh` made from a GitHub issue. Empty for `surface
+	// enqueue`.
+	Source string `json:"source,omitempty"`
+	// Author is the login of whoever wrote the source text, for an intake
+	// row the issue's author. Empty when Source is.
+	Author string `json:"author,omitempty"`
+	// Labeler is the login whose labeling admitted the source, for an intake
+	// row the account that applied the eligible label. Empty when Source is.
+	Labeler string `json:"labeler,omitempty"`
+	// LabeledAt is when that labeling happened, an RFC 3339 time as GitHub
+	// recorded it. Empty when Labeler is.
+	LabeledAt string `json:"labeled_at,omitempty"`
+}
+
+// QueueOrigin is where a queue row's brief came from, for a row another
+// command than `surface enqueue` wrote: its Source and Author, and the
+// labeling that admitted it.
+type QueueOrigin struct {
+	Source    string
+	Author    string
+	Labeler   string
+	LabeledAt string
+}
+
+// maxOriginLen bounds a row's Source and Author; both are printed in
+// `surface queue --json`.
+const maxOriginLen = 200
+
+// Check refuses a Source, Author, Labeler or LabeledAt that is too long, or
+// that holds anything but printable ASCII; an Author or Labeler without a
+// Source; a Labeler that is not a GitHub login; and a Labeler and LabeledAt
+// that are not both set or both empty, or a LabeledAt that is not RFC 3339.
+func (o QueueOrigin) Check() error {
+	if err := o.checkLabeling(); err != nil {
+		return err
+	}
+	for _, f := range []struct{ name, v string }{{"source", o.Source}, {"author", o.Author}, {"labeler", o.Labeler}, {"labeled_at", o.LabeledAt}} {
+		if len(f.v) > maxOriginLen {
+			return fmt.Errorf("worker: queue row %s is %d bytes, limit %d", f.name, len(f.v), maxOriginLen)
+		}
+		for _, r := range f.v {
+			if r <= ' ' || r > '~' {
+				return fmt.Errorf("worker: queue row %s holds a character outside printable ASCII", f.name)
+			}
+		}
+	}
+	if (o.Author != "" || o.Labeler != "") && o.Source == "" {
+		return errors.New("worker: a queue row with an author or a labeler needs a source")
+	}
+	return nil
+}
+
+// checkLabeling refuses a Labeler without a LabeledAt or the reverse, a
+// Labeler that is not a GitHub login, and a LabeledAt that is not RFC 3339.
+func (o QueueOrigin) checkLabeling() error {
+	if (o.Labeler == "") != (o.LabeledAt == "") {
+		return errors.New("worker: a queue row's labeler and labeled_at are set together or not at all")
+	}
+	if o.Labeler == "" {
+		return nil
+	}
+	if err := config.CheckGitHubLogin(o.Labeler); err != nil {
+		return fmt.Errorf("worker: queue row labeler: %w", err)
+	}
+	if _, err := time.Parse(time.RFC3339, o.LabeledAt); err != nil {
+		return errors.New("worker: queue row labeled_at is not an RFC 3339 time")
+	}
+	return nil
 }
 
 // QueueLaunch is what a queue row asks of its launch beyond the brief.
@@ -298,6 +368,10 @@ func enqueueRow(rows []QueueRow, row QueueRow) (out []QueueRow, existing QueueRo
 			return nil, r, false, fmt.Errorf("%w: %q holds brief sha256 %s, this brief is sha256 %s (state %s); dequeue it first to replace it",
 				ErrQueueNameTaken, r.Name, r.BriefSHA256, row.BriefSHA256, r.State)
 		}
+		if r.Source != row.Source || r.Author != row.Author || r.Labeler != row.Labeler || r.LabeledAt != row.LabeledAt {
+			return nil, r, false, fmt.Errorf("%w: %q has source %q, author %q, labeler %q and labeled_at %q, this enqueue has source %q, author %q, labeler %q and labeled_at %q (state %s); dequeue it first to replace it",
+				ErrQueueNameTaken, r.Name, r.Source, r.Author, r.Labeler, r.LabeledAt, row.Source, row.Author, row.Labeler, row.LabeledAt, r.State)
+		}
 		if r.Launch() != row.Launch() {
 			was, want := r.Launch(), row.Launch()
 			return nil, r, false, fmt.Errorf("%w: %q is queued with harness %q, profile %q and model %q, this enqueue asks for harness %q, profile %q and model %q (state %s); dequeue it first to replace it",
@@ -390,6 +464,17 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 // and the harness always (claude when none is named). A name already queued
 // with another harness, profile or model is ErrQueueNameTaken.
 func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunch, now time.Time) (row QueueRow, added bool, err error) {
+	return q.EnqueueFrom(name, repo, brief, batch, launch, QueueOrigin{}, now)
+}
+
+// EnqueueFrom is EnqueueLaunch for a row whose brief came from somewhere
+// other than the operator: it records origin's Source, Author, Labeler and
+// LabeledAt on the row. A name already queued with another origin is
+// ErrQueueNameTaken.
+func (q *Queue) EnqueueFrom(name, repo, brief, batch string, launch QueueLaunch, origin QueueOrigin, now time.Time) (row QueueRow, added bool, err error) {
+	if err := origin.Check(); err != nil {
+		return QueueRow{}, false, err
+	}
 	if launch.Profile == config.MainProfile {
 		launch.Profile = ""
 	}
@@ -413,6 +498,7 @@ func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunc
 	candidate := QueueRow{
 		Name: name, Repo: repo, Brief: brief, BriefSHA256: BriefSHA256(brief), Batch: batch,
 		State: QueueQueued, EnqueuedAt: now, StateAt: now, Profile: launch.Profile, Model: launch.Model, Harness: launch.Harness,
+		Source: origin.Source, Author: origin.Author, Labeler: origin.Labeler, LabeledAt: origin.LabeledAt,
 	}
 	err = q.mutate(MaxQueueBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, existing, ok, err := enqueueRow(rows, candidate)

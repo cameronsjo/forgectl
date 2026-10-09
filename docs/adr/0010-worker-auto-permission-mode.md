@@ -112,3 +112,13 @@ What a worker now has, stated plainly:
 What forgectl still sets: the permission-mode ceiling (`auto`; `dontAsk` and `bypassPermissions` refused), the environment allowlist (so a worker started from a Claude session does not inherit that session's own variables), `useAutoModeDuringPlan = false`, and the `acceptEdits` allow list.
 
 The boundary is the one this ADR already records: accidents, not adversaries. The worker runs as the operator, and its instructions are the only thing asking it not to merge or reach other sessions.
+
+## Amendment 2026-10-09: intake needs a person at a terminal
+
+`forgectl surface intake gh` turns labeled GitHub issues into queue rows, and its author, labeler and edit checks prove only that something holding the operator's `gh` login acted. A worker holds that same login, so a prompt-injected worker could file an issue, apply `queue:drain`, and have the next intake run launch another unattended worker from it. An independent security review raised this, and Cameron ruled that a person confirms at a terminal.
+
+- **Terminal confirmation.** A real intake run shows each candidate and queues them only when `yes` is typed at the controlling terminal. stdin must be a terminal and the answer is read from `/dev/tty`, so piped input never counts. There is no flag that skips it; tests inject the confirmer in code.
+- **Worker marker.** Every worker launch sets `FORGECTL_DRAIN_WORKER=1`, and intake, `surface enqueue` and `surface launch` refuse to run when it is set. A worker can unset it, so it is a courtesy refusal, not a boundary.
+- **Admitting event on the row.** Each intake row records `labeler` and `labeled_at` beside `source` and `author`.
+
+This is a stopgap. A worker can give itself a terminal (`script`, `expect`, a pty library, `tmux send-keys`) or type into any herdr pane through herdr-bridge (2026-10-08 amendment), so the confirmation makes a person the expected reader of the candidate list; it does not prove a person typed the answer. It stops accidents, not adversaries, and it puts a person back in a loop the plan meant to run unattended. The real fix is the one this ADR already names: a separate agent identity for workers (the per-worker GitHub App token, forgectl#1134), so the labeler check can tell the operator from a worker.

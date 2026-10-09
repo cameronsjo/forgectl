@@ -208,3 +208,106 @@ func TestCheckModelName(t *testing.T) {
 		}
 	}
 }
+
+func TestSurfaceIntakeConfig_Resolve(t *testing.T) {
+	s, err := SurfaceIntakeConfig{}.Resolve()
+	if err != nil || len(s.Authors) != 0 || len(s.Labels) != 1 || s.Labels[0] != "queue:drain" || s.MaxPerRun != DefaultIntakeMaxPerRun {
+		t.Fatalf("defaults: %+v, %v", s, err)
+	}
+	seven := 7
+	s, err = SurfaceIntakeConfig{Authors: []string{"alice", "Bob-2"}, Labels: []string{"ready"}, MaxPerRun: &seven}.Resolve()
+	if err != nil || len(s.Authors) != 2 || s.Labels[0] != "ready" || s.MaxPerRun != 7 {
+		t.Fatalf("set: %+v, %v", s, err)
+	}
+	zero, big := 0, MaxIntakeMaxPerRun+1
+	for name, c := range map[string]SurfaceIntakeConfig{
+		"bot author":          {Authors: []string{"dependabot[bot]"}},
+		"author with dash":    {Authors: []string{"-alice"}},
+		"author too long":     {Authors: []string{strings.Repeat("a", 40)}},
+		"empty author":        {Authors: []string{""}},
+		"empty label list":    {Labels: []string{}},
+		"padded label":        {Labels: []string{" ready"}},
+		"control in label":    {Labels: []string{"re\x1bady"}},
+		"label too long":      {Labels: []string{strings.Repeat("l", 51)}},
+		"max_per_run zero":    {MaxPerRun: &zero},
+		"max_per_run too big": {MaxPerRun: &big},
+	} {
+		if _, err := c.Resolve(); err == nil || !strings.Contains(err.Error(), "[surface.intake]") {
+			t.Errorf("%s: %v, want a [surface.intake] error", name, err)
+		}
+	}
+}
+
+// TestSurfaceIntake_RefusedAtLoad pins that a bad [surface.intake] value
+// makes the file invalid at load, and that the section is kept rather than
+// dropped to defaults, which would widen who can write a brief.
+func TestSurfaceIntake_RefusedAtLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[surface.intake]\nauthors = [\"alice\"]\nmax_per_run = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err != nil {
+		t.Fatalf("valid intake: %v", err)
+	}
+	if cfg := LoadPath(path); cfg.DecodeError() != nil || cfg.Surface.Intake.Authors[0] != "alice" {
+		t.Fatalf("LoadPath: %+v, %v", cfg.Surface.Intake, cfg.DecodeError())
+	}
+	if err := os.WriteFile(path, []byte("[surface.intake]\nauthors = [\"alice\", \"bot[bot]\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err == nil || !strings.Contains(err.Error(), "[surface.intake] authors") {
+		t.Fatalf("bot author: ValidatePath %v", err)
+	}
+	cfg := LoadPath(path)
+	if err := cfg.DecodeError(); err == nil || !strings.Contains(err.Error(), "is not valid") {
+		t.Fatalf("LoadPath decode error %v", err)
+	}
+	if _, err := cfg.Surface.Intake.Resolve(); err == nil {
+		t.Fatal("the loaded section resolves; a caller that goes on would use it")
+	}
+}
+
+// TestSurfaceIntake_UnknownKeyRefused pins security review N2: a misspelled
+// key under [surface.intake] makes the file invalid instead of leaving its
+// field absent, which would select the default labels.
+func TestSurfaceIntake_UnknownKeyRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	for name, body := range map[string]string{
+		"misspelled key": "[surface.intake]\nlables = [\"ready\"]\n",
+		"nested table":   "[surface.intake.labels_extra]\nx = 1\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidatePath(path); err == nil || !strings.Contains(err.Error(), "[surface.intake]: unknown key") {
+			t.Errorf("%s: ValidatePath %v, want an unknown-key error", name, err)
+		}
+		cfg := LoadPath(path)
+		if err := cfg.DecodeError(); err == nil || !strings.Contains(err.Error(), "is not valid") {
+			t.Errorf("%s: LoadPath decode error %v, want the file reported invalid", name, err)
+		}
+		if _, err := cfg.Surface.Intake.Resolve(); err == nil {
+			t.Errorf("%s: the loaded section resolves to defaults", name)
+		}
+	}
+	// The correctly spelled key still loads.
+	if err := os.WriteFile(path, []byte("[surface.intake]\nlabels = [\"ready\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err != nil {
+		t.Fatalf("valid intake: %v", err)
+	}
+}
+
+func TestCheckGitHubLogin(t *testing.T) {
+	for _, ok := range []string{"cameronsjo", "Alice-B", "alice_acme", "a"} {
+		if err := CheckGitHubLogin(ok); err != nil {
+			t.Errorf("CheckGitHubLogin(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "-alice", "alice-", "dependabot[bot]", "a b", "al.ice", strings.Repeat("a", 40)} {
+		if err := CheckGitHubLogin(bad); err == nil {
+			t.Errorf("CheckGitHubLogin(%q) = nil, want an error", bad)
+		}
+	}
+}

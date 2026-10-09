@@ -292,6 +292,17 @@ var workerEnvKeys = []string{
 	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME",
 }
 
+// DrainWorkerEnv marks a worker's environment: BuildInvocation sets it to "1"
+// on every worker launch (the drain's, and `surface launch --worktree`'s,
+// which share that path), after the allowlist and the profile's env, so the
+// harness and the shells it starts inherit it. `surface intake gh` refuses to run when it
+// is set, so a worker cannot queue work for the next worker by accident.
+//
+// It is a courtesy refusal, not a control: a worker runs as the operator and
+// can unset it. The gate is intake's requirement that a person type "yes" at
+// a terminal (docs/herdr.md § Intake).
+const DrainWorkerEnv = "FORGECTL_DRAIN_WORKER"
+
 // workerBaseEnv keeps the entries of env named in workerEnvKeys, and the
 // LC_* locale variables.
 func workerBaseEnv(env []string) []string {
@@ -488,6 +499,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		// The worker's named profile is the operator's choice for this one
 		// launch, so it outranks the inherited value and the profile's env.
 		env = MergeEnv(env, map[string]string{"CLAUDE_CONFIG_DIR": req.ConfigDir})
+	}
+	if req.Worker {
+		// Set last, so neither the inherited snapshot nor a profile's env
+		// can remove or change it.
+		env = MergeEnv(env, map[string]string{DrainWorkerEnv: "1"})
 	}
 	dir := runDirectory(req, posture)
 	if dir != req.CWD {

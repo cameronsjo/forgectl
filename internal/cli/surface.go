@@ -65,6 +65,10 @@ surface drain launches as claude, codex, or pi workers in herdr:
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
   forgectl surface queue
 
+intake gh queues a brief for each open GitHub issue the operator labeled:
+
+  forgectl surface intake gh --repo forgectl --dry-run
+
 drain start runs the detached process that launches them; drain status,
 events and stop inspect and end it:
 
@@ -81,6 +85,7 @@ events and stop inspect and end it:
 	cmd.AddCommand(newSurfaceEnqueueCmd(deps))
 	cmd.AddCommand(newSurfaceDequeueCmd(deps))
 	cmd.AddCommand(newSurfaceQueueCmd(deps))
+	cmd.AddCommand(newSurfaceIntakeCmd(deps))
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
 	return cmd
@@ -248,6 +253,9 @@ func firstArg(args []string) string {
 // another local user can perturb is actionable at launch time and is routed to
 // this command's stderr explicitly rather than depending on optional logging.
 func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface launch"); err != nil {
+		return err
+	}
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)

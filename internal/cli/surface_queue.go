@@ -36,6 +36,10 @@ type queueRowView struct {
 	Profile     string    `json:"profile,omitempty"`
 	Model       string    `json:"model,omitempty"`
 	Harness     string    `json:"harness"`
+	Source      string    `json:"source,omitempty"`
+	Author      string    `json:"author,omitempty"`
+	Labeler     string    `json:"labeler,omitempty"`
+	LabeledAt   string    `json:"labeled_at,omitempty"`
 	BriefSHA256 string    `json:"brief_sha256"`
 	EnqueuedAt  time.Time `json:"enqueued_at"`
 	StateAt     time.Time `json:"state_at"`
@@ -47,7 +51,7 @@ func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
 	return queueRowView{
 		Name: r.Name, Repo: r.Repo, Batch: r.Batch, State: string(r.State), Attempts: r.Attempts,
 		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, Profile: r.Profile, Model: r.Model, Harness: r.Launch().Harness,
-		BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
+		Source: r.Source, Author: r.Author, Labeler: r.Labeler, LabeledAt: r.LabeledAt, BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
 	}
 }
 
@@ -102,11 +106,13 @@ refused naming both brief hashes, as is another --harness, --profile or --model.
 queue file stays under 768 KiB; an enqueue past that is refused before
 anything is written. --json prints {"added","name","repo","batch","state",
 "attempts","last_error","launch_id","session","profile","model","harness",
-"brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
-holds another brief or repository, or the queue is full). Exit 2: a usage or
+holds another brief, repository, launch setting, or intake origin (source,
+author, labeler, labeled_at),
+or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
@@ -130,6 +136,9 @@ setup error, such as an unusable brief or an unreadable queue file.
 }
 
 func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface enqueue"); err != nil {
+		return err
+	}
 	if opts.Repo == "" || opts.Name == "" || opts.Brief == "" {
 		return WithExitCode(errors.New("enqueue needs --repo, --name and --brief"), exitUsage)
 	}
@@ -139,24 +148,8 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 	if strings.HasPrefix(opts.Brief, "@") {
 		return WithExitCode(errors.New("--brief takes a path to the brief file; drop the leading '@'"), exitUsage)
 	}
-	if opts.Model != "" {
-		if err := config.CheckModelName(opts.Model); err != nil {
-			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
-		}
-	}
-	switch opts.Harness {
-	case "claude":
-	case "codex", "pi":
-		if opts.Profile != "" && opts.Profile != config.MainProfile {
-			return WithExitCode(errProfileNotClaude, exitUsage)
-		}
-	default:
-		return WithExitCode(fmt.Errorf("--harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(opts.Harness, 0)), exitUsage)
-	}
-	// Only the name is stored; resolving it now refuses a name the config
-	// does not define, and the drain resolves it again at launch.
-	if _, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir); err != nil {
-		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
+	if err := checkQueueLaunchFlags(deps, opts.Profile, opts.Model, opts.Harness); err != nil {
+		return err
 	}
 	target, err := projects.New(deps.Runner).ResolveTarget(opts.Repo)
 	if err != nil {
@@ -188,6 +181,31 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 	return reportEnqueue(cmd.OutOrStdout(), enqueueResult{Added: added, queueRowView: viewQueueRow(row, now)}, opts.JSON)
 }
 
+// checkQueueLaunchFlags refuses a --model, --harness or --profile a queue row
+// cannot carry, as a usage error.
+func checkQueueLaunchFlags(deps module.Deps, profile, model, harness string) error {
+	if model != "" {
+		if err := config.CheckModelName(model); err != nil {
+			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	switch harness {
+	case "claude":
+	case "codex", "pi":
+		if profile != "" && profile != config.MainProfile {
+			return WithExitCode(errProfileNotClaude, exitUsage)
+		}
+	default:
+		return WithExitCode(fmt.Errorf("--harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(harness, 0)), exitUsage)
+	}
+	// Only the name is stored; resolving it now refuses a name the config
+	// does not define, and the drain resolves it again at launch.
+	if _, err := deps.Cfg.Surface.ProfileConfigDir(profile, os.UserHomeDir); err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
+	}
+	return nil
+}
+
 func reportEnqueue(out io.Writer, r enqueueResult, asJSON bool) error {
 	if asJSON {
 		return writeJSON(out, r)
@@ -211,7 +229,7 @@ may be running (claimed, launched, needs-you): run surface close first. After
 dequeue the same name can be enqueued again, which is how a failed row is
 retried. --json prints the removed row as it was: {"name","repo","batch",
 "state","attempts","last_error","launch_id","session","profile","model","harness",
-"brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: removed. Exit 1: refused, the worker is live. Exit 2: no such row,
 or a usage or setup error.
@@ -222,7 +240,7 @@ or a usage or setup error.
 			return runSurfaceDequeue(cmd, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
 	return cmd
 }
 
@@ -261,8 +279,11 @@ brief text is never printed. States: queued, claimed, launched, needs-you,
 reported, failed, closed, expired. A dequeued row is removed, not kept.
 
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
-"launch_id","session","profile","model","harness","brief_sha256","enqueued_at",
-"state_at","age_seconds"}]}.
+"launch_id","session","profile","model","harness","source","author",
+"labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}]}.
+source, author, labeler and labeled_at are set on rows surface intake made:
+gh:<owner>/<repo>#<number>, the issue's author, and the login and RFC 3339
+time of the labeling that admitted it.
 
 Exit 0: listed. Exit 2: the queue file cannot be read.
 
@@ -281,7 +302,7 @@ Exit 0: listed. Exit 2: the queue file cannot be read.
 			return reportQueue(cmd.OutOrStdout(), rows, time.Now(), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
 	return cmd
 }
 
