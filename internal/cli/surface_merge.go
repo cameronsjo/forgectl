@@ -104,8 +104,10 @@ result merged-unconfirmed.
 
 Every merge writes two lines to merge-audit.jsonl in the state directory (the
 attempt, whose hash the commit body carries, and the outcome), and every
-refusal one, unless the same refusal (actor, PR, head and reasons) is
-already there. --dry-run reads and decides and writes nothing, not even an
+refusal one, unless the latest line for the same actor and PR (or worker,
+with no PR) is the same refusal (head, reasons and policy). A merge starts
+only with room in the file for its attempt line and 8 KiB for its outcome
+line; otherwise it is refused. --dry-run reads and decides and writes nothing, not even an
 audit line.
 
 --json prints {"name","repo","dry_run","mode","result","pr","url","head",
@@ -235,9 +237,10 @@ func realLander(run exec.Runner) (merge.Lander, error) {
 		Merge: func(ctx context.Context, args []string) error {
 			return ghInNeutralDir(ctx, gh, args, os.MkdirTemp, os.RemoveAll)
 		},
-		Audit: audit.Append,
-		Now:   time.Now,
-		Sleep: sleepCtx,
+		Audit:    audit.Append,
+		AuditCap: worker.MaxMergeAuditBytes,
+		Now:      time.Now,
+		Sleep:    sleepCtx,
 	}, nil
 }
 
@@ -319,8 +322,8 @@ removed by mistake). It does not detect tampering by your own user, who can
 rewrite the whole file; each merge's commit body on the default branch
 carries its attempt line's hash, which a rewritten file cannot change.
 
---json prints {"pr","lines":[{"line","hash","time","actor","repo","repo_id",
-"pr","head","policy_hash","checks","markers","result","reasons",
+--json prints {"pr","lines":[{"line","hash","time","actor","worker","repo",
+"repo_id","pr","head","policy_hash","checks","markers","result","reasons",
 "merge_commit","attempt","prev"}],"chain":{"ok","lines","break"}}; break is
 {"line","reason"} or null.
 

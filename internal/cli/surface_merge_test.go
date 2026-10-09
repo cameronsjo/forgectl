@@ -181,7 +181,7 @@ func TestRealLanderReadsWithNoCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Read == nil || l.Recheck == nil || l.Landed == nil || l.Merge == nil || l.Audit == nil || l.Now == nil || l.Sleep == nil {
+	if l.Read == nil || l.Recheck == nil || l.Landed == nil || l.Merge == nil || l.Audit == nil || l.Now == nil || l.Sleep == nil || l.AuditCap != worker.MaxMergeAuditBytes {
 		t.Fatalf("an unwired seam: %+v", l)
 	}
 }

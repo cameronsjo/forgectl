@@ -46,8 +46,10 @@ const (
 
 // AuditLine is one merge-audit.jsonl line.
 type AuditLine struct {
-	Time   string `json:"time"`
-	Actor  By     `json:"actor"`
+	Time  string `json:"time"`
+	Actor By     `json:"actor"`
+	// Worker is the worker's name: a refusal with no PR is keyed on it.
+	Worker string `json:"worker"`
 	Repo   string `json:"repo"`
 	RepoID int64  `json:"repo_id"`
 	PR     int    `json:"pr"`
@@ -156,24 +158,40 @@ func ParseAudit(data []byte) ([]AuditEntry, *ChainBreak) {
 	return out, brk
 }
 
-// reasonSet is a refusal's reasons as a set: sorted, without repeats.
-func reasonSet(reasons []string) []string {
+// ReasonSet is a refusal's reasons as a set: sorted, without repeats. The
+// audit's refusal limit and the drain's merge-refused events both compare
+// refusals by it.
+func ReasonSet(reasons []string) []string {
 	set := slices.Clone(reasons)
 	slices.Sort(set)
 	return slices.Compact(set)
 }
 
-// sameRefusal reports whether l repeats an earlier refusal e: the same
-// actor, repository, PR, head and reason set.
-func sameRefusal(e AuditLine, l AuditLine) bool {
-	return e.Result == AuditRefused && e.Actor == l.Actor && strings.EqualFold(e.Repo, l.Repo) && e.RepoID == l.RepoID &&
-		e.PR == l.PR && e.Head == l.Head && slices.Equal(reasonSet(e.Reasons), reasonSet(l.Reasons))
+// sameSubject reports whether e and l are about the same thing: the same
+// actor and repository, and the same PR, or for lines with no PR the same
+// worker.
+func sameSubject(e, l AuditLine) bool {
+	if e.Actor != l.Actor || !strings.EqualFold(e.Repo, l.Repo) || e.RepoID != l.RepoID || e.PR != l.PR {
+		return false
+	}
+	return l.PR != 0 || e.Worker == l.Worker
+}
+
+// repeatsRefusal reports whether the refusal l repeats e, the most recent
+// line about the same subject: e is a refusal too, at the same head, with
+// the same reason set and policy hash.
+func repeatsRefusal(e, l AuditLine) bool {
+	return e.Result == AuditRefused && e.Head == l.Head && e.PolicyHash == l.PolicyHash &&
+		slices.Equal(ReasonSet(e.Reasons), ReasonSet(l.Reasons))
 }
 
 // AppendAudit encodes l chained onto existing, the whole file as it is now.
 // It returns the line to append (with its newline) and its hash. A refusal
-// that repeats an earlier one (sameRefusal) is not written: write is false.
-// An existing file ending in a partial line is ErrAuditPartial.
+// that repeats the most recent line about the same subject (sameSubject,
+// repeatsRefusal) is not written: write is false. Any later line about that
+// subject that is not the same refusal (a merge attempt, an outcome, another
+// refusal) ends the repeat. An existing file ending in a partial line is
+// ErrAuditPartial.
 func AppendAudit(existing []byte, l AuditLine) (line []byte, hash string, write bool, err error) {
 	lines, partial := splitLines(existing)
 	if partial {
@@ -184,10 +202,15 @@ func AppendAudit(existing []byte, l AuditLine) (line []byte, hash string, write 
 		l.Prev = LineHash(lines[n-1])
 	}
 	if l.Result == AuditRefused {
-		for _, raw := range lines {
-			if e, err := decodeAuditLine(raw); err == nil && sameRefusal(e, l) {
+		for i := len(lines) - 1; i >= 0; i-- {
+			e, err := decodeAuditLine(lines[i])
+			if err != nil || !sameSubject(e, l) {
+				continue
+			}
+			if repeatsRefusal(e, l) {
 				return nil, "", false, nil
 			}
+			break
 		}
 	}
 	if l.Checks == nil {

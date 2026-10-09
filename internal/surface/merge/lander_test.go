@@ -40,12 +40,13 @@ type fakeLand struct {
 	sleeps         int
 	audit          []byte
 	auditErr       error
+	auditCap       int
 }
 
 func newFakeLand(t *testing.T) *fakeLand {
 	f := passingFacts(t)
 	return &fakeLand{facts: f, hasPR: true, landing: Landing{State: "MERGED", Merged: true, HeadRefOid: f.PR.HeadRefOid, MergeCommit: landedCommit,
-		DefaultBranch: "main", DefaultHead: mainHead, Ancestry: CompareAhead, OnDefault: true}}
+		DefaultBranch: "main", DefaultHead: mainHead, Ancestry: CompareAhead, OnDefault: true}, auditCap: 1 << 20}
 }
 
 func (fl *fakeLand) lander() Lander {
@@ -86,8 +87,9 @@ func (fl *fakeLand) lander() Lander {
 			}
 			return err
 		},
-		Now:   func() time.Time { return time.Date(2026, 10, 9, 21, 0, 0, 0, time.UTC) },
-		Sleep: func(context.Context, time.Duration) { fl.sleeps++ },
+		AuditCap: fl.auditCap,
+		Now:      func() time.Time { return time.Date(2026, 10, 9, 21, 0, 0, 0, time.UTC) },
+		Sleep:    func(context.Context, time.Duration) { fl.sleeps++ },
 	}
 }
 
@@ -356,5 +358,39 @@ func TestCarriesAuditLine(t *testing.T) {
 	}
 	if CarriesAuditLine("Audit-line: sha256:\n", "") {
 		t.Fatal("an empty hash matched")
+	}
+}
+
+// TestLandNeedsRoomForTheOutcome pins that a merge starts only when the
+// audit file has room for its attempt line and the reserve for its outcome
+// line (T10.4 security review).
+func TestLandNeedsRoomForTheOutcome(t *testing.T) {
+	fl := newFakeLand(t)
+	prior, _, _, err := AppendAudit(nil, auditLine(AuditMerged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.audit = prior
+	// Room for an attempt line (about 1-2 KiB), not for it and the reserve.
+	fl.auditCap = len(prior) + AuditOutcomeReserve
+	out := fl.land(t, goodSettings(), ByCLI, false)
+	if out.Result != LandRefused || len(fl.merges) != 0 || !slices.ContainsFunc(out.Reasons, func(r string) bool { return strings.Contains(r, "the audit file is full") }) {
+		t.Fatalf("%+v, %d merges", out, len(fl.merges))
+	}
+	if got := fl.results(t); !slices.Equal(got, []string{AuditMerged, AuditRefused}) {
+		t.Fatalf("audit %q", got)
+	}
+	// With the reserve's room, it merges.
+	fl = newFakeLand(t)
+	fl.audit = prior
+	fl.auditCap = len(prior) + 4*AuditOutcomeReserve
+	if out := fl.land(t, goodSettings(), ByCLI, false); out.Result != LandMerged {
+		t.Fatalf("with room: %+v", out)
+	}
+	// No cap wired refuses.
+	fl = newFakeLand(t)
+	fl.auditCap = 0
+	if out := fl.land(t, goodSettings(), ByCLI, false); out.Result != LandRefused || len(fl.merges) != 0 {
+		t.Fatalf("no cap: %+v", out)
 	}
 }

@@ -81,7 +81,11 @@ type Lander struct {
 	// Audit appends what fn returns for the whole audit file
 	// (worker.MergeAudit.Append).
 	Audit func(fn func(existing []byte) ([]byte, error)) error
-	Now   func() time.Time
+	// AuditCap is the most bytes the audit file may hold
+	// (worker.MaxMergeAuditBytes): an attempt line is written only with room
+	// for it and AuditOutcomeReserve after it.
+	AuditCap int
+	Now      func() time.Time
 	// Sleep waits between landing reads, returning early when ctx ends.
 	Sleep func(ctx context.Context, d time.Duration)
 }
@@ -99,6 +103,15 @@ const (
 
 // maxGHError caps a gh error kept in an audit line or a reason.
 const maxGHError = 300
+
+// AuditOutcomeReserve is the room an attempt line leaves in the audit file
+// for its outcome line, so a merge that runs always has room to record how
+// it ended. The outcome line may use it; nothing else checks it.
+const AuditOutcomeReserve = 8 << 10
+
+// ErrAuditNoRoom reports an audit file with no room for an attempt line and
+// AuditOutcomeReserve: the merge is refused.
+var ErrAuditNoRoom = errors.New("merge: merge-audit.jsonl has no room for this merge's attempt line and the reserve for its outcome line; rotate it by hand (see docs/herdr.md)")
 
 // MergeArgs is the gh argv for a squash merge of f's PR bound to its head:
 // the repository named host-qualified, never --admin, never --auto.
@@ -161,6 +174,9 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 	attempt := base
 	attempt.Result, attempt.Reasons = AuditMerging, []string{}
 	hash, _, err := l.record(attempt)
+	if errors.Is(err, ErrAuditNoRoom) {
+		return refuse([]string{"the audit file is full: " + err.Error()})
+	}
 	if err != nil {
 		out.Result, out.Err = LandFailed, err
 		out.Reasons = []string{"nothing was merged: the audit attempt line could not be written: " + err.Error()}
@@ -271,7 +287,7 @@ func (l Lander) auditBase(s config.MergeSettings, by By, f Facts) AuditLine {
 		repo = f.Row.GitHubRepo
 	}
 	return AuditLine{
-		Time: l.Now().UTC().Format(time.RFC3339), Actor: by, Repo: repo, RepoID: f.Row.GitHubRepoID, PR: f.PR.Number, Head: f.PR.HeadRefOid,
+		Time: l.Now().UTC().Format(time.RFC3339), Actor: by, Worker: f.Row.Name, Repo: repo, RepoID: f.Row.GitHubRepoID, PR: f.PR.Number, Head: f.PR.HeadRefOid,
 		PolicyHash: PolicyHash(s), Checks: ChecksSeen(f, s), Markers: MarkerEvidence(f, s),
 	}
 }
@@ -280,12 +296,17 @@ func (l Lander) auditBase(s config.MergeSettings, by By, f Facts) AuditLine {
 var ErrAuditUnwritten = errors.New("merge: the audit store wrote no line")
 
 // record appends line to the audit file, chained onto it, and returns the
-// line's hash and whether it was written (a repeated refusal is not).
+// line's hash and whether it was written (a repeated refusal is not). An
+// attempt line needs room for itself and AuditOutcomeReserve under
+// AuditCap, or it is ErrAuditNoRoom.
 func (l Lander) record(line AuditLine) (hash string, written bool, err error) {
 	err = l.Audit(func(existing []byte) ([]byte, error) {
 		data, h, write, err := AppendAudit(existing, line)
 		if err != nil || !write {
 			return nil, err
+		}
+		if line.Result == AuditMerging && (l.AuditCap <= 0 || len(existing)+len(data)+AuditOutcomeReserve > l.AuditCap) {
+			return nil, ErrAuditNoRoom
 		}
 		hash, written = h, true
 		return data, nil

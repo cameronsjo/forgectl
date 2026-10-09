@@ -778,9 +778,7 @@ func (d *drainer) autopilot(ctx context.Context) {
 	case merge.LandUnreadable:
 		d.closerEvent(d.autopilotNote, c.q, drain.EventUnreadable, "the autopilot could not read the worker's PR: "+strings.Join(out.Reasons, "; "))
 	default:
-		set := slices.Clone(out.Reasons)
-		slices.Sort(set)
-		why := fmt.Sprintf("PR #%d at head %s: %s, %s", out.PR, shortSHA(out.Head), out.Result, strings.Join(slices.Compact(set), "; "))
+		why := fmt.Sprintf("PR #%d at head %s: %s, %s", out.PR, shortSHA(out.Head), out.Result, strings.Join(merge.ReasonSet(out.Reasons), "; "))
 		d.closerEvent(d.autopilotNote, c.q, drain.EventMergeRefused, why)
 	}
 }

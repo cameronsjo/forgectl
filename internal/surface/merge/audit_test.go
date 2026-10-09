@@ -68,35 +68,63 @@ func TestAuditChain(t *testing.T) {
 
 func TestAuditRefusalsAreRateLimited(t *testing.T) {
 	file, _ := appendAll(t, auditLine(AuditRefused, "b", "a"))
+	with := func(f func(*AuditLine), reasons ...string) AuditLine {
+		l := auditLine(AuditRefused, reasons...)
+		f(&l)
+		return l
+	}
 	for name, c := range map[string]struct {
 		l     AuditLine
 		write bool
 	}{
-		"the same reasons in another order": {auditLine(AuditRefused, "a", "b", "a"), false},
-		"another reason":                    {auditLine(AuditRefused, "a"), true},
-		"another head": {func() AuditLine {
-			l := auditLine(AuditRefused, "a", "b")
-			l.Head = base1204
-			return l
-		}(), true},
-		"the other actor": {func() AuditLine {
-			l := auditLine(AuditRefused, "a", "b")
-			l.Actor = ByDrain
-			return l
-		}(), true},
-		"another PR": {func() AuditLine {
-			l := auditLine(AuditRefused, "a", "b")
-			l.PR = 1
-			return l
-		}(), true},
-		"a repository name in another case": {func() AuditLine {
-			l := auditLine(AuditRefused, "a", "b")
-			l.Repo = "CameronSjo/Forgectl"
-			return l
-		}(), false},
-		"a merge is never limited": {auditLine(AuditMerging), true},
+		"the same reasons in another order":  {auditLine(AuditRefused, "a", "b", "a"), false},
+		"another reason":                     {auditLine(AuditRefused, "a"), true},
+		"another head":                       {with(func(l *AuditLine) { l.Head = base1204 }, "a", "b"), true},
+		"the other actor":                    {with(func(l *AuditLine) { l.Actor = ByDrain }, "a", "b"), true},
+		"another PR":                         {with(func(l *AuditLine) { l.PR = 1 }, "a", "b"), true},
+		"another policy":                     {with(func(l *AuditLine) { l.PolicyHash = strings.Repeat("c", 64) }, "a", "b"), true},
+		"a repository name in another case":  {with(func(l *AuditLine) { l.Repo = "CameronSjo/Forgectl" }, "a", "b"), false},
+		"a merge is never limited":           {auditLine(AuditMerging), true},
+		"another worker on the same PR":      {with(func(l *AuditLine) { l.Worker = "other" }, "a", "b"), false},
+		"the same reasons, another repo id":  {with(func(l *AuditLine) { l.RepoID = 7 }, "a", "b"), true},
+		"the same reasons, PR 0 on that row": {with(func(l *AuditLine) { l.PR = 0 }, "a", "b"), true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			_, _, write, err := AppendAudit(file, c.l)
+			if err != nil || write != c.write {
+				t.Fatalf("write %v, %v; want %v", write, err, c.write)
+			}
+		})
+	}
+}
+
+// TestAuditRefusalRepeatIsTheLatestLine pins that a refusal repeats only the
+// most recent line about the same subject: any later line about it that is
+// not the same refusal ends the repeat, and lines about other subjects do
+// not (T10.4 security review).
+func TestAuditRefusalRepeatIsTheLatestLine(t *testing.T) {
+	other := auditLine(AuditRefused, "x")
+	other.PR = 1
+	noPR := func(worker string) AuditLine {
+		l := auditLine(AuditRefused, "no PR")
+		l.PR, l.Head, l.Worker = 0, "", worker
+		return l
+	}
+	for name, c := range map[string]struct {
+		before []AuditLine
+		l      AuditLine
+		write  bool
+	}{
+		"a merge attempt in between":    {[]AuditLine{auditLine(AuditRefused, "a"), auditLine(AuditMerging)}, auditLine(AuditRefused, "a"), true},
+		"an outcome in between":         {[]AuditLine{auditLine(AuditRefused, "a"), auditLine(AuditFailed)}, auditLine(AuditRefused, "a"), true},
+		"another refusal in between":    {[]AuditLine{auditLine(AuditRefused, "a"), auditLine(AuditRefused, "b")}, auditLine(AuditRefused, "a"), true},
+		"another PR's line in between":  {[]AuditLine{auditLine(AuditRefused, "a"), other}, auditLine(AuditRefused, "a"), false},
+		"no PR: the same worker":        {[]AuditLine{noPR("w1")}, noPR("w1"), false},
+		"no PR: another worker":         {[]AuditLine{noPR("w1")}, noPR("w2"), true},
+		"no PR: another worker between": {[]AuditLine{noPR("w1"), noPR("w2")}, noPR("w1"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			file, _ := appendAll(t, c.before...)
 			_, _, write, err := AppendAudit(file, c.l)
 			if err != nil || write != c.write {
 				t.Fatalf("write %v, %v; want %v", write, err, c.write)
