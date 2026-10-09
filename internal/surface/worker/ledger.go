@@ -77,6 +77,10 @@ type Row struct {
 	// .git/config, which a worker can rewrite.
 	GitHubRepo   string `json:"github_repo,omitempty"`
 	GitHubRepoID int64  `json:"github_repo_id,omitempty"`
+	// ClosedAt is when a close first marked the row StageClosed (it kept
+	// the worktree). `surface prune` ages a closed row by it. A row closed
+	// before the field existed has none.
+	ClosedAt *time.Time `json:"closed_at,omitempty"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -20,8 +22,8 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// `surface prune` removes old closed, failed and expired queue rows and old
-// closed ledger rows (atelier P4, T10.3), adding the removed rows' cost to
+// `surface prune` removes old closed, failed, expired and reported queue rows
+// and old closed ledger rows (atelier P4, T10.3), adding the removed rows' cost to
 // usage-daily.jsonl first. The drain runs it once a UTC day.
 
 // pruneTimeout bounds one prune: herdr probes and the state files.
@@ -64,6 +66,9 @@ type pruneDeps struct {
 	appendUsage func([]byte) error
 	// cache is the status cache; nil prunes none.
 	cache pruneCache
+	// worktreeGone reports whether a closed ledger row's recorded worktree
+	// path no longer exists (drain.PruneInput.WorktreeGone).
+	worktreeGone func(path string) (bool, error)
 }
 
 // pruneCache is the slice of worker.StatusCache prune uses.
@@ -80,17 +85,21 @@ func newSurfacePruneCmd(_ module.Deps) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "Remove old closed, failed and expired queue rows, closed ledger rows and status cache entries",
-		Long: `prune removes queue rows in state closed, failed or expired whose state_at is
-older than --older-than (default 30d), and ledger rows at stage closed whose
-started_at is older than it, from every ledger in the state directory, and
-surface status cache entries last written before the cutoff. reported rows wait for the drain's closers or surface close and are never
-pruned.
+		Short: "Remove old closed, failed, expired and reported queue rows, closed ledger rows and status cache entries",
+		Long: `prune removes queue rows in state closed, failed, expired or reported whose
+state_at is older than --older-than (default 30d), ledger rows at stage
+closed whose closed_at is older than it, from every ledger in the state
+directory, and surface status cache entries last written before the cutoff.
+A reported row normally waits for the drain's closers or surface close; one
+neither settled for the whole cutoff goes like the others. A closed ledger
+row from before closed_at existed goes only when its started_at is older
+than the cutoff and its recorded worktree path no longer exists.
 
 A queue row whose own ledger row (same name and launch id) still has a
-herdr workspace that herdr says is live, or cannot rule out, is kept. When
-herdr cannot be read (no herdr session, or the server is down), no ledger
-row is removed, and prune says so.
+herdr workspace that herdr says is live, or cannot rule out, is kept, and so
+is every launched queue row whose ledger is not readable while any ledger
+file cannot be read at all. When herdr cannot be read (no herdr session, or
+the server is down), no ledger row is removed, and prune says so.
 
 Before a queue row with a cost_usd is removed, its cost is added to
 usage-daily.jsonl in the state directory: one line per UTC day of state_at,
@@ -157,10 +166,24 @@ func realPruneDeps() (pruneDeps, error) {
 		ledger: func(id worker.LedgerID) (pruneLedger, error) {
 			return worker.Open(id.Repo, id.Session)
 		},
-		workspace:   herdrWorkspaces,
-		appendUsage: files.AppendUsage,
-		cache:       cache,
+		workspace:    herdrWorkspaces,
+		appendUsage:  files.AppendUsage,
+		cache:        cache,
+		worktreeGone: pathGone,
 	}, nil
+}
+
+// pathGone reports whether path no longer exists, without following a
+// final symlink. Any error other than "does not exist" means it cannot say.
+func pathGone(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return false, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	}
+	return false, err
 }
 
 // herdrWorkspaces probes ledger rows' workspaces through the herdr session
@@ -214,7 +237,7 @@ func runPrune(ctx context.Context, d pruneDeps, now time.Time, olderThan time.Du
 	for _, name := range bad {
 		res.Notes = append(res.Notes, "skipped a ledger file that could not be read: "+name)
 	}
-	in := drain.PruneInput{Now: now, OlderThan: olderThan, Queue: rows}
+	in := drain.PruneInput{Now: now, OlderThan: olderThan, Queue: rows, BadLedgers: bad, WorktreeGone: d.worktreeGone}
 	stores := map[worker.LedgerID]pruneLedger{}
 	for _, id := range ids {
 		pl := drain.PruneLedger{ID: id}

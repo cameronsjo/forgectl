@@ -10,10 +10,11 @@ import (
 )
 
 // Prune (atelier P4, T10.3) decides which old rows `surface prune` and the
-// drain's daily prune remove: closed, failed and expired queue rows, and
-// closed ledger rows, older than a cutoff. A queue row whose own ledger row
-// still has a live herdr workspace stays, and when herdr cannot be read no
-// ledger row is removed at all.
+// drain's daily prune remove: closed, failed, expired and reported queue
+// rows, and closed ledger rows, older than a cutoff. A queue row whose own
+// ledger row still has a live herdr workspace, or may be in a ledger file
+// that could not be read, stays; when herdr cannot be read no ledger row is
+// removed at all.
 
 // Workspace is what is known about a ledger row's herdr workspace.
 type Workspace int
@@ -55,6 +56,15 @@ type PruneInput struct {
 	// Cache is the status cache's entries. One older than the cutoff goes:
 	// an entry serves only the head it names, and rows do not record heads.
 	Cache []worker.StatusCacheEntry
+	// BadLedgers names the ledger files that could not be read at all (no
+	// repo or session is known for them). While any is listed, a launched
+	// queue row whose ledger is not among Ledgers is kept: its ledger row
+	// may be in one of them.
+	BadLedgers []string
+	// WorktreeGone reports whether a closed ledger row's recorded worktree
+	// path no longer exists; an error means it cannot say. It is asked only
+	// for a closed row with no closed_at.
+	WorktreeGone func(path string) (bool, error)
 }
 
 // Prune item kinds.
@@ -72,7 +82,8 @@ type PruneItem struct {
 	Session string `json:"session,omitempty"`
 	// State is the queue state or the ledger stage.
 	State string `json:"state"`
-	// At is the queue row's state_at, or the ledger row's started_at.
+	// At is the queue row's state_at, or the ledger row's closed_at
+	// (started_at for a row closed before closed_at was recorded).
 	At      time.Time `json:"at"`
 	CostUSD *float64  `json:"cost_usd,omitempty"`
 	Reason  string    `json:"reason"`
@@ -101,9 +112,11 @@ type PrunePlan struct {
 	Notes []string
 }
 
-// prunableQueueStates are the queue states prune removes. A reported row
-// waits for the closer, or for surface close.
-var prunableQueueStates = []worker.QueueState{worker.QueueClosed, worker.QueueFailed, worker.QueueExpired}
+// prunableQueueStates are the queue states prune removes. A reported row is
+// among them: one that neither closer nor surface close settled for the
+// whole cutoff goes once its worker's workspace is not live, so a row with
+// no PR and no operator does not live forever.
+var prunableQueueStates = []worker.QueueState{worker.QueueClosed, worker.QueueFailed, worker.QueueExpired, worker.QueueReported}
 
 // PlanPrune decides what to remove. It is pure but for in.Workspace.
 func PlanPrune(in PruneInput) PrunePlan {
@@ -133,11 +146,11 @@ func PlanPrune(in PruneInput) PrunePlan {
 		it := PruneItem{Kind: PruneKindQueue, Name: q.Name, Repo: q.Repo, Session: q.Session, State: string(q.State), At: q.StateAt, CostUSD: q.CostUSD, queueRow: q}
 		switch {
 		case !slices.Contains(prunableQueueStates, q.State):
-			it.Reason = fmt.Sprintf("state %s is not pruned (only closed, failed and expired rows are)", q.State)
+			it.Reason = fmt.Sprintf("state %s is not pruned (only closed, failed, expired and reported rows are)", q.State)
 		case !q.StateAt.Before(cutoff):
 			it.Reason = fmt.Sprintf("in state %s since %s, not older than the cutoff %s", q.State, q.StateAt.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
 		default:
-			it.Reason = queueKeepReason(q, ledgers, workspace)
+			it.Reason = queueKeepReason(q, ledgers, in.BadLedgers, workspace)
 			if it.Reason == "" {
 				it.Reason = fmt.Sprintf("%s since %s, older than the cutoff", q.State, q.StateAt.UTC().Format(time.RFC3339))
 				p.Remove = append(p.Remove, it)
@@ -150,17 +163,33 @@ func PlanPrune(in PruneInput) PrunePlan {
 	for _, l := range in.Ledgers {
 		for _, r := range l.Rows {
 			it := PruneItem{Kind: PruneKindLedger, Name: r.Name, Repo: l.ID.Repo, Session: l.ID.Session, State: string(r.Stage), At: r.StartedAt, ledgerRow: r, ledgerID: l.ID}
+			if r.ClosedAt != nil {
+				it.At = *r.ClosedAt
+			}
 			switch {
 			case in.HerdrErr != "":
 				it.Reason = "herdr could not be read; no ledger row is removed"
 			case r.Stage != worker.StageClosed:
 				it.Reason = fmt.Sprintf("stage %s is not pruned (only closed rows are)", r.Stage)
-			case !r.StartedAt.Before(cutoff):
-				it.Reason = fmt.Sprintf("started %s, not older than the cutoff %s", r.StartedAt.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
-			default:
-				it.Reason = fmt.Sprintf("closed, started %s, older than the cutoff", r.StartedAt.UTC().Format(time.RFC3339))
+			case !it.At.Before(cutoff):
+				it.Reason = fmt.Sprintf("closed %s, not older than the cutoff %s", it.At.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
+				if r.ClosedAt == nil {
+					it.Reason = fmt.Sprintf("started %s and has no closed_at, not older than the cutoff %s", it.At.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
+				}
+			case r.ClosedAt != nil:
+				it.Reason = fmt.Sprintf("closed %s, older than the cutoff", it.At.UTC().Format(time.RFC3339))
 				p.Remove = append(p.Remove, it)
 				continue
+			default:
+				// Closed before closed_at was recorded: the close time is
+				// unknown, and the row is the only record of the worktree it
+				// kept, so it goes only once that worktree is gone.
+				it.Reason = closedWithoutTimeReason(r, in.WorktreeGone)
+				if it.Reason == "" {
+					it.Reason = fmt.Sprintf("closed with no closed_at, started %s, and its worktree %s no longer exists", it.At.UTC().Format(time.RFC3339), r.Worktree)
+					p.Remove = append(p.Remove, it)
+					continue
+				}
 			}
 			p.Keep = append(p.Keep, it)
 		}
@@ -175,16 +204,39 @@ func PlanPrune(in PruneInput) PrunePlan {
 	return p
 }
 
+// closedWithoutTimeReason returns why a closed ledger row with no closed_at
+// must stay, or "" when its recorded worktree is gone.
+func closedWithoutTimeReason(r worker.Row, gone func(string) (bool, error)) string {
+	if r.Worktree == "" {
+		return fmt.Sprintf("closed with no closed_at and no recorded worktree path, so prune cannot tell its worktree is gone; run surface close %s", r.Name)
+	}
+	if gone == nil {
+		return "closed with no closed_at, and its worktree cannot be checked"
+	}
+	ok, err := gone(r.Worktree)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("closed with no closed_at, and its worktree %s cannot be checked: %v", r.Worktree, err)
+	case !ok:
+		return fmt.Sprintf("closed with no closed_at, and its worktree %s still exists; run surface close %s once its work is saved", r.Worktree, r.Name)
+	}
+	return ""
+}
+
 // queueKeepReason returns why an old queue row must stay, or "": its own
-// ledger row (same name and launch id) cannot be read, or has a workspace
-// herdr says is live or cannot rule out.
-func queueKeepReason(q worker.QueueRow, ledgers map[worker.LedgerID]PruneLedger, workspace func(worker.LedgerID, worker.Row) Workspace) string {
+// ledger row (same name and launch id) cannot be read, may be in a ledger
+// file that could not be read at all, or has a workspace herdr says is live
+// or cannot rule out.
+func queueKeepReason(q worker.QueueRow, ledgers map[worker.LedgerID]PruneLedger, bad []string, workspace func(worker.LedgerID, worker.Row) Workspace) string {
 	if q.LaunchID == "" || q.Session == "" {
 		return "" // never launched, or nothing of its launch was left
 	}
 	id := worker.LedgerID{Repo: q.Repo, Session: q.Session}
 	l, ok := ledgers[id]
 	if !ok {
+		if len(bad) > 0 {
+			return "its ledger may be in a ledger file that could not be read: " + strings.Join(bad, ", ")
+		}
 		return ""
 	}
 	if l.Err != "" {

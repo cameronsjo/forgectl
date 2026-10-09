@@ -37,7 +37,7 @@ func (f *fakeClose) steps() closeSteps {
 			return f.removeErr
 		},
 		forget:     func() error { f.calls = append(f.calls, "forget"); return nil },
-		markClosed: func() error { f.calls = append(f.calls, "mark-closed"); return nil },
+		markClosed: func(time.Time) error { f.calls = append(f.calls, "mark-closed"); return nil },
 	}
 }
 
@@ -202,4 +202,49 @@ func TestCloseWorkerGuards(t *testing.T) {
 			t.Fatalf("result %+v", got)
 		}
 	})
+}
+
+// noCloser is a backend.Closer markClosed never calls.
+type noCloser struct{}
+
+func (noCloser) Close(context.Context, backend.Ref) backend.CloseResult { return backend.CloseResult{} }
+
+// TestRealCloseStepsMarkClosedRecordsClosedAt pins that the close that
+// keeps a worktree records closed_at once: a later close that keeps it
+// again leaves the first time, so prune ages the row from its first close.
+func TestRealCloseStepsMarkClosedRecordsClosedAt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const repo = "/repo/closed-at"
+	led, err := worker.Open(repo, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Update("w", func(r *worker.Row) { r.Stage = worker.StageLaunched }); err != nil {
+		t.Fatal(err)
+	}
+	read := func() worker.Row {
+		rows, err := led.Rows()
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows %+v, %v", rows, err)
+		}
+		return rows[0]
+	}
+	first := time.Date(2026, 10, 9, 12, 30, 15, 500, time.UTC)
+	if err := realCloseSteps(nil, noCloser{}, led, repo, read()).markClosed(first); err != nil {
+		t.Fatal(err)
+	}
+	r := read()
+	if r.Stage != worker.StageClosed || r.ClosedAt == nil || !r.ClosedAt.Equal(first.Truncate(time.Second)) {
+		t.Fatalf("after the first close: stage %s closed_at %v", r.Stage, r.ClosedAt)
+	}
+	if err := realCloseSteps(nil, noCloser{}, led, repo, r).markClosed(first.Add(48 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if again := read(); again.ClosedAt == nil || !again.ClosedAt.Equal(first.Truncate(time.Second)) {
+		t.Fatalf("a second close moved closed_at to %v", again.ClosedAt)
+	}
 }

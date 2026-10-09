@@ -161,29 +161,40 @@ func seedPruneWorld(t *testing.T) *worker.Queue {
 	seedPruneLedger(t, "failed-gone", "launch-failed-gone", worker.StageFailed, old, true)
 	seedPruneRow(t, q, "closed-young", worker.QueueClosed, young, true, ptr(3))
 	seedPruneRow(t, q, "reported-old", worker.QueueReported, old, true, nil)
-	seedPruneLedger(t, "kept-wt", "", worker.StageClosed, old, true)
-	seedPruneLedger(t, "kept-wt-young", "", worker.StageClosed, young, true)
+	seedPruneRow(t, q, "reported-live", worker.QueueReported, old, true, nil)
+	seedPruneLedger(t, "reported-live", "launch-reported-live", worker.StageLaunched, old, true)
+	seedClosedLedger(t, "kept-wt", old.Add(-24*time.Hour), old)
+	seedClosedLedger(t, "kept-wt-young", old.Add(-24*time.Hour), young)
 	return q
+}
+
+// seedClosedLedger writes a closed ledger row in pruneRepo, started at
+// started and closed at closed.
+func seedClosedLedger(t *testing.T, name string, started, closed time.Time) {
+	t.Helper()
+	seedLedger(t, pruneRepo, name, "", worker.StageClosed, func(r *worker.Row) {
+		r.StartedAt, r.ClosedAt, r.Worktree = started, &closed, "/wt/"+name
+	})
 }
 
 func TestRunPruneRemovesOldRowsKeepsLive(t *testing.T) {
 	q := seedPruneWorld(t)
-	res, err := runPrune(t.Context(), testPruneDeps(t, q, map[string]bool{"failed-live": true}, nil), pruneNow, drain.PruneAfter, false)
+	res, err := runPrune(t.Context(), testPruneDeps(t, q, map[string]bool{"failed-live": true, "reported-live": true}, nil), pruneNow, drain.PruneAfter, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := itemNames(res.Removed), "ledger:kept-wt,queue:closed-a,queue:closed-b,queue:expired,queue:failed-gone"; got != want {
+	if got, want := itemNames(res.Removed), "ledger:kept-wt,queue:closed-a,queue:closed-b,queue:expired,queue:failed-gone,queue:reported-old"; got != want {
 		t.Fatalf("removed %s, want %s", got, want)
 	}
-	if got := strings.Join(queueNames(t, q), ","); got != "closed-young,failed-live,reported-old" {
+	if got := strings.Join(queueNames(t, q), ","); got != "closed-young,failed-live,reported-live" {
 		t.Fatalf("queue left %s", got)
 	}
-	if got := strings.Join(ledgerNames(t), ","); got != "failed-gone,failed-live,kept-wt-young" {
+	if got := strings.Join(ledgerNames(t), ","); got != "failed-gone,failed-live,kept-wt-young,reported-live" {
 		t.Fatalf("ledger left %s", got)
 	}
 	for _, it := range res.Kept {
-		if it.Name == "failed-live" && it.Kind == drain.PruneKindQueue && !strings.Contains(it.Reason, "still live") {
-			t.Fatalf("failed-live kept for %q", it.Reason)
+		if (it.Name == "failed-live" || it.Name == "reported-live") && it.Kind == drain.PruneKindQueue && !strings.Contains(it.Reason, "still live") {
+			t.Fatalf("%s kept for %q", it.Name, it.Reason)
 		}
 	}
 	day := pruneNow.Add(-drain.PruneAfter - time.Hour).UTC().Format(worker.UTCDayLayout)
@@ -201,10 +212,10 @@ func TestRunPruneHerdrUnreadable(t *testing.T) {
 	}
 	// Rows with no workspace go; a row whose ledger row has one stays, and
 	// no ledger row is removed.
-	if got, want := itemNames(res.Removed), "queue:closed-a,queue:closed-b,queue:expired"; got != want {
+	if got, want := itemNames(res.Removed), "queue:closed-a,queue:closed-b,queue:expired,queue:reported-old"; got != want {
 		t.Fatalf("removed %s, want %s", got, want)
 	}
-	if got := strings.Join(ledgerNames(t), ","); got != "failed-gone,failed-live,kept-wt,kept-wt-young" {
+	if got := strings.Join(ledgerNames(t), ","); got != "failed-gone,failed-live,kept-wt,kept-wt-young,reported-live" {
 		t.Fatalf("ledger left %s; herdr unreadable must remove no ledger row", got)
 	}
 	if !slices.ContainsFunc(res.Notes, func(n string) bool { return strings.Contains(n, "herdr could not be read") }) {
@@ -232,7 +243,7 @@ func TestRunPruneDryRunWritesNothing(t *testing.T) {
 	if len(after) != len(before) {
 		t.Fatalf("dry run removed queue rows: %d -> %d", len(before), len(after))
 	}
-	if got := len(ledgerNames(t)); got != 4 {
+	if got := len(ledgerNames(t)); got != 5 {
 		t.Fatalf("dry run removed ledger rows: %d left", got)
 	}
 	if got := usageFile(t); got != "" {
@@ -343,5 +354,55 @@ func TestRunPruneStatusCache(t *testing.T) {
 	entries, err := c.Entries()
 	if err != nil || len(entries) != 1 || entries[0].Head != newHead {
 		t.Fatalf("left %+v, %v", entries, err)
+	}
+}
+
+// TestRunPruneKeepsRowsOfAnUnreadableLedgerFile pins that a ledger file
+// prune cannot read at all keeps every launched queue row whose ledger is
+// not among the readable ones, naming the file.
+func TestRunPruneKeepsRowsOfAnUnreadableLedgerFile(t *testing.T) {
+	_, _, q := newFakeDrain(t)
+	old := pruneNow.Add(-drain.PruneAfter - time.Hour)
+	seedPruneRow(t, q, "failed-elsewhere", worker.QueueFailed, old, true, nil)
+	seedPruneRow(t, q, "never-launched", worker.QueueExpired, old, false, nil)
+	const badName = "0123456789abcdef0123456789abcdef.json"
+	surface := filepath.Join(os.Getenv("XDG_STATE_HOME"), "forgectl", "surface")
+	if err := os.WriteFile(filepath.Join(surface, badName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := runPrune(t.Context(), testPruneDeps(t, q, nil, nil), pruneNow, drain.PruneAfter, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := itemNames(res.Removed); got != "queue:never-launched" {
+		t.Fatalf("removed %s; a launched row whose ledger may be the unreadable file stays", got)
+	}
+	kept := slices.IndexFunc(res.Kept, func(it drain.PruneItem) bool { return it.Name == "failed-elsewhere" })
+	if kept < 0 || !strings.Contains(res.Kept[kept].Reason, badName) {
+		t.Fatalf("kept %+v; the reason names %s", res.Kept, badName)
+	}
+}
+
+// TestRunPruneClosedRowWithoutClosedAt pins that a closed ledger row from
+// before closed_at existed goes only once its recorded worktree is gone.
+func TestRunPruneClosedRowWithoutClosedAt(t *testing.T) {
+	_, _, q := newFakeDrain(t)
+	old := pruneNow.Add(-drain.PruneAfter - time.Hour)
+	present := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "removed")
+	for name, wt := range map[string]string{"untimed-present": present, "untimed-gone": gone} {
+		seedLedger(t, pruneRepo, name, "", worker.StageClosed, func(r *worker.Row) { r.StartedAt, r.Worktree = old, wt })
+	}
+	deps := testPruneDeps(t, q, nil, nil)
+	deps.worktreeGone = pathGone
+	res, err := runPrune(t.Context(), deps, pruneNow, drain.PruneAfter, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := itemNames(res.Removed); got != "ledger:untimed-gone" {
+		t.Fatalf("removed %s", got)
+	}
+	if got := strings.Join(ledgerNames(t), ","); got != "untimed-present" {
+		t.Fatalf("ledger left %s", got)
 	}
 }

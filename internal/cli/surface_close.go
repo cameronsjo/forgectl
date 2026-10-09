@@ -174,8 +174,16 @@ func realCloseSteps(run exec.Runner, herdr backend.Closer, led *worker.Ledger, t
 		// Both act only on the row close read: a launch that reused the name
 		// meanwhile is left alone.
 		forget: func() error { return led.RemoveIf(row.Name, worker.SameRow(row)) },
-		markClosed: func() error {
-			return led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) { r.Stage = worker.StageClosed })
+		// markClosed records closed_at the first time only: a later close
+		// that keeps the worktree again leaves the first close time.
+		markClosed: func(now time.Time) error {
+			return led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) {
+				r.Stage = worker.StageClosed
+				if r.ClosedAt == nil {
+					at := now.UTC().Truncate(time.Second)
+					r.ClosedAt = &at
+				}
+			})
 		},
 	}
 }
@@ -196,7 +204,7 @@ type closeSteps struct {
 	inspect    func(context.Context) (worker.WorktreeFacts, error)
 	remove     func(context.Context, string) error
 	forget     func() error
-	markClosed func() error
+	markClosed func(time.Time) error
 }
 
 // workspaceDecision is what the ledger row alone decides about the workspace:
@@ -317,7 +325,7 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 	}
 
 	if res.Worktree == closeWorktreeKept {
-		if err := s.markClosed(); err != nil {
+		if err := s.markClosed(now); err != nil {
 			res.Note = joinNote(res.Note, "the ledger row could not be marked closed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 		}
 		return res
