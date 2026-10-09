@@ -15,7 +15,7 @@ func goodMergeTOML() string {
 	return `[surface.merge]
 mode = "manual"
 machine = "` + MergeMachineDigest(testMergeHost) + `"
-approvers = ["cadence-review", "coderabbit"]
+approvers = ["cadence-review"]
 marker_author_id = 4084915
 required_reviewers = ["cadence-forge-security-reviewer", "polish"]
 method = "squash"
@@ -148,25 +148,24 @@ func TestSurfaceMergeConfig_Resolve(t *testing.T) {
 	if s, err := (SurfaceMergeConfig{}).Resolve(); err != nil || s.Mode != MergeOff {
 		t.Fatalf("empty: %+v, %v", s, err)
 	}
-	rabbit := good()
-	rabbit.Approvers, rabbit.RequiredReviewers = []string{"coderabbit"}, nil
-	if s, err := rabbit.Resolve(); err != nil || s.MarkerAuthorID != 4084915 {
-		t.Fatalf("coderabbit only, with marker_author_id: %+v, %v", s, err)
-	}
 	cases := map[string]struct {
 		mutate func(*SurfaceMergeConfig)
 		want   string
 	}{
-		"unknown key":           {func(c *SurfaceMergeConfig) { c.unknown = []string{"surface.merge.methd"} }, "unknown key"},
-		"bad mode":              {func(c *SurfaceMergeConfig) { c.Mode = "Auto" }, "mode: want off, manual or auto"},
-		"bad machine":           {func(c *SurfaceMergeConfig) { c.Machine = "0123456789AB" }, "machine: want the 12 lowercase hex"},
-		"short machine":         {func(c *SurfaceMergeConfig) { c.Machine = "0123" }, "machine"},
-		"method merge":          {func(c *SurfaceMergeConfig) { c.Method = "merge" }, `method: want "squash"`},
-		"unknown approver":      {func(c *SurfaceMergeConfig) { c.Approvers = []string{"chief-of-staff"} }, "approvers: want"},
-		"duplicate approver":    {func(c *SurfaceMergeConfig) { c.Approvers = []string{"coderabbit", "coderabbit"} }, "listed twice"},
-		"marker author missing": {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = nil }, "marker_author_id: required"},
-		"marker author missing, coderabbit only": {func(c *SurfaceMergeConfig) {
-			c.Approvers, c.RequiredReviewers, c.MarkerAuthorID = []string{"coderabbit"}, nil, nil
+		"unknown key":        {func(c *SurfaceMergeConfig) { c.unknown = []string{"surface.merge.methd"} }, "unknown key"},
+		"bad mode":           {func(c *SurfaceMergeConfig) { c.Mode = "Auto" }, "mode: want off, manual or auto"},
+		"bad machine":        {func(c *SurfaceMergeConfig) { c.Machine = "0123456789AB" }, "machine: want the 12 lowercase hex"},
+		"short machine":      {func(c *SurfaceMergeConfig) { c.Machine = "0123" }, "machine"},
+		"method merge":       {func(c *SurfaceMergeConfig) { c.Method = "merge" }, `method: want "squash"`},
+		"unknown approver":   {func(c *SurfaceMergeConfig) { c.Approvers = []string{"chief-of-staff"} }, "approvers: want"},
+		"duplicate approver": {func(c *SurfaceMergeConfig) { c.Approvers = []string{"cadence-review", "cadence-review"} }, "listed twice"},
+		// coderabbit was an approver until 2026-10-09 (ADR-0011 amendment);
+		// a config still listing it refuses at load.
+		"coderabbit approver":              {func(c *SurfaceMergeConfig) { c.Approvers = []string{"coderabbit"} }, `approvers: want "cadence-review", the one approver implemented, got "coderabbit"`},
+		"coderabbit beside cadence-review": {func(c *SurfaceMergeConfig) { c.Approvers = []string{"cadence-review", "coderabbit"} }, `got "coderabbit"`},
+		"marker author missing":            {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = nil }, "marker_author_id: required"},
+		"marker author missing, no approvers": {func(c *SurfaceMergeConfig) {
+			c.Approvers, c.RequiredReviewers, c.MarkerAuthorID = nil, nil, nil
 		}, "marker_author_id: required whenever mode is manual or auto"},
 		"marker author zero":         {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = id(0) }, "marker_author_id: want"},
 		"required reviewers empty":   {func(c *SurfaceMergeConfig) { c.RequiredReviewers = nil }, "required_reviewers: at least one"},
@@ -182,24 +181,24 @@ func TestSurfaceMergeConfig_Resolve(t *testing.T) {
 		"duplicate repo, other case": {func(c *SurfaceMergeConfig) { c.Repos = []string{"o/r", "O/R"} }, "listed twice"},
 		"workflow key twice, other case": {func(c *SurfaceMergeConfig) { c.Workflow["O/R"] = ".github/workflows/other.yml" },
 			"[surface.merge.workflow]: \"O/R\" and \"o/r\" name the same repository"},
-		"checks key twice, other case": {func(c *SurfaceMergeConfig) { c.RequiredChecks["o/R"] = []string{"x"} }, "name the same repository"},
-		"paths key twice, other case":  {func(c *SurfaceMergeConfig) { c.Paths["O/r"] = []string{"internal/**"} }, "name the same repository"},
-		"bare star glob":               {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"*"} }, "bare *"},
-		"bare double-star glob":        {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"**"} }, "bare **"},
-		"double star first":            {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"**/x.go"} }, "may only follow"},
-		"double star after wildcard":   {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"*/**"} }, "may only follow"},
-		"double star inside segment":   {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/**.md"} }, "whole segment"},
-		"question mark glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/?.md"} }, "only wildcards"},
-		"dot-dot glob":                 {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/../x"} }, `".." segment`},
-		"leading slash glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"/docs/**"} }, "start with '/'"},
-		"empty segment glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs//x"} }, "empty segment"},
-		"backslash glob":               {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{`docs\x`} }, "backslash"},
-		"control byte glob":            {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\x1b"} }, "control byte"},
-		"non-ASCII glob":               {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"internal/ſurface/**"} }, "only ASCII"},
-		"invalid UTF-8 glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\xff/**"} }, "valid UTF-8"},
-		"approvers past two entries":   {func(c *SurfaceMergeConfig) { c.Approvers = []string{"a", "b", "c"} }, "at most"},
-		"negative marker author id":    {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = id(-4) }, "marker_author_id: want"},
-		"duplicate required reviewer":  {func(c *SurfaceMergeConfig) { c.RequiredReviewers = []string{"polish", "polish"} }, "listed twice"},
+		"checks key twice, other case":    {func(c *SurfaceMergeConfig) { c.RequiredChecks["o/R"] = []string{"x"} }, "name the same repository"},
+		"paths key twice, other case":     {func(c *SurfaceMergeConfig) { c.Paths["O/r"] = []string{"internal/**"} }, "name the same repository"},
+		"bare star glob":                  {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"*"} }, "bare *"},
+		"bare double-star glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"**"} }, "bare **"},
+		"double star first":               {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"**/x.go"} }, "may only follow"},
+		"double star after wildcard":      {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"*/**"} }, "may only follow"},
+		"double star inside segment":      {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/**.md"} }, "whole segment"},
+		"question mark glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/?.md"} }, "only wildcards"},
+		"dot-dot glob":                    {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/../x"} }, `".." segment`},
+		"leading slash glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"/docs/**"} }, "start with '/'"},
+		"empty segment glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs//x"} }, "empty segment"},
+		"backslash glob":                  {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{`docs\x`} }, "backslash"},
+		"control byte glob":               {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\x1b"} }, "control byte"},
+		"non-ASCII glob":                  {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"internal/ſurface/**"} }, "only ASCII"},
+		"invalid UTF-8 glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\xff/**"} }, "valid UTF-8"},
+		"approvers with an unknown entry": {func(c *SurfaceMergeConfig) { c.Approvers = []string{"cadence-review", "b", "c"} }, `got "b"`},
+		"negative marker author id":       {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = id(-4) }, "marker_author_id: want"},
+		"duplicate required reviewer":     {func(c *SurfaceMergeConfig) { c.RequiredReviewers = []string{"polish", "polish"} }, "listed twice"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

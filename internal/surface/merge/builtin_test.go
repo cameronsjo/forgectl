@@ -146,3 +146,33 @@ func TestBuiltinRefusalsTopLevel(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinRefusalsBuildFiles pins that other languages' module, lock,
+// build and toolchain files are refused at any depth, and that the Go module
+// files keep their own reason.
+func TestBuiltinRefusalsBuildFiles(t *testing.T) {
+	for _, base := range []string{"Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain", "rust-toolchain.toml",
+		"package.json", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+		".npmrc", ".yarnrc", ".yarnrc.yml", "requirements.txt", "requirements-dev.txt", "Requirements_Test.TXT",
+		"pyproject.toml", "uv.lock", "poetry.lock", "Pipfile", "Pipfile.lock", "Gemfile", "Gemfile.lock",
+		".tool-versions", ".mise.toml", "mise.toml", "flake.nix", "flake.lock", "Dockerfile", "Makefile", "cargo.TOML"} {
+		for _, dir := range []string{"docs/", "internal/tasks/sub/"} {
+			if why := builtinRefusal(dir + base); !strings.Contains(why, "build and toolchain files") {
+				t.Errorf("%s%s: %q, want the build-file refusal", dir, base, why)
+			}
+		}
+	}
+	for _, p := range []string{"docs/.cargo/config.toml", "internal/tasks/a/.cargo/x", "docs/.CARGO/config"} {
+		if why := builtinRefusal(p); !strings.Contains(why, "a .cargo directory is refused at any depth") {
+			t.Errorf("%s: %q, want the .cargo refusal", p, why)
+		}
+	}
+	if why := builtinRefusal("docs/x/go.mod"); !strings.Contains(why, "module files (go.mod") {
+		t.Errorf("docs/x/go.mod: %q, want the Go module-file reason unchanged", why)
+	}
+	for _, p := range []string{"docs/requirements.md", "docs/makefile-notes.md", "docs/cargo.md", "internal/tasks/build.go"} {
+		if why := builtinRefusal(p); why != "" {
+			t.Errorf("%s refused: %s", p, why)
+		}
+	}
+}

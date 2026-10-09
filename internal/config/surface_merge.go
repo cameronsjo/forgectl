@@ -24,8 +24,8 @@ type SurfaceMergeConfig struct {
 	// other host resolves it to off, so a config synced across machines
 	// turns itself off.
 	Machine string `toml:"machine"`
-	// Approvers are the approver kinds the policy accepts:
-	// MergeApproverCadenceReview and MergeApproverCodeRabbit.
+	// Approvers are the approver kinds the policy accepts. The one kind
+	// implemented is MergeApproverCadenceReview; any other refuses at load.
 	Approvers []string `toml:"approvers"`
 	// MarkerAuthorID is the operator's numeric GitHub user id: only
 	// cadence-review markers posted by it count. Required whenever mode is
@@ -65,11 +65,10 @@ const (
 	MergeAuto MergeMode = "auto"
 )
 
-// Approver kinds.
-const (
-	MergeApproverCadenceReview = "cadence-review"
-	MergeApproverCodeRabbit    = "coderabbit"
-)
+// MergeApproverCadenceReview is the one approver kind implemented. The
+// approvers key stays a list for a future approver with an identity a worker
+// cannot use (ADR-0011, 2026-10-09 amendment).
+const MergeApproverCadenceReview = "cadence-review"
 
 // MergeMethodSquash is the one merge method implemented.
 const MergeMethodSquash = "squash"
@@ -197,12 +196,9 @@ func (c SurfaceMergeConfig) Resolve() (MergeSettings, error) {
 	if c.Method != "" && c.Method != MergeMethodSquash {
 		return fail("method: want %q, the one method implemented, got %s", MergeMethodSquash, quoteConfigValue(c.Method))
 	}
-	if len(c.Approvers) > 2 {
-		return fail("approvers: want at most %q and %q, got %d entries", MergeApproverCadenceReview, MergeApproverCodeRabbit, len(c.Approvers))
-	}
 	for _, a := range c.Approvers {
-		if a != MergeApproverCadenceReview && a != MergeApproverCodeRabbit {
-			return fail("approvers: want %q or %q, got %s", MergeApproverCadenceReview, MergeApproverCodeRabbit, quoteConfigValue(a))
+		if a != MergeApproverCadenceReview {
+			return fail("approvers: want %q, the one approver implemented, got %s", MergeApproverCadenceReview, quoteConfigValue(a))
 		}
 		if slices.Contains(s.Approvers, a) {
 			return fail("approvers: %s is listed twice", quoteConfigValue(a))

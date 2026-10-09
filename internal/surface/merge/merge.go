@@ -13,14 +13,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// GitHub identities the policy matches by numeric id, never by login.
-const (
-	// CodeRabbitUserID is coderabbitai[bot]'s user id.
-	CodeRabbitUserID int64 = 136622811
-	// GitHubActionsAppID is the GitHub Actions app's id; a required check
-	// run must come from it.
-	GitHubActionsAppID int64 = 15368
-)
+// GitHubActionsAppID is the GitHub Actions app's id, matched by number,
+// never by name; a required check run must come from it.
+const GitHubActionsAppID int64 = 15368
 
 // Result is a verdict's outcome.
 type Result string
@@ -77,12 +72,9 @@ type Repository struct {
 
 // PullRequest is the PR's state, read in one query bound to HeadRefOid.
 type PullRequest struct {
-	Number int
-	URL    string
-	Title  string
-	// Body is the PR description; only the @coderabbitai mention rule
-	// reads it.
-	Body              string
+	Number            int
+	URL               string
+	Title             string
 	State             string
 	IsDraft           bool
 	IsCrossRepository bool
@@ -133,18 +125,13 @@ type Review struct {
 	CommitOID string
 }
 
-// Comment is a PR or review-thread comment.
+// Comment is a PR conversation comment. Only checkOpenFindings reads it: a
+// comment is never a passing marker, but one holding a marker can refuse.
 type Comment struct {
-	Author Actor
-	Body   string
-}
-
-// Thread is a review thread.
-type Thread struct {
-	IsResolved bool
-	// ResolvedBy is nil when no one, or no readable account, resolved it.
-	ResolvedBy *Actor
-	Comments   []Comment
+	Author    Actor
+	Body      string
+	URL       string
+	CreatedAt string
 }
 
 // File is one changed file, from the compare of base and head, with its
@@ -176,7 +163,6 @@ type Facts struct {
 	PR         PullRequest
 	Checks     []CheckRun
 	Reviews    []Review
-	Threads    []Thread
 	// Comments are the PR's conversation comments.
 	Comments []Comment
 	Files    []File
@@ -374,9 +360,11 @@ func checkPR(f Facts, add addFunc) {
 // count (the suite's head branch is the PR's, and its matching open PRs
 // include this one), so a run at the same commit for another PR cannot
 // stand in. Of those, for each required name: a run from another app or
-// workflow file, or with no workflow run, refuses; among the runs from the
-// pinned file on a pull_request event, any still running refuses, any that
-// concluded other than SUCCESS refuses, and at least one SUCCESS is needed.
+// workflow file, or with no workflow run, refuses; a run from the pinned
+// file on any other event (push, workflow_dispatch, schedule) never counts
+// and refuses unless it is SUCCESS; among the runs from the pinned file on a
+// pull_request event, any still running refuses, any that concluded other
+// than SUCCESS refuses, and at least one SUCCESS is needed.
 func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 	want := "/" + f.Repository.NameWithOwner + "/actions/workflows/" + path.Base(repo.Workflow)
 	tied := func(r CheckRun) bool {
@@ -397,6 +385,12 @@ func checkChecks(f Facts, repo config.MergeRepo, add addFunc) {
 				add("check %q has a run (id %d) from workflow %s, expected only %s", name, r.DatabaseID, r.WorkflowPath, want)
 			case r.Event == "pull_request":
 				pinned = append(pinned, r)
+			case r.Status != "COMPLETED" || r.Conclusion != "SUCCESS":
+				// A run of the pinned file on another event (push,
+				// workflow_dispatch, schedule) never counts, but one that is
+				// not SUCCESS still refuses.
+				add("check %q has a run (id %d) from %s on event %q that is %s/%s, expected every run of the pinned workflow at the head to be COMPLETED/SUCCESS",
+					name, r.DatabaseID, repo.Workflow, r.Event, nonEmpty(r.Status, "unknown"), nonEmpty(r.Conclusion, "none"))
 			}
 		}
 		if len(pinned) == 0 {
@@ -493,7 +487,7 @@ func checkModes(file File, add addFunc) {
 // whichever approver passes.
 func checkApprovers(f Facts, s config.MergeSettings, add addFunc) {
 	if len(s.Approvers) == 0 {
-		add("[surface.merge] approvers is empty, expected cadence-review or coderabbit")
+		add("[surface.merge] approvers is empty, expected cadence-review")
 		return
 	}
 	var why []string
@@ -502,8 +496,6 @@ func checkApprovers(f Facts, s config.MergeSettings, add addFunc) {
 		switch a {
 		case config.MergeApproverCadenceReview:
 			r = cadenceReview(f, s)
-		case config.MergeApproverCodeRabbit:
-			r = codeRabbit(f)
 		default:
 			r = []string{fmt.Sprintf("approver %q is not implemented", a)}
 		}
@@ -523,17 +515,21 @@ type marker struct {
 	index  int
 }
 
-// markersOf collects the cadence-review markers by s.MarkerAuthorID, per
-// reviewer. A marker review whose submittedAt does not parse is not counted
-// and comes back as a reason: it may hold a finding.
-func markersOf(f Facts, s config.MergeSettings) (map[string][]marker, []string) {
-	var bad []string
+// countedReview reports a review the cadence-review approver reads: a User
+// review by s.MarkerAuthorID in state COMMENTED or APPROVED.
+func countedReview(r Review, s config.MergeSettings) bool {
+	return r.Author.Typename == "User" && r.Author.DatabaseID == s.MarkerAuthorID && r.Author.DatabaseID != 0 &&
+		(r.State == "COMMENTED" || r.State == "APPROVED")
+}
+
+// markersOf collects the strict cadence-review markers by s.MarkerAuthorID,
+// per reviewer, for the cadence-review approver. A marker review whose
+// submittedAt does not parse is not counted here; checkOpenFindings refuses
+// it.
+func markersOf(f Facts, s config.MergeSettings) map[string][]marker {
 	byReviewer := map[string][]marker{}
 	for i, r := range f.Reviews {
-		if r.Author.Typename != "User" || r.Author.DatabaseID != s.MarkerAuthorID || r.Author.DatabaseID == 0 {
-			continue
-		}
-		if r.State != "COMMENTED" && r.State != "APPROVED" {
+		if !countedReview(r, s) {
 			continue
 		}
 		m, ok := ParseMarker(r.Body)
@@ -542,12 +538,11 @@ func markersOf(f Facts, s config.MergeSettings) (map[string][]marker, []string) 
 		}
 		at, err := time.Parse(time.RFC3339, r.SubmittedAt)
 		if err != nil {
-			bad = append(bad, fmt.Sprintf("cadence-review: a %s marker has submittedAt %q, expected a timestamp", m.Reviewer, r.SubmittedAt))
 			continue
 		}
 		byReviewer[m.Reviewer] = append(byReviewer[m.Reviewer], marker{Marker: m, at: at, commit: r.CommitOID, index: i})
 	}
-	return byReviewer, bad
+	return byReviewer
 }
 
 // passingAt reports a marker that clears the head: it names head, was posted
@@ -556,42 +551,167 @@ func passingAt(m marker, head string) bool {
 	return m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0
 }
 
-// checkOpenFindings refuses a reviewer whose latest marker with a Critical
-// or Important finding, at any commit, has no later passing marker at the
-// head. It runs under every approver set (ADR-0011, 2026-10-09 amendment,
-// decision 1): a passing CodeRabbit review never silences an open finding.
+// looseMarker finds "cadence-review:" anywhere in a body, in any case, with
+// the token after it: the reviewer name the marker claims. The strict
+// markerPattern decides what passes; this decides what may hold a finding.
+var looseMarker = regexp.MustCompile(`(?i)cadence-review:[ \t]*(\S*)`)
+
+// reviewerName is a reviewer name a strict marker can carry.
+var reviewerName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+
+// maxQuotedLine caps a body line quoted in a reason.
+const maxQuotedLine = 120
+
+// markerPost is a review or conversation comment by marker_author_id whose
+// body mentions "cadence-review:".
+type markerPost struct {
+	// where names it for a reason: "review <url>" or "conversation comment
+	// <url>".
+	where string
+	// stampField is the timestamp's GraphQL name, and stamp its value.
+	stampField, stamp string
+	body              string
+	mentions          [][]string
+	// review is nil for a conversation comment.
+	review *Review
+}
+
+// markerPosts lists the reviews (any state, any commit) and conversation
+// comments by s.MarkerAuthorID that mention "cadence-review:" in any case.
+func markerPosts(f Facts, s config.MergeSettings) []markerPost {
+	var out []markerPost
+	for i := range f.Reviews {
+		r := &f.Reviews[i]
+		if r.Author.DatabaseID != s.MarkerAuthorID {
+			continue
+		}
+		if m := looseMarker.FindAllStringSubmatch(r.Body, -1); m != nil {
+			out = append(out, markerPost{where: "review " + nonEmpty(r.URL, "with no URL"), stampField: "submittedAt", stamp: r.SubmittedAt, body: r.Body, mentions: m, review: r})
+		}
+	}
+	for _, c := range f.Comments {
+		if c.Author.DatabaseID != s.MarkerAuthorID {
+			continue
+		}
+		if m := looseMarker.FindAllStringSubmatch(c.Body, -1); m != nil {
+			out = append(out, markerPost{where: "conversation comment " + nonEmpty(c.URL, "with no URL"), stampField: "createdAt", stamp: c.CreatedAt, body: c.Body, mentions: m})
+		}
+	}
+	return out
+}
+
+// strictPass returns the marker when p is a review that passes at head: a
+// counted review whose body mentions "cadence-review:" once, in a first line
+// that is an exact marker naming head, posted at head, with crit=0 imp=0.
+func strictPass(p markerPost, head string, s config.MergeSettings) (Marker, bool) {
+	if p.review == nil || !countedReview(*p.review, s) || len(p.mentions) != 1 {
+		return Marker{}, false
+	}
+	m, ok := ParseMarker(p.body)
+	if !ok || m.Crit != 0 || m.Imp != 0 || m.Head != head || p.review.CommitOID != head {
+		return Marker{}, false
+	}
+	return m, true
+}
+
+// whyNotPassing says why p is not a passing marker at head.
+func whyNotPassing(p markerPost, head string) string {
+	var why []string
+	if p.review == nil {
+		why = append(why, "a conversation comment never counts as a passing marker")
+	} else {
+		r := p.review
+		if r.Author.Typename != "User" {
+			why = append(why, fmt.Sprintf("its author is a %s, expected a User", nonEmpty(r.Author.Typename, "unknown actor")))
+		}
+		if r.State != "COMMENTED" && r.State != "APPROVED" {
+			why = append(why, fmt.Sprintf("its state is %s, expected COMMENTED or APPROVED", nonEmpty(r.State, "unknown")))
+		}
+	}
+	if n := len(p.mentions); n > 1 {
+		why = append(why, fmt.Sprintf("it mentions cadence-review: %d times, expected one marker", n))
+	}
+	m, ok := ParseMarker(p.body)
+	switch {
+	case !ok:
+		line, _, _ := strings.Cut(p.body, "\n")
+		if len(line) > maxQuotedLine {
+			line = line[:maxQuotedLine] + "..."
+		}
+		why = append(why, fmt.Sprintf("its first line %s is not an exact marker", strconv.Quote(line)))
+	case m.Crit > 0 || m.Imp > 0:
+		why = append(why, fmt.Sprintf("%s reported crit=%d imp=%d at head %s", m.Reviewer, m.Crit, m.Imp, short(m.Head)))
+	case p.review != nil && (m.Head != head || p.review.CommitOID != head):
+		why = append(why, fmt.Sprintf("it names head %s at review commit %s, expected %s for both", short(m.Head), short(p.review.CommitOID), short(head)))
+	}
+	return strings.Join(why, "; ")
+}
+
+// checkOpenFindings fails closed on cadence-review markers. Every review
+// (any state, any commit) and conversation comment by marker_author_id whose
+// body mentions "cadence-review:" anywhere, in any case, and that is not a
+// strict passing marker at the head (strictPass) is an open finding for each
+// reviewer it names, unless a strict passing marker at the head by the same
+// reviewer was submitted later (a marker in the same second is not later);
+// each one not cleared adds its own reason. One that names a reviewer that
+// does not parse, or whose timestamp does not, refuses outright: no later
+// marker can be shown to clear it. It runs outside the approver loop, so it
+// refuses under every approver set (ADR-0011, 2026-10-09 amendment,
+// decision 1).
 func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 	if s.MarkerAuthorID <= 0 {
 		add("[surface.merge] marker_author_id is not set, expected the operator's id: open cadence-review findings cannot be read without it")
 		return
 	}
 	head := f.PR.HeadRefOid
-	byReviewer, bad := markersOf(f, s)
-	for _, b := range bad {
-		add("%s", b)
+	type openItem struct {
+		at                   time.Time
+		reviewer, where, why string
 	}
-	reviewers := make([]string, 0, len(byReviewer))
-	for name := range byReviewer {
-		reviewers = append(reviewers, name)
-	}
-	sort.Strings(reviewers)
-	for _, name := range reviewers {
-		ms := byReviewer[name]
-		var failedAt time.Time
-		var failed *marker
-		for i := range ms {
-			if (ms[i].Crit > 0 || ms[i].Imp > 0) && (failed == nil || !ms[i].at.Before(failedAt)) {
-				failed, failedAt = &ms[i], ms[i].at
-			}
-		}
-		if failed == nil {
+	passes := map[string][]time.Time{}
+	var open []openItem
+	for _, p := range markerPosts(f, s) {
+		at, err := time.Parse(time.RFC3339, p.stamp)
+		if err != nil {
+			add("open finding: %s mentions cadence-review: and has %s %q, expected a timestamp, so no later passing marker can be shown to clear it; this refuses under every approver", p.where, p.stampField, p.stamp)
 			continue
 		}
-		cleared := slices.ContainsFunc(ms, func(m marker) bool { return passingAt(m, head) && m.at.After(failedAt) })
-		if !cleared {
-			add("open finding: %s reported crit=%d imp=%d at head %s (%s), expected a later passing marker at head %s; this refuses under every approver",
-				name, failed.Crit, failed.Imp, short(failed.Head), failedAt.UTC().Format(time.RFC3339), short(head))
+		if m, ok := strictPass(p, head, s); ok {
+			passes[m.Reviewer] = append(passes[m.Reviewer], at)
+			continue
 		}
+		why := whyNotPassing(p, head)
+		var names []string
+		bad, badName := false, ""
+		for _, mention := range p.mentions {
+			if !reviewerName.MatchString(mention[1]) {
+				bad, badName = true, mention[1]
+				break
+			}
+			if !slices.Contains(names, mention[1]) {
+				names = append(names, mention[1])
+			}
+		}
+		if bad {
+			add("open finding: %s mentions cadence-review: with reviewer name %q, which does not parse (expected 1-40 characters of a-z, 0-9 and '-'), so no marker can clear it: %s; this refuses under every approver", p.where, badName, why)
+			continue
+		}
+		for _, n := range names {
+			open = append(open, openItem{at: at, reviewer: n, where: p.where, why: why})
+		}
+	}
+	sort.SliceStable(open, func(i, j int) bool {
+		if open[i].reviewer != open[j].reviewer {
+			return open[i].reviewer < open[j].reviewer
+		}
+		return open[i].at.Before(open[j].at)
+	})
+	for _, it := range open {
+		if slices.ContainsFunc(passes[it.reviewer], func(t time.Time) bool { return t.After(it.at) }) {
+			continue
+		}
+		add("open finding: %s (%s, %s), expected a later passing marker by %s at head %s; this refuses under every approver",
+			it.why, it.where, it.at.UTC().Format(time.RFC3339), it.reviewer, short(head))
 	}
 }
 
@@ -601,7 +721,7 @@ func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 func cadenceReview(f Facts, s config.MergeSettings) []string {
 	var why []string
 	head := f.PR.HeadRefOid
-	byReviewer, _ := markersOf(f, s)
+	byReviewer := markersOf(f, s)
 	for _, name := range s.RequiredReviewers {
 		ms := byReviewer[name]
 		if len(ms) == 0 {
@@ -629,75 +749,6 @@ func latestMarker(ms []marker) marker {
 		}
 	}
 	return last
-}
-
-// codeRabbitStatusLine marks a completed CodeRabbit review body, as the
-// captured cameronsjo/forgectl#1195 review carries it.
-const codeRabbitStatusLine = "<!-- This is an auto-generated comment by CodeRabbit for review status -->"
-
-var (
-	codeRabbitFirstLine = regexp.MustCompile(`^\*\*Actionable comments posted: (0|[1-9][0-9]{0,3})\*\*$`)
-	codeRabbitRange     = regexp.MustCompile(`(?m)^Reviewing files that changed from the base of the PR and between [0-9a-f]{40} and ([0-9a-f]{40})\.$`)
-)
-
-// CompletedCodeRabbitReview reports whether body has the shape of a
-// completed CodeRabbit review of head: the "Actionable comments posted"
-// first line, the review-status marker, and the commit range ending at
-// head.
-func CompletedCodeRabbitReview(body, head string) bool {
-	first, _, _ := strings.Cut(body, "\n")
-	if !codeRabbitFirstLine.MatchString(first) || !strings.Contains(body, codeRabbitStatusLine) {
-		return false
-	}
-	m := codeRabbitRange.FindAllStringSubmatch(body, -1)
-	return len(m) == 1 && m[0][1] == head
-}
-
-func isCodeRabbit(a Actor) bool { return a.DatabaseID == CodeRabbitUserID }
-
-// codeRabbit returns why the coderabbit approver does not pass, or nothing
-// when it does.
-func codeRabbit(f Facts) []string {
-	var why []string
-	head := f.PR.HeadRefOid
-	if !slices.ContainsFunc(f.Reviews, func(r Review) bool {
-		return isCodeRabbit(r.Author) && r.Author.Typename == "Bot" && r.CommitOID == head &&
-			(r.State == "COMMENTED" || r.State == "APPROVED") && CompletedCodeRabbitReview(r.Body, head)
-	}) {
-		why = append(why, fmt.Sprintf("coderabbit: no completed review by user %d at head %s (a commit status such as \"Review rate limited\" never counts)", CodeRabbitUserID, short(head)))
-	}
-	for _, t := range f.Threads {
-		if len(t.Comments) == 0 || !isCodeRabbit(t.Comments[0].Author) {
-			continue
-		}
-		switch {
-		case !t.IsResolved:
-			why = append(why, "coderabbit: a CodeRabbit review thread is unresolved, expected every bot thread resolved by the bot")
-		case t.ResolvedBy == nil || !isCodeRabbit(*t.ResolvedBy):
-			by := "an unreadable account"
-			if t.ResolvedBy != nil {
-				by = who(*t.ResolvedBy)
-			}
-			why = append(why, fmt.Sprintf("coderabbit: a CodeRabbit thread was resolved by %s, expected the bot (%d)", by, CodeRabbitUserID))
-		}
-	}
-	mention := func(c Comment) bool {
-		return !isCodeRabbit(c.Author) && strings.Contains(strings.ToLower(c.Body), "@coderabbitai")
-	}
-	all := append(slices.Clone(f.Comments), Comment{Author: f.PR.Author, Body: f.PR.Body})
-	for _, r := range f.Reviews {
-		all = append(all, Comment{Author: r.Author, Body: r.Body})
-	}
-	for _, t := range f.Threads {
-		all = append(all, t.Comments...)
-	}
-	for _, c := range all {
-		if mention(c) {
-			why = append(why, fmt.Sprintf("coderabbit: %s mentioned @coderabbitai, expected no non-bot mention", who(c.Author)))
-			break
-		}
-	}
-	return why
 }
 
 func who(a Actor) string {

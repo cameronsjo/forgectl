@@ -14,11 +14,11 @@ import (
 // Fixtures (testdata) are live, read-only captures from cameronsjo/forgectl
 // on 2026-10-09, made with the exact DiscoverQuery, PRQuery and ChecksQuery
 // in decode.go: #1204 (a merged drain worker PR on worker/gh1175-forgectl),
-// #1203 (cadence-review markers at head d2a35ddc and earlier heads), #1199
-// (a "Review rate limited" CodeRabbit commit status and no CodeRabbit
-// review), #1195 (a completed CodeRabbit review with one unresolved thread).
-// They are trimmed to keep them small: review and comment bodies other than
-// CodeRabbit's review are cut to their first line, the compare response
+// #1203 (cadence-review markers at head d2a35ddc and earlier heads), and the
+// #1199 checks (a "Review rate limited" CodeRabbit commit status). The PR
+// fixtures were captured with a query that also read review threads and is
+// a superset of today's. They are trimmed to keep them small: review and
+// comment bodies are cut to their first line, the compare response
 // keeps only status and the file list, and each tree keeps only the changed
 // files' entries. discover_synthetic_fork.json is the #1204 discovery with
 // three PRs added on the same head name that the filter must drop.
@@ -87,7 +87,7 @@ func passingFacts(t *testing.T) Facts {
 			Base: base1204, GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: forgectlID, QueueLaunchID: "launch-abc", QueueState: "reported",
 		},
 		Repository: pr.Repository, OperatorID: operatorID, PR: pr.PR, Checks: checks.Runs, Reviews: reviews,
-		Threads: pr.Threads, Comments: pr.Comments, Files: files,
+		Comments: pr.Comments, Files: files,
 		BaseAncestry: CompareIdentical, HeadAncestry: CompareAhead,
 	}
 }
@@ -373,10 +373,26 @@ func TestEvaluateChecks(t *testing.T) {
 			t.Fatalf("%d ci.yml runs in the capture, expected build-test, lint and macos-test at least", n)
 		}
 	})
-	t.Run("a push-event run beside the pull_request run is ignored", func(t *testing.T) {
+	// A run of the pinned workflow on another event never counts toward a
+	// pass, but one that is not SUCCESS refuses, naming its event.
+	for name, c := range map[string]struct{ event, status, conclusion, want string }{
+		"a failed push run":                {"push", "COMPLETED", "FAILURE", `on event "push" that is COMPLETED/FAILURE`},
+		"a running workflow_dispatch run":  {"workflow_dispatch", "IN_PROGRESS", "", `on event "workflow_dispatch" that is IN_PROGRESS/none`},
+		"a cancelled schedule run":         {"schedule", "COMPLETED", "CANCELLED", `on event "schedule" that is COMPLETED/CANCELLED`},
+		"a failed run with no event named": {"", "COMPLETED", "FAILURE", `on event "" that is COMPLETED/FAILURE`},
+	} {
+		t.Run(name+" beside the pull_request run refuses", func(t *testing.T) {
+			f := passingFacts(t)
+			r := runNamed(f, "lint")
+			r.DatabaseID, r.StartedAt, r.Event, r.Status, r.Conclusion = r.DatabaseID+5, "2099-01-01T00:00:00Z", c.event, c.status, c.conclusion
+			f.Checks = append(f.Checks, r)
+			wantRefusal(t, evalManual(f), c.want)
+		})
+	}
+	t.Run("a successful push run beside the pull_request run passes", func(t *testing.T) {
 		f := passingFacts(t)
 		r := runNamed(f, "lint")
-		r.DatabaseID, r.StartedAt, r.Event, r.Conclusion = r.DatabaseID+5, "2099-01-01T00:00:00Z", "push", "FAILURE"
+		r.DatabaseID, r.StartedAt, r.Event = r.DatabaseID+5, "2099-01-01T00:00:00Z", "push"
 		f.Checks = append(f.Checks, r)
 		if v := evalManual(f); v.Result != Pass {
 			t.Fatalf("%s %q", v.Result, v.Reasons)
@@ -430,6 +446,8 @@ func TestEvaluatePaths(t *testing.T) {
 		"built-in: go.mod at the root": {[]File{file("go.mod", "modified")}, "top-level files"},
 		"built-in: go.sum nested":      {[]File{file("docs/x/go.sum", "added")}, "module files"},
 		"built-in: go.work":            {[]File{file("docs/go.work", "added")}, "module files"},
+		"built-in: Cargo.toml nested":  {[]File{file("docs/x/Cargo.toml", "added")}, "build and toolchain files"},
+		"built-in: .cargo nested":      {[]File{file("docs/.cargo/config.toml", "added")}, "a .cargo directory"},
 		"renamed out of the gate":      {[]File{{Path: "docs/x.go", PreviousPath: "internal/surface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/surface/x.go" is refused`},
 		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "internal/tasks2/README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/tasks2/README.md" matches none`},
 		"removed test file":            {[]File{file("internal/tasks/x_test.go", "removed")}, "removes a test file"},
@@ -572,6 +590,11 @@ func TestEvaluateCadenceReview(t *testing.T) {
 			t.Fatalf("%s %q", v.Result, v.Reasons)
 		}
 	})
+	t.Run("no marker_author_id refuses", func(t *testing.T) {
+		s := goodSettings()
+		s.MarkerAuthorID = 0
+		wantRefusal(t, Evaluate(passingFacts(t), Policy{Settings: s}), "marker_author_id is not set")
+	})
 	// Each of these marker reviews is not counted, so polish has no marker.
 	notCounted := map[string]func(Review) Review{
 		"another author id": func(r Review) Review { r.Author.DatabaseID = 556; return r },
@@ -630,9 +653,129 @@ func TestEvaluateCadenceReview(t *testing.T) {
 		}
 		s := goodSettings()
 		s.RequiredReviewers = []string{"cadence-forge-security-reviewer", "chief-of-staff"}
-		if v := Evaluate(f, Policy{Settings: s}); slices.ContainsFunc(v.Reasons, func(r string) bool { return strings.Contains(r, "cadence-review") }) {
-			t.Fatalf("security and chief-of-staff at the head: %q", v.Reasons)
+		v = Evaluate(f, Policy{Settings: s})
+		if slices.ContainsFunc(v.Reasons, func(r string) bool { return strings.Contains(r, "no approver passed") }) {
+			t.Fatalf("security and chief-of-staff at the head: the approver refused: %q", v.Reasons)
 		}
+		// #1203's earlier markers fail closed: the two first-format markers
+		// ("cadence-review: security ...", no HTML comment) and polish's
+		// marker at an earlier head have no later passing marker at the head
+		// by the same reviewer, so each refuses, naming its review.
+		wantRefusal(t, v, `its first line "cadence-review: security head=8a4e4e3c972fd477f2a04d280aa1d9186415e354 crit=0 imp=0" is not an exact marker (review https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472236515`)
+		wantRefusal(t, v, `expected a later passing marker by code at head d2a35ddc1885`)
+		wantRefusal(t, v, `it names head 8a4e4e3c972f at review commit 8a4e4e3c972f, expected d2a35ddc1885 for both (review https://github.com/cameronsjo/forgectl/pull/1203#pullrequestreview-5472254227`)
+	})
+}
+
+// TestEvaluateOpenFindingsFailClosed pins that any review or conversation
+// comment by marker_author_id mentioning "cadence-review:" that is not a
+// strict passing marker at the head refuses, unless a strict passing marker
+// at the head by the same reviewer came later; and that one naming a
+// reviewer that does not parse refuses outright.
+func TestEvaluateOpenFindingsFailClosed(t *testing.T) {
+	const old = "8a4e4e3c972fd477f2a04d280aa1d9186415e354"
+	const url = "https://github.com/cameronsjo/forgectl/pull/1204#pullrequestreview-1"
+	operator := Actor{Typename: "User", Login: "cameronsjo", DatabaseID: operatorID}
+	// A polish review an hour after passingFacts' passing polish marker
+	// (17:00:01), so nothing clears it.
+	late := func(mutate func(*Review)) Review {
+		r := markerReview("polish", head1204, 0, 0, "2026-10-09T18:00:00Z")
+		r.URL = url
+		mutate(&r)
+		return r
+	}
+	body := func(b string) func(*Review) { return func(r *Review) { r.Body = b } }
+	good := "<!-- cadence-review: polish head=" + head1204 + " crit=0 imp=0 -->"
+	reviews := map[string]struct {
+		review Review
+		want   string
+	}{
+		"CRLF line endings": {late(body(good + "\r\nreview text")), `-->\r" is not an exact marker (review ` + url},
+		"a reviewer name with a colon": {late(body(strings.Replace(good, "polish", "cadence-forge:code-reviewer", 1))),
+			`reviewer name "cadence-forge:code-reviewer", which does not parse`},
+		"an uppercase reviewer name": {late(body(strings.Replace(good, "polish", "Polish", 1))), `reviewer name "Polish", which does not parse`},
+		"an empty reviewer name":     {late(body("cadence-review:\nsee above")), `reviewer name "", which does not parse`},
+		"a leading space":            {late(body(" " + good)), `its first line " <!-- cadence-review: polish`},
+		"a byte-order mark":          {late(body("\uFEFF" + good)), `its first line "\ufeff<!-- cadence-review: polish`},
+		"crit=10000":                 {late(body(strings.Replace(good, "crit=0", "crit=10000", 1))), "crit=10000 imp=0 -->\" is not an exact marker"},
+		"imp=01":                     {late(body(strings.Replace(good, "imp=0", "imp=01", 1))), "imp=01 -->\" is not an exact marker"},
+		"an uppercase head":          {late(body(strings.Replace(good, head1204, strings.ToUpper(head1204), 1))), "is not an exact marker (review " + url},
+		"a dismissed crit>0 review": {late(func(r *Review) { r.State, r.Body = "DISMISSED", strings.Replace(good, "crit=0", "crit=2", 1) }),
+			"its state is DISMISSED, expected COMMENTED or APPROVED; polish reported crit=2 imp=0"},
+		"a dismissed passing review at the head": {late(func(r *Review) { r.State = "DISMISSED" }), "its state is DISMISSED"},
+		"a pending review with submittedAt":      {late(func(r *Review) { r.State = "PENDING" }), "its state is PENDING"},
+		"a pending review with no submittedAt": {late(func(r *Review) { r.State, r.SubmittedAt = "PENDING", "" }),
+			`review ` + url + ` mentions cadence-review: and has submittedAt "", expected a timestamp`},
+		"changes requested at an old commit": {late(func(r *Review) {
+			r.State, r.CommitOID, r.Body = "CHANGES_REQUESTED", old, strings.Replace(good, head1204, old, 1)
+		}), "its state is CHANGES_REQUESTED"},
+		"a passing marker at an old head": {late(func(r *Review) { r.CommitOID, r.Body = old, strings.Replace(good, head1204, old, 1) }),
+			"it names head 8a4e4e3c972f at review commit 8a4e4e3c972f, expected 3afe70e8bff8 for both"},
+		"a bot-typed review on the operator's id": {late(func(r *Review) { r.Author.Typename = "Bot" }), "its author is a Bot, expected a User"},
+		"a mention past the first line, any case": {late(body("Looks fine.\n\nCADENCE-REVIEW: polish crit=1")),
+			`its first line "Looks fine." is not an exact marker`},
+		"a second marker in a passing review": {late(body(good + "\n<!-- cadence-review: polish head=" + head1204 + " crit=1 imp=0 -->")),
+			"it mentions cadence-review: 2 times, expected one marker"},
+	}
+	for name, c := range reviews {
+		t.Run(name, func(t *testing.T) {
+			f := passingFacts(t)
+			f.Reviews = append(f.Reviews, c.review)
+			v := evalManual(f)
+			wantRefusal(t, v, c.want)
+			wantRefusal(t, v, "this refuses under every approver")
+		})
+	}
+	comment := func(b, at string) Comment {
+		return Comment{Author: operator, Body: b, URL: "https://github.com/cameronsjo/forgectl/pull/1204#issuecomment-9", CreatedAt: at}
+	}
+	t.Run("a conversation comment marker", func(t *testing.T) {
+		f := passingFacts(t)
+		f.Comments = append(f.Comments, comment(good, "2026-10-09T18:00:00Z"))
+		wantRefusal(t, evalManual(f), "a conversation comment never counts as a passing marker (conversation comment https://github.com/cameronsjo/forgectl/pull/1204#issuecomment-9, 2026-10-09T18:00:00Z), expected a later passing marker by polish")
+	})
+	t.Run("a conversation comment with no createdAt", func(t *testing.T) {
+		f := passingFacts(t)
+		f.Comments = append(f.Comments, comment(good, ""))
+		wantRefusal(t, evalManual(f), `mentions cadence-review: and has createdAt "", expected a timestamp`)
+	})
+	// Controls: each of these is followed by a strict passing marker at the
+	// head by the same reviewer, or is not by marker_author_id, so it passes.
+	cleared := map[string]func(*Facts){
+		"CRLF before the pass": func(f *Facts) {
+			r := late(body(good + "\r\nreview text"))
+			r.SubmittedAt = "2026-10-09T16:00:00Z"
+			f.Reviews = append(f.Reviews, r)
+		},
+		"a dismissed crit>0 review before the pass": func(f *Facts) {
+			r := late(func(r *Review) { r.State, r.Body = "DISMISSED", strings.Replace(good, "crit=0", "crit=2", 1) })
+			r.SubmittedAt = "2026-10-09T16:00:00Z"
+			f.Reviews = append(f.Reviews, r)
+		},
+		"a conversation comment before the pass": func(f *Facts) {
+			f.Comments = append(f.Comments, comment(good, "2026-10-09T16:00:00Z"))
+		},
+		"a marker comment by another account": func(f *Facts) {
+			c := comment(strings.Replace(good, "crit=0", "crit=3", 1), "2026-10-09T18:00:00Z")
+			c.Author.DatabaseID = 556
+			f.Comments = append(f.Comments, c)
+		},
+	}
+	for name, mutate := range cleared {
+		t.Run("control: "+name, func(t *testing.T) {
+			f := passingFacts(t)
+			mutate(&f)
+			if v := evalManual(f); v.Result != Pass {
+				t.Fatalf("%s %q", v.Result, v.Reasons)
+			}
+		})
+	}
+	t.Run("a reviewer name that does not parse refuses even before a pass", func(t *testing.T) {
+		f := passingFacts(t)
+		r := late(body(strings.Replace(good, "polish", "cadence-forge:code-reviewer", 1)))
+		r.SubmittedAt = "2026-10-09T16:00:00Z"
+		f.Reviews = append(f.Reviews, r)
+		wantRefusal(t, evalManual(f), `reviewer name "cadence-forge:code-reviewer", which does not parse`)
 	})
 }
 
@@ -660,177 +803,23 @@ func TestParseMarker(t *testing.T) {
 	}
 }
 
-// Predicate 7: the coderabbit approver.
-func TestEvaluateCodeRabbit(t *testing.T) {
-	s := goodSettings()
-	s.Approvers = []string{config.MergeApproverCodeRabbit}
-	pr1195 := decodePRFixture(t, "pr_1195.json")
-	const head1195 = "1f01561d92018670e354cb381780908fd3286f3d"
-	at1195 := func(t *testing.T) Facts {
-		f := passingFacts(t)
-		// Clones: the subtests below edit these in place.
-		f.PR.HeadRefOid, f.Reviews, f.Threads, f.Comments = head1195, slices.Clone(pr1195.Reviews), slices.Clone(pr1195.Threads), slices.Clone(pr1195.Comments)
-		return f
-	}
-	t.Run("the real #1195: a completed review, one unresolved thread", func(t *testing.T) {
-		wantRefusal(t, Evaluate(at1195(t), Policy{Settings: s}), "a CodeRabbit review thread is unresolved")
-	})
-	resolve := func(f *Facts, by *Actor) {
-		for i := range f.Threads {
-			f.Threads[i].IsResolved, f.Threads[i].ResolvedBy = true, by
-		}
-	}
-	bot := &Actor{Typename: "User", Login: "coderabbitai", DatabaseID: CodeRabbitUserID}
-	t.Run("the thread resolved by the bot passes", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
-			t.Fatalf("%s %q", v.Result, v.Reasons)
-		}
-	})
-	cases := map[string]struct {
-		mutate func(*Facts)
-		want   string
-	}{
-		"thread resolved by the operator": {func(f *Facts) { resolve(f, &Actor{Typename: "User", Login: "cameronsjo", DatabaseID: operatorID}) },
-			`resolved by user "cameronsjo"`},
-		"thread resolved by no one readable": {func(f *Facts) { resolve(f, nil) }, "resolved by an unreadable account"},
-		"a non-bot @coderabbitai mention": {func(f *Facts) {
-			resolve(f, bot)
-			f.Comments = append(f.Comments, Comment{Author: Actor{Typename: "User", Login: "cameronsjo", DatabaseID: operatorID}, Body: "@CodeRabbitAI resolve"})
-		}, "mentioned @coderabbitai"},
-		"a mention in a review body": {func(f *Facts) {
-			resolve(f, bot)
-			f.Reviews = append(f.Reviews, Review{Author: Actor{Typename: "User", DatabaseID: operatorID, Login: "cameronsjo"}, Body: "ping @coderabbitai", State: "COMMENTED"})
-		}, "mentioned @coderabbitai"},
-		"a mention in the PR body": {func(f *Facts) {
-			resolve(f, bot)
-			f.PR.Body = "Summary\n\n@coderabbitai summary"
-		}, "mentioned @coderabbitai"},
-		"the review is at an older head": {func(f *Facts) {
-			resolve(f, bot)
-			f.PR.HeadRefOid = head1204
-		}, "no completed review by user 136622811 at head 3afe70e8bff8"},
-		"the review is by another id": {func(f *Facts) {
-			resolve(f, bot)
-			for i := range f.Reviews {
-				f.Reviews[i].Author.DatabaseID = 1
-			}
-		}, "no completed review by user 136622811"},
-		"the review body is not a completed review": {func(f *Facts) {
-			resolve(f, bot)
-			for i := range f.Reviews {
-				if isCodeRabbit(f.Reviews[i].Author) {
-					f.Reviews[i].Body = "Review skipped"
-				}
-			}
-		}, "no completed review"},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := at1195(t)
-			c.mutate(&f)
-			wantRefusal(t, Evaluate(f, Policy{Settings: s}), c.want)
-		})
-	}
-	// C1 (T10.2 security review): an open cadence-review finding refuses
-	// under every approver set, so a passing CodeRabbit review never
-	// silences it.
-	t.Run("a passing CodeRabbit review does not silence an open finding", func(t *testing.T) {
-		both := goodSettings()
-		both.Approvers = []string{config.MergeApproverCadenceReview, config.MergeApproverCodeRabbit}
-		for name, settings := range map[string]config.MergeSettings{"coderabbit only": s, "cadence-review and coderabbit": both} {
-			t.Run(name, func(t *testing.T) {
-				f := at1195(t)
-				resolve(&f, bot)
-				if v := Evaluate(f, Policy{Settings: settings}); v.Result != Pass {
-					t.Fatalf("control: CodeRabbit passing alone: %s %q", v.Result, v.Reasons)
-				}
-				f.Reviews = append(f.Reviews, markerReview("cadence-forge-security-reviewer", head1195, 2, 0, "2026-10-09T23:00:00Z"))
-				wantRefusal(t, Evaluate(f, Policy{Settings: settings}), "open finding: cadence-forge-security-reviewer reported crit=2 imp=0")
-			})
-		}
-	})
-	t.Run("an open finding at an older head, cleared later at the head, passes", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		f.Reviews = append(f.Reviews,
-			markerReview("cadence-forge-security-reviewer", head1204, 1, 1, "2026-10-09T22:00:00Z"),
-			markerReview("cadence-forge-security-reviewer", head1195, 0, 0, "2026-10-09T23:00:00Z"))
-		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
-			t.Fatalf("%s %q", v.Result, v.Reasons)
-		}
-	})
-	t.Run("no marker_author_id refuses under coderabbit too", func(t *testing.T) {
-		f := at1195(t)
-		resolve(&f, bot)
-		noID := s
-		noID.MarkerAuthorID = 0
-		wantRefusal(t, Evaluate(f, Policy{Settings: noID}), "marker_author_id is not set")
-	})
-	t.Run("the real #1199: rate limited, no review", func(t *testing.T) {
-		pr := decodePRFixture(t, "pr_1199.json")
-		f := passingFacts(t)
-		f.PR.HeadRefOid, f.Reviews, f.Threads, f.Comments = pr.PR.HeadRefOid, pr.Reviews, pr.Threads, pr.Comments
-		wantRefusal(t, Evaluate(f, Policy{Settings: s}), "a commit status such as \"Review rate limited\" never counts")
-	})
-	t.Run("either approver passing is enough", func(t *testing.T) {
-		both := goodSettings()
-		both.Approvers = []string{config.MergeApproverCadenceReview, config.MergeApproverCodeRabbit}
-		if v := Evaluate(passingFacts(t), Policy{Settings: both}); v.Result != Pass {
-			t.Fatalf("cadence-review passing, coderabbit not: %s %q", v.Result, v.Reasons)
-		}
-		f := at1195(t)
-		resolve(&f, bot)
-		f.Reviews = slices.DeleteFunc(f.Reviews, func(r Review) bool { return !isCodeRabbit(r.Author) })
-		if v := Evaluate(f, Policy{Settings: both}); v.Result != Pass {
-			t.Fatalf("coderabbit passing, cadence-review not: %s %q", v.Result, v.Reasons)
-		}
-		// #1195's own cadence-review markers pass at its head; drop them so
-		// neither approver passes.
-		f = at1195(t)
-		f.Reviews = slices.DeleteFunc(f.Reviews, func(r Review) bool { return !isCodeRabbit(r.Author) })
-		v := Evaluate(f, Policy{Settings: both})
-		wantRefusal(t, v, "no approver passed the head")
-		wantRefusal(t, v, "cadence-review: no cadence-forge-security-reviewer marker")
-		wantRefusal(t, v, "coderabbit: a CodeRabbit review thread is unresolved")
-	})
-}
-
-// TestDecodePRBody pins that the PR body is read, so the @coderabbitai
-// mention rule can see it. The captured fixtures predate the field.
-func TestDecodePRBody(t *testing.T) {
+// TestDecodePRCommentFields pins that a conversation comment's url and
+// createdAt are read, so an open-finding reason can name the comment and
+// order it against a later passing marker. The captured fixtures predate
+// the fields.
+func TestDecodePRCommentFields(t *testing.T) {
 	pr := string(readFixture(t, "pr_1204.json"))
-	withBody := strings.Replace(pr, `"title": `, `"body": "ping @coderabbitai", "title": `, 1)
-	if withBody == pr {
+	const from = `"body": "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"`
+	withFields := strings.Replace(pr, from, from+`, "url": "https://example.test/c/1", "createdAt": "2026-10-09T18:00:00Z"`, 1)
+	if withFields == pr {
 		t.Fatal("the fixture edit did not apply")
 	}
-	r, err := DecodePR([]byte(withBody))
-	if err != nil || r.PR.Body != "ping @coderabbitai" {
-		t.Fatalf("body %q, %v", r.PR.Body, err)
+	r, err := DecodePR([]byte(withFields))
+	if err != nil || len(r.Comments) != 1 || r.Comments[0].URL != "https://example.test/c/1" || r.Comments[0].CreatedAt != "2026-10-09T18:00:00Z" {
+		t.Fatalf("comments %+v, %v", r.Comments, err)
 	}
-}
-
-func TestCompletedCodeRabbitReview(t *testing.T) {
-	pr := decodePRFixture(t, "pr_1195.json")
-	const head = "1f01561d92018670e354cb381780908fd3286f3d"
-	var body string
-	for _, r := range pr.Reviews {
-		if isCodeRabbit(r.Author) {
-			body = r.Body
-		}
-	}
-	if !CompletedCodeRabbitReview(body, head) {
-		t.Fatal("the captured #1195 review is not read as completed")
-	}
-	if CompletedCodeRabbitReview(body, head1204) {
-		t.Fatal("a review of another head counted")
-	}
-	if CompletedCodeRabbitReview(strings.Replace(body, codeRabbitStatusLine, "", 1), head) {
-		t.Fatal("a body without the review-status marker counted")
-	}
-	if CompletedCodeRabbitReview(" "+body, head) {
-		t.Fatal("a body with a different first line counted")
+	if !strings.Contains(PRQuery, "body url createdAt }") {
+		t.Fatal("PRQuery does not ask for the comment's url and createdAt")
 	}
 }
 
