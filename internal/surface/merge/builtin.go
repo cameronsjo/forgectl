@@ -113,6 +113,14 @@ var builtinRefusedGlobs = []string{
 // files that decide what code a build pulls in.
 var builtinRefusedBase = []string{"go.mod", "go.sum", "go.work", "go.work.sum"}
 
+// builtinRefusedAgentBase are the agent instruction files a coding agent
+// loads from any directory it works in, refused at any depth.
+var builtinRefusedAgentBase = []string{"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
+
+// builtinRefusedSegment are directory names refused at any depth: agent and
+// CI configuration a nested copy of still takes effect from.
+var builtinRefusedSegment = []string{".claude", ".github"}
+
 // builtinRefusal returns why p is refused whatever the config says, or "".
 func builtinRefusal(p string) string {
 	// The repository root holds the module, build, lint, release and agent
@@ -128,10 +136,22 @@ func builtinRefusal(p string) string {
 			return "module files (" + strings.Join(builtinRefusedBase, ", ") + ") are refused in any directory"
 		}
 	}
+	for _, b := range builtinRefusedAgentBase {
+		if strings.EqualFold(base, b) {
+			return "agent instruction files (" + strings.Join(builtinRefusedAgentBase, ", ") + ") are refused in any directory"
+		}
+	}
 	lower := strings.ToLower(p)
 	for _, g := range builtinRefusedGlobs {
 		if config.MatchMergeGlob(g, lower) {
 			return "it is under the built-in refused set (" + g + ")"
+		}
+	}
+	for _, seg := range strings.Split(path.Dir(p), "/") {
+		for _, sg := range builtinRefusedSegment {
+			if strings.EqualFold(seg, sg) {
+				return "a " + sg + " directory is refused at any depth"
+			}
 		}
 	}
 	return ""

@@ -310,7 +310,7 @@ func TestPriceTranscript(t *testing.T) {
 	answer := func(out string, err error) *exec.FakeRunner {
 		return &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, err }}
 	}
-	good := answer(`{"costUsd":2.5,"byModel":{"claude-opus-5-5":{"costUsd":2.5}},"unpricedModels":[]}`, nil)
+	good := answer(`{"byModel":[{"costUsd":2.5,"model":"claude-opus-5-5","tokens":{"cacheCreate":0,"cacheCreate1h":0,"cacheRead":0,"input":10,"output":5}}],"costUsd":2.5,"unpricedModels":[]}`, nil)
 	u := priceTranscript(ctx, good, found, "/t/s.jsonl")
 	if u == nil || u.CostUSD != 2.5 || !strings.Contains(string(u.ByModel), "claude-opus-5-5") {
 		t.Fatalf("good: %+v", u)
@@ -319,11 +319,13 @@ func TestPriceTranscript(t *testing.T) {
 		t.Fatalf("call %+v", c)
 	}
 	for name, run := range map[string]*exec.FakeRunner{
-		"exit 1":        answer("", errors.New("exit status 1")),
-		"not JSON":      answer("nope", nil),
-		"no costUsd":    answer(`{"byModel":{}}`, nil),
-		"negative cost": answer(`{"costUsd":-1,"byModel":{}}`, nil),
-		"byModel array": answer(`{"costUsd":1,"byModel":[1]}`, nil),
+		"exit 1":            answer("", errors.New("exit status 1")),
+		"not JSON":          answer("nope", nil),
+		"no costUsd":        answer(`{"byModel":[]}`, nil),
+		"negative cost":     answer(`{"costUsd":-1,"byModel":[]}`, nil),
+		"byModel not rows":  answer(`{"costUsd":1,"byModel":[1]}`, nil),
+		"byModel object":    answer(`{"costUsd":1,"byModel":{"m":{}},"unpricedModels":[]}`, nil),
+		"row without model": answer(`{"costUsd":1,"byModel":[{"costUsd":1}],"unpricedModels":[]}`, nil),
 	} {
 		if u := priceTranscript(ctx, run, found, "/t/s.jsonl"); u != nil {
 			t.Errorf("%s: %+v, want nil", name, u)
@@ -331,18 +333,21 @@ func TestPriceTranscript(t *testing.T) {
 	}
 	// Partial: an unpriced model makes usage partial, never the session's
 	// cost, and model names lose control, bidi and invisible characters.
-	partial := answer(`{"costUsd":1.5,"byModel":{"claude-opus-5-5\u202e":{"costUsd":1.5}},"unpricedModels":["my-\u001b[31mmodel\u200b"]}`, nil)
+	partial := answer(`{"costUsd":1.5,"byModel":[{"costUsd":1.5,"model":"claude-opus-5-5\u202e"}],"unpricedModels":["my-\u001b[31mmodel\u200b"]}`, nil)
 	u = priceTranscript(ctx, partial, found, "/t/s.jsonl")
 	if u == nil || u.Priced || len(u.UnpricedModels) != 1 || u.UnpricedModels[0] != "my-[31mmodel" {
 		t.Fatalf("partial: %+v", u)
 	}
-	if string(u.ByModel) != `{"claude-opus-5-5":{"costUsd":1.5}}` {
+	if string(u.ByModel) != `[{"costUsd":1.5,"model":"claude-opus-5-5"}]` {
 		t.Fatalf("partial byModel %s", u.ByModel)
 	}
 	if g := priceTranscript(ctx, good, found, "/t/s.jsonl"); g == nil || !g.Priced || len(g.UnpricedModels) != 0 {
 		t.Fatal("a fully priced transcript is not priced")
 	}
-	collide := answer(`{"costUsd":1,"byModel":{"m":{},"m\u200b":{}},"unpricedModels":[]}`, nil)
+	if g := priceTranscript(ctx, answer(`{"costUsd":2.5,"byModel":[{"costUsd":2.5,"model":"m"}]}`, nil), found, "/t/s.jsonl"); g == nil || g.Priced {
+		t.Fatalf("no unpricedModels key must read as not priced: %+v", g)
+	}
+	collide := answer(`{"costUsd":1,"byModel":[{"model":"m"},{"model":"m\u200b"}],"unpricedModels":[]}`, nil)
 	if u := priceTranscript(ctx, collide, found, "/t/s.jsonl"); u != nil {
 		t.Fatalf("two names that strip to one: %+v, want nil", u)
 	}

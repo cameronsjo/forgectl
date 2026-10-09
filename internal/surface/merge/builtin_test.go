@@ -134,6 +134,12 @@ func TestBuiltinRefusalsTopLevel(t *testing.T) {
 			t.Errorf("%s is not refused", p)
 		}
 	}
+	for _, p := range []string{"docs/CLAUDE.md", "internal/tasks/AGENTS.md", "docs/sub/claude.local.md",
+		"docs/.claude/settings.json", "internal/tasks/.github/x.yml", "docs/.Claude/x"} {
+		if builtinRefusal(p) == "" {
+			t.Errorf("nested agent or CI file %s is not refused", p)
+		}
+	}
 	for _, p := range []string{"internal/tasks/x.go", "docs/x.md"} {
 		if why := builtinRefusal(p); why != "" {
 			t.Errorf("%s refused: %s", p, why)

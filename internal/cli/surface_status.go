@@ -422,40 +422,53 @@ func priceTranscript(ctx context.Context, run exec.Runner, lookPath func(string)
 	if err != nil {
 		return nil
 	}
+	// The shape is cadence-hooks' sessions.jsonl one: byModel is an array of
+	// {model, tokens, costUsd}, and unpricedModels lists the models the price
+	// table lacks. A missing unpricedModels reads as not priced.
 	var got struct {
-		CostUSD        *float64        `json:"costUsd"`
-		ByModel        json.RawMessage `json:"byModel"`
-		UnpricedModels []string        `json:"unpricedModels"`
+		CostUSD        *float64                     `json:"costUsd"`
+		ByModel        []map[string]json.RawMessage `json:"byModel"`
+		UnpricedModels *[]string                    `json:"unpricedModels"`
 	}
 	if json.Unmarshal([]byte(out), &got) != nil || got.CostUSD == nil || *got.CostUSD < 0 || math.IsNaN(*got.CostUSD) || math.IsInf(*got.CostUSD, 0) {
 		return nil
 	}
-	by := got.ByModel
-	if len(by) == 0 || string(by) == "null" {
-		by = json.RawMessage("{}")
-	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(by, &obj) != nil {
-		return nil
-	}
-	clean := make(map[string]json.RawMessage, len(obj))
-	for k, v := range obj {
-		ck := cleanModelName(k)
-		if _, dup := clean[ck]; dup {
+	seen := make(map[string]bool, len(got.ByModel))
+	clean := make([]map[string]json.RawMessage, 0, len(got.ByModel))
+	for _, entry := range got.ByModel {
+		var name string
+		if raw, ok := entry["model"]; !ok || json.Unmarshal(raw, &name) != nil {
 			return nil
 		}
-		clean[ck] = v
+		cn := cleanModelName(name)
+		if seen[cn] {
+			return nil
+		}
+		seen[cn] = true
+		// termsafe:allow-raw-json encodes one already-cleaned model name into the row; the document is written through writeJSON
+		nameJSON, err := json.Marshal(cn)
+		if err != nil {
+			return nil
+		}
+		row := make(map[string]json.RawMessage, len(entry))
+		for k, v := range entry {
+			row[k] = v
+		}
+		row["model"] = nameJSON
+		clean = append(clean, row)
 	}
-	// termsafe:allow-raw-json re-encodes a map of already-decoded JSON values; the document is written through writeJSON
+	// termsafe:allow-raw-json re-encodes already-decoded JSON values with each model name cleaned; the document is written through writeJSON
 	cleanBy, err := json.Marshal(clean)
 	if err != nil {
 		return nil
 	}
-	unpriced := make([]string, 0, len(got.UnpricedModels))
-	for _, m := range got.UnpricedModels {
-		unpriced = append(unpriced, cleanModelName(m))
+	unpriced := []string{}
+	if got.UnpricedModels != nil {
+		for _, m := range *got.UnpricedModels {
+			unpriced = append(unpriced, cleanModelName(m))
+		}
 	}
-	return &statusUsage{CostUSD: *got.CostUSD, ByModel: cleanBy, Priced: len(unpriced) == 0, UnpricedModels: unpriced}
+	return &statusUsage{CostUSD: *got.CostUSD, ByModel: cleanBy, Priced: got.UnpricedModels != nil && len(unpriced) == 0, UnpricedModels: unpriced}
 }
 
 // maxModelName caps a model name shown in usage.

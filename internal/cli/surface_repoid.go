@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
@@ -96,6 +97,28 @@ const maxIdentityWarning = 300
 // (drain.ErrGitHubRead) instead of counting an attempt.
 var errIdentityRead = errors.New("the repository identity could not be read from GitHub")
 
+// errIdentityRefused marks an identity read GitHub answered but refused or
+// answered without a repository: a renamed, deleted or inaccessible
+// repository, or a GraphQL error. Retrying on the next tick would only find
+// it again, so the drain counts an attempt rather than pausing; a row stuck
+// on it fails at the attempt limit instead of holding the queue.
+var errIdentityRefused = errors.New("GitHub refused the repository identity read")
+
+// transientGitHubFailure reports a gh failure worth pausing for rather than
+// counting: the network, a server error, or a rate limit. Anything else is
+// treated as GitHub's answer.
+func transientGitHubFailure(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"http 5", "rate limit", "dial tcp", "connection refused", "connection reset",
+		"no such host", "i/o timeout", "tls handshake", "network is unreachable", "context deadline exceeded",
+		"timeout awaiting", "unexpected eof"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // readRepoIdentity runs IdentityQuery for owner/name and branch.
 func readRepoIdentity(ctx context.Context, run exec.Runner, owner, name, branch string) (merge.Identity, error) {
 	slug := owner + "/" + name
@@ -104,11 +127,15 @@ func readRepoIdentity(ctx context.Context, run exec.Runner, owner, name, branch 
 		"-f", "query="+merge.IdentityQuery,
 		"-f", "owner="+owner, "-f", "name="+name, "-f", "ref=refs/heads/"+branch)
 	if err != nil {
-		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, errIdentityRead, err)
+		class := errIdentityRefused
+		if transientGitHubFailure(err) {
+			class = errIdentityRead
+		}
+		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, class, err)
 	}
 	id, err := merge.DecodeIdentity([]byte(out))
 	if err != nil {
-		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, errIdentityRead, err)
+		return merge.Identity{}, fmt.Errorf("forgectl: read %s's repository name and id from GitHub, which a worker launch records: %w: %w", slug, errIdentityRefused, err)
 	}
 	return id, nil
 }

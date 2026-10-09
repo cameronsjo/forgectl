@@ -82,18 +82,26 @@ func TestWorkerRepoIdentity(t *testing.T) {
 	failing := func() map[string]*exec.FakeRunner {
 		return map[string]*exec.FakeRunner{
 			"gh fails":      identityFake("git@github.com:o/r.git", "", errors.New("HTTP 502"), ""),
+			"gh refused":    identityFake("git@github.com:o/r.git", "", errors.New("HTTP 404: Not Found"), ""),
 			"bad response":  identityFake("git@github.com:o/r.git", `{"data":{"repository":null}}`, nil, ""),
 			"graphql error": identityFake("git@github.com:o/r.git", `{"errors":[{"message":"nope"}]}`, nil, ""),
 		}
 	}
-	t.Run("a GitHub read failure fails a drain launch, classed GitHub unreadable", func(t *testing.T) {
+	t.Run("a transient GitHub failure pauses a drain launch; an answer counts an attempt", func(t *testing.T) {
 		for name, run := range failing() {
 			_, err := workerRepoIdentity(ctx, run, io.Discard, "/top", "worker/w1", true)
-			if !errors.Is(err, errIdentityRead) || !strings.Contains(err.Error(), "which a worker launch records") {
-				t.Errorf("%s: %v, want errIdentityRead naming the identity read", name, err)
+			if err == nil || !strings.Contains(err.Error(), "which a worker launch records") {
+				t.Fatalf("%s: %v, want the identity read named", name, err)
 			}
-			if got := classifyLaunchError(err); got != drain.ErrGitHubRead {
-				t.Errorf("%s: class %v, want ErrGitHubRead (pause, no attempt spent)", name, got)
+			want, wantErr := drain.ErrOther, errIdentityRefused
+			if name == "gh fails" {
+				want, wantErr = drain.ErrGitHubRead, errIdentityRead
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("%s: %v, want %v", name, err, wantErr)
+			}
+			if got := classifyLaunchError(err); got != want {
+				t.Errorf("%s: class %v, want %v", name, got, want)
 			}
 		}
 	})
