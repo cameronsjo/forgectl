@@ -10,12 +10,14 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -23,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -82,6 +85,20 @@ type drainIO struct {
 	emit     func(drain.Event) error
 	now      func() time.Time
 	launchID func() (string, error)
+	// prRead finds a reported worker's PR through the discovery filter
+	// (merge.Reader.Discover), for the closers.
+	prRead func(ctx context.Context, row merge.Row) (merge.Candidate, error)
+	// price prices a transcript, or returns nil (priceTranscript).
+	price func(ctx context.Context, transcript string) *statusUsage
+	// closeRow runs the close `surface close` runs on a reported row's own
+	// ledger row.
+	closeRow func(ctx context.Context, q worker.QueueRow, led worker.Row) closeResult
+	// prune runs `surface prune` with the default cutoff.
+	prune func(ctx context.Context, now time.Time) (pruneResult, error)
+	// pruneDay and setPruneDay read and record the UTC day of the last daily
+	// prune.
+	pruneDay    func() (string, error)
+	setPruneDay func(day string) error
 }
 
 // drainProber reads one live worker's pane.
@@ -104,11 +121,24 @@ type drainer struct {
 	// slotsCond is the condition the last claude-slots check left
 	// (drain.SlotsDecision.Cond), so each is recorded once on entry.
 	slotsCond string
+	// closerRead is when each reported row's PR was last read, so a row is
+	// read at most every drain.CloserReadEvery. A restart forgets it.
+	closerRead map[string]time.Time
+	// closerNote is the last closer event recorded for each row, so a
+	// repeated refusal or note is one event, not one per read. closerReadFail
+	// is the same for a failed PR read, and a read that works clears it.
+	closerNote     map[string]string
+	closerReadFail map[string]string
+	// pruneDay is the UTC day of the last daily prune; pruneDayRead says it
+	// was read from drain-prune-day.
+	pruneDay     string
+	pruneDayRead bool
 }
 
 func newDrainer(io drainIO, session string, stopping func() bool) *drainer {
 	return &drainer{io: io, session: session, pauses: drain.Pauses{}, memo: map[string]drain.Memo{},
-		settings: config.DefaultDrainSettings(), stopping: stopping}
+		settings: config.DefaultDrainSettings(), stopping: stopping,
+		closerRead: map[string]time.Time{}, closerNote: map[string]string{}, closerReadFail: map[string]string{}}
 }
 
 // announce records what the drain starts without: one note when claude-slots
@@ -255,8 +285,9 @@ func nonEmptyState(s, fallback worker.QueueState) worker.QueueState {
 }
 
 // tick runs one pass: reload the config, settle claimed rows a dead launch
-// left, watch live workers, expire, claim and launch, prune. It returns the
-// rows as last read, for drain.json.
+// left, watch live workers, run the closers on reported rows, expire, claim
+// and launch, and once a UTC day prune. It returns the rows as last read,
+// for drain.json.
 func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	d.lastErr = ""
 	d.loadSettings()
@@ -283,6 +314,10 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	if d.stopping() {
 		return rows
 	}
+	d.closers(ctx, rows, ledgers)
+	if d.stopping() {
+		return rows
+	}
 	now := d.io.now()
 	for _, q := range rows {
 		d.apply(q, drain.Expire(q, now))
@@ -297,7 +332,7 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	if d.stopping() {
 		return rows
 	}
-	d.prune(rows)
+	d.dailyPrune(ctx)
 	if fresh, ok := d.readRows(); ok {
 		rows = fresh
 	}
@@ -488,22 +523,160 @@ func (d *drainer) onlyPause(k drain.PauseKind) bool {
 	return len(d.pauses) == 1 && d.pauseHeld(k)
 }
 
-// prune removes terminal rows past drain.PruneAfter, each only if it is
-// still the row read.
-func (d *drainer) prune(rows []worker.QueueRow) {
+// closers reads the PR of each reported row due a read, oldest read first,
+// at most drain.CloserReadsPerTick a tick, and closes the worker once its PR
+// merged, or drain.ClosedGrace after it closed unmerged.
+func (d *drainer) closers(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
 	now := d.io.now()
+	type candidate struct {
+		q   worker.QueueRow
+		led worker.Row
+	}
+	var due []candidate
+	seen := map[string]bool{}
 	for _, q := range rows {
-		if !drain.Prunable(q, now) {
+		l := ledgers[q.Name]
+		ok, identity := drain.CloserCandidate(q, l)
+		if !ok {
 			continue
 		}
-		_, err := d.io.queue.RemoveIf(q.Name, worker.SameRead(q))
-		switch {
-		case err == nil:
-			d.event(drain.Event{Kind: drain.EventState, Name: q.Name, Repo: q.Repo, State: "pruned", Attempt: q.Attempts})
-		case errors.Is(err, worker.ErrQueueRowChanged), errors.Is(err, worker.ErrQueueNoRow):
-		default:
-			d.lastErr = "queue: " + err.Error()
+		seen[q.Name] = true
+		if !identity {
+			d.closerEvent(d.closerNote, q, drain.EventNote, fmt.Sprintf("the worker's ledger row records no GitHub repository, so the closers skip it; close it with surface close %s", q.Name))
+			continue
 		}
+		if drain.CloserDue(d.closerRead[q.Name], now) {
+			due = append(due, candidate{q, l.Row})
+		}
+	}
+	slices.SortStableFunc(due, func(a, b candidate) int {
+		if c := d.closerRead[a.q.Name].Compare(d.closerRead[b.q.Name]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.q.Name, b.q.Name)
+	})
+	for i, c := range due {
+		if i >= drain.CloserReadsPerTick || d.stopping() {
+			break
+		}
+		d.closeOne(ctx, c.q, c.led, now)
+	}
+	for name := range d.closerRead {
+		if !seen[name] {
+			delete(d.closerRead, name)
+		}
+	}
+	for _, notes := range []map[string]string{d.closerNote, d.closerReadFail} {
+		for name := range notes {
+			if !seen[name] {
+				delete(notes, name)
+			}
+		}
+	}
+}
+
+// closerEvent records one closer event for q, unless the last one notes
+// holds for it says the same.
+func (d *drainer) closerEvent(notes map[string]string, q worker.QueueRow, kind, text string) {
+	key := kind + "\x00" + text
+	if notes[q.Name] == key {
+		return
+	}
+	notes[q.Name] = key
+	d.event(drain.Event{Kind: kind, Name: q.Name, Repo: q.Repo, State: string(q.State), Attempt: q.Attempts, Error: text})
+}
+
+// closeOne reads one reported row's PR and acts on drain.DecideCloser. A
+// read that fails changes nothing: a network failure, server error or rate
+// limit is an unreadable event, anything else (a refusal, an ambiguous PR, a
+// repository whose id changed) an error event, each once until it changes.
+func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Row, now time.Time) {
+	d.closerRead[q.Name] = now
+	cand, err := d.io.prRead(ctx, mergeRow(led, &q))
+	pr := drain.PRRead{State: drain.PRNone}
+	switch {
+	case errors.Is(err, merge.ErrNoPR):
+	case err != nil:
+		if transientGitHubFailure(err) {
+			d.closerEvent(d.closerReadFail, q, drain.EventUnreadable, "the closer could not read the worker's PR from GitHub: "+err.Error())
+		} else {
+			d.closerEvent(d.closerReadFail, q, drain.EventError, "the closer's PR read was refused; the row stays reported: "+err.Error())
+		}
+		return
+	default:
+		pr = drain.PRRead{State: drain.PRState(cand.State), Number: cand.Number}
+	}
+	// A read that worked ends any failure condition: the next one is new.
+	delete(d.closerReadFail, q.Name)
+	dec := drain.DecideCloser(q, pr, now)
+	if dec.Change.Writes() {
+		written, ok := d.apply(q, dec.Change)
+		if !ok {
+			return
+		}
+		q = written
+		if dec.Note != "" {
+			d.closerEvent(d.closerNote, q, drain.EventNote, dec.Note)
+		}
+	}
+	if !dec.Close {
+		return
+	}
+	var cost *float64
+	if dec.Merged && led.Transcript != "" {
+		// A partial price (a model with no price) is not the session's cost.
+		if u := d.io.price(ctx, led.Transcript); u != nil && u.Priced {
+			c := u.CostUSD
+			cost = &c
+		}
+	}
+	res := d.io.closeRow(ctx, q, led)
+	if !res.Closed {
+		if cost != nil {
+			if written, ok := d.apply(q, drain.Change{Name: q.Name, From: q.State, CostUSD: cost}); ok {
+				q = written
+			}
+		}
+		d.closerEvent(d.closerNote, q, drain.EventError, "close refused, the row stays reported: "+res.Reason)
+		return
+	}
+	why := dec.Why
+	if res.Worktree == closeWorktreeKept {
+		why += "; worktree kept: " + strings.Join(res.KeptBecause, "; ")
+	}
+	d.apply(q, drain.Change{Name: q.Name, From: q.State, To: worker.QueueClosed, Error: why, CostUSD: cost})
+}
+
+// dailyPrune runs `surface prune` with the default cutoff once per UTC day.
+// The day is recorded before the prune runs, so neither a failure nor a
+// restart runs it again that day; a failure is an error event and never
+// stops the drain.
+func (d *drainer) dailyPrune(ctx context.Context) {
+	now := d.io.now()
+	if !d.pruneDayRead {
+		day, err := d.io.pruneDay()
+		if err != nil {
+			d.event(drain.Event{Kind: drain.EventError, Error: "read the last daily prune day: " + err.Error()})
+		}
+		d.pruneDay, d.pruneDayRead = day, true
+	}
+	if !drain.PruneDue(d.pruneDay, now) {
+		return
+	}
+	d.pruneDay = now.UTC().Format(worker.UTCDayLayout)
+	if err := d.io.setPruneDay(d.pruneDay); err != nil {
+		d.event(drain.Event{Kind: drain.EventError, Error: "record the daily prune day: " + err.Error()})
+	}
+	res, err := d.io.prune(ctx, now)
+	if err != nil {
+		d.event(drain.Event{Kind: drain.EventError, Error: "daily prune: " + err.Error()})
+		return
+	}
+	for _, it := range res.Removed {
+		d.event(drain.Event{Kind: drain.EventState, Name: it.Name, Repo: it.Repo, State: "pruned", Error: it.Kind + " row: " + it.Reason})
+	}
+	for _, n := range res.Notes {
+		d.event(drain.Event{Kind: drain.EventNote, Error: "daily prune: " + n})
 	}
 }
 
@@ -830,6 +1003,10 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 	if err != nil {
 		return drainIO{}, err
 	}
+	files, err := worker.OpenDrainFiles()
+	if err != nil {
+		return drainIO{}, err
+	}
 	var slots func(context.Context, int) drain.SlotsCheck
 	if slotsPath != "" {
 		slots = func(ctx context.Context, need int) drain.SlotsCheck { return runClaudeSlots(ctx, slotsPath, need) }
@@ -864,5 +1041,55 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 		emit:     emit,
 		now:      time.Now,
 		launchID: newDrainLaunchID,
+		prRead: func(ctx context.Context, row merge.Row) (merge.Candidate, error) {
+			ctx, cancel := context.WithTimeout(ctx, statusTimeout)
+			defer cancel()
+			// No cache: the closers read live state only.
+			return merge.Reader{GH: githubauth.Runner(deps.Runner, githubauth.DefaultHost)}.Discover(ctx, row)
+		},
+		price: func(ctx context.Context, transcript string) *statusUsage {
+			return priceTranscript(ctx, deps.Runner, osexec.LookPath, transcript)
+		},
+		closeRow: drainCloseRow(deps.Runner, session),
+		prune: func(ctx context.Context, now time.Time) (pruneResult, error) {
+			d, err := realPruneDeps()
+			if err != nil {
+				return pruneResult{}, err
+			}
+			ctx, cancel := context.WithTimeout(ctx, pruneTimeout)
+			defer cancel()
+			return runPrune(ctx, d, now, drain.PruneAfter, false)
+		},
+		pruneDay:    files.ReadPruneDay,
+		setPruneDay: files.WritePruneDay,
 	}, nil
+}
+
+// drainCloseRow is the closers' close: the close `surface close` runs
+// (closeWorker through realCloseSteps), on the row's own ledger row, through
+// a herdr adapter that must resolve the drain's pinned session.
+func drainCloseRow(run exec.Runner, session string) func(context.Context, worker.QueueRow, worker.Row) closeResult {
+	return func(ctx context.Context, q worker.QueueRow, led worker.Row) closeResult {
+		refuse := func(why string) closeResult {
+			return closeResult{Name: led.Name, Branch: led.Branch, Workspace: closeWorkspaceRefused, Worktree: closeWorktreeUntouched, Reason: why}
+		}
+		adapter, err := newHerdrAdapter(io.Discard)
+		if err != nil {
+			return refuse("herdr: " + err.Error())
+		}
+		herdr, ok := adapter.(*herdradapter.Adapter)
+		if !ok {
+			return refuse("the herdr adapter has an unexpected type")
+		}
+		if herdr.Session() != session || (q.Session != "" && q.Session != session) {
+			return refuse(fmt.Sprintf("the worker is in herdr session %q, the drain's is %q", q.Session, session))
+		}
+		ledger, err := worker.Open(q.Repo, session)
+		if err != nil {
+			return refuse("the ledger: " + err.Error())
+		}
+		ctx, cancel := context.WithTimeout(ctx, closeTimeout)
+		defer cancel()
+		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr, ledger, q.Repo, led))
+	}
 }

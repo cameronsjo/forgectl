@@ -170,3 +170,35 @@ func TestReaderReadBaseNotOnGitHub(t *testing.T) {
 		t.Fatalf("a 502 compare: %v, want ErrRead", err)
 	}
 }
+
+func TestDiscover(t *testing.T) {
+	ctx := context.Background()
+	c, err := Reader{GH: fixtureGH{t: t}.runner()}.Discover(ctx, row1204())
+	if err != nil || c.Number != 1204 || c.State != "MERGED" {
+		t.Fatalf("#1204: %+v, %v", c, err)
+	}
+	// Three open PRs on the head name (a fork, another author, a bot) are
+	// dropped before the state is read.
+	syn := fixtureGH{t: t, override: map[string]string{"viewer { login databaseId }": string(readFixture(t, "discover_synthetic_fork.json"))}}
+	if c, err := (Reader{GH: syn.runner()}).Discover(ctx, row1204()); err != nil || c.Number != 1204 || c.State != "MERGED" {
+		t.Fatalf("synthetic fork: %+v, %v", c, err)
+	}
+	other := row1204()
+	other.GitHubRepoID = 42
+	if _, err := (Reader{GH: fixtureGH{t: t}.runner()}).Discover(ctx, other); !errors.Is(err, ErrRepoChanged) {
+		t.Fatalf("id changed: %v", err)
+	}
+	none := row1204()
+	none.GitHubRepo = ""
+	if _, err := (Reader{GH: fixtureGH{t: t}.runner()}).Discover(ctx, none); !errors.Is(err, ErrNoRecordedRepo) {
+		t.Fatalf("no identity: %v", err)
+	}
+	if _, err := (Reader{GH: fixtureGH{t: t, failOn: "graphql"}.runner()}).Discover(ctx, row1204()); !errors.Is(err, ErrRead) {
+		t.Fatalf("gh failure: %v", err)
+	}
+	branch := row1204()
+	branch.Branch = "worker/other"
+	if _, err := (Reader{GH: fixtureGH{t: t}.runner()}).Discover(ctx, branch); !errors.Is(err, ErrNoPR) {
+		t.Fatalf("no PR on the branch: %v", err)
+	}
+}

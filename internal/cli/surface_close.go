@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -152,24 +153,31 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
 		}), opts.JSON)
 	}
-	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), closeSteps{
-		close: w.herdr.Close,
+	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), realCloseSteps(deps.Runner, w.herdr, w.led, w.top, row))
+	return reportClose(cmd, res, opts.JSON)
+}
+
+// realCloseSteps wires close's steps to herdr, git and the ledger for row in
+// the repository top. `surface close` and the drain's closers both close
+// through it, so the two cannot differ.
+func realCloseSteps(run exec.Runner, herdr backend.Closer, led *worker.Ledger, top string, row worker.Row) closeSteps {
+	return closeSteps{
+		close: herdr.Close,
 		inspect: func(ctx context.Context) (worker.WorktreeFacts, error) {
-			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
+			return worker.InspectWorktree(ctx, run, top, row.Name, row.Base)
 		},
 		remove: func(ctx context.Context, path string) error {
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
 			defer cancel()
-			return worker.RemoveWorktree(ctx, deps.Runner, w.top, path)
+			return worker.RemoveWorktree(ctx, run, top, path)
 		},
 		// Both act only on the row close read: a launch that reused the name
 		// meanwhile is left alone.
-		forget: func() error { return w.led.RemoveIf(row.Name, worker.SameRow(row)) },
+		forget: func() error { return led.RemoveIf(row.Name, worker.SameRow(row)) },
 		markClosed: func() error {
-			return w.led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) { r.Stage = worker.StageClosed })
+			return led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) { r.Stage = worker.StageClosed })
 		},
-	})
-	return reportClose(cmd, res, opts.JSON)
+	}
 }
 
 func findRow(rows []worker.Row, name string) (worker.Row, bool) {

@@ -27,6 +27,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -52,6 +53,22 @@ type fakeDrain struct {
 	events    []drain.Event
 	ids       int
 	t         *testing.T
+	// prs answers the closers' PR reads by row name; a missing name has no
+	// PR. prErr, when set for a name, is the read's error. prReads counts
+	// reads by name.
+	prs     map[string]merge.Candidate
+	prErr   map[string]error
+	prReads map[string]int
+	// usage is what pricing a transcript returns.
+	usage *statusUsage
+	// closeRes, when set, is what closeRow returns; otherwise the close
+	// succeeds and removes the ledger row. closed lists the rows closed.
+	closeRes *closeResult
+	closed   []string
+	// pruneRuns counts daily prunes; pruneDay is the recorded day.
+	pruneRuns int
+	pruneDay  string
+	pruneErr  error
 }
 
 // checkOwnLedger fails the test when the drain hands the notifier a ledger
@@ -82,7 +99,7 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeDrain{now: drainT0, t: t}
+	f := &fakeDrain{now: drainT0, t: t, prs: map[string]merge.Candidate{}, prErr: map[string]error{}, prReads: map[string]int{}}
 	f.launch = func(worker.QueueRow) drain.Attempt { return drain.Attempt{} }
 	f.probe = func(worker.QueueRow, worker.Row) drain.Probe { return drain.Probe{} }
 	io := drainIO{
@@ -110,6 +127,38 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 			f.ids++
 			return fmt.Sprintf("launch-%d", f.ids), nil
 		},
+		prRead: func(_ context.Context, row merge.Row) (merge.Candidate, error) {
+			f.prReads[row.Name]++
+			if err := f.prErr[row.Name]; err != nil {
+				return merge.Candidate{}, err
+			}
+			c, ok := f.prs[row.Name]
+			if !ok {
+				return merge.Candidate{}, merge.ErrNoPR
+			}
+			return c, nil
+		},
+		price: func(context.Context, string) *statusUsage { return f.usage },
+		closeRow: func(_ context.Context, q worker.QueueRow, led worker.Row) closeResult {
+			if f.closeRes != nil {
+				return *f.closeRes
+			}
+			f.closed = append(f.closed, q.Name)
+			l, err := worker.Open(q.Repo, drainTestSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RemoveIf(led.Name, worker.SameRow(led)); err != nil {
+				t.Fatal(err)
+			}
+			return closeResult{Name: q.Name, Closed: true, Workspace: closeWorkspaceClosed, Worktree: closeWorktreeRemoved, Forgotten: true}
+		},
+		prune: func(context.Context, time.Time) (pruneResult, error) {
+			f.pruneRuns++
+			return pruneResult{}, f.pruneErr
+		},
+		pruneDay:    func() (string, error) { return f.pruneDay, nil },
+		setPruneDay: func(day string) error { f.pruneDay = day; return nil },
 	}
 	return f, newDrainer(io, drainTestSession, func() bool { return false }), q
 }
@@ -421,11 +470,23 @@ func TestDrainTickExpireAndPrune(t *testing.T) {
 	if r := rowNamed(t, q, "old"); r.State != worker.QueueExpired {
 		t.Fatalf("after 7 days: %s, want expired", r.State)
 	}
+	// The daily prune is surface prune's own run over the real queue.
+	d.io.prune = func(ctx context.Context, now time.Time) (pruneResult, error) {
+		f.pruneRuns++
+		return runPrune(ctx, testPruneDeps(t, q, nil, errors.New("no herdr in this test")), now, drain.PruneAfter, false)
+	}
 	f.now = f.now.Add(drain.PruneAfter + time.Minute)
 	d.tick(t.Context())
 	rows, err := q.Rows()
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("after 30 more days: rows %+v, err %v; want pruned", rows, err)
+	}
+	pruned := false
+	for _, e := range f.events {
+		pruned = pruned || (e.Kind == drain.EventState && e.Name == "old" && e.State == "pruned")
+	}
+	if !pruned {
+		t.Fatalf("no pruned event for old: %+v", f.events)
 	}
 }
 

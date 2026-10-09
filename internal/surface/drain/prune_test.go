@@ -1,0 +1,196 @@
+package drain
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
+)
+
+func cost(v float64) *float64 { return &v }
+
+// pqrow is a launched-then-ended queue row in session s1.
+func pqrow(name string, state worker.QueueState, at time.Time) worker.QueueRow {
+	r := qrow(name, "/r", state, at)
+	r.Session = "s1"
+	return r
+}
+
+var pid = worker.LedgerID{Repo: "/r", Session: "s1"}
+
+func lrow(name, launchID string, stage worker.Stage, started time.Time, ref bool) worker.Row {
+	r := worker.Row{Name: name, LaunchID: launchID, Stage: stage, StartedAt: started}
+	if ref {
+		r.Ref = json.RawMessage(`{"ref":1}`)
+	}
+	return r
+}
+
+func planNames(items []PruneItem) string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Kind+":"+it.Name)
+	}
+	return strings.Join(out, ",")
+}
+
+func reasonOf(t *testing.T, items []PruneItem, kind, name string) string {
+	t.Helper()
+	for _, it := range items {
+		if it.Kind == kind && it.Name == name {
+			return it.Reason
+		}
+	}
+	t.Fatalf("no %s item %s in %s", kind, name, planNames(items))
+	return ""
+}
+
+func TestPlanPrune(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	old := now.Add(-PruneAfter - time.Hour)
+	young := now.Add(-PruneAfter + time.Hour)
+	live := map[string]Workspace{"failed-live": WorkspaceLive, "failed-unknown": WorkspaceUnknown}
+	in := PruneInput{
+		Now: now, OlderThan: PruneAfter,
+		Queue: []worker.QueueRow{
+			pqrow("closed-old", worker.QueueClosed, old),
+			pqrow("failed-live", worker.QueueFailed, old),
+			pqrow("failed-unknown", worker.QueueFailed, old),
+			pqrow("failed-gone", worker.QueueFailed, old),
+			pqrow("expired-old", worker.QueueExpired, old),
+			pqrow("closed-young", worker.QueueClosed, young),
+			pqrow("reported-old", worker.QueueReported, old),
+			pqrow("queued-old", worker.QueueQueued, old),
+		},
+		Ledgers: []PruneLedger{{ID: pid, Rows: []worker.Row{
+			lrow("failed-live", "L-failed-live", worker.StageFailed, old, true),
+			lrow("failed-unknown", "L-failed-unknown", worker.StageFailed, old, true),
+			lrow("failed-gone", "L-failed-gone", worker.StageFailed, old, true),
+			lrow("kept-wt-old", "", worker.StageClosed, old, true),
+			lrow("kept-wt-young", "", worker.StageClosed, young, true),
+			lrow("running", "", worker.StageLaunched, old, true),
+		}}},
+		Workspace: func(_ worker.LedgerID, r worker.Row) Workspace {
+			if w, ok := live[r.Name]; ok {
+				return w
+			}
+			return WorkspaceGone
+		},
+	}
+	p := PlanPrune(in)
+	if got, want := planNames(p.Remove), "queue:closed-old,queue:failed-gone,queue:expired-old,ledger:kept-wt-old"; got != want {
+		t.Fatalf("remove %s, want %s", got, want)
+	}
+	for name, want := range map[string]string{
+		"failed-live":    "still live",
+		"failed-unknown": "cannot say",
+		"closed-young":   "not older than the cutoff",
+		"reported-old":   "state reported is not pruned",
+		"queued-old":     "state queued is not pruned",
+	} {
+		if got := reasonOf(t, p.Keep, PruneKindQueue, name); !strings.Contains(got, want) {
+			t.Errorf("%s kept for %q, want %q", name, got, want)
+		}
+	}
+	if got := reasonOf(t, p.Keep, PruneKindLedger, "running"); !strings.Contains(got, "stage launched") {
+		t.Errorf("running kept for %q", got)
+	}
+	if got := reasonOf(t, p.Keep, PruneKindLedger, "kept-wt-young"); !strings.Contains(got, "not older than the cutoff") {
+		t.Errorf("kept-wt-young kept for %q", got)
+	}
+}
+
+func TestPlanPruneCutoffBoundary(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	at := now.Add(-PruneAfter)
+	in := PruneInput{Now: now, OlderThan: PruneAfter, Queue: []worker.QueueRow{
+		pqrow("at", worker.QueueClosed, at),
+		pqrow("past", worker.QueueClosed, at.Add(-time.Second)),
+	}, Ledgers: []PruneLedger{{ID: pid, Rows: []worker.Row{
+		lrow("l-at", "", worker.StageClosed, at, false),
+		lrow("l-past", "", worker.StageClosed, at.Add(-time.Second), false),
+	}}}}
+	if got := planNames(PlanPrune(in).Remove); got != "queue:past,ledger:l-past" {
+		t.Fatalf("remove %s; a row exactly at the cutoff stays", got)
+	}
+}
+
+func TestPlanPruneHerdrUnreadable(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	old := now.Add(-PruneAfter - time.Hour)
+	called := false
+	in := PruneInput{
+		Now: now, OlderThan: PruneAfter, HerdrErr: "herdr session not running",
+		Queue: []worker.QueueRow{
+			pqrow("no-ledger", worker.QueueClosed, old),
+			pqrow("with-ws", worker.QueueFailed, old),
+		},
+		Ledgers: []PruneLedger{{ID: pid, Rows: []worker.Row{
+			lrow("with-ws", "L-with-ws", worker.StageFailed, old, true),
+			lrow("closed-old", "", worker.StageClosed, old, false),
+		}}},
+		Workspace: func(worker.LedgerID, worker.Row) Workspace { called = true; return WorkspaceGone },
+	}
+	p := PlanPrune(in)
+	if got := planNames(p.Remove); got != "queue:no-ledger" {
+		t.Fatalf("remove %s; with herdr unreadable no ledger row goes, and a row that may be live stays", got)
+	}
+	if called {
+		t.Fatal("herdr was asked while unreadable")
+	}
+	if got := reasonOf(t, p.Keep, PruneKindLedger, "closed-old"); !strings.Contains(got, "herdr could not be read") {
+		t.Fatalf("closed-old kept for %q", got)
+	}
+	if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], "herdr session not running") {
+		t.Fatalf("notes %q", p.Notes)
+	}
+}
+
+func TestPlanPruneUnreadableLedger(t *testing.T) {
+	now := t0.Add(60 * 24 * time.Hour)
+	old := now.Add(-PruneAfter - time.Hour)
+	p := PlanPrune(PruneInput{Now: now, OlderThan: PruneAfter, Queue: []worker.QueueRow{pqrow("w", worker.QueueFailed, old)},
+		Ledgers: []PruneLedger{{ID: pid, Err: "hardlinked"}}})
+	if len(p.Remove) != 0 || !strings.Contains(reasonOf(t, p.Keep, PruneKindQueue, "w"), "ledger could not be read") {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestUsageRollup(t *testing.T) {
+	day1 := time.Date(2026, 9, 1, 23, 30, 0, 0, time.UTC)
+	day2 := time.Date(2026, 9, 2, 0, 30, 0, 0, time.UTC)
+	rows := []worker.QueueRow{
+		{Name: "a", StateAt: day2, CostUSD: cost(2)},
+		{Name: "b", StateAt: day1, CostUSD: cost(1.25)},
+		{Name: "c", StateAt: day1, CostUSD: cost(0.5)},
+		{Name: "d", StateAt: day1}, // unpriced: not counted
+	}
+	got := UsageRollup(rows)
+	want := []UsageDay{{Day: "2026-09-01", CostUSD: 1.75, Rows: 2}, {Day: "2026-09-02", CostUSD: 2, Rows: 1}}
+	if len(got) != len(want) {
+		t.Fatalf("%+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("day %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if len(UsageRollup(nil)) != 0 {
+		t.Fatal("no rows, no lines")
+	}
+}
+
+func TestPruneDue(t *testing.T) {
+	now := time.Date(2026, 10, 9, 23, 59, 0, 0, time.UTC)
+	if !PruneDue("", now) || !PruneDue("2026-10-08", now) {
+		t.Fatal("a new day must be due")
+	}
+	if PruneDue("2026-10-09", now) || PruneDue("2026-10-09", now.Add(-23*time.Hour)) {
+		t.Fatal("the same UTC day must not be due")
+	}
+	if !PruneDue("2026-10-09", now.Add(time.Minute)) {
+		t.Fatal("the next UTC day must be due")
+	}
+}
