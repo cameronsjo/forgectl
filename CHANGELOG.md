@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/cameronsjo/forgectl/compare/v0.37.0...v0.38.0) (2026-10-09)
+
+
+### Features
+
+* **surface:** intake from GitHub labels (atelier P3) ([#1203](https://github.com/cameronsjo/forgectl/issues/1203)) ([7386b24](https://github.com/cameronsjo/forgectl/commit/7386b24f1d169a0e00666d69a27feb927705015a))
+
 ## [0.37.0](https://github.com/cameronsjo/forgectl/compare/v0.36.0...v0.37.0) (2026-10-08)
 
 
