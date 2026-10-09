@@ -265,6 +265,9 @@ const (
 	// forkNode is a PR on the same head name from the operator's own fork.
 	forkNodeFmt = `{"number":901,"state":"%s","isCrossRepository":true,"createdAt":"2026-10-09T17:00:00Z","headRefName":"worker/w","headRepository":{"databaseId":999000111},"author":{"__typename":"User","login":"cameronsjo","databaseId":4084915}}`
 	ownMerged   = `{"number":12,"state":"MERGED","isCrossRepository":false,"createdAt":"2026-10-09T16:00:00Z","headRefName":"worker/w","headRepository":{"databaseId":1252924951},"author":{"__typename":"User","login":"cameronsjo","databaseId":4084915}}`
+	// ownMergedEarlier is the operator's merged PR on worker/w from a launch
+	// before the ledger row's started_at (drainT0): a reused name's old PR.
+	ownMergedEarlier = `{"number":11,"state":"MERGED","isCrossRepository":false,"createdAt":"2026-10-07T11:59:59Z","headRefName":"worker/w","headRepository":{"databaseId":1252924951},"author":{"__typename":"User","login":"cameronsjo","databaseId":4084915}}`
 )
 
 func TestDrainCloserForkPRIgnored(t *testing.T) {
@@ -276,6 +279,11 @@ func TestDrainCloserForkPRIgnored(t *testing.T) {
 		"open fork beside the merged PR": {strings.Replace(forkNodeFmt, "%s", "OPEN", 1) + "," + ownMerged, worker.QueueClosed},
 		// A merged fork PR is not the worker's PR.
 		"merged fork PR alone": {strings.Replace(forkNodeFmt, "%s", "MERGED", 1), worker.QueueReported},
+		// The operator's merged PR from before this launch started is an
+		// earlier launch's under the same name: it must not close this one.
+		"own merged PR from an earlier launch": {ownMergedEarlier, worker.QueueReported},
+		// One created after the launch started is this launch's.
+		"own merged PR from this launch beside an earlier one": {ownMergedEarlier + "," + ownMerged, worker.QueueClosed},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

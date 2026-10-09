@@ -118,7 +118,7 @@ func (r Reader) Read(ctx context.Context, row Row) (Snapshot, error) {
 		return Snapshot{}, decodeErr(err)
 	}
 	snap.Facts.Repository, snap.Facts.OperatorID = disc.Repository, disc.ViewerID
-	cand, err := SelectPR(disc, row.Branch)
+	cand, err := SelectPR(disc, row.Branch, row.StartedAt)
 	if errors.Is(err, ErrNoPR) || errors.Is(err, ErrAmbiguousPR) {
 		snap.NoPR = err.Error()
 		return snap, nil
@@ -176,7 +176,8 @@ var ErrRepoChanged = errors.New("merge: the recorded repository's id changed on 
 
 // Discover finds the worker's PR with the discovery query alone: the same
 // filter Read and `surface status` apply (SelectPR: its head branch on the
-// recorded repository, not a fork, by the operator, at most one open). It
+// recorded repository, not a fork, by the operator, created since the
+// launch started, at most one open). It
 // is the drain closer's read, which needs only the PR's state. A head
 // branch with no PR is ErrNoPR, more than one open is ErrAmbiguousPR, and a
 // repository whose id is no longer the recorded one is ErrRepoChanged.
@@ -196,7 +197,7 @@ func (r Reader) Discover(ctx context.Context, row Row) (Candidate, error) {
 	if disc.Repository.DatabaseID != row.GitHubRepoID {
 		return Candidate{}, fmt.Errorf("%w: %s is id %d on GitHub, the row recorded %d", ErrRepoChanged, row.GitHubRepo, disc.Repository.DatabaseID, row.GitHubRepoID)
 	}
-	return SelectPR(disc, row.Branch)
+	return SelectPR(disc, row.Branch, row.StartedAt)
 }
 
 // compareStatus is compare(from...to).status. A compare GitHub answers

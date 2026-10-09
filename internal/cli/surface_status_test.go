@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -64,7 +65,7 @@ func statusRow1204() worker.Row {
 	return worker.Row{
 		Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: worker.BranchNew, Stage: worker.StageLaunched,
 		Base: "2e469107d375d1977085887813de99ce18bc91bf", GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: 1252924951,
-		LaunchID: "launch-abc", Transcript: "/t/session.jsonl",
+		LaunchID: "launch-abc", Transcript: "/t/session.jsonl", StartedAt: time.Date(2026, 10, 9, 16, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -249,6 +250,14 @@ func TestSurfaceStatusOutcomes(t *testing.T) {
 		text, err := runStatusCmd(t, statusTestDeps(t, row, statusGH(t, false), manualSettings()), "other")
 		if err != nil || !strings.Contains(text, "no PR") {
 			t.Fatalf("%v: %s", err, text)
+		}
+	})
+	t.Run("a merged PR from an earlier launch is not shown", func(t *testing.T) {
+		row := statusRow1204()
+		row.StartedAt = time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
+		out, err := runStatusCmd(t, statusTestDeps(t, row, statusGH(t, false), manualSettings()), row.Name, "--json")
+		if err != nil || !strings.Contains(out, `"pr": null`) || !strings.Contains(out, "created since the launch started") {
+			t.Fatalf("%v: %s", err, out)
 		}
 	})
 	t.Run("no transcript, no usage", func(t *testing.T) {

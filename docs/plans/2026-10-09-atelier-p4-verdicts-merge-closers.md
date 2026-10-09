@@ -148,6 +148,7 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 
 ### T10.4: merge, audit, autopilot (forgectl, one PR; after T10.2)
 
+- [ ] Order: T10.3 (with the SelectPR launch binding) must merge before T10.4 or any PR that lets SelectPR drive a close or a merge (chief-of-staff, 2026-10-09).
 - [ ] `surface merge <name> [--dry-run]` and the drain's autopilot step (`mode = "auto"` only), both calling `Evaluate` on fresh reads, the pre-merge re-read, the composed message, and the post-merge check.
 - [ ] `merge-audit.jsonl` and `surface audit --pr`.
 - [ ] Worker brief rule: never post review markers, approve or merge.
@@ -207,5 +208,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.3, a refused close:** the row stays `reported` with one `error` event naming why, and `cost_usd` is still written when the session was priced; the close is tried again at the next read.
 - **T10.3, usage rollup:** one line per UTC day per prune run; a later run that removes more rows from the same day appends another line for it (sum per day to read). The lines are appended under the queue lock before the rows go, and nothing is removed when they cannot be written.
 - **T10.3, daily prune day:** recorded in `drain-prune-day` before the prune runs, so a failed prune is not retried the same day.
+- **T10.3 review fix I1, PRs bound to the launch:** `SelectPR` takes the ledger row's `started_at` (`merge.Row.StartedAt`) and drops every PR created before it, so a reused name's earlier PR cannot close a new worker or show in `surface status`. A PR that passes the rest of the filter with a missing or unparseable `createdAt`, or a row with no `started_at`, fails the read (`merge.ErrUnboundPR`): an `error` event for the closers, exit 1 for status. No clock-skew allowance: a GitHub clock behind the local one by more than the time from launch to PR only leaves the row `reported`. The "head descends from `Base`" check suggested beside it is not added; T10.4's merge already requires it (predicate 3).
+- **T10.3 ordering (chief-of-staff, 2026-10-09):** T10.3 (with the SelectPR launch binding) must merge before T10.4 or any PR that lets SelectPR drive a close or a merge.
 
 ## Learnings

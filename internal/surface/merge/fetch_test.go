@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -71,7 +72,7 @@ func (m memCache) Write(head string, data []byte) error {
 
 func row1204() Row {
 	return Row{
-		Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: "new", LaunchID: "launch-abc", Stage: "launched",
+		Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: "new", LaunchID: "launch-abc", Stage: "launched", StartedAt: launched1204,
 		Base: rowBase1204, GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: forgectlID, QueueLaunchID: "launch-abc", QueueState: "reported",
 	}
 }
@@ -200,5 +201,16 @@ func TestDiscover(t *testing.T) {
 	branch.Branch = "worker/other"
 	if _, err := (Reader{GH: fixtureGH{t: t}.runner()}).Discover(ctx, branch); !errors.Is(err, ErrNoPR) {
 		t.Fatalf("no PR on the branch: %v", err)
+	}
+	// A relaunch under the same name started after #1204 was created: the
+	// merged #1204 is the earlier launch's, for Discover and Read alike.
+	relaunch := row1204()
+	relaunch.StartedAt = time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
+	if c, err := (Reader{GH: fixtureGH{t: t}.runner()}).Discover(ctx, relaunch); !errors.Is(err, ErrNoPR) {
+		t.Fatalf("an earlier launch's merged PR: %+v, %v, want ErrNoPR", c, err)
+	}
+	snap, err := Reader{GH: fixtureGH{t: t}.runner()}.Read(ctx, relaunch)
+	if err != nil || snap.HasPR || !strings.Contains(snap.NoPR, "no pull request") {
+		t.Fatalf("Read of an earlier launch's merged PR: %+v, %v", snap, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -30,6 +31,10 @@ const (
 	operatorID = 4084915
 	forgectlID = 1252924951
 )
+
+// launched1204 is a start time before #1204 was created (16:05:34Z), so the
+// fixture PR belongs to the row's launch.
+var launched1204 = time.Date(2026, 10, 9, 16, 0, 0, 0, time.UTC)
 
 func decodePRFixture(t *testing.T, name string) PRRead {
 	t.Helper()
@@ -83,7 +88,7 @@ func passingFacts(t *testing.T) Facts {
 	pr.PR.ChangedFiles = len(files)
 	return Facts{
 		Row: Row{
-			Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: "new", LaunchID: "launch-abc", Stage: "launched",
+			Name: "gh1175-forgectl", Branch: "worker/gh1175-forgectl", BranchFrom: "new", LaunchID: "launch-abc", Stage: "launched", StartedAt: launched1204,
 			Base: base1204, GitHubRepo: "cameronsjo/forgectl", GitHubRepoID: forgectlID, QueueLaunchID: "launch-abc", QueueState: "reported",
 		},
 		Repository: pr.Repository, OperatorID: operatorID, PR: pr.PR, Checks: checks.Runs, Reviews: reviews,
@@ -828,11 +833,11 @@ func TestSelectPR(t *testing.T) {
 	if err != nil || d.ViewerID != operatorID || d.Repository.DatabaseID != forgectlID || d.Repository.DefaultBranch != "main" {
 		t.Fatalf("discover_1204: %+v, %v", d, err)
 	}
-	c, err := SelectPR(d, "worker/gh1175-forgectl")
+	c, err := SelectPR(d, "worker/gh1175-forgectl", launched1204)
 	if err != nil || c.Number != 1204 || c.State != "MERGED" {
 		t.Fatalf("select: %+v, %v", c, err)
 	}
-	if _, err := SelectPR(d, "worker/other"); !errors.Is(err, ErrNoPR) {
+	if _, err := SelectPR(d, "worker/other", launched1204); !errors.Is(err, ErrNoPR) {
 		t.Fatalf("other branch: %v", err)
 	}
 	syn, err := DecodeDiscovery(readFixture(t, "discover_synthetic_fork.json"))
@@ -841,7 +846,7 @@ func TestSelectPR(t *testing.T) {
 	}
 	// Three open PRs on the same head name (a fork, another author, a bot)
 	// are dropped before ordering, so the operator's merged #1204 is the one.
-	if c, err := SelectPR(syn, "worker/gh1175-forgectl"); err != nil || c.Number != 1204 {
+	if c, err := SelectPR(syn, "worker/gh1175-forgectl", launched1204); err != nil || c.Number != 1204 {
 		t.Fatalf("synthetic fork: %+v, %v", c, err)
 	}
 	two := syn
@@ -851,13 +856,51 @@ func TestSelectPR(t *testing.T) {
 	first := two.Candidates[3]
 	first.State = "OPEN"
 	two.Candidates = append(two.Candidates, extra, first)
-	if _, err := SelectPR(two, "worker/gh1175-forgectl"); !errors.Is(err, ErrAmbiguousPR) {
+	if _, err := SelectPR(two, "worker/gh1175-forgectl", launched1204); !errors.Is(err, ErrAmbiguousPR) {
 		t.Fatalf("two open: %v", err)
 	}
 	one := syn
 	one.Candidates = []Candidate{extra}
-	if c, err := SelectPR(one, "worker/gh1175-forgectl"); err != nil || c.Number != 9100 {
+	if c, err := SelectPR(one, "worker/gh1175-forgectl", launched1204); err != nil || c.Number != 9100 {
 		t.Fatalf("one open: %+v, %v", c, err)
+	}
+}
+
+// TestSelectPRBindsToLaunch pins that a PR created before the ledger row's
+// started_at is an earlier launch's under the same name and is never picked,
+// and that a PR SelectPR cannot date refuses the read.
+func TestSelectPRBindsToLaunch(t *testing.T) {
+	d, err := DecodeDiscovery(readFixture(t, "discover_1204.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const branch = "worker/gh1175-forgectl"
+	created := time.Date(2026, 10, 9, 16, 5, 34, 0, time.UTC)
+	if _, err := SelectPR(d, branch, created.Add(time.Second)); !errors.Is(err, ErrNoPR) {
+		t.Fatalf("a merged PR from before the launch: %v, want ErrNoPR", err)
+	}
+	if c, err := SelectPR(d, branch, created); err != nil || c.Number != 1204 {
+		t.Fatalf("a PR created at the launch's start: %+v, %v", c, err)
+	}
+	// An earlier launch's open PR does not hide this launch's merged one.
+	mixed := d
+	old := d.Candidates[0]
+	old.Number, old.State, old.CreatedAt = 1100, "OPEN", "2026-09-01T00:00:00Z"
+	mixed.Candidates = append([]Candidate{old}, d.Candidates...)
+	if c, err := SelectPR(mixed, branch, launched1204); err != nil || c.Number != 1204 {
+		t.Fatalf("an old open PR beside this launch's merged one: %+v, %v", c, err)
+	}
+	for name, at := range map[string]string{"missing": "", "unparseable": "yesterday"} {
+		bad := d
+		c := d.Candidates[0]
+		c.CreatedAt = at
+		bad.Candidates = []Candidate{c}
+		if _, err := SelectPR(bad, branch, launched1204); !errors.Is(err, ErrUnboundPR) {
+			t.Errorf("%s createdAt: %v, want ErrUnboundPR", name, err)
+		}
+	}
+	if _, err := SelectPR(d, branch, time.Time{}); !errors.Is(err, ErrUnboundPR) {
+		t.Fatalf("no start time: %v, want ErrUnboundPR", err)
 	}
 }
 

@@ -232,7 +232,7 @@ func statusRows(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 // mergeRow is the policy's view of the ledger and queue rows.
 func mergeRow(row worker.Row, q *worker.QueueRow) merge.Row {
 	r := merge.Row{
-		Name: row.Name, Branch: row.Branch, BranchFrom: row.BranchFrom, LaunchID: row.LaunchID, Stage: string(row.Stage),
+		Name: row.Name, Branch: row.Branch, BranchFrom: row.BranchFrom, LaunchID: row.LaunchID, Stage: string(row.Stage), StartedAt: row.StartedAt,
 		Base: row.Base, GitHubRepo: row.GitHubRepo, GitHubRepoID: row.GitHubRepoID,
 	}
 	if q != nil {
