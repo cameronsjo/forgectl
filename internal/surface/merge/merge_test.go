@@ -430,6 +430,8 @@ func TestEvaluatePaths(t *testing.T) {
 		"built-in: go.mod at the root": {[]File{file("go.mod", "modified")}, "top-level files"},
 		"built-in: go.sum nested":      {[]File{file("docs/x/go.sum", "added")}, "module files"},
 		"built-in: go.work":            {[]File{file("docs/go.work", "added")}, "module files"},
+		"built-in: Cargo.toml nested":  {[]File{file("docs/x/Cargo.toml", "added")}, "build and toolchain files"},
+		"built-in: .cargo nested":      {[]File{file("docs/.cargo/config.toml", "added")}, "a .cargo directory"},
 		"renamed out of the gate":      {[]File{{Path: "docs/x.go", PreviousPath: "internal/surface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/surface/x.go" is refused`},
 		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "internal/tasks2/README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/tasks2/README.md" matches none`},
 		"removed test file":            {[]File{file("internal/tasks/x_test.go", "removed")}, "removes a test file"},

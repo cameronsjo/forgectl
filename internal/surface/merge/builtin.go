@@ -2,6 +2,7 @@ package merge
 
 import (
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -113,13 +114,28 @@ var builtinRefusedGlobs = []string{
 // files that decide what code a build pulls in.
 var builtinRefusedBase = []string{"go.mod", "go.sum", "go.work", "go.work.sum"}
 
+// builtinRefusedBuildBase are other languages' module, lock, build and
+// toolchain files, refused in any directory: a nested one still decides
+// what a build fetches or runs. requirements*.txt is matched by prefix and
+// suffix (builtinRefusal).
+var builtinRefusedBuildBase = []string{
+	"Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain", "rust-toolchain.toml",
+	"package.json", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+	".npmrc", ".yarnrc", ".yarnrc.yml",
+	"pyproject.toml", "uv.lock", "poetry.lock", "Pipfile", "Pipfile.lock",
+	"Gemfile", "Gemfile.lock",
+	".tool-versions", ".mise.toml", "mise.toml",
+	"flake.nix", "flake.lock",
+	"Dockerfile", "Makefile",
+}
+
 // builtinRefusedAgentBase are the agent instruction files a coding agent
 // loads from any directory it works in, refused at any depth.
 var builtinRefusedAgentBase = []string{"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
 
-// builtinRefusedSegment are directory names refused at any depth: agent and
-// CI configuration a nested copy of still takes effect from.
-var builtinRefusedSegment = []string{".claude", ".github"}
+// builtinRefusedSegment are directory names refused at any depth: agent, CI
+// and Cargo configuration a nested copy of still takes effect from.
+var builtinRefusedSegment = []string{".claude", ".github", ".cargo"}
 
 // builtinRefusal returns why p is refused whatever the config says, or "".
 func builtinRefusal(p string) string {
@@ -135,6 +151,11 @@ func builtinRefusal(p string) string {
 		if strings.EqualFold(base, b) {
 			return "module files (" + strings.Join(builtinRefusedBase, ", ") + ") are refused in any directory"
 		}
+	}
+	lowerBase := strings.ToLower(base)
+	if slices.ContainsFunc(builtinRefusedBuildBase, func(b string) bool { return strings.EqualFold(base, b) }) ||
+		strings.HasPrefix(lowerBase, "requirements") && strings.HasSuffix(lowerBase, ".txt") {
+		return "build and toolchain files (" + strings.Join(builtinRefusedBuildBase, ", ") + ", requirements*.txt) are refused in any directory"
 	}
 	for _, b := range builtinRefusedAgentBase {
 		if strings.EqualFold(base, b) {
