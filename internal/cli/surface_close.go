@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -65,6 +66,10 @@ type closeResult struct {
 	Forgotten bool   `json:"forgotten"`
 	Reason    string `json:"reason,omitempty"`
 	Note      string `json:"note,omitempty"`
+	// ledgerFailed reports that the ledger row could not be marked closed or
+	// removed: it still says the worker is open. The drain's closers then
+	// leave the queue row reported and try again.
+	ledgerFailed bool
 }
 
 type closeOptions struct {
@@ -152,24 +157,49 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
 		}), opts.JSON)
 	}
-	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), closeSteps{
-		close: w.herdr.Close,
+	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), realCloseSteps(deps.Runner, w.herdr, w.led, w.top, row))
+	return reportClose(cmd, res, opts.JSON)
+}
+
+// realCloseSteps wires close's steps to herdr, git and the ledger for row in
+// the repository top. `surface close` and the drain's closers both close
+// through it, so the two cannot differ.
+func realCloseSteps(run exec.Runner, herdr backend.Closer, led *worker.Ledger, top string, row worker.Row) closeSteps {
+	return closeSteps{
+		close: herdr.Close,
+		// The worktree is found by name, so inspect and remove each check
+		// first that the ledger row is still the one close read: a close or
+		// relaunch under the same name while the workspace closed leaves the
+		// new launch's worktree alone.
 		inspect: func(ctx context.Context) (worker.WorktreeFacts, error) {
-			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
+			if why := ledgerRowChanged(led, row); why != "" {
+				return worker.WorktreeFacts{}, errors.New(why)
+			}
+			return worker.InspectWorktree(ctx, run, top, row.Name, row.Base)
 		},
 		remove: func(ctx context.Context, path string) error {
+			if why := ledgerRowChanged(led, row); why != "" {
+				return errors.New(why)
+			}
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
 			defer cancel()
-			return worker.RemoveWorktree(ctx, deps.Runner, w.top, path)
+			return worker.RemoveWorktree(ctx, run, top, path)
 		},
 		// Both act only on the row close read: a launch that reused the name
 		// meanwhile is left alone.
-		forget: func() error { return w.led.RemoveIf(row.Name, worker.SameRow(row)) },
-		markClosed: func() error {
-			return w.led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) { r.Stage = worker.StageClosed })
+		forget: func() error { return led.RemoveIf(row.Name, worker.SameRow(row)) },
+		// markClosed records closed_at the first time only: a later close
+		// that keeps the worktree again leaves the first close time.
+		markClosed: func(now time.Time) error {
+			return led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) {
+				r.Stage = worker.StageClosed
+				if r.ClosedAt == nil {
+					at := now.UTC().Truncate(time.Second)
+					r.ClosedAt = &at
+				}
+			})
 		},
-	})
-	return reportClose(cmd, res, opts.JSON)
+	}
 }
 
 func findRow(rows []worker.Row, name string) (worker.Row, bool) {
@@ -188,7 +218,7 @@ type closeSteps struct {
 	inspect    func(context.Context) (worker.WorktreeFacts, error)
 	remove     func(context.Context, string) error
 	forget     func() error
-	markClosed func() error
+	markClosed func(time.Time) error
 }
 
 // workspaceDecision is what the ledger row alone decides about the workspace:
@@ -309,13 +339,15 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 	}
 
 	if res.Worktree == closeWorktreeKept {
-		if err := s.markClosed(); err != nil {
+		if err := s.markClosed(now); err != nil {
 			res.Note = joinNote(res.Note, "the ledger row could not be marked closed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+			res.ledgerFailed = true
 		}
 		return res
 	}
 	if err := s.forget(); err != nil && !errors.Is(err, worker.ErrNoRow) {
 		res.Note = joinNote(res.Note, "the ledger row could not be removed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+		res.ledgerFailed = true
 		return res
 	}
 	res.Forgotten = true

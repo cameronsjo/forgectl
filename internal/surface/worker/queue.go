@@ -111,6 +111,14 @@ type QueueRow struct {
 	// LabeledAt is when that labeling happened, an RFC 3339 time as GitHub
 	// recorded it. Empty when Labeler is.
 	LabeledAt string `json:"labeled_at,omitempty"`
+	// PRClosedAt is when the drain first saw the worker's PR closed without
+	// a merge, RFC 3339. The drain closes the worker 24 hours after it; a
+	// PR seen open again clears it.
+	PRClosedAt *time.Time `json:"pr_closed_at,omitempty"`
+	// CostUSD is the worker session's cost in US dollars, written when its
+	// PR merged and cadence-hooks priced every model in the transcript.
+	// Prune adds it to usage-daily.jsonl before it removes the row.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }
 
 // QueueOrigin is where a queue row's brief came from, for a row another
@@ -327,6 +335,9 @@ func decodeQueue(data []byte) (queueFile, error) {
 	for _, r := range f.Rows {
 		if !r.State.valid() {
 			return queueFile{}, fmt.Errorf("%w: row %q has unknown state %q", ErrQueueUnreadable, r.Name, r.State)
+		}
+		if r.CostUSD != nil && *r.CostUSD < 0 {
+			return queueFile{}, fmt.Errorf("%w: row %q has a negative cost_usd", ErrQueueUnreadable, r.Name)
 		}
 	}
 	return f, nil
@@ -566,6 +577,39 @@ func (q *Queue) RemoveIf(name string, match func(QueueRow) bool) (QueueRow, erro
 		return nil, ErrQueueNoRow
 	})
 	return removed, err
+}
+
+// PruneIf removes, under the queue lock, every row remove accepts, and
+// returns them. before is called with those rows while the lock is still
+// held, and when it fails nothing is removed: `surface prune` appends their
+// cost to usage-daily.jsonl there, so a row is never removed without its
+// cost recorded, and two prunes cannot both count one row. With no row to
+// remove, before is not called and nothing is written.
+func (q *Queue) PruneIf(remove func(QueueRow) bool, before func([]QueueRow) error) ([]QueueRow, error) {
+	var removed []QueueRow
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
+		removed = nil
+		kept := make([]QueueRow, 0, len(rows))
+		for _, r := range rows {
+			if remove(r) {
+				removed = append(removed, r)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		if len(removed) == 0 {
+			return nil, errQueueUnchanged
+		}
+		if err := before(removed); err != nil {
+			removed = nil
+			return nil, err
+		}
+		return kept, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 // SameRead matches a row that is still exactly as read: the same launch, the

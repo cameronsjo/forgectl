@@ -53,6 +53,9 @@ type Row struct {
 	LaunchID   string
 	// Stage is the ledger row's stage.
 	Stage string
+	// StartedAt is the ledger row's started_at: SelectPR ignores a PR
+	// created before it, which belongs to an earlier launch of the name.
+	StartedAt time.Time
 	// Base is the commit the worker's branch started at.
 	Base         string
 	GitHubRepo   string

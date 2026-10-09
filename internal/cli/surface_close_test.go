@@ -19,6 +19,9 @@ type fakeClose struct {
 	facts     worker.WorktreeFacts
 	inspErr   error
 	removeErr error
+	// markErr and forgetErr are what the ledger writes return.
+	markErr   error
+	forgetErr error
 	calls     []string
 }
 
@@ -36,8 +39,8 @@ func (f *fakeClose) steps() closeSteps {
 			f.calls = append(f.calls, "remove")
 			return f.removeErr
 		},
-		forget:     func() error { f.calls = append(f.calls, "forget"); return nil },
-		markClosed: func() error { f.calls = append(f.calls, "mark-closed"); return nil },
+		forget:     func() error { f.calls = append(f.calls, "forget"); return f.forgetErr },
+		markClosed: func(time.Time) error { f.calls = append(f.calls, "mark-closed"); return f.markErr },
 	}
 }
 
@@ -202,4 +205,106 @@ func TestCloseWorkerGuards(t *testing.T) {
 			t.Fatalf("result %+v", got)
 		}
 	})
+}
+
+// noCloser is a backend.Closer markClosed never calls.
+type noCloser struct{}
+
+func (noCloser) Close(context.Context, backend.Ref) backend.CloseResult { return backend.CloseResult{} }
+
+// TestRealCloseStepsMarkClosedRecordsClosedAt pins that the close that
+// keeps a worktree records closed_at once: a later close that keeps it
+// again leaves the first time, so prune ages the row from its first close.
+func TestRealCloseStepsMarkClosedRecordsClosedAt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const repo = "/repo/closed-at"
+	led, err := worker.Open(repo, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Update("w", func(r *worker.Row) { r.Stage = worker.StageLaunched }); err != nil {
+		t.Fatal(err)
+	}
+	read := func() worker.Row {
+		rows, err := led.Rows()
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("rows %+v, %v", rows, err)
+		}
+		return rows[0]
+	}
+	first := time.Date(2026, 10, 9, 12, 30, 15, 500, time.UTC)
+	if err := realCloseSteps(nil, noCloser{}, led, repo, read()).markClosed(first); err != nil {
+		t.Fatal(err)
+	}
+	r := read()
+	if r.Stage != worker.StageClosed || r.ClosedAt == nil || !r.ClosedAt.Equal(first.Truncate(time.Second)) {
+		t.Fatalf("after the first close: stage %s closed_at %v", r.Stage, r.ClosedAt)
+	}
+	if err := realCloseSteps(nil, noCloser{}, led, repo, r).markClosed(first.Add(48 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if again := read(); again.ClosedAt == nil || !again.ClosedAt.Equal(first.Truncate(time.Second)) {
+		t.Fatalf("a second close moved closed_at to %v", again.ClosedAt)
+	}
+}
+
+// TestCloseWorkerLedgerWriteFailure pins that a close whose ledger write
+// fails says so in its note and marks the result, which the drain's closers
+// read to leave the queue row reported.
+func TestCloseWorkerLedgerWriteFailure(t *testing.T) {
+	stashed := cleanFacts
+	stashed.Stashes = 1
+	for name, fake := range map[string]fakeClose{
+		"mark closed fails": {result: backend.NewCloseClosed(), facts: stashed, markErr: errors.New("disk full")},
+		"forget fails":      {result: backend.NewCloseClosed(), facts: cleanFacts, forgetErr: errors.New("disk full")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := closeWorker(context.Background(), launchedRow(t), false, time.Now(), fake.steps())
+			if !res.Closed || !res.ledgerFailed || !strings.Contains(res.Note, "disk full") || res.Forgotten {
+				t.Fatalf("result %+v; want closed, ledgerFailed, the error in the note, not forgotten", res)
+			}
+		})
+	}
+	ok := fakeClose{result: backend.NewCloseClosed(), facts: cleanFacts}
+	if res := closeWorker(context.Background(), launchedRow(t), false, time.Now(), ok.steps()); res.ledgerFailed {
+		t.Fatalf("a clean close reported a ledger failure: %+v", res)
+	}
+}
+
+// A relaunch under the same name after close read the row (here, between
+// steps) refuses inspect and remove before either touches the worktree,
+// which is found by name and would be the new launch's.
+func TestRealCloseStepsRefuseARelaunchedRow(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const repo = "/repo/relaunch"
+	led, err := worker.Open(repo, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := led.Rows()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %+v, %v", rows, err)
+	}
+	steps := realCloseSteps(nil, noCloser{}, led, repo, rows[0])
+	// The old row is closed and forgotten, and the name launched again.
+	if err := led.RemoveIf("w", worker.SameRow(rows[0])); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Begin(worker.Row{Name: "w", Branch: "worker/w", StartedAt: started.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := steps.inspect(t.Context()); err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("inspect after a relaunch: %v, want a refusal", err)
+	}
+	if err := steps.remove(t.Context(), "/repo/relaunch/.claude/worktrees/w"); err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("remove after a relaunch: %v, want a refusal", err)
+	}
 }

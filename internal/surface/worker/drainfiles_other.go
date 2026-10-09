@@ -27,3 +27,15 @@ func (DrainFiles) AppendEvent(*DrainLock, []byte) error { return privdir.ErrUnsu
 
 // ReadEvents refuses.
 func (DrainFiles) ReadEvents() ([]byte, []byte, error) { return nil, nil, privdir.ErrUnsupported }
+
+// AppendUsage refuses.
+func (DrainFiles) AppendUsage([]byte) error { return privdir.ErrUnsupported }
+
+// ReadUsage refuses.
+func (DrainFiles) ReadUsage() ([]byte, error) { return nil, privdir.ErrUnsupported }
+
+// ReadPruneDay refuses.
+func (DrainFiles) ReadPruneDay() (string, error) { return "", privdir.ErrUnsupported }
+
+// WritePruneDay refuses.
+func (DrainFiles) WritePruneDay(string) error { return privdir.ErrUnsupported }

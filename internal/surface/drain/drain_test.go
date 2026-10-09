@@ -158,7 +158,7 @@ func TestCheckClaimed(t *testing.T) {
 	}
 }
 
-func TestExpireAndPrune(t *testing.T) {
+func TestExpire(t *testing.T) {
 	q := qrow("w", "/r", worker.QueueQueued, t0)
 	if c := Expire(q, t0.Add(ExpireAfter)); c.Writes() {
 		t.Fatal("expired at exactly 7 days; want strictly older")
@@ -169,17 +169,6 @@ func TestExpireAndPrune(t *testing.T) {
 	claimed := qrow("w", "/r", worker.QueueClaimed, t0)
 	if c := Expire(claimed, t0.Add(30*ExpireAfter)); c.Writes() {
 		t.Fatal("a claimed row expired; only queued rows expire")
-	}
-	for _, s := range []worker.QueueState{worker.QueueReported, worker.QueueFailed, worker.QueueClosed, worker.QueueExpired} {
-		r := qrow("w", "/r", s, t0)
-		if Prunable(r, t0.Add(PruneAfter)) || !Prunable(r, t0.Add(PruneAfter+time.Second)) {
-			t.Errorf("%s: prune boundary wrong", s)
-		}
-	}
-	for _, s := range []worker.QueueState{worker.QueueQueued, worker.QueueClaimed, worker.QueueLaunched, worker.QueueNeedsYou} {
-		if Prunable(qrow("w", "/r", s, t0), t0.Add(10*PruneAfter)) {
-			t.Errorf("%s row was prunable; only terminal rows are", s)
-		}
 	}
 }
 

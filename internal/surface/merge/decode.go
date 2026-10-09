@@ -229,15 +229,31 @@ var ErrNoPR = errors.New("merge: no pull request on the worker's branch")
 // ErrAmbiguousPR reports more than one open PR on the head branch.
 var ErrAmbiguousPR = errors.New("merge: more than one open pull request on the worker's branch")
 
+// ErrUnboundPR reports a discovery list SelectPR cannot tie to the launch:
+// the ledger row has no start time, or a PR that passes the filter has a
+// createdAt that is missing or does not parse.
+var ErrUnboundPR = errors.New("merge: a pull request on the worker's branch cannot be tied to its launch")
+
 // SelectPR applies the discovery filter, then picks the PR: same head
 // branch name exactly, not cross-repository, head repository id equal to
-// the base repository's, author id equal to the operator's. The filter runs
-// before any ordering, so a fork's or another author's PR on the same head
-// name is never picked. More than one open PR refuses; one open PR is it;
-// with none open, the most recently created closed or merged one is shown.
-// A PR number from a worker's report is never used.
-func SelectPR(d Discovery, branch string) (Candidate, error) {
-	var kept []Candidate
+// the base repository's, author id equal to the operator's, and created at
+// or after started (the ledger row's StartedAt), so a PR from an earlier
+// launch under the same name is never this launch's. A PR that passes the
+// rest of the filter with a missing or unparseable createdAt refuses the
+// whole read (ErrUnboundPR), as does a zero started. The filter runs before
+// any ordering, so a fork's, another author's or an earlier launch's PR on
+// the same head name is never picked. More than one open PR refuses; one
+// open PR is it; with none open, the most recently created closed or merged
+// one is shown. A PR number from a worker's report is never used.
+func SelectPR(d Discovery, branch string, started time.Time) (Candidate, error) {
+	if started.IsZero() {
+		return Candidate{}, fmt.Errorf("%w: the ledger row records no start time", ErrUnboundPR)
+	}
+	type dated struct {
+		c  Candidate
+		at time.Time
+	}
+	var kept []dated
 	for _, c := range d.Candidates {
 		if c.HeadRefName != branch || c.IsCrossRepository || c.HeadRepository == nil || c.HeadRepository.DatabaseID != d.Repository.DatabaseID {
 			continue
@@ -245,12 +261,19 @@ func SelectPR(d Discovery, branch string) (Candidate, error) {
 		if c.Author == nil || c.Author.DatabaseID != d.ViewerID || c.Author.DatabaseID == 0 {
 			continue
 		}
-		kept = append(kept, c)
+		at, err := time.Parse(time.RFC3339, c.CreatedAt)
+		if err != nil {
+			return Candidate{}, fmt.Errorf("%w: PR #%d has createdAt %q", ErrUnboundPR, c.Number, c.CreatedAt)
+		}
+		if at.Before(started) {
+			continue // an earlier launch's PR on the same head name
+		}
+		kept = append(kept, dated{c, at})
 	}
 	var open []Candidate
-	for _, c := range kept {
-		if c.State == "OPEN" {
-			open = append(open, c)
+	for _, k := range kept {
+		if k.c.State == "OPEN" {
+			open = append(open, k.c)
 		}
 	}
 	switch {
@@ -263,17 +286,15 @@ func SelectPR(d Discovery, branch string) (Candidate, error) {
 	case len(open) == 1:
 		return open[0], nil
 	case len(kept) == 0:
-		return Candidate{}, fmt.Errorf("%w %s", ErrNoPR, branch)
+		return Candidate{}, fmt.Errorf("%w %s created since the launch started", ErrNoPR, branch)
 	}
 	sort.SliceStable(kept, func(i, j int) bool {
-		ti, _ := time.Parse(time.RFC3339, kept[i].CreatedAt)
-		tj, _ := time.Parse(time.RFC3339, kept[j].CreatedAt)
-		if ti.Equal(tj) {
-			return kept[i].Number > kept[j].Number
+		if kept[i].at.Equal(kept[j].at) {
+			return kept[i].c.Number > kept[j].c.Number
 		}
-		return ti.After(tj)
+		return kept[i].at.After(kept[j].at)
 	})
-	return kept[0], nil
+	return kept[0].c, nil
 }
 
 // PRRead is a PRQuery response.

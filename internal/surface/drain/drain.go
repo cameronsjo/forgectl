@@ -22,7 +22,8 @@ const (
 	MaxAttempts = 3
 	// ExpireAfter is how long a row may sit queued before it expires.
 	ExpireAfter = 7 * 24 * time.Hour
-	// PruneAfter is how long a terminal row stays before it is removed.
+	// PruneAfter is the cutoff the drain's daily prune uses, and `surface
+	// prune`'s default: closed, failed and expired rows older than it go.
 	PruneAfter = 30 * 24 * time.Hour
 	// StaleTicks is how many intervals may pass without a tick before a
 	// running drain reads as stale.
@@ -105,11 +106,17 @@ type Change struct {
 	// Note is a non-state event to record once, such as a row becoming
 	// unreadable.
 	Note string
+	// PRClosedAt is the new pr_closed_at, written with SetPRClosedAt; nil
+	// clears it.
+	PRClosedAt    *time.Time
+	SetPRClosedAt bool
+	// CostUSD, when set, is the new cost_usd.
+	CostUSD *float64
 }
 
 // Writes reports whether c changes the row on disk.
 func (c Change) Writes() bool {
-	return c.To != "" || c.SetError || c.SetAttempts || c.ClearLaunch
+	return c.To != "" || c.SetError || c.SetAttempts || c.ClearLaunch || c.SetPRClosedAt || c.CostUSD != nil
 }
 
 // Apply writes c into r.
@@ -125,6 +132,13 @@ func (c Change) Apply(r *worker.QueueRow) {
 	}
 	if c.ClearLaunch {
 		r.LaunchID = ""
+	}
+	if c.SetPRClosedAt {
+		r.PRClosedAt = c.PRClosedAt
+	}
+	if c.CostUSD != nil {
+		cost := *c.CostUSD
+		r.CostUSD = &cost
 	}
 }
 
@@ -225,12 +239,6 @@ func Expire(q worker.QueueRow, now time.Time) Change {
 		return c
 	}
 	return c.to(worker.QueueExpired, fmt.Sprintf("queued since %s, more than %s, and never launched", q.EnqueuedAt.UTC().Format(time.RFC3339), ExpireAfter))
-}
-
-// Prunable reports whether a terminal row has been in its state longer than
-// PruneAfter and may be removed.
-func Prunable(q worker.QueueRow, now time.Time) bool {
-	return q.State.Terminal() && now.Sub(q.StateAt) > PruneAfter
 }
 
 // Held returns the names of the rows holding a slot, in row order.

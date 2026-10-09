@@ -79,7 +79,12 @@ status shows a worker's PR and what the merge policy ([surface.merge])
 decides about it; merge-machine prints this machine's policy value:
 
   forgectl surface status fix-login --json
-  forgectl surface merge-machine`,
+  forgectl surface merge-machine
+
+prune removes old closed, failed and expired queue rows and closed ledger
+rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
+
+  forgectl surface prune --dry-run`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -96,6 +101,7 @@ decides about it; merge-machine prints this machine's policy value:
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
 	cmd.AddCommand(newSurfaceStatusCmd(deps))
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
+	cmd.AddCommand(newSurfacePruneCmd(deps))
 	return cmd
 }
 
