@@ -25,6 +25,9 @@ type Worktree struct {
 	// Base is the commit the worktree started at. `close` (T4) uses it to tell
 	// a branch with new work from one with none.
 	Base string
+	// BranchFrom is where Branch came from: BranchLocal, BranchOrigin or
+	// BranchNew.
+	BranchFrom string
 }
 
 // ErrUnsafeWorktreeRoot reports a worktree root forgectl will not create under.
@@ -99,7 +102,8 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 	}
 
 	add := []string{"-C", top, "-c", "core.hooksPath=/dev/null", "worktree", "add"}
-	switch branchSource(ctx, run, top, branch) {
+	from := branchSource(ctx, run, top, branch)
+	switch from {
 	case BranchLocal:
 		add = append(add, "--", path, branch)
 	case BranchOrigin:
@@ -121,7 +125,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 	// The worktree exists from here on. A later failure still returns its
 	// path, so the caller records it and does not take the attempt for one
 	// that created nothing (a retry would find the path taken).
-	created := Worktree{Path: path, Branch: branch}
+	created := Worktree{Path: path, Branch: branch, BranchFrom: from}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return created, fmt.Errorf("worker: resolve created worktree: %w", err)
@@ -131,9 +135,30 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 	}
 	head, err := gitenv.Run(ctx, run, gitenv.Local, "-C", resolved, "rev-parse", "HEAD")
 	if err != nil {
-		return Worktree{Path: resolved, Branch: branch}, fmt.Errorf("worker: read worktree HEAD: %w", err)
+		return Worktree{Path: resolved, Branch: branch, BranchFrom: from}, fmt.Errorf("worker: read worktree HEAD: %w", err)
 	}
-	return Worktree{Path: resolved, Branch: branch, Base: strings.TrimSpace(head)}, nil
+	return Worktree{Path: resolved, Branch: branch, Base: strings.TrimSpace(head), BranchFrom: from}, nil
+}
+
+// ErrBranchExists reports a drain launch whose branch already exists, in
+// the checkout or on origin. A drain worker's branch must be new: the merge
+// policy binds a PR's head to a branch the drain created, so a branch that
+// was already there (a stale one, or one a worker pushed ahead of time) is
+// refused before anything is created.
+var ErrBranchExists = errors.New("worker: the branch already exists")
+
+// CheckBranchNew refuses a branch that exists in the checkout as a local
+// branch or as origin/<branch>. It reads refs only and writes nothing. A
+// branch on GitHub that the checkout has not fetched is the caller's to ask
+// GitHub about.
+func CheckBranchNew(ctx context.Context, run GitRunner, top, branch string) error {
+	switch branchSource(ctx, run, top, branch) {
+	case BranchLocal:
+		return fmt.Errorf("%w: %q is a local branch in %s; a drain worker starts on a new branch", ErrBranchExists, branch, top)
+	case BranchOrigin:
+		return fmt.Errorf("%w: origin/%s exists in %s; a drain worker starts on a new branch", ErrBranchExists, branch, top)
+	}
+	return nil
 }
 
 // Where a worker's branch comes from.

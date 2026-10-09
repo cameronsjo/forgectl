@@ -234,3 +234,40 @@ func TestAddWorktreeStartsAtTheGivenBase(t *testing.T) {
 		t.Fatalf("an existing branch asked for a base (asked=%v, err=%v)", asked, err)
 	}
 }
+
+// TestBranchFromAndCheckBranchNew pins what a launch records as BranchFrom,
+// and the drain's refusal of a branch that is already there, locally or as
+// origin/<branch>.
+func TestBranchFromAndCheckBranchNew(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	if err := CheckBranchNew(ctx, run, top, "worker/fresh"); err != nil {
+		t.Fatalf("a new branch: %v", err)
+	}
+	wt, err := AddWorktree(ctx, run, top, "fresh", "worker/fresh", baseOf(t, top))
+	if err != nil || wt.BranchFrom != BranchNew {
+		t.Fatalf("new branch: %+v, %v; want BranchFrom %q", wt, err, BranchNew)
+	}
+
+	mustGit(t, top, "branch", "worker/local")
+	if err := CheckBranchNew(ctx, run, top, "worker/local"); !errors.Is(err, ErrBranchExists) || !strings.Contains(err.Error(), "local branch") {
+		t.Fatalf("a local branch: %v, want ErrBranchExists naming it local", err)
+	}
+	wt, err = AddWorktree(ctx, run, top, "local", "worker/local", baseOf(t, top))
+	if err != nil || wt.BranchFrom != BranchLocal {
+		t.Fatalf("local branch: %+v, %v; want BranchFrom %q", wt, err, BranchLocal)
+	}
+
+	mustGit(t, top, "branch", "worker/remote")
+	mustGit(t, top, "remote", "add", "origin", top)
+	mustGit(t, top, "fetch", "-q", "origin")
+	mustGit(t, top, "branch", "-D", "worker/remote")
+	if err := CheckBranchNew(ctx, run, top, "worker/remote"); !errors.Is(err, ErrBranchExists) || !strings.Contains(err.Error(), "origin/worker/remote") {
+		t.Fatalf("an origin branch: %v, want ErrBranchExists naming origin/worker/remote", err)
+	}
+	wt, err = AddWorktree(ctx, run, top, "remote", "worker/remote", baseOf(t, top))
+	if err != nil || wt.BranchFrom != BranchOrigin {
+		t.Fatalf("origin branch: %+v, %v; want BranchFrom %q", wt, err, BranchOrigin)
+	}
+}

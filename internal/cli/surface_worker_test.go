@@ -74,8 +74,11 @@ func testHerdrRef(t *testing.T) backend.Ref {
 
 func goodSteps(t *testing.T) workerSteps {
 	return workerSteps{
+		identify: func(context.Context) (repoIdentity, error) {
+			return repoIdentity{NameWithOwner: "cameronsjo/forgectl", DatabaseID: 1252924951}, nil
+		},
 		addWorktree: func(context.Context) (worker.Worktree, error) {
-			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123"}, nil
+			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123", BranchFrom: worker.BranchNew}, nil
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
 			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}, Worker: true}, nil
@@ -297,6 +300,7 @@ func inProcessStepsFor(t *testing.T, led *worker.Ledger, launched *[]launch.Invo
 	deps := module.Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}}}
 	setup := workerSetup{top: testRepoTop, led: led, self: "/nonexistent/forgectl"}
 	steps := setup.steps(deps, spec, "Fix it.", nil, io.Discard)
+	steps.identify = func(context.Context) (repoIdentity, error) { return repoIdentity{}, nil }
 	steps.addWorktree = func(context.Context) (worker.Worktree, error) {
 		return worker.Worktree{Path: cwd, Branch: "feat/w1", Base: "abc123"}, nil
 	}

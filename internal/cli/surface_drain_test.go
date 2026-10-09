@@ -444,6 +444,7 @@ func TestDrainKillAtEachLaunchStage(t *testing.T) {
 			kl := &killLedger{Ledger: led, killAt: c.killAt}
 			ref := testHerdrRef(t)
 			steps := workerSteps{
+				identify: func(context.Context) (repoIdentity, error) { return repoIdentity{}, nil },
 				addWorktree: func(context.Context) (worker.Worktree, error) {
 					if c.failAt == "worktree" {
 						return worker.Worktree{}, errors.New("base lookup failed")
