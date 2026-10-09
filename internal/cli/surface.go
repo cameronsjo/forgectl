@@ -88,6 +88,7 @@ events and stop inspect and end it:
 	cmd.AddCommand(newSurfaceIntakeCmd(deps))
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
+	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	return cmd
 }
 
