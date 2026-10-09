@@ -417,3 +417,56 @@ func TestDrainDailyPruneUnreadableDay(t *testing.T) {
 		t.Fatalf("a restart after the rewrite pruned again (%d runs)", f.pruneRuns)
 	}
 }
+
+// A row re-enqueued by hand between the closer's read and its close (here,
+// while the session is priced) is left alone: the close waits for the next
+// read rather than acting on the new row.
+func TestDrainCloserQueueChangedInTheWindow(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedReported(t, q, "w", true)
+	f.prs["w"] = merge.Candidate{Number: 5, State: "MERGED"}
+	f.usage = &statusUsage{CostUSD: 1, Priced: true}
+	f.onPrice = func() {
+		f.onPrice = nil
+		if _, err := q.Dequeue("w"); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		enqueueAt(t, q, "w", closerRepo, drainT0)
+	}
+	d.tick(t.Context())
+	if len(f.closed) != 0 {
+		t.Fatalf("closed %v; a row changed in the window must not be closed", f.closed)
+	}
+	if r := rowNamed(t, q, "w"); r.State == worker.QueueClosed {
+		t.Fatalf("row %s; the new row must not be marked closed", r.State)
+	}
+}
+
+type fakeLedgerRows []worker.Row
+
+func (f fakeLedgerRows) Rows() ([]worker.Row, error) { return f, nil }
+
+// The drain's close checks the ledger row again right before closing: a
+// relaunch (a new start time) or a close by hand (a new stage) in the window
+// refuses.
+func TestLedgerRowChanged(t *testing.T) {
+	led := worker.Row{Name: "w", Stage: worker.StageLaunched, StartedAt: drainT0}
+	relaunched := led
+	relaunched.StartedAt = drainT0.Add(time.Minute)
+	closedByHand := led
+	closedByHand.Stage = worker.StageClosed
+	for name, c := range map[string]struct {
+		rows fakeLedgerRows
+		want string
+	}{
+		"unchanged":      {fakeLedgerRows{led}, ""},
+		"relaunched":     {fakeLedgerRows{relaunched}, "changed"},
+		"closed by hand": {fakeLedgerRows{closedByHand}, "changed"},
+		"gone":           {fakeLedgerRows{}, "gone"},
+	} {
+		got := ledgerRowChanged(c.rows, led)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}

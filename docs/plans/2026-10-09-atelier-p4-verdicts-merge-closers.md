@@ -218,4 +218,6 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.3 review fix, daily prune:** an unreadable `drain-prune-day` is one `error` event and is rewritten with today before the prune runs. The daily prune is capped at 30 s (`surface prune` by hand keeps 2 minutes). herdr was probed per row (a readiness check and a listing each); prune now reads it once per run through `herdradapter.Adapter.Prober`, which judges every reference against one read under `Probe`'s rules.
 - **T10.3 review fix, `surface prune` exit codes:** failing to open the queue, the drain files or the status cache is exit 1 (the state could not be read), as ADR-0015's table puts a verb that ran and failed; exit 2 is for usage errors only.
 
+- **T10.3 independent review (chief-of-staff), closer race:** the closer acts on a ledger row read at the start of the tick, after the watch, the PR reads and pricing. It now checks the queue row is still the one read (`worker.SameRead`) before the close, and the drain's close re-reads the ledger row and requires `worker.SameRow` right before anything is closed or inspected, so a close or relaunch by hand in that window is left alone. A closed ledger row with `closed_at` also stays while the worktree it records exists, like a row without `closed_at`.
+
 ## Learnings

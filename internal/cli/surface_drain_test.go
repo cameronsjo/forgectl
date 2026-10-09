@@ -59,8 +59,10 @@ type fakeDrain struct {
 	prs     map[string]merge.Candidate
 	prErr   map[string]error
 	prReads map[string]int
-	// usage is what pricing a transcript returns.
-	usage *statusUsage
+	// usage is what pricing a transcript returns. onPrice, when set, runs
+	// while pricing: the window between the closer's read and its close.
+	usage   *statusUsage
+	onPrice func()
 	// closeRes, when set, is what closeRow returns; otherwise the close
 	// succeeds and removes the ledger row. closed lists the rows closed.
 	closeRes *closeResult
@@ -140,7 +142,12 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 			}
 			return c, nil
 		},
-		price: func(context.Context, string) *statusUsage { return f.usage },
+		price: func(context.Context, string) *statusUsage {
+			if f.onPrice != nil {
+				f.onPrice()
+			}
+			return f.usage
+		},
 		closeRow: func(_ context.Context, q worker.QueueRow, led worker.Row) closeResult {
 			if f.closeRes != nil {
 				return *f.closeRes

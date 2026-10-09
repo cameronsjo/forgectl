@@ -339,6 +339,23 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	return rows
 }
 
+// queueRowUnchanged reports whether the queue row named q.Name is still
+// exactly the row read as q (worker.SameRead). An unreadable queue reads as
+// changed.
+func (d *drainer) queueRowUnchanged(q worker.QueueRow) bool {
+	rows, err := d.io.queue.Rows()
+	if err != nil {
+		return false
+	}
+	same := worker.SameRead(q)
+	for _, r := range rows {
+		if r.Name == q.Name {
+			return same(r)
+		}
+	}
+	return false
+}
+
 func (d *drainer) readRows() ([]worker.QueueRow, bool) {
 	rows, err := d.io.queue.Rows()
 	if err != nil {
@@ -629,6 +646,15 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 			c := u.CostUSD
 			cost = &c
 		}
+	}
+	// The ledger row was read at the start of the tick, and the watch, the
+	// PR reads and the pricing ran since. Check the queue row is still the
+	// one read; closeRow checks the ledger row the same way right before it
+	// closes anything, so a close or relaunch by hand in the window is left
+	// alone.
+	if !d.queueRowUnchanged(q) {
+		d.closerEvent(d.closerNote, q, drain.EventNote, "the queue row changed since the closer read it; the close waits for the next read")
+		return
 	}
 	res := d.io.closeRow(ctx, q, led)
 	if !res.Closed {
@@ -1106,8 +1132,35 @@ func drainCloseRow(run exec.Runner, session string) func(context.Context, worker
 		if err != nil {
 			return refuse("the ledger: " + err.Error())
 		}
+		// Right before anything is closed: the ledger row must still be the
+		// one the closer read (same launch, same stage). A close by hand, a
+		// close that kept the worktree, or a relaunch under the same name in
+		// the meantime refuses here, so the new launch's worktree is never
+		// the one inspected or removed.
+		if why := ledgerRowChanged(ledger, led); why != "" {
+			return refuse(why)
+		}
 		ctx, cancel := context.WithTimeout(ctx, closeTimeout)
 		defer cancel()
 		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr, ledger, q.Repo, led))
 	}
+}
+
+// ledgerRowChanged returns why the ledger's row named led.Name is no longer
+// led (worker.SameRow), or "" when it still is.
+func ledgerRowChanged(ledger interface{ Rows() ([]worker.Row, error) }, led worker.Row) string {
+	rows, err := ledger.Rows()
+	if err != nil {
+		return "the ledger could not be read again before the close: " + err.Error()
+	}
+	same := worker.SameRow(led)
+	for _, r := range rows {
+		if r.Name == led.Name {
+			if same(r) {
+				return ""
+			}
+			return "the ledger row changed since the closer read it (closed or relaunched by hand); the close waits for the next read"
+		}
+	}
+	return "the ledger row is gone since the closer read it"
 }
