@@ -679,13 +679,13 @@ func DecodeTree(data []byte) (map[string]string, error) {
 }
 
 // LandedQuery reads, after a merge, whether the PR merged, its merge commit
-// and head, and the default branch's head commit.
+// with its message and head, and the default branch's head commit.
 const LandedQuery = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     databaseId
     nameWithOwner
     defaultBranchRef { name target { oid } }
-    pullRequest(number: $number) { number state merged headRefOid mergeCommit { oid } }
+    pullRequest(number: $number) { number state merged headRefOid mergeCommit { oid message } }
   }
 }`
 
@@ -697,8 +697,10 @@ type LandedRead struct {
 	State       string
 	Merged      bool
 	HeadRefOid  string
-	// MergeCommit is "" when GitHub names none.
-	MergeCommit string
+	// MergeCommit is "" when GitHub names none, and MergeMessage its full
+	// message.
+	MergeCommit  string
+	MergeMessage string
 }
 
 // DecodeLanded reads a LandedQuery response.
@@ -718,7 +720,8 @@ func DecodeLanded(data []byte) (LandedRead, error) {
 				Merged      bool   `json:"merged"`
 				HeadRefOid  string `json:"headRefOid"`
 				MergeCommit *struct {
-					OID string `json:"oid"`
+					OID     string `json:"oid"`
+					Message string `json:"message"`
 				} `json:"mergeCommit"`
 			} `json:"pullRequest"`
 		} `json:"repository"`
@@ -746,7 +749,7 @@ func DecodeLanded(data []byte) (LandedRead, error) {
 	p := d.Repository.PullRequest
 	out.Number, out.State, out.Merged, out.HeadRefOid = p.Number, p.State, p.Merged, p.HeadRefOid
 	if p.MergeCommit != nil {
-		out.MergeCommit = p.MergeCommit.OID
+		out.MergeCommit, out.MergeMessage = p.MergeCommit.OID, p.MergeCommit.Message
 	}
 	return out, nil
 }

@@ -74,7 +74,10 @@ func TestSurfaceMergeExitCodes(t *testing.T) {
 		"refused":     {merge.Outcome{Result: merge.LandRefused, PR: 1204, Reasons: []string{"the PR is a draft, expected ready for review"}}, 1, "merge refused (1 reasons above)", "  - the PR is a draft"},
 		"unreadable":  {merge.Outcome{Result: merge.LandUnreadable, Reasons: []string{"GitHub could not be read: HTTP 502"}}, 1, "GitHub could not be read; nothing was merged", "HTTP 502"},
 		"failed":      {merge.Outcome{Result: merge.LandFailed, PR: 1204, Reasons: []string{"gh pr merge failed: x"}}, 1, "the merge failed", ""},
-		"unconfirmed": {merge.Outcome{Result: merge.LandUnconfirmed, PR: 1204}, 1, "could not be confirmed on the default branch", ""},
+		"unconfirmed": {merge.Outcome{Result: merge.LandUnconfirmed, PR: 1204}, 1, "could not be confirmed as this attempt's on the default branch", ""},
+		"merged elsewhere": {merge.Outcome{Result: merge.LandMergedElsewhere, PR: 1204, MergeCommit: "1111111111111111111111111111111111111111"}, 1,
+			"not by this attempt", ": merged-elsewhere"},
+		"unknown": {merge.Outcome{Result: merge.LandUnknown, PR: 1204}, 1, "the PR may have merged: check it by hand", ": merge-unknown"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

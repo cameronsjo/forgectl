@@ -241,22 +241,22 @@ func TestRecheckAndLanded(t *testing.T) {
 	const mergeCommit = "1111111111111111111111111111111111111111"
 	const mainHead = "2222222222222222222222222222222222222222"
 	landed := `{"data":{"repository":{"databaseId":1252924951,"nameWithOwner":"cameronsjo/forgectl","defaultBranchRef":{"name":"main","target":{"oid":"` + mainHead + `"}},
-	  "pullRequest":{"number":1204,"state":"MERGED","merged":true,"headRefOid":"` + head1204 + `","mergeCommit":{"oid":"` + mergeCommit + `"}}}}}`
-	gh := fixtureGH{t: t, override: map[string]string{"mergeCommit { oid }": landed, "compare/" + mergeCommit + "..." + mainHead: `{"status":"ahead"}`}}
+	  "pullRequest":{"number":1204,"state":"MERGED","merged":true,"headRefOid":"` + head1204 + `","mergeCommit":{"oid":"` + mergeCommit + `","message":"fix: x\n\nAudit-line: sha256:abc\n"}}}}}`
+	gh := fixtureGH{t: t, override: map[string]string{"mergeCommit { oid message }": landed, "compare/" + mergeCommit + "..." + mainHead: `{"status":"ahead"}`}}
 	l, err := Reader{GH: gh.runner()}.Landed(ctx, snap.Facts)
-	if err != nil || !l.Merged || !l.OnDefault || l.MergeCommit != mergeCommit || l.DefaultBranch != "main" {
+	if err != nil || !l.Merged || !l.OnDefault || l.MergeCommit != mergeCommit || l.DefaultBranch != "main" || l.MergeMessage != "fix: x\n\nAudit-line: sha256:abc\n" {
 		t.Fatalf("landed: %+v, %v", l, err)
 	}
 	gh.override["compare/"+mergeCommit+"..."+mainHead] = `{"status":"diverged"}`
 	if l, err := (Reader{GH: gh.runner()}).Landed(ctx, snap.Facts); err != nil || l.OnDefault || l.Ancestry != "diverged" {
 		t.Fatalf("a merge commit off the default branch: %+v, %v", l, err)
 	}
-	open := strings.Replace(strings.Replace(landed, `"MERGED","merged":true`, `"OPEN","merged":false`, 1), `{"oid":"`+mergeCommit+`"}`, "null", 1)
-	if l, err := (Reader{GH: fixtureGH{t: t, override: map[string]string{"mergeCommit { oid }": open}}.runner()}).Landed(ctx, snap.Facts); err != nil || l.Merged || l.OnDefault {
+	open := strings.Replace(strings.Replace(landed, `"MERGED","merged":true`, `"OPEN","merged":false`, 1), `{"oid":"`+mergeCommit+`","message":"fix: x\n\nAudit-line: sha256:abc\n"}`, "null", 1)
+	if l, err := (Reader{GH: fixtureGH{t: t, override: map[string]string{"mergeCommit { oid message }": open}}.runner()}).Landed(ctx, snap.Facts); err != nil || l.Merged || l.OnDefault {
 		t.Fatalf("an unmerged PR: %+v, %v", l, err)
 	}
 	other := strings.Replace(landed, `"databaseId":1252924951`, `"databaseId":7`, 1)
-	if _, err := (Reader{GH: fixtureGH{t: t, override: map[string]string{"mergeCommit { oid }": other}}.runner()}).Landed(ctx, snap.Facts); !errors.Is(err, ErrRead) {
+	if _, err := (Reader{GH: fixtureGH{t: t, override: map[string]string{"mergeCommit { oid message }": other}}.runner()}).Landed(ctx, snap.Facts); !errors.Is(err, ErrRead) {
 		t.Fatalf("another repository: %v, want ErrRead", err)
 	}
 }

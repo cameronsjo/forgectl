@@ -29,10 +29,17 @@ type fakeLand struct {
 	mergeErr     error
 	landing      Landing
 	landErr      error
-	landings     int
-	sleeps       int
-	audit        []byte
-	auditErr     error
+	// foreignMessage, when set, is the merge commit's message; otherwise it
+	// is the subject and body of the last gh pr merge call, as GitHub writes
+	// a squash this attempt made.
+	foreignMessage string
+	// landedNeedsCtx makes a landing read fail once its context has ended,
+	// as a real gh call does.
+	landedNeedsCtx bool
+	landings       int
+	sleeps         int
+	audit          []byte
+	auditErr       error
 }
 
 func newFakeLand(t *testing.T) *fakeLand {
@@ -50,9 +57,20 @@ func (fl *fakeLand) lander() Lander {
 			fl.recheckNames = checks
 			return fl.moved, fl.recheck
 		},
-		Landed: func(context.Context, Facts) (Landing, error) {
+		Landed: func(ctx context.Context, _ Facts) (Landing, error) {
 			fl.landings++
-			return fl.landing, fl.landErr
+			if fl.landedNeedsCtx && ctx.Err() != nil {
+				return Landing{}, ctx.Err()
+			}
+			l := fl.landing
+			switch {
+			case fl.foreignMessage != "":
+				l.MergeMessage = fl.foreignMessage
+			case len(fl.merges) > 0:
+				args := fl.merges[len(fl.merges)-1]
+				l.MergeMessage = args[len(args)-3] + "\n\n" + args[len(args)-1]
+			}
+			return l, fl.landErr
 		},
 		Merge: func(_ context.Context, args []string) error {
 			fl.merges = append(fl.merges, args)
@@ -250,6 +268,68 @@ func TestLandFailures(t *testing.T) {
 			t.Fatalf("%+v", out)
 		}
 	})
+	t.Run("a deadline kills gh after GitHub merged", func(t *testing.T) {
+		// The merge's context ends with gh (the 3-minute cap), after GitHub
+		// made the squash: the confirmation still reads it back, on a
+		// context of its own (T10.4 security review I2).
+		fl := newFakeLand(t)
+		fl.landedNeedsCtx = true
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		l := fl.lander()
+		l.Merge = func(_ context.Context, args []string) error {
+			fl.merges = append(fl.merges, args)
+			cancel()
+			return errors.New("signal: killed")
+		}
+		out := l.Land(ctx, goodSettings(), ByCLI, fl.facts.Row, false)
+		if out.Result != LandMerged || out.MergeCommit != landedCommit {
+			t.Fatalf("%+v", out)
+		}
+		if got := fl.results(t); !slices.Equal(got, []string{AuditMerging, AuditMerged}) {
+			t.Fatalf("audit %q", got)
+		}
+	})
+	t.Run("something else merged it", func(t *testing.T) {
+		for name, mergeErr := range map[string]error{"gh failed": errors.New("Pull request is already merged"), "gh succeeded": nil} {
+			t.Run(name, func(t *testing.T) {
+				fl := newFakeLand(t)
+				fl.mergeErr = mergeErr
+				fl.foreignMessage = "fix: merged in the web UI\n\nCloses #12\n"
+				out := fl.land(t, goodSettings(), ByCLI, false)
+				if out.Result != LandMergedElsewhere || !strings.Contains(out.Reasons[0], "does not carry this attempt's Audit-line") {
+					t.Fatalf("%+v", out)
+				}
+				if got := fl.results(t); !slices.Equal(got, []string{AuditMerging, AuditMergedElsewhere}) {
+					t.Fatalf("audit %q", got)
+				}
+			})
+		}
+	})
+	t.Run("gh fails and GitHub cannot be read after it", func(t *testing.T) {
+		fl := newFakeLand(t)
+		fl.mergeErr = errors.New("signal: killed")
+		fl.landErr = errors.New("HTTP 502")
+		out := fl.land(t, goodSettings(), ByCLI, false)
+		if out.Result != LandUnknown || fl.landings != 1 || !strings.Contains(out.Reasons[0], "check it by hand") {
+			t.Fatalf("%+v, %d landing reads", out, fl.landings)
+		}
+		if got := fl.results(t); !slices.Equal(got, []string{AuditMerging, AuditUnknown}) {
+			t.Fatalf("audit %q", got)
+		}
+	})
+	t.Run("gh succeeds but GitHub does not say merged", func(t *testing.T) {
+		// A merge queue: gh exits 0 having enqueued the PR.
+		fl := newFakeLand(t)
+		fl.landing = Landing{State: "OPEN"}
+		out := fl.land(t, goodSettings(), ByCLI, false)
+		if out.Result != LandUnconfirmed || fl.landings != landingTries || !strings.Contains(out.Reasons[0], "merge queue") {
+			t.Fatalf("%+v, %d landing reads", out, fl.landings)
+		}
+		if got := fl.results(t); !slices.Equal(got, []string{AuditMerging, AuditUnconfirmed}) {
+			t.Fatalf("audit %q", got)
+		}
+	})
 	t.Run("the landing read fails", func(t *testing.T) {
 		fl := newFakeLand(t)
 		fl.landErr = errors.New("HTTP 502")
@@ -257,4 +337,24 @@ func TestLandFailures(t *testing.T) {
 			t.Fatalf("%+v", out)
 		}
 	})
+}
+
+func TestCarriesAuditLine(t *testing.T) {
+	h := strings.Repeat("a", 64)
+	for msg, want := range map[string]bool{
+		"fix: x\n\nMerged by forgectl\n\nAudit-line: sha256:" + h + "\nPolicy: sha256:b\n": true,
+		"fix: x\r\n\r\nAudit-line: sha256:" + h + "\r\n":                                   true,
+		"fix: x\n\nAudit-line: sha256:" + h:                                                true,
+		"fix: x\n\nAudit-line: sha256:" + h + "0\n":                                        false,
+		"fix: x\n\n Audit-line: sha256:" + h + "\n":                                        false,
+		"fix: x Audit-line: sha256:" + h + "\n":                                            false,
+		"":                                                                                 false,
+	} {
+		if got := CarriesAuditLine(msg, h); got != want {
+			t.Errorf("CarriesAuditLine(%q) = %v, want %v", msg, got, want)
+		}
+	}
+	if CarriesAuditLine("Audit-line: sha256:\n", "") {
+		t.Fatal("an empty hash matched")
+	}
 }

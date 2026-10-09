@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -30,12 +31,21 @@ const (
 	LandRefused = "refused"
 	// LandUnreadable: GitHub could not be read; nothing was decided.
 	LandUnreadable = "unreadable"
-	// LandFailed: the merge was not made (gh failed, or the attempt line
-	// could not be written first).
+	// LandFailed: the merge was not made (gh failed and GitHub says the PR
+	// is not merged, or the attempt line could not be written first).
 	LandFailed = "merge-failed"
-	// LandUnconfirmed: GitHub says merged, but the merge commit could not be
-	// shown on the default branch.
+	// LandUnconfirmed: the merge could not be shown to be this attempt's on
+	// the default branch: GitHub could not be read after gh reported
+	// success, does not say merged yet (a merge queue), says merged at
+	// another head, or the merge commit is not shown on the default branch.
 	LandUnconfirmed = "merged-unconfirmed"
+	// LandMergedElsewhere: GitHub says the PR merged, but its merge commit's
+	// message does not carry this attempt's Audit-line: something else
+	// merged it.
+	LandMergedElsewhere = "merged-elsewhere"
+	// LandUnknown: gh failed, and GitHub could not be read after it, so
+	// whether the PR merged is not known.
+	LandUnknown = "merge-unknown"
 )
 
 // Outcome is what Land did.
@@ -78,9 +88,13 @@ type Lander struct {
 
 // landingTries and landingWait bound the post-merge confirmation: GitHub can
 // take a moment to name the merge commit and move the default branch.
+// confirmTimeout caps the confirmation, which runs on a context of its own
+// so a merge whose context ended (a deadline that killed gh after GitHub
+// merged) is still read back.
 const (
-	landingTries = 3
-	landingWait  = 2 * time.Second
+	landingTries   = 3
+	landingWait    = 2 * time.Second
+	confirmTimeout = 30 * time.Second
 )
 
 // maxGHError caps a gh error kept in an audit line or a reason.
@@ -155,21 +169,36 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 	out.AuditLine = hash
 	body := Body(BodyInput{By: by, AuditHash: hash, PolicyHash: base.PolicyHash, PRURL: f.PR.URL, Head: f.PR.HeadRefOid, Checks: base.Checks, Markers: base.Markers})
 	mergeErr := l.Merge(ctx, MergeArgs(f, subject, body))
-	landing, landErr := l.confirm(ctx, f, mergeErr == nil)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), confirmTimeout)
+	landing, landErr := l.confirm(cctx, f, mergeErr == nil)
+	cancel()
 	outcome := base
 	outcome.Attempt = hash
+	ghFailed := func() string { return "gh pr merge failed: " + termsafe.SafeLineMax(mergeErr.Error(), maxGHError) }
+	merged := landErr == nil && landing.Merged && landing.State == "MERGED"
 	switch {
-	case mergeErr != nil && (landErr != nil || !landing.Merged):
-		why := "gh pr merge failed: " + termsafe.SafeLineMax(mergeErr.Error(), maxGHError)
-		if landErr != nil {
-			why += "; the PR's state could not be read after it: " + termsafe.SafeLineMax(landErr.Error(), maxGHError)
-		}
-		out.Result, out.Err, out.Reasons = LandFailed, mergeErr, []string{why}
-		outcome.Result = AuditFailed
+	case landErr != nil && mergeErr != nil:
+		out.Result, out.Err = LandUnknown, mergeErr
+		out.Reasons = []string{ghFailed() + "; GitHub could not be read after it: " + termsafe.SafeLineMax(landErr.Error(), maxGHError) +
+			"; the PR may have merged: check it by hand"}
+		outcome.Result = AuditUnknown
 	case landErr != nil:
 		out.Result, out.Err = LandUnconfirmed, landErr
-		out.Reasons = []string{"merged, but GitHub could not be read to confirm the merge commit: " + termsafe.SafeLineMax(landErr.Error(), maxGHError)}
+		out.Reasons = []string{"gh pr merge reported success, but GitHub could not be read to confirm the merge: " + termsafe.SafeLineMax(landErr.Error(), maxGHError)}
 		outcome.Result = AuditUnconfirmed
+	case !merged && mergeErr != nil:
+		out.Result, out.Err, out.Reasons = LandFailed, mergeErr, []string{ghFailed() + "; GitHub says the PR is " + nonEmpty(landing.State, "not merged")}
+		outcome.Result = AuditFailed
+	case !merged:
+		out.Result = LandUnconfirmed
+		out.Reasons = []string{"gh pr merge reported success, but GitHub does not say the PR merged (state " + nonEmpty(landing.State, "unknown") +
+			"); a merge queue, if the branch has one, merges it later with a message of its own"}
+		outcome.Result = AuditUnconfirmed
+	case !CarriesAuditLine(landing.MergeMessage, hash):
+		out.Result, out.MergeCommit = LandMergedElsewhere, landing.MergeCommit
+		out.Reasons = []string{fmt.Sprintf("GitHub says the PR merged as %s, but that commit's message does not carry this attempt's Audit-line: sha256:%s; something else merged it",
+			short(landing.MergeCommit), short(hash))}
+		outcome.Result = AuditMergedElsewhere
 	case landing.HeadRefOid != f.PR.HeadRefOid:
 		out.Result, out.MergeCommit = LandUnconfirmed, landing.MergeCommit
 		out.Reasons = []string{fmt.Sprintf("GitHub says the PR merged at head %s, expected %s", short(landing.HeadRefOid), short(f.PR.HeadRefOid))}
@@ -183,7 +212,7 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 		out.Result, out.MergeCommit, out.Reasons = LandMerged, landing.MergeCommit, []string{}
 		outcome.Result = AuditMerged
 	}
-	if mergeErr != nil && out.Result != LandFailed {
+	if mergeErr != nil && out.Result != LandFailed && out.Result != LandUnknown {
 		// gh reported a failure, yet GitHub says it merged (a timeout after
 		// the merge, say): the record keeps both.
 		out.Reasons = append(out.Reasons, "gh pr merge reported: "+termsafe.SafeLineMax(mergeErr.Error(), maxGHError))
@@ -193,6 +222,22 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 		out.AuditNote = "the outcome line could not be audited: " + err.Error()
 	}
 	return out
+}
+
+// CarriesAuditLine reports whether a merge commit's message holds the line
+// "Audit-line: sha256:<hash>": the body this attempt wrote, so the merge is
+// this attempt's and not another's.
+func CarriesAuditLine(message, hash string) bool {
+	if hash == "" {
+		return false
+	}
+	want := "Audit-line: sha256:" + hash
+	for _, line := range strings.Split(message, "\n") {
+		if strings.TrimSuffix(line, "\r") == want {
+			return true
+		}
+	}
+	return false
 }
 
 // confirm reads what the merge left, again while GitHub has not yet named

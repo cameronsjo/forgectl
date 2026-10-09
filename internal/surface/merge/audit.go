@@ -27,11 +27,18 @@ const (
 	AuditMerging = "merging"
 	// AuditMerged: the merge commit is on the default branch.
 	AuditMerged = "merged"
-	// AuditUnconfirmed: GitHub says merged, but the merge commit could not
-	// be shown to be on the default branch.
+	// AuditUnconfirmed: the merge could not be shown to be this attempt's
+	// on the default branch (see LandUnconfirmed).
 	AuditUnconfirmed = "merged-unconfirmed"
-	// AuditFailed: `gh pr merge` failed and the PR is not merged.
+	// AuditFailed: `gh pr merge` failed and GitHub says the PR is not
+	// merged.
 	AuditFailed = "merge-failed"
+	// AuditMergedElsewhere: GitHub says the PR merged, but its merge
+	// commit's message does not carry this attempt's hash: not this merge.
+	AuditMergedElsewhere = "merged-elsewhere"
+	// AuditUnknown: `gh pr merge` failed and GitHub could not be read after
+	// it; the PR may have merged.
+	AuditUnknown = "merge-unknown"
 	// AuditRefused: the policy, the subject or the pre-merge re-read
 	// refused.
 	AuditRefused = "refused"

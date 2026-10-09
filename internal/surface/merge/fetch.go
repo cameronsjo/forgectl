@@ -236,13 +236,15 @@ func (r Reader) Recheck(ctx context.Context, f Facts, checks []string) ([]string
 }
 
 // Landing is what a merge left: whether GitHub says the PR merged, at which
-// head, its merge commit, and whether that commit is on the default branch
-// (compare(mergeCommit...defaultHead) is ahead or identical).
+// head, its merge commit and that commit's message, and whether the commit
+// is on the default branch (compare(mergeCommit...defaultHead) is ahead or
+// identical).
 type Landing struct {
-	State       string
-	Merged      bool
-	HeadRefOid  string
-	MergeCommit string
+	State        string
+	Merged       bool
+	HeadRefOid   string
+	MergeCommit  string
+	MergeMessage string
 	// DefaultBranch and DefaultHead are the default branch and its head.
 	DefaultBranch string
 	DefaultHead   string
@@ -269,7 +271,7 @@ func (r Reader) Landed(ctx context.Context, f Facts) (Landing, error) {
 	if l.Repository.DatabaseID != f.Repository.DatabaseID || l.Number != f.PR.Number {
 		return Landing{}, fmt.Errorf("%w: the landing read names repository %d PR #%d, expected %d #%d", ErrRead, l.Repository.DatabaseID, l.Number, f.Repository.DatabaseID, f.PR.Number)
 	}
-	out := Landing{State: l.State, Merged: l.Merged, HeadRefOid: l.HeadRefOid, MergeCommit: l.MergeCommit,
+	out := Landing{State: l.State, Merged: l.Merged, HeadRefOid: l.HeadRefOid, MergeCommit: l.MergeCommit, MergeMessage: l.MergeMessage,
 		DefaultBranch: l.Repository.DefaultBranch, DefaultHead: l.DefaultHead}
 	if !l.Merged || !isSHA(l.MergeCommit) || !isSHA(l.DefaultHead) {
 		return out, nil

@@ -96,8 +96,11 @@ gh pr merge <n> -R github.com/<owner>/<repo> --squash
 temporary directory, never --admin. The body is forgectl's own: the audit
 line's hash, the policy hash, the head, the checks and review markers
 counted, and a Merged-By: forgectl-cli trailer; no PR text is copied into
-it. After the merge, forgectl confirms the merge commit is on the default
-branch and records it.
+it. After the merge, forgectl reads the PR back, on a 30-second timeout of
+its own, and records merged only when GitHub says it merged, its merge
+commit is on the default branch, and the commit's message carries this
+attempt's Audit-line. A merge queue, if the branch has one, makes the
+result merged-unconfirmed.
 
 Every merge writes two lines to merge-audit.jsonl in the state directory (the
 attempt, whose hash the commit body carries, and the outcome), and every
@@ -107,11 +110,13 @@ audit line.
 
 --json prints {"name","repo","dry_run","mode","result","pr","url","head",
 "reasons","merge_commit","audit_line","audit_note"}; result is merged,
-would-merge, refused, unreadable, merge-failed or merged-unconfirmed.
+would-merge, refused, unreadable, merge-failed, merged-unconfirmed,
+merged-elsewhere (GitHub says merged, by something else) or merge-unknown
+(gh failed and GitHub could not be read after it).
 
 Exit 0: merged, or a dry run that would merge. Exit 1: refused, GitHub
-could not be read, the merge failed, or the merge commit could not be
-confirmed; the message says which. Exit 2: a usage or setup error (no such
+could not be read, the merge failed, could not be confirmed, was made by
+something else, or is not known; the message says which. Exit 2: a usage or setup error (no such
 worker, a row that records no GitHub repository).
 
   forgectl surface merge gh1175-forgectl --dry-run
@@ -180,7 +185,11 @@ func mergeFailureSentence(out merge.Outcome) string {
 	case merge.LandFailed:
 		return "the merge failed; nothing was merged"
 	case merge.LandUnconfirmed:
-		return "GitHub says the PR merged, but the merge commit could not be confirmed on the default branch; check it by hand"
+		return "the merge could not be confirmed as this attempt's on the default branch; check it by hand"
+	case merge.LandMergedElsewhere:
+		return "GitHub says the PR merged, but not by this attempt: its merge commit does not carry this attempt's audit line"
+	case merge.LandUnknown:
+		return "gh pr merge failed and GitHub could not be read after it; the PR may have merged: check it by hand"
 	}
 	return "unexpected merge result " + strconv.Quote(out.Result)
 }
