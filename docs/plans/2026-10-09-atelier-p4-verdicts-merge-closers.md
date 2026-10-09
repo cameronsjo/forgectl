@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. T10.3 (closers, prune) built on feat/p4-closers, PR not opened yet. Next: T10.4 (merge, audit, autopilot)."
+next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. T10.3 (closers, prune) built on feat/p4-closers, PR not opened yet. T10.4 (merge, audit, autopilot, brief rule, mutation sweep, cameronsjo/forgectl#1208) built on feat/p4-merge, PR not opened yet. Next: the T10.4 security review and live check."
 branch: plan/atelier-p4
 pr: "cameronsjo/forgectl#1207"
 updated: 2026-10-09
@@ -149,10 +149,10 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 ### T10.4: merge, audit, autopilot (forgectl, one PR; after T10.2)
 
 - [ ] Order: T10.3 (with the SelectPR launch binding) must merge before T10.4 or any PR that lets SelectPR drive a close or a merge (chief-of-staff, 2026-10-09).
-- [ ] `surface merge <name> [--dry-run]` and the drain's autopilot step (`mode = "auto"` only), both calling `Evaluate` on fresh reads, the pre-merge re-read, the composed message, and the post-merge check.
-- [ ] `merge-audit.jsonl` and `surface audit --pr`.
-- [ ] Worker brief rule: never post review markers, approve or merge.
-- [ ] Mutation sweep: force each predicate true in turn; a named test goes red for each.
+- [x] `surface merge <name> [--dry-run]` and the drain's autopilot step (`mode = "auto"` only), both calling `Evaluate` on fresh reads, the pre-merge re-read, the composed message, and the post-merge check.
+- [x] `merge-audit.jsonl` and `surface audit --pr`.
+- [x] Worker brief rule: never post review markers, approve or merge.
+- [x] Mutation sweep: force each predicate true in turn; a named test goes red for each (table below, under "T10.4 mutation sweep").
 - [ ] Security review (Opus) of the gate's file set (merge package, status reads, merge path, audit, config resolution, drain autopilot, launch recording, worker brief, `.github/workflows/ci.yml` and `ship.yml`, and the live `estate-main` ruleset) before any machine sets `mode = "auto"`.
 - [ ] Live check: `mode = "manual"` on sjomba; merge one real worker PR on cameronsjo/forgectl, from the drain, whose paths are inside a narrow allowlist; confirm the squash body, the audit line, and the T10.3 closer.
 
@@ -217,5 +217,78 @@ Panel: plan-reviewer, security-posture-reviewer (Opus) ran — 2 Critical (the s
 - **T10.3 review fix, close notes:** a drain close whose result carries a note records it: a `note` event and the closed row's `last_error`. When the ledger row could not be marked closed or removed (the brief named "marked closed"; "removed" fails the same way, leaving a ledger row that still says the worker is open, so both are handled alike), the queue row stays `reported` with the note as `last_error` and one `error` event, and the next read retries the close.
 - **T10.3 review fix, daily prune:** an unreadable `drain-prune-day` is one `error` event and is rewritten with today before the prune runs. The daily prune is capped at 30 s (`surface prune` by hand keeps 2 minutes). herdr was probed per row (a readiness check and a listing each); prune now reads it once per run through `herdradapter.Adapter.Prober`, which judges every reference against one read under `Probe`'s rules.
 - **T10.3 review fix, `surface prune` exit codes:** failing to open the queue, the drain files or the status cache is exit 1 (the state could not be read), as ADR-0015's table puts a verb that ran and failed; exit 2 is for usage errors only.
+- **T10.4, cameronsjo/forgectl#1208 (folded in):** marker posts are ordered by their last edit (`lastEditedAt`, read on every review and comment): a post counts at `max(posted, edited)`, an edited post is never a strict pass, and an edited required-reviewer marker never satisfies the approver, so an edit can neither hide a finding behind an earlier pass nor turn a finding into a pass. A marker post whose response carries no `lastEditedAt` field (`EditUnread`), or an unparseable one, refuses outright. The loose scan reads bodies with invisible, zero-width, bidi and control characters and invalid UTF-8 removed, NFKC-normalized and HTML entities decoded (then removed and normalized again), and matches `(?i)cadence[\s\\_\-U+2010..U+2015 U+2212]*review\s*:` (U+2212 minus added beside the asked range). Inline review comments are read from each review in the PR query (`comments(first: 100)` per review, GraphQL, refusing on a remaining page or a missing connection) rather than the REST endpoint, whose pagination gh reports only in headers; any mention there by `marker_author_id` is an open finding. The PR fixtures' review nodes gained `"lastEditedAt": null` and an empty inline comment list by hand (a read-only live check showed both on #1203).
+- **T10.4, two audit lines per merge:** the squash body must carry an audit hash, and the outcome (merge commit) is known only after the merge, so a merge writes an attempt line (`merging`) before `gh pr merge` runs, whose hash the body carries, and an outcome line after (`merged`, `merged-unconfirmed` or `merge-failed`) naming the attempt's hash in `attempt`. A refusal is one line. An attempt line that cannot be written stops the merge. A refusal with no PR records `pr` 0.
+- **T10.4, merge details:** `-R` is host-qualified (`github.com/<owner>/<repo>`), and the name is GitHub's canonical one read in the same pass (the policy already refuses a rename). The subject also refuses an issue reference (`#N`, `GH-N`), since `fix: #12` or `fix: closes #12` in a commit on the default branch closes the issue. The pre-merge re-read is the full PR query, compared whole: head, base branch, draft, state, the repository id, and every review, conversation comment and inline review comment (an edit counts as a change). The post-merge check reads the PR's `mergeCommit` and the default branch's head, and requires `compare(mergeCommit...head)` to be `ahead` or `identical`, up to three reads 2 s apart; GitHub saying merged at another head is `merged-unconfirmed`. `gh` reporting a failure while GitHub says merged is recorded as merged with the gh error kept as a reason. `--dry-run` writes no audit line. Running `gh` from a temporary directory needed a new seam, `exec.DirRunner` (`RunWithEnvFilteredInDir`), implemented by `OSRunner`, `FakeRunner` and the githubauth pinned runner, which refuses when its base cannot choose a directory.
+- **T10.4, the audit file:** read whole to chain and check, so capped at 16 MiB (`worker.MaxMergeAuditBytes`); an append past it, or onto a last line with no newline (a cut-short write), is refused and the merge with it, until the file is moved aside by hand. Refusals are limited to one per actor, PR, head and reason set over the whole file, not per time window.
+- **T10.4, autopilot:** at most one attempt a tick and, per row, at most one every 5 minutes (`drain.AutopilotEvery`), since each attempt reads the PR in full; the queue and ledgers are read again after the closers. Candidates also need the ledger row still `launched`. Two new event kinds: `merged` and `merge-refused` (the latter also for a failed or unconfirmed merge). A merge clears the row's closer read time, so the closers read it at the next tick rather than up to 5 minutes later. An attempt runs inside the tick, capped at 3 minutes (`mergeTimeout`), unlike the daily prune's 30 s cap, since cutting a merge short mid-call leaves its outcome to be read back; a slow attempt can make `drain status` read `stale`.
+- **T10.4, worker brief rule:** in every launch brief (`worker.Compose`, `ViaLaunch`) and intake's template. A typed follow-up brief does not repeat it: it fits the 600-character typed cap only without it, and goes to a worker that got the rule at launch. The rule names `cadence-review` without a colon, so an echo of it is not a marker mention.
+
+## T10.4 mutation sweep
+
+Each row forces one check to pass with a temporary edit (cp backup, the edit, `go test -count=1` of the package, cp restore, `cmp` against the backup), and names the tests that went red. Run 2026-10-09 on `feat/p4-merge`. The first run had two gaps, fixed before this table: row 7f's edit did not compile (redone as `removedTest && false`), and row 10 stayed green (no test covered `Facts.Unread`; `TestEvaluateUnreadFactsRefuse` added).
+
+| Row | Check forced to pass | Red |
+|---|---|---|
+| 1a | mode: off | `TestEvaluateMode`, `TestLandRefusesAndAudits` |
+| 1b | mode: the drain needs auto | `TestEvaluateMode`, `TestLandRefusesAndAudits` |
+| 1c | mode: an unknown mode | `TestEvaluateMode` |
+| 2a | machine: a mismatch (`config.ResolveMerge`) | `TestResolveMerge` |
+| 2b | machine: unset | `TestResolveMerge` |
+| 3a | repository: no recorded repository | `TestEvaluateRepository` |
+| 3b | repository: id changed | `TestEvaluateRepository` |
+| 3c | repository: renamed | `TestEvaluateRepository` |
+| 3d | repository: built-in refused repositories | `TestEvaluateRepository` |
+| 3e | repository: not on `repos` | `TestEvaluateRepository` |
+| 4a | row: the whole predicate | `TestEvaluateRow`, `TestReaderReadBaseNotOnGitHub` |
+| 4b | row: `launch_id` equals the queue's claim | `TestEvaluateRow` |
+| 4c | row: `branch_from` new | `TestEvaluateRow` |
+| 4d | row: ledger stage launched | `TestEvaluateRow` |
+| 4e | row: base is an ancestor of the PR's base | `TestEvaluateRow` |
+| 4f | row: head descends from the base | `TestEvaluateRow` |
+| 5a | PR: the whole predicate | `TestEvaluatePR`, `TestLandDryRun`, `TestLandRefusesAndAudits`, `TestReaderRead1204` |
+| 5b | PR: open | `TestEvaluatePR`, `TestReaderRead1204` |
+| 5c | PR: not a draft | `TestEvaluatePR`, `TestLandDryRun`, `TestLandRefusesAndAudits` |
+| 5d | PR: mergeable | `TestEvaluatePR` |
+| 5e | PR: merge state | `TestEvaluatePR` |
+| 5f | PR: author is the operator | `TestEvaluatePR` |
+| 5g | PR: targets the default branch | `TestEvaluatePR` |
+| 6a | checks: the whole predicate | `TestEvaluateChecks` |
+| 6b | checks: runs tied to this PR | `TestEvaluateChecks` |
+| 6c | checks: a failed run refuses | `TestEvaluateChecks` |
+| 6d | checks: a running run refuses | `TestEvaluateChecks` |
+| 6e | checks: the pinned workflow file | `TestEvaluateChecks` |
+| 6f | checks: at least one run | `TestEvaluateChecks` |
+| 6g | checks: the GitHub Actions app | `TestEvaluateChecks` |
+| 7a | paths: the whole predicate | `TestEvaluatePaths`, `TestReaderRead1204` |
+| 7b | paths: the per-repository allowlist | `TestEvaluatePaths` |
+| 7c | paths: the built-in refusals | `TestBuiltinRefusalsBuildFiles`, `TestBuiltinRefusalsCoverTheGateClosure`, `TestBuiltinRefusalsTopLevel`, `TestEvaluatePaths` |
+| 7d | paths: path shape (`CheckChangedPath`) | `TestEvaluatePaths` |
+| 7e | paths: file modes | `TestEvaluatePaths` |
+| 7f | paths: a removed test file | `TestEvaluatePaths` |
+| 7g | paths: the file count | `TestEvaluatePaths` |
+| 7h | paths: file status | `TestEvaluatePaths` |
+| 8a | approver: the whole predicate | `TestEditedPassClearsNothing`, `TestEvaluateCadenceReview` |
+| 8b | approver: the latest marker passes at the head | `TestEditedPassClearsNothing`, `TestEvaluateCadenceReview` |
+| 8c | approver: counted reviews only | `TestEvaluateCadenceReview`, `TestEvaluateOpenFindingsFailClosed` |
+| 9a | open findings: the whole predicate | `TestEditedPassClearsNothing`, `TestEvaluateCadenceReview`, `TestEvaluateOpenFindingsFailClosed`, `TestInlineReviewCommentsAreFindings`, `TestLooseMarkerScanIsWide`, `TestOpenFindingsOrderedByEdit` |
+| 9b | open findings: only a later pass clears | the same six |
+| 9c | open findings (#1208): a post counts at its edit | `TestEditedPassClearsNothing`, `TestOpenFindingsOrderedByEdit` |
+| 9d | open findings (#1208): an edited post is never a pass | `TestEditedPassClearsNothing` |
+| 9e | open findings (#1208): the normalized scan | `TestLooseMarkerScanIsWide` |
+| 9f | open findings (#1208): inline review comments | `TestInlineReviewCommentsAreFindings` |
+| 9g | open findings (#1208): an unread edit refuses | `TestEditedPassClearsNothing` |
+| 9h | open findings: `marker_author_id` required | `TestEvaluateCadenceReview` |
+| 10 | facts not read (`Facts.Unread`) | `TestEvaluateUnreadFactsRefuse` |
+| 11a | merge path: the subject rule | `TestLandRefusesAndAudits` |
+| 11b | merge path: the pre-merge re-read | `TestLandRefusesAndAudits` |
+| 11c | merge path: the drain needs auto | `TestLandRefusesAndAudits` |
+| 11d | merge path: `--match-head-commit` | `TestLandMerges` |
+| 11e | merge path: no issue reference in the subject | `TestLandRefusesAndAudits`, `TestSubject` |
+| 11f | merge path: the attempt line before the merge | `TestLandFailures` |
+| 11g | autopilot: mode auto only (the kill switch) | `TestDrainAutopilotKillSwitch`, `TestDrainAutopilotOnlyInAuto` |
+| 11h | autopilot: candidates only | `TestDrainAutopilotSkipsRowsItCannotVouchFor` |
+| 11i | audit: refusals limited | `TestAuditRefusalsAreRateLimited`, `TestLandRefusesAndAudits` |
+| 11j | audit: the chain check | `TestAuditChain` |
 
 ## Learnings

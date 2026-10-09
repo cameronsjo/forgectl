@@ -492,7 +492,9 @@ func newSurfaceDrainEventsCmd() *cobra.Command {
 		Long: `events prints drain-events.jsonl (and the rotated drain-events.jsonl.1 before
 it), oldest first: one event per row state change, pause, resume, drain start
 and stop, a row becoming unreadable, claude-slots holding launches
-(slots-held), and a note such as claude-slots missing. seq counts from 1 in each drain
+(slots-held), a note such as claude-slots missing, and with [surface.merge]
+mode auto the autopilot's merges (merged) and refusals (merge-refused, once
+per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 
