@@ -1,5 +1,5 @@
 ---
-status: planned
+status: in-flight
 next: "T10.1 (cadence-hooks metrics price) and T10.2 (ADR-0011 amendment, [surface.merge], surface status) in parallel; then T10.3 and T10.4."
 branch: plan/atelier-p4
 pr: "—"
