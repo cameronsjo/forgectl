@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T10.1 (cadence-hooks metrics price) and T10.2 (ADR-0011 amendment, [surface.merge], surface status) in parallel; then T10.3 and T10.4."
+next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. Next: T10.3 (closers, prune) and T10.4 (merge, audit, autopilot) as separate PRs."
 branch: plan/atelier-p4
 pr: "cameronsjo/forgectl#1207"
 updated: 2026-10-09
