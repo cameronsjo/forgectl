@@ -69,7 +69,10 @@ drain start runs the detached process that launches them; drain status,
 events and stop inspect and end it:
 
   forgectl surface drain start
-  forgectl surface drain status`,
+  forgectl surface drain status
+
+send, inbox, flush and event carry messages between a coordinator and
+its workers across harnesses. See forgectl surface send --help.`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -83,6 +86,10 @@ events and stop inspect and end it:
 	cmd.AddCommand(newSurfaceQueueCmd(deps))
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
+	cmd.AddCommand(newSurfaceSendCmd(deps))
+	cmd.AddCommand(newSurfaceInboxCmd(deps))
+	cmd.AddCommand(newSurfaceFlushCmd(deps))
+	cmd.AddCommand(newSurfaceEventCmd(deps))
 	return cmd
 }
 

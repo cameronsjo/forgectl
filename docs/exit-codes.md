@@ -8,7 +8,7 @@ One table for every forgectl verb ([ADR-0015](adr/0015-exit-code-table.md), [#10
 | 1 | `failed` | The verb ran and the result did not hold: a failed step, drift, a partial result, a refusal that carries its reason, a degraded `--strict` report. The default for an error with no class. | Read the output. Re-run once if it names a transient cause; otherwise stop and report. |
 | 2 | `usage` | Nothing was attempted, and the caller or operator can fix it: a bad flag or argument, an unknown verb, a malformed name, something absent or unconfigured (no terminal, no herdr pane, no backend on `PATH`), a config that does not parse. | Stop. Fix the call or setup. Do not retry it unchanged. |
 | 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | Stop. Escalate to whoever owns the credential. |
-| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today only `tasks` host refusal. | Stop. Escalate. |
+| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal and `surface send` between two workers while `peer_messages` is off. | Stop. Escalate. |
 | 5 | `unreachable` | Reserved. No verb emits it. | |
 | 6 | `not_found` | Reserved. No verb emits it. | |
 
@@ -16,7 +16,7 @@ One table for every forgectl verb ([ADR-0015](adr/0015-exit-code-table.md), [#10
 
 ## Outside the table
 
-- **75** (`desk watch` reached `--deadline`; the last line holds the resume command), **130** (interrupted) and **141** (stdout closed). `resume` also uses 130 for a cancelled pick.
+- **75** (`desk watch` reached `--deadline`, and the last line holds the resume command; `surface send` queued a message it could not deliver yet, and a later `send`, `flush` or hook event retries it), **130** (interrupted) and **141** (stdout closed). `resume` also uses 130 for a cancelled pick.
 - **Pass-through verbs** return a child's code: `launch`, `surface _exec`, `docs read` (the reader's status), `k8s` (kubectl's, including a remote command's), and `desk watch` for its run's rc. Their help says so. 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141.
 
 ## Where usage keeps exit 1
@@ -28,6 +28,7 @@ A verb whose 2 already means something else keeps usage errors at 1, so a 2 neve
 | `tasks` (all subverbs, `mcp --ping`) | 1 | 2 is "instance unreachable, retry", and an external probe depends on it. |
 | `env check` | 1 (`check_failed`) | 2 is "file absent", part of its documented contract. |
 | `resume snapshot` | 1 | Wired as a Claude Code `Stop` hook. A `Stop` hook that exits 2 blocks the session from stopping, so `resume snapshot` never exits 2: not on a bad flag, an unresolvable `$HOME`, or a config that does not parse. |
+| `surface event` | 1 | Wired as a Claude Code `Stop` and `UserPromptSubmit` hook. Exit 2 blocks the stop or erases the prompt, so `surface event` never exits 2, on the same terms as `resume snapshot`. |
 | `k8s` | kubectl's code, else 1 | Pass-through. |
 
 Setup failures raised before any verb starts (an unresolvable `$HOME`, a relative `$XDG_CONFIG_HOME`) follow the same exceptions, read from the command line. A config that does not parse exits 2 for every verb, `tasks` and `env check` included (unchanged from the previous release). `resume snapshot` never exits 2 when the command line names it exactly; a mistyped verb (`resume snapshott`) is an unknown flag on the `resume` group and exits 2, so the Stop hook must spell it exactly.

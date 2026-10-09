@@ -19,6 +19,7 @@ Being built now.
 - [forgectl TUI — one lipgloss, an Artificer theme for the whole binary, and a hub menu](2026-09-05-tui-theme-and-hub.md)
 - [Review-autonomy spine — design](2026-09-11-review-autonomy-spine-design.md)
 - [forgectl: a coordinator over herdr worker panes](2026-09-28-forgectl-herdr-coordinator.md)
+- [forgectl: surface send, messages between harnesses](2026-09-28-forgectl-surface-send.md)
 - [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
 - [atelier P2: queue and drain (forgectl T8)](2026-10-06-atelier-p2-queue-and-drain.md)
 

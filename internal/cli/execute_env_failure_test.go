@@ -95,6 +95,8 @@ func TestInvokesHookVerb(t *testing.T) {
 		{[]string{"resume"}, false},
 		{[]string{"resume", "list"}, false},
 		{[]string{"snapshot"}, false},
+		{[]string{"surface", "event", "--harness", "claude"}, true},
+		{[]string{"surface", "send", "coord", "hi"}, false},
 		{nil, false},
 	} {
 		if got := invokesHookVerb(c.args); got != c.want {
