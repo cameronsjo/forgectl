@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T9.1 shipped for review in cameronsjo/forgectl#1203; the live worker for cameronsjo/forgectl#1175 waits on the operator at a permission prompt, then its draft PR closes the live check."
+next: "T9.1 done; cameronsjo/forgectl#1203 in review (terminal-confirmation gate added on the operator's ruling). Then P4."
 branch: plan/atelier-p3-intake
 pr: "cameronsjo/forgectl#1203"
 updated: 2026-10-09
@@ -67,8 +67,8 @@ Recorded boundary, not designed against: the brief's rules are instructions, not
 - [x] Tests from captured GraphQL fixtures: each refusal (outsider author, bot author, outsider labeler, relabel by an outsider after the owner, edit between labelings, same-second edit, title rename after label, missing `lastEditedAt`, GraphQL error, PR, transferred, too long, `CheckBrief` content, org repo with no `authors`, non-github remote, name collision) and the happy path; idempotence; a body containing the fence text. Stage breaks of the author, labeler, edit and title checks and confirm each goes red.
 - [x] Docs: docs/herdr.md "Intake" section, help text.
 - [x] Security review (Opus) of the control's file set, not only the diff, before the live check: the T9.1 diff with the brief template and fixtures; `internal/surface/worker/brief.go`, `queue.go`; `internal/surface/drain/drain.go`; `internal/cli/surface_queue.go`; `internal/launch/invocation.go`. It checks the gate against the written code. `[surface.merge] mode` stays `off` (ADR-0011 Decision 10).
-- [ ] Live check: label one real issue `queue:drain` in cameronsjo/forgectl (user-owned by the `gh` account, so the default `authors` covers it), run intake with `--dry-run`, then for real; confirm the row, the brief, and a draft PR with `Closes #N`.
-  - 2026-10-09 result, branch build `8b6170f5`: `queue:drain` created and put on cameronsjo/forgectl#1175. `--dry-run` listed only #1175 (`gh1175-forgectl`, author `cameronsjo`, nothing skipped). The real run queued the row with `source: gh:cameronsjo/forgectl#1175` and `author: cameronsjo`; its brief carries the nonce fence and `Closes #1175`. The drain claimed and launched it, and the worker edited the four files the issue names from the brief alone, then stopped at a Bash permission prompt, shown as `needs-you`. The draft PR waits on the operator answering that prompt; the PR step is the drain's own path, proven in P2. Box stays open until the PR exists.
+- [x] Live check: label one real issue `queue:drain` in cameronsjo/forgectl (user-owned by the `gh` account, so the default `authors` covers it), run intake with `--dry-run`, then for real; confirm the row, the brief, and a draft PR with `Closes #N`.
+  - 2026-10-09 result, branch build `8b6170f5`: `queue:drain` created and put on cameronsjo/forgectl#1175. `--dry-run` listed only #1175 (`gh1175-forgectl`, author `cameronsjo`, nothing skipped). The real run queued the row with `source: gh:cameronsjo/forgectl#1175` and `author: cameronsjo`; its brief carries the nonce fence and `Closes #1175`. The drain claimed and launched it, and the worker edited the four files the issue names from the brief alone, then stopped at a Bash permission prompt, shown as `needs-you`. The operator answered the prompt; the worker reported and opened draft cameronsjo/forgectl#1204 with `Closes #1175`. Its report matched git (one commit, the four files), and its 46 shell commands include no read of the issue, no label write and no merge.
 
 ## Verification
 
