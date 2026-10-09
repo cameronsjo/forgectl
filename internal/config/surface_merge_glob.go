@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // The [surface.merge] paths grammar. A glob is a '/'-separated list of
@@ -19,8 +20,9 @@ import (
 // A glob that is "*" or "**", that starts with "**", or that holds "**"
 // inside a longer segment is refused, and so is anything a changed path
 // itself may not hold: an empty, "." or ".." segment, a leading '/', a
-// backslash, a control byte, or one of '?', '[', ']', '{', '}' (the grammar
-// has no other metacharacters, so these would only mislead).
+// backslash, a control byte, a non-ASCII byte or invalid UTF-8, or one of
+// '?', '[', ']', '{', '}' (the grammar has no other metacharacters, so these
+// would only mislead).
 
 // maxMergeGlobLen bounds a glob.
 const maxMergeGlobLen = 200
@@ -58,8 +60,8 @@ func CheckMergeGlob(g string) error {
 }
 
 // CheckChangedPath refuses a changed path the merge policy will not judge:
-// one with an empty, "." or ".." segment, a leading '/', a backslash, or a
-// control byte (including DEL).
+// one with an empty, "." or ".." segment, a leading '/', a backslash, a
+// control byte (including DEL), a non-ASCII byte, or invalid UTF-8.
 func CheckChangedPath(p string) error {
 	if p == "" {
 		return errors.New("the path is empty")
@@ -76,9 +78,18 @@ func checkPathBytes(p string) error {
 	if strings.Contains(p, `\`) {
 		return errors.New("a path may not hold a backslash")
 	}
+	if !utf8.ValidString(p) {
+		return errors.New("a path must be valid UTF-8")
+	}
 	for i := 0; i < len(p); i++ {
 		if b := p[i]; b < 0x20 || b == 0x7f {
 			return fmt.Errorf("a path may not hold the control byte 0x%02x", b)
+		}
+		// A case-folding filesystem can fold a non-ASCII rune onto an ASCII
+		// one (U+017F long s onto 's' on APFS), so a path spelled with one
+		// could land on a refused file while matching none of the refusals.
+		if p[i] >= utf8.RuneSelf {
+			return fmt.Errorf("a path may hold only ASCII, got the byte 0x%02x", p[i])
 		}
 	}
 	for _, s := range strings.Split(p, "/") {

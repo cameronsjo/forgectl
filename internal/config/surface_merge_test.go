@@ -182,6 +182,8 @@ func TestSurfaceMergeConfig_Resolve(t *testing.T) {
 		"empty segment glob":          {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs//x"} }, "empty segment"},
 		"backslash glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{`docs\x`} }, "backslash"},
 		"control byte glob":           {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\x1b"} }, "control byte"},
+		"non-ASCII glob":              {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"internal/ſurface/**"} }, "only ASCII"},
+		"invalid UTF-8 glob":          {func(c *SurfaceMergeConfig) { c.Paths["o/r"] = []string{"docs/\xff/**"} }, "valid UTF-8"},
 		"approvers past two entries":  {func(c *SurfaceMergeConfig) { c.Approvers = []string{"a", "b", "c"} }, "at most"},
 		"negative marker author id":   {func(c *SurfaceMergeConfig) { c.MarkerAuthorID = id(-4) }, "marker_author_id: want"},
 		"duplicate required reviewer": {func(c *SurfaceMergeConfig) { c.RequiredReviewers = []string{"polish", "polish"} }, "listed twice"},
@@ -246,7 +248,7 @@ func TestMergeGlobs(t *testing.T) {
 	if MatchMergeGlob("**", "anything") || MatchMergeGlob("*", "x") {
 		t.Error("a refused glob matched")
 	}
-	for _, p := range []string{"", "/a", "a//b", "a/./b", "a/../b", `a\b`, "a/\x00", "a/\x7f", "."} {
+	for _, p := range []string{"", "/a", "a//b", "a/./b", "a/../b", `a\b`, "a/\x00", "a/\x7f", ".", "internal/ſurface/x.go", "docs/café.md", "docs/\xff.md"} {
 		if CheckChangedPath(p) == nil {
 			t.Errorf("CheckChangedPath(%q) passed", p)
 		}

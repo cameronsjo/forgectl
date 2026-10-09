@@ -391,6 +391,37 @@ func TestEvaluatePaths(t *testing.T) {
 			wantRefusal(t, evalManual(f), c.want)
 		})
 	}
+	// I1 (T10.2 security review): U+017F long s folds onto 's' on a
+	// case-folding checkout, so internal/ſurface/x.go would land on
+	// internal/surface/x.go while matching no built-in refusal. A config
+	// glob wide enough to reach it (internal/**) must still refuse it.
+	t.Run("a non-ASCII path is refused, under both names of a rename", func(t *testing.T) {
+		s := goodSettings()
+		s.Repos[0].Paths = []string{"internal/**", "docs/**"}
+		for name, files := range map[string][]File{
+			"modified":      {file("internal/ſurface/x.go", "modified")},
+			"renamed to":    {{Path: "internal/ſurface/x.go", PreviousPath: "docs/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
+			"renamed from":  {{Path: "docs/x.go", PreviousPath: "internal/ſurface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
+			"invalid UTF-8": {file("internal/\xffsurface/x.go", "modified")},
+		} {
+			t.Run(name, func(t *testing.T) {
+				f := passingFacts(t)
+				f.Files, f.PR.ChangedFiles = files, len(files)
+				v := Evaluate(f, Policy{Settings: s})
+				if v.Result != Refuse || !slices.ContainsFunc(v.Reasons, func(r string) bool {
+					return strings.Contains(r, "only ASCII") || strings.Contains(r, "valid UTF-8")
+				}) {
+					t.Fatalf("%s %q; want a non-ASCII refusal", v.Result, v.Reasons)
+				}
+			})
+		}
+		// Control: the same glob passes the ASCII path it is meant for.
+		f := passingFacts(t)
+		f.Files, f.PR.ChangedFiles = []File{file("internal/tasks/x.go", "modified")}, 1
+		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
+			t.Fatalf("control: %s %q", v.Result, v.Reasons)
+		}
+	})
 	t.Run("file count differs from changedFiles", func(t *testing.T) {
 		f := passingFacts(t)
 		f.PR.ChangedFiles = 5
