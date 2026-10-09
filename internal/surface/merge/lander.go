@@ -61,6 +61,9 @@ type Outcome struct {
 	// AuditNote says an audit line could not be written, or a refusal
 	// repeated an earlier one and was not written again.
 	AuditNote string `json:"audit_note,omitempty"`
+	// AuditErr is the error behind an AuditNote that says a line could not
+	// be written; nil for a repeated refusal, which is not an error.
+	AuditErr error `json:"-"`
 	// Err is the read or merge failure behind LandUnreadable, LandFailed or
 	// LandUnconfirmed.
 	Err error `json:"-"`
@@ -137,7 +140,7 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 		line := base
 		line.Result, line.Reasons = AuditRefused, reasons
 		if _, written, err := l.record(line); err != nil {
-			out.AuditNote = "the refusal could not be audited: " + err.Error()
+			out.AuditNote, out.AuditErr = "the refusal could not be audited: "+err.Error(), err
 		} else if !written {
 			out.AuditNote = "the same refusal is already in the audit file"
 		}
@@ -235,7 +238,7 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 	}
 	outcome.MergeCommit, outcome.Reasons = out.MergeCommit, out.Reasons
 	if _, _, err := l.record(outcome); err != nil {
-		out.AuditNote = "the outcome line could not be audited: " + err.Error()
+		out.AuditNote, out.AuditErr = "the outcome line could not be audited: "+err.Error(), err
 	}
 	return out
 }

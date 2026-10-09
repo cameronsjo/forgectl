@@ -188,7 +188,7 @@ func TestLandRefusesAndAudits(t *testing.T) {
 			}
 			// The same refusal again is not written again.
 			again := fl.land(t, s, c.by, false)
-			if again.Result != LandRefused || again.AuditNote != "the same refusal is already in the audit file" || len(fl.results(t)) != 1 {
+			if again.Result != LandRefused || again.AuditNote != "the same refusal is already in the audit file" || again.AuditErr != nil || len(fl.results(t)) != 1 {
 				t.Fatalf("a repeat: %+v, audit %q", again, fl.results(t))
 			}
 		})
@@ -392,5 +392,17 @@ func TestLandNeedsRoomForTheOutcome(t *testing.T) {
 	fl.auditCap = 0
 	if out := fl.land(t, goodSettings(), ByCLI, false); out.Result != LandRefused || len(fl.merges) != 0 {
 		t.Fatalf("no cap: %+v", out)
+	}
+}
+
+// TestLandRefusalAuditErr pins that a refusal whose line could not be
+// written carries the error, for the drain's error event.
+func TestLandRefusalAuditErr(t *testing.T) {
+	fl := newFakeLand(t)
+	fl.facts.PR.IsDraft = true
+	fl.auditErr = errors.New("disk full")
+	out := fl.land(t, goodSettings(), ByCLI, false)
+	if out.Result != LandRefused || out.AuditErr == nil || !strings.Contains(out.AuditNote, "the refusal could not be audited: disk full") {
+		t.Fatalf("%+v", out)
 	}
 }

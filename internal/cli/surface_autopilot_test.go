@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -166,5 +167,49 @@ func TestDrainAutopilotSkipsRowsItCannotVouchFor(t *testing.T) {
 	d.tick(t.Context())
 	if len(f.landed) != 0 {
 		t.Fatalf("the autopilot tried %+v", f.landed)
+	}
+}
+
+// TestDrainAutopilotAuditErrors pins that a refusal whose audit line could
+// not be written is an error event, while a refusal the audit skipped as a
+// repeat is not (T10.4 security review).
+func TestDrainAutopilotAuditErrors(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedMergeable(t, q, "w", drainT0.Add(-time.Hour))
+	f.mergeSettings = autoSettings()
+	f.landOut = merge.Outcome{Result: merge.LandRefused, PR: 3, Head: status1204Head, Reasons: []string{"x"},
+		AuditNote: "the same refusal is already in the audit file"}
+	d.tick(t.Context())
+	if ev := eventsOf(f, "w", drain.EventError); len(ev) != 0 {
+		t.Fatalf("a repeated refusal raised %+v", ev)
+	}
+	full := errors.New("worker: merge-audit.jsonl is full")
+	f.landOut.AuditNote, f.landOut.AuditErr = "the refusal could not be audited: "+full.Error(), full
+	f.now = f.now.Add(drain.AutopilotEvery)
+	d.tick(t.Context())
+	if ev := eventsOf(f, "w", drain.EventError); len(ev) != 1 || !strings.Contains(ev[0].Error, "merge audit: the refusal could not be audited") {
+		t.Fatalf("error events %+v; want one for the unwritten refusal", ev)
+	}
+}
+
+// TestDrainAutopilotSkipsRowsItMerged pins that a row the autopilot merged
+// is not tried again while it stays reported (GitHub, or the closers, not yet
+// showing it merged).
+func TestDrainAutopilotSkipsRowsItMerged(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedMergeable(t, q, "w", drainT0.Add(-time.Hour))
+	f.mergeSettings = autoSettings()
+	f.landOut = merge.Outcome{Result: merge.LandMerged, PR: 9, Head: status1204Head, MergeCommit: "1111111111111111111111111111111111111111", AuditLine: "abcdef0123456789"}
+	f.prs["w"] = merge.Candidate{Number: 9, State: "OPEN"} // the closers' read lags
+	d.tick(t.Context())
+	for range 3 {
+		f.now = f.now.Add(drain.AutopilotEvery)
+		d.tick(t.Context())
+	}
+	if row := rowNamed(t, q, "w"); row.State != worker.QueueReported {
+		t.Fatalf("the row is %s, want still reported", row.State)
+	}
+	if len(f.landed) != 1 {
+		t.Fatalf("landed %d; the autopilot tried a row it merged again", len(f.landed))
 	}
 }

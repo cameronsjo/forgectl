@@ -144,13 +144,21 @@ type drainer struct {
 	// refusal is one event. A restart forgets both.
 	autopilotTried map[string]time.Time
 	autopilotNote  map[string]string
+	// autopilotMerged holds the rows (autopilotKey) the autopilot merged,
+	// skipped while they stay reported, so a merged row is not tried again
+	// before the closers close it. A restart forgets it; a fresh attempt
+	// then refuses on the PR's state.
+	autopilotMerged map[string]bool
 }
+
+// autopilotKey names one launch of a row: its name and launch_id.
+func autopilotKey(q worker.QueueRow) string { return q.Name + "\x00" + q.LaunchID }
 
 func newDrainer(io drainIO, session string, stopping func() bool) *drainer {
 	return &drainer{io: io, session: session, pauses: drain.Pauses{}, memo: map[string]drain.Memo{},
 		settings: config.DefaultDrainSettings(), stopping: stopping,
 		closerRead: map[string]time.Time{}, closerNote: map[string]string{}, closerReadFail: map[string]string{},
-		autopilotTried: map[string]time.Time{}, autopilotNote: map[string]string{}}
+		autopilotTried: map[string]time.Time{}, autopilotNote: map[string]string{}, autopilotMerged: map[string]bool{}}
 }
 
 // announce records what the drain starts without: one note when claude-slots
@@ -711,7 +719,8 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 // ledgers again, since the closers may have just closed a row, and tries the
 // reported row tried longest ago, at most every drain.AutopilotEvery, through
 // the merge path `surface merge` uses, as the drain. A merge is one merged
-// event and lets the closers read the row at the next tick; a refusal,
+// event, lets the closers read the row at the next tick, and the row is not
+// tried again while it stays reported; a refusal,
 // failure or unconfirmed merge is one merge-refused event per row, head and
 // reasons; GitHub unreadable is one unreadable event per condition.
 func (d *drainer) autopilot(ctx context.Context) {
@@ -734,9 +743,20 @@ func (d *drainer) autopilot(ctx context.Context) {
 	}
 	var due []candidate
 	seen := map[string]bool{}
+	reported := map[string]bool{}
+	for _, q := range rows {
+		if q.State == worker.QueueReported {
+			reported[autopilotKey(q)] = true
+		}
+	}
+	for key := range d.autopilotMerged {
+		if !reported[key] {
+			delete(d.autopilotMerged, key)
+		}
+	}
 	for _, q := range rows {
 		l := ledgers[q.Name]
-		if !drain.AutopilotCandidate(q, l) {
+		if d.autopilotMerged[autopilotKey(q)] || !drain.AutopilotCandidate(q, l) {
 			continue
 		}
 		seen[q.Name] = true
@@ -766,11 +786,14 @@ func (d *drainer) autopilot(ctx context.Context) {
 	c := due[0]
 	d.autopilotTried[c.q.Name] = now
 	out := d.io.land(ctx, s, merge.ByDrain, mergeRow(c.led, &c.q), false)
-	if out.AuditNote != "" && out.Result != merge.LandRefused {
+	if out.AuditErr != nil {
+		// A line that could not be written is an error, a refusal's
+		// included (a full audit file); a repeated refusal is not.
 		d.event(drain.Event{Kind: drain.EventError, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State), Error: "merge audit: " + out.AuditNote})
 	}
 	switch out.Result {
 	case merge.LandMerged:
+		d.autopilotMerged[autopilotKey(c.q)] = true
 		delete(d.autopilotNote, c.q.Name)
 		delete(d.closerRead, c.q.Name) // the closers read it at the next tick
 		d.event(drain.Event{Kind: drain.EventMerged, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State),
