@@ -284,9 +284,14 @@ func (c SurfaceMergeConfig) resolveRepos() ([]MergeRepo, error) {
 		name string
 		keys []string
 	}{{"workflow", keysOf(c.Workflow)}, {"required_checks", keysOf(c.RequiredChecks)}, {"paths", keysOf(c.Paths)}} {
-		for _, k := range table.keys {
+		for i, k := range table.keys {
 			if !listed(k) {
 				return nil, fmt.Errorf("[surface.merge.%s]: %s is not on repos", table.name, quoteConfigValue(k))
+			}
+			// Lookups compare case-insensitively over a Go map, so two keys
+			// that differ only in case would make the entry used random.
+			if j := slices.IndexFunc(table.keys[:i], func(o string) bool { return strings.EqualFold(o, k) }); j >= 0 {
+				return nil, fmt.Errorf("[surface.merge.%s]: %s and %s name the same repository; keep one", table.name, quoteConfigValue(table.keys[j]), quoteConfigValue(k))
 			}
 		}
 	}

@@ -77,9 +77,12 @@ type Repository struct {
 
 // PullRequest is the PR's state, read in one query bound to HeadRefOid.
 type PullRequest struct {
-	Number            int
-	URL               string
-	Title             string
+	Number int
+	URL    string
+	Title  string
+	// Body is the PR description; only the @coderabbitai mention rule
+	// reads it.
+	Body              string
 	State             string
 	IsDraft           bool
 	IsCrossRepository bool
@@ -674,7 +677,7 @@ func codeRabbit(f Facts) []string {
 	mention := func(c Comment) bool {
 		return !isCodeRabbit(c.Author) && strings.Contains(strings.ToLower(c.Body), "@coderabbitai")
 	}
-	all := slices.Clone(f.Comments)
+	all := append(slices.Clone(f.Comments), Comment{Author: f.PR.Author, Body: f.PR.Body})
 	for _, r := range f.Reviews {
 		all = append(all, Comment{Author: r.Author, Body: r.Body})
 	}

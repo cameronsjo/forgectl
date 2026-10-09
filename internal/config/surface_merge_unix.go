@@ -35,6 +35,11 @@ func readMergeConfig(path string, check MergeFileCheck) ([]byte, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
+	// A second hard link is a second name another path can write the
+	// policy through.
+	if n := uint64(st.Nlink); n != 1 { //nolint:gosec,unconvert // G115: Nlink is uint16 on darwin and uint64 on linux
+		return nil, fmt.Errorf("%s has %d hard links, expected 1", path, n)
+	}
 	if int(st.Uid) != check.UID {
 		return nil, fmt.Errorf("%s is owned by uid %d, expected %d", path, st.Uid, check.UID)
 	}

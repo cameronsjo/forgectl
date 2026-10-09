@@ -232,6 +232,46 @@ func TestSurfaceStatusOutcomes(t *testing.T) {
 	})
 }
 
+type statusMemCache map[string][]byte
+
+func (m statusMemCache) Read(head string) ([]byte, error) { return m[head], nil }
+func (m statusMemCache) Write(head string, data []byte) error {
+	m[head] = data
+	return nil
+}
+
+// TestStatusReadNeverPassesOnCache: a planted cache entry whose file list
+// would pass is read again fresh, so the verdict comes from GitHub's file
+// list; a cached read that refuses is kept.
+func TestStatusReadNeverPassesOnCache(t *testing.T) {
+	planted := statusMemCache{status1204Head: []byte(`{"head":"` + status1204Head + `","base":"` + status1204Base +
+		`","merge_base":"` + status1204Base + `","files":[{"Path":"docs/x.md","Status":"modified","BaseMode":"100644","HeadMode":"100644"}]}`)}
+	planted1 := func(f merge.Facts) bool { return len(f.Files) == 1 && f.Files[0].Path == "docs/x.md" }
+	row := mergeRow(statusRow1204(), nil)
+
+	gh := statusGH(t, false)
+	snap, err := statusRead(context.Background(), merge.Reader{GH: gh, Cache: planted}, row, planted1)
+	if err != nil || snap.Cached || len(snap.Facts.Files) != 4 {
+		t.Fatalf("a would-pass cached read: cached %v, %d files, %v; want a fresh read of the 4 real files", snap.Cached, len(snap.Facts.Files), err)
+	}
+	compares := 0
+	for _, c := range gh.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "compare/"+status1204Base+"..."+status1204Head) {
+			compares++
+		}
+	}
+	if compares != 1 {
+		t.Fatalf("%d file-list compares; want the one fresh read", compares)
+	}
+
+	// Control: a cached read that refuses is kept as it is.
+	refuses := func(merge.Facts) bool { return false }
+	snap, err = statusRead(context.Background(), merge.Reader{GH: statusGH(t, false), Cache: planted}, row, refuses)
+	if err != nil || !snap.Cached || len(snap.Facts.Files) != 1 {
+		t.Fatalf("a refusing cached read: cached %v, %d files, %v", snap.Cached, len(snap.Facts.Files), err)
+	}
+}
+
 func TestPriceTranscript(t *testing.T) {
 	ctx := context.Background()
 	found := func(string) (string, error) { return "/opt/bin/cadence-hooks", nil }

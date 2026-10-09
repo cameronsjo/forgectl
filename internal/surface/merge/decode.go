@@ -49,6 +49,7 @@ const PRQuery = `query($owner: String!, $name: String!, $number: Int!) {
       number
       url
       title
+      body
       state
       isDraft
       isCrossRepository
@@ -309,6 +310,7 @@ func DecodePR(data []byte) (PRRead, error) {
 				Number            int    `json:"number"`
 				URL               string `json:"url"`
 				Title             string `json:"title"`
+				Body              string `json:"body"`
 				State             string `json:"state"`
 				IsDraft           bool   `json:"isDraft"`
 				IsCrossRepository bool   `json:"isCrossRepository"`
@@ -389,7 +391,7 @@ func DecodePR(data []byte) (PRRead, error) {
 		return *a
 	}
 	out := PRRead{Repository: repo, PR: PullRequest{
-		Number: p.Number, URL: p.URL, Title: p.Title, State: p.State, IsDraft: p.IsDraft, IsCrossRepository: p.IsCrossRepository,
+		Number: p.Number, URL: p.URL, Title: p.Title, Body: p.Body, State: p.State, IsDraft: p.IsDraft, IsCrossRepository: p.IsCrossRepository,
 		Author: actor(p.Author), BaseRefName: p.BaseRefName, BaseRefOid: p.BaseRefOid, HeadRefName: p.HeadRefName, HeadRefOid: p.HeadRefOid,
 		Mergeable: p.Mergeable, MergeStateStatus: p.MergeStateStatus, ChangedFiles: p.ChangedFiles,
 	}}

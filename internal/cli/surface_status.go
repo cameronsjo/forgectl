@@ -241,7 +241,9 @@ func runSurfaceStatus(cmd *cobra.Command, d statusDeps, opts statusOptions) erro
 	settings := d.settings()
 	ctx, cancel := context.WithTimeout(cmd.Context(), statusTimeout)
 	defer cancel()
-	snap, err := d.reader().Read(ctx, mergeRow(row, qrow))
+	snap, err := statusRead(ctx, d.reader(), mergeRow(row, qrow), func(f merge.Facts) bool {
+		return merge.Evaluate(f, merge.Policy{Settings: settings}).Result == merge.Pass
+	})
 	switch {
 	case errors.Is(err, merge.ErrNoRecordedRepo):
 		return WithExitCode(fmt.Errorf("worker %q: %w; it was launched before forgectl recorded one, or its origin is not on github.com", opts.Name, err), exitUsage)
@@ -256,6 +258,21 @@ func runSurfaceStatus(cmd *cobra.Command, d statusDeps, opts statusOptions) erro
 		return writeJSON(cmd.OutOrStdout(), view)
 	}
 	return renderWorkerStatus(cmd.OutOrStdout(), view)
+}
+
+// statusRead reads row through r. The cache holds only the file list and
+// modes, and any session on the operator's account can write it, so a pass
+// is never shown on cached data: when a read that used the cache would
+// pass, everything is read again without it. A refusal keeps the cached
+// read.
+func statusRead(ctx context.Context, r merge.Reader, row merge.Row, passes func(merge.Facts) bool) (merge.Snapshot, error) {
+	snap, err := r.Read(ctx, row)
+	if err != nil || !snap.Cached || !snap.HasPR || !passes(snap.Facts) {
+		return snap, err
+	}
+	fresh := r
+	fresh.Cache = nil
+	return fresh.Read(ctx, row)
 }
 
 // buildWorkerStatus turns a read into the view, and decides the verdict: Evaluate

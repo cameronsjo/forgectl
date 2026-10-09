@@ -703,6 +703,10 @@ func TestEvaluateCodeRabbit(t *testing.T) {
 			resolve(f, bot)
 			f.Reviews = append(f.Reviews, Review{Author: Actor{Typename: "User", DatabaseID: operatorID, Login: "cameronsjo"}, Body: "ping @coderabbitai", State: "COMMENTED"})
 		}, "mentioned @coderabbitai"},
+		"a mention in the PR body": {func(f *Facts) {
+			resolve(f, bot)
+			f.PR.Body = "Summary\n\n@coderabbitai summary"
+		}, "mentioned @coderabbitai"},
 		"the review is at an older head": {func(f *Facts) {
 			resolve(f, bot)
 			f.PR.HeadRefOid = head1204
@@ -791,6 +795,20 @@ func TestEvaluateCodeRabbit(t *testing.T) {
 		wantRefusal(t, v, "cadence-review: no cadence-forge-security-reviewer marker")
 		wantRefusal(t, v, "coderabbit: a CodeRabbit review thread is unresolved")
 	})
+}
+
+// TestDecodePRBody pins that the PR body is read, so the @coderabbitai
+// mention rule can see it. The captured fixtures predate the field.
+func TestDecodePRBody(t *testing.T) {
+	pr := string(readFixture(t, "pr_1204.json"))
+	withBody := strings.Replace(pr, `"title": `, `"body": "ping @coderabbitai", "title": `, 1)
+	if withBody == pr {
+		t.Fatal("the fixture edit did not apply")
+	}
+	r, err := DecodePR([]byte(withBody))
+	if err != nil || r.PR.Body != "ping @coderabbitai" {
+		t.Fatalf("body %q, %v", r.PR.Body, err)
+	}
 }
 
 func TestCompletedCodeRabbitReview(t *testing.T) {
