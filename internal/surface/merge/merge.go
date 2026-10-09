@@ -173,6 +173,9 @@ type Facts struct {
 	// HeadAncestry compare(Row.Base...PR.HeadRefOid).status.
 	BaseAncestry string
 	HeadAncestry string
+	// Unread names facts the reads could not gather (too many directories
+	// to read modes from, say). Each one refuses.
+	Unread []string
 }
 
 // Policy is the resolved [surface.merge] the verdict is for. ForDrain is the
@@ -237,6 +240,9 @@ func Evaluate(f Facts, p Policy) Verdict {
 		checkPaths(f, repo, add)
 	}
 	checkApprovers(f, s, add)
+	for _, u := range f.Unread {
+		add("not read: %s", u)
+	}
 	if len(reasons) > 0 {
 		return Verdict{Result: Refuse, Reasons: reasons}
 	}

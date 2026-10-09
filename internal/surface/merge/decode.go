@@ -536,15 +536,20 @@ const MaxCompareFiles = 300
 // CompareRead is a REST compare response.
 type CompareRead struct {
 	Status string
-	Files  []File
+	// MergeBase is merge_base_commit.sha: the base side of the file list.
+	MergeBase string
+	Files     []File
 }
 
 // DecodeCompare reads a REST compare response. Modes are filled in later
 // from the trees.
 func DecodeCompare(data []byte) (CompareRead, error) {
 	var d struct {
-		Status *string `json:"status"`
-		Files  []struct {
+		Status          *string `json:"status"`
+		MergeBaseCommit *struct {
+			SHA string `json:"sha"`
+		} `json:"merge_base_commit"`
+		Files []struct {
 			Filename         string `json:"filename"`
 			Status           string `json:"status"`
 			PreviousFilename string `json:"previous_filename"`
@@ -557,6 +562,9 @@ func DecodeCompare(data []byte) (CompareRead, error) {
 		return CompareRead{}, fmt.Errorf("%w: compare: no status", ErrResponse)
 	}
 	out := CompareRead{Status: *d.Status}
+	if d.MergeBaseCommit != nil {
+		out.MergeBase = d.MergeBaseCommit.SHA
+	}
 	for _, f := range d.Files {
 		out.Files = append(out.Files, File{Path: f.Filename, Status: f.Status, PreviousPath: f.PreviousFilename})
 	}
