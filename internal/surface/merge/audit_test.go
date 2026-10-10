@@ -133,6 +133,41 @@ func TestAuditRefusalRepeatIsTheLatestLine(t *testing.T) {
 	}
 }
 
+// TestAuditRefusesADamagedLastLink pins that nothing is appended onto a
+// last line that does not chain onto the line before it (independent review
+// of cameronsjo/forgectl#1212): a last line from another file, one that
+// does not decode, or a first line naming a prev. An edit to the last line
+// that keeps its prev still chains; the chain cannot see it (docs/herdr.md).
+func TestAuditRefusesADamagedLastLink(t *testing.T) {
+	file, _ := appendAll(t, auditLine(AuditRefused, "a"), auditLine(AuditMerging))
+	lines := strings.SplitAfter(string(file), "\n")
+	other, _ := appendAll(t, auditLine(AuditRefused, "b"), auditLine(AuditMerged))
+	otherLines := strings.SplitAfter(string(other), "\n")
+	for name, damaged := range map[string]string{
+		"the last line from another file": lines[0] + otherLines[1],
+		"the last line does not decode":   lines[0] + "{not json\n",
+		"a first line naming a prev":      otherLines[1],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := AppendAudit([]byte(damaged), auditLine(AuditMerged)); !errors.Is(err, ErrAuditDamaged) {
+				t.Fatalf("err %v, want ErrAuditDamaged", err)
+			}
+		})
+	}
+	edited := strings.Replace(lines[1], `"result":"merging"`, `"result":"merged"`, 1)
+	if edited == lines[1] {
+		t.Fatal("the edit did not apply")
+	}
+	for name, intact := range map[string]string{
+		"an intact file":             string(file),
+		"a last edit that kept prev": lines[0] + edited,
+	} {
+		if _, _, _, err := AppendAudit([]byte(intact), auditLine(AuditMerged)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestAuditRefusesAPartialFile(t *testing.T) {
 	file, _ := appendAll(t, auditLine(AuditRefused, "a"))
 	if _, _, _, err := AppendAudit(bytes.TrimSuffix(file, []byte("\n")), auditLine(AuditMerging)); !errors.Is(err, ErrAuditPartial) {

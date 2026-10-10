@@ -116,7 +116,7 @@ func TestDrainAutopilotRefusalEventsOncePerHeadAndReasons(t *testing.T) {
 	step()
 	f.landOut.Head = "4444444444444444444444444444444444444444"
 	step()
-	f.landOut = merge.Outcome{Result: merge.LandUnconfirmed, PR: 3, Head: status1204Head, Reasons: []string{"not on main"}}
+	f.landOut = merge.Outcome{Result: merge.LandFailed, PR: 3, Head: status1204Head, Reasons: []string{"gh pr merge failed"}}
 	step()
 	if got := len(eventsOf(f, "w", drain.EventMergeRefused)); got != 4 {
 		t.Fatalf("%d refusal events; want one per change of head, reasons or result", got)
@@ -126,6 +126,37 @@ func TestDrainAutopilotRefusalEventsOncePerHeadAndReasons(t *testing.T) {
 	step()
 	if ev := eventsOf(f, "w", drain.EventUnreadable); len(ev) != 1 {
 		t.Fatalf("unreadable events %+v; want one", ev)
+	}
+}
+
+// TestDrainAutopilotSkipsRowsThatMayHaveMerged pins that a row whose merge
+// may have happened (merged-unconfirmed, merged-elsewhere, merge-unknown) is
+// not tried again while it stays reported, so a merge-queue PR cannot fill
+// the audit file (independent review of cameronsjo/forgectl#1212); a refusal
+// or a failed merge is tried again.
+func TestDrainAutopilotSkipsRowsThatMayHaveMerged(t *testing.T) {
+	for result, tries := range map[string]int{
+		merge.LandUnconfirmed: 1, merge.LandMergedElsewhere: 1, merge.LandUnknown: 1,
+		merge.LandRefused: 4, merge.LandFailed: 4,
+	} {
+		t.Run(result, func(t *testing.T) {
+			f, d, q := newFakeDrain(t)
+			seedMergeable(t, q, "w", drainT0.Add(-time.Hour))
+			f.mergeSettings = autoSettings()
+			f.landOut = merge.Outcome{Result: result, PR: 9, Head: status1204Head, Reasons: []string{"x"}}
+			f.prs["w"] = merge.Candidate{Number: 9, State: "OPEN"} // the closers see it open
+			d.tick(t.Context())
+			for range 3 {
+				f.now = f.now.Add(drain.AutopilotEvery)
+				d.tick(t.Context())
+			}
+			if len(f.landed) != tries {
+				t.Fatalf("tried %d times, want %d", len(f.landed), tries)
+			}
+			if ev := eventsOf(f, "w", drain.EventMergeRefused); len(ev) != 1 {
+				t.Fatalf("merge-refused events %+v; want one", ev)
+			}
+		})
 	}
 }
 

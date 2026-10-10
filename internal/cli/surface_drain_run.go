@@ -144,10 +144,13 @@ type drainer struct {
 	// refusal is one event. A restart forgets both.
 	autopilotTried map[string]time.Time
 	autopilotNote  map[string]string
-	// autopilotMerged holds the rows (autopilotKey) the autopilot merged,
-	// skipped while they stay reported, so a merged row is not tried again
-	// before the closers close it. A restart forgets it; a fresh attempt
-	// then refuses on the PR's state.
+	// autopilotMerged holds the rows (autopilotKey) the autopilot merged, or
+	// whose merge may have happened (merged-unconfirmed, merged-elsewhere,
+	// merge-unknown), skipped while they stay reported, so such a row is not
+	// tried again before the closers settle it: a merge-queue PR, say, would
+	// otherwise add an attempt and an outcome line to the audit file every
+	// drain.AutopilotEvery. A restart forgets it; a fresh attempt then
+	// refuses on the PR's state.
 	autopilotMerged map[string]bool
 }
 
@@ -720,7 +723,8 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 // reported row tried longest ago, at most every drain.AutopilotEvery, through
 // the merge path `surface merge` uses, as the drain. A merge is one merged
 // event, lets the closers read the row at the next tick, and the row is not
-// tried again while it stays reported; a refusal,
+// tried again while it stays reported, nor is one whose merge may have
+// happened (merged-unconfirmed, merged-elsewhere, merge-unknown); a refusal,
 // failure or unconfirmed merge is one merge-refused event per row, head and
 // reasons; GitHub unreadable is one unreadable event per condition.
 func (d *drainer) autopilot(ctx context.Context) {
@@ -801,6 +805,10 @@ func (d *drainer) autopilot(ctx context.Context) {
 	case merge.LandUnreadable:
 		d.closerEvent(d.autopilotNote, c.q, drain.EventUnreadable, "the autopilot could not read the worker's PR: "+strings.Join(out.Reasons, "; "))
 	default:
+		if out.Result == merge.LandUnconfirmed || out.Result == merge.LandMergedElsewhere || out.Result == merge.LandUnknown {
+			// The PR may have merged: leave it to the closers.
+			d.autopilotMerged[autopilotKey(c.q)] = true
+		}
 		why := fmt.Sprintf("PR #%d at head %s: %s, %s", out.PR, shortSHA(out.Head), out.Result, strings.Join(merge.ReasonSet(out.Reasons), "; "))
 		d.closerEvent(d.autopilotNote, c.q, drain.EventMergeRefused, why)
 	}

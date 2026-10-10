@@ -98,6 +98,12 @@ type ChainBreak struct {
 // hand, so no line chains onto a fragment.
 var ErrAuditPartial = errors.New("merge: merge-audit.jsonl ends in a partial line; repair it by hand (see docs/herdr.md)")
 
+// ErrAuditDamaged reports an audit file whose last line does not chain onto
+// the line before it: it does not decode, or its prev is not that line's
+// hash (or not "" on a first line). Nothing more is appended until it is
+// repaired or moved aside by hand, so no new line vouches for a damaged one.
+var ErrAuditDamaged = errors.New("merge: merge-audit.jsonl is damaged: its last line does not chain onto the line before it; repair it or move it aside by hand (see docs/herdr.md)")
+
 // splitLines splits data into lines, each without its newline, and reports
 // whether the last one had none.
 func splitLines(data []byte) (lines [][]byte, partial bool) {
@@ -160,6 +166,24 @@ func ParseAudit(data []byte) ([]AuditEntry, *ChainBreak) {
 	return out, brk
 }
 
+// checkLastLink checks the last of lines (at least one) names the hash of
+// the line before it as prev, or "" when it is the first.
+func checkLastLink(lines [][]byte) error {
+	n := len(lines)
+	last, err := decodeAuditLine(lines[n-1])
+	if err != nil {
+		return fmt.Errorf("%w (line %d does not decode: %v)", ErrAuditDamaged, n, err)
+	}
+	want := ""
+	if n > 1 {
+		want = LineHash(lines[n-2])
+	}
+	if last.Prev != want {
+		return fmt.Errorf("%w (line %d names prev %q, expected %q)", ErrAuditDamaged, n, last.Prev, want)
+	}
+	return nil
+}
+
 // ReasonSet is a refusal's reasons as a set: sorted, without repeats. The
 // audit's refusal limit and the drain's merge-refused events both compare
 // refusals by it.
@@ -193,7 +217,8 @@ func repeatsRefusal(e, l AuditLine) bool {
 // repeatsRefusal) is not written: write is false. Any later line about that
 // subject that is not the same refusal (a merge attempt, an outcome, another
 // refusal) ends the repeat. An existing file ending in a partial line is
-// ErrAuditPartial.
+// ErrAuditPartial, and one whose last line does not chain onto the line
+// before it is ErrAuditDamaged.
 func AppendAudit(existing []byte, l AuditLine) (line []byte, hash string, write bool, err error) {
 	lines, partial := splitLines(existing)
 	if partial {
@@ -201,6 +226,9 @@ func AppendAudit(existing []byte, l AuditLine) (line []byte, hash string, write 
 	}
 	l.Prev = ""
 	if n := len(lines); n > 0 {
+		if err := checkLastLink(lines); err != nil {
+			return nil, "", false, err
+		}
 		l.Prev = LineHash(lines[n-1])
 	}
 	if l.Result == AuditRefused {
