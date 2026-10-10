@@ -805,3 +805,18 @@ func TestEscapeInvisibleInvisibleRunes(t *testing.T) {
 		t.Errorf("plain text changed: %q", got)
 	}
 }
+
+// The rendered candidate block carries the escapes for a padded title, so the
+// title wiring is pinned too (cameronsjo/forgectl#1215).
+func TestWriteIntakeCandidatesEscapesATitleAndBody(t *testing.T) {
+	pad := strings.Repeat("\u3164", 20)
+	c := intakeCandidate{Title: "t" + pad + "\nurl x", Body: pad + " tail \U000e0041"}
+	var out strings.Builder
+	if err := writeIntakeCandidates(&out, []intakeCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.ContainsRune(got, 0x3164) || strings.ContainsRune(got, 0xe0041) || !strings.Contains(got, `\u3164`) || !strings.Contains(got, `\U000E0041`) {
+		t.Errorf("rendered block not escaped: %q", got)
+	}
+}

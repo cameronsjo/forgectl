@@ -598,7 +598,9 @@ func intakeBodyExcerpt(body string) string {
 // shows next to labeled fields as \uXXXX. SafeLine shows invisible runes (U+2800, the Hangul
 // fillers) as themselves, so padding made of them wraps a body onto what
 // looks like a fresh "url" or "author" line; they are escaped here
-// first (cameronsjo/forgectl#1215). Call it inside a capped SafeLineMax.
+// first (cameronsjo/forgectl#1215). Call it inside a capped SafeLineMax. Only
+// the title and body are free text: the other fields are GitHub logins,
+// owner/repo names and numbers, which GitHub restricts to ASCII.
 func escapeInvisible(s string) string {
 	if strings.IndexFunc(s, termsafe.IsInvisibleRune) < 0 {
 		return s
@@ -606,7 +608,11 @@ func escapeInvisible(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if termsafe.IsInvisibleRune(r) {
-			fmt.Fprintf(&b, "\\u%04X", r)
+			if r > 0xffff {
+				fmt.Fprintf(&b, "\\U%08X", r)
+			} else {
+				fmt.Fprintf(&b, "\\u%04X", r)
+			}
 			continue
 		}
 		b.WriteRune(r)
