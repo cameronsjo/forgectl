@@ -691,18 +691,6 @@ func TestSurfaceIntakeProductionRefusesAPipedYes(t *testing.T) {
 	}
 }
 
-// fakeTTY is a terminal stand-in: answers are read from in, and what the
-// confirmation writes lands in out.
-type fakeTTY struct {
-	in     io.Reader
-	out    strings.Builder
-	closed bool
-}
-
-func (f *fakeTTY) Read(p []byte) (int, error)  { return f.in.Read(p) }
-func (f *fakeTTY) Write(p []byte) (int, error) { return f.out.Write(p) }
-func (f *fakeTTY) Close() error                { f.closed = true; return nil }
-
 var sampleCandidates = []intakeCandidate{{
 	Number: 7, Title: "Fix the thing", Author: "cameronsjo", Labeler: "cameronsjo",
 	LabeledAt: "2026-10-01T10:00:00Z", Name: "gh7-forgectl", Source: "gh:cameronsjo/forgectl#7", BriefSHA256: "abc123",
