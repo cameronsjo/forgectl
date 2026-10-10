@@ -22,7 +22,6 @@ Being built now.
 - [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
 - [atelier P2: queue and drain (forgectl T8)](2026-10-06-atelier-p2-queue-and-drain.md)
 - [atelier P3: intake from GitHub labels (forgectl T9)](2026-10-09-atelier-p3-github-intake.md)
-- [atelier P4: verdicts, usage, merge, closers (forgectl T10)](2026-10-09-atelier-p4-verdicts-merge-closers.md)
 
 ## Proposed
 
@@ -57,6 +56,7 @@ Built. Read as history, not as a spec: the shipped behavior and its ADR are the 
 - [Review-autonomy spine: #299 → #472 → #473](2026-09-11-review-autonomy-spine.md)
 - [`env set --sops` — write one key into a SOPS file without exposing the value](2026-09-12-env-set-sops.md)
 - [Harness update hooks — Roadmap (2026-09-29)](2026-09-29-harness-update-hooks-roadmap.md)
+- [atelier P4: verdicts, usage, merge, closers (forgectl T10)](2026-10-09-atelier-p4-verdicts-merge-closers.md)
 
 ## Superseded
 
