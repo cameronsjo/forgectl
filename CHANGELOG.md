@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.0](https://github.com/cameronsjo/forgectl/compare/v0.40.0...v0.41.0) (2026-10-10)
+
+
+### Features
+
+* **surface:** surface merge, merge audit, drain autopilot (P4 T10.4) ([#1212](https://github.com/cameronsjo/forgectl/issues/1212)) ([e9b1bfa](https://github.com/cameronsjo/forgectl/commit/e9b1bfa9d02bafd04f59e2565d1196c8eba0ff9a))
+
 ## [0.40.0](https://github.com/cameronsjo/forgectl/compare/v0.39.0...v0.40.0) (2026-10-09)
 
 
