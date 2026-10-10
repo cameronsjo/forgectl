@@ -34,6 +34,13 @@ func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 		"surface brief": func() error {
 			return runSurfaceBrief(cmd, module.Deps{}, briefOptions{Repo: "/nonexistent", Name: "x", Text: "hi", Readback: time.Second, Start: time.Second})
 		},
+		// Nor close or dequeue a sibling (cameronsjo/forgectl#1215).
+		"surface close": func() error {
+			return runSurfaceClose(cmd, module.Deps{}, closeOptions{Repo: "/nonexistent", Name: "x"})
+		},
+		"surface dequeue": func() error {
+			return runSurfaceDequeue(cmd, "x", false)
+		},
 		"surface merge": func() error {
 			return runSurfaceMerge(newSurfaceMergeCmd(module.Deps{}), mergeDeps{}, mergeOptions{Name: "x"})
 		},

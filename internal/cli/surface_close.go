@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -135,6 +136,9 @@ refused. Exit 2: a usage or setup error.
 }
 
 func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface close"); err != nil {
+		return err
+	}
 	if err := worker.ValidName(opts.Name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}

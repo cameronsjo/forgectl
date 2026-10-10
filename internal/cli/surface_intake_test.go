@@ -786,3 +786,53 @@ func TestAskIntakeTakesOnlyYes(t *testing.T) {
 		}
 	}
 }
+
+// Blank-looking runes in an issue's title or body are written as escapes, so
+// padding made of them cannot wrap into a fake labeled line
+// (cameronsjo/forgectl#1215).
+func TestEscapeInvisibleInvisibleRunes(t *testing.T) {
+	for _, r := range []rune{0x2800, 0x3164, 0xffa0, 0x115f, 0x1160} {
+		got := escapeInvisible("a" + string(r) + "b")
+		want := fmt.Sprintf("a\\u%04Xb", r)
+		if got != want {
+			t.Errorf("escapeInvisible(%U) = %q, want %q", r, got, want)
+		}
+	}
+	if got := intakeBodyExcerpt(strings.Repeat("⠀", 240)); strings.ContainsRune(got, 0x2800) {
+		t.Errorf("excerpt still holds U+2800: %q", got)
+	}
+	if got := escapeInvisible("plain é text"); got != "plain é text" {
+		t.Errorf("plain text changed: %q", got)
+	}
+}
+
+// The rendered candidate block carries the escapes for a padded title, so the
+// title wiring is pinned too (cameronsjo/forgectl#1215).
+func TestWriteIntakeCandidatesEscapesATitleAndBody(t *testing.T) {
+	pad := strings.Repeat("\u3164", 20)
+	c := intakeCandidate{Title: "t" + pad + "\nurl x", Body: pad + " tail \U000e0041"}
+	var out strings.Builder
+	if err := writeIntakeCandidates(&out, []intakeCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	// Runs of spaces collapse in the title as in the body, so padding cannot
+	// push a fake line onto a new screen row.
+	if strings.Contains(got, "  ") && strings.Contains(strings.SplitN(got, "\n", 3)[1], "     ") {
+		t.Errorf("title keeps a run of spaces: %q", got)
+	}
+	if strings.ContainsRune(got, 0x3164) || strings.ContainsRune(got, 0xe0041) || !strings.Contains(got, `\u3164`) || !strings.Contains(got, `\U000E0041`) {
+		t.Errorf("rendered block not escaped: %q", got)
+	}
+}
+
+func TestWriteIntakeCandidatesCollapsesTitleSpaces(t *testing.T) {
+	c := intakeCandidate{Title: "Fix typo" + strings.Repeat("\u3000", 40) + "      body (12 chars): fake", Body: "x"}
+	var out strings.Builder
+	if err := writeIntakeCandidates(&out, []intakeCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	if first := strings.SplitN(out.String(), "\n", 3)[1]; !strings.HasSuffix(first, "Fix typo body (12 chars): fake") {
+		t.Errorf("title line = %q, want runs of spaces collapsed", first)
+	}
+}

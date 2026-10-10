@@ -211,7 +211,8 @@ var errIntakeInWorker = errors.New("intake refuses to run inside a drain worker 
 // refuseInDrainWorker refuses verb inside a drain worker, the same courtesy
 // refusal intake makes, for the other commands that start a worker (surface
 // enqueue and surface launch), drive one (surface brief, the drain's start,
-// stop and process) or merge a PR (surface merge).
+// stop and process), close one or remove its queue row (surface close and
+// surface dequeue) or merge a PR (surface merge).
 func refuseInDrainWorker(getenv func(string) string, verb string) error {
 	if getenv(launch.DrainWorkerEnv) == "" {
 		return nil
@@ -571,7 +572,7 @@ func writeIntakeCandidates(out io.Writer, cands []intakeCandidate) error {
 	}
 	for _, c := range cands {
 		if _, err := fmt.Fprintf(out, "  %s %s\n      url %s\n      body (%d chars): %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
-			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.URL, 200), utf8.RuneCountInString(c.Body), intakeBodyExcerpt(c.Body),
+			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(escapeInvisible(strings.Join(strings.Fields(c.Title), " ")), 100), termsafe.SafeLineMax(c.URL, 200), utf8.RuneCountInString(c.Body), intakeBodyExcerpt(c.Body),
 			termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
 			termsafe.SafeLineMax(c.LabeledAt, 40), termsafe.SafeLineMax(c.Name, 64), termsafe.SafeLineMax(c.BriefSHA256, 64)); err != nil {
 			return err
@@ -590,7 +591,33 @@ func intakeBodyExcerpt(body string) string {
 	if flat == "" {
 		return "(empty)"
 	}
-	return termsafe.SafeLineMax(flat, intakeBodyExcerptRunes)
+	return termsafe.SafeLineMax(escapeInvisible(flat), intakeBodyExcerptRunes)
+}
+
+// escapeInvisible writes the invisible runes of issue text the intake prompt
+// shows next to labeled fields as \uXXXX. SafeLine shows invisible runes (U+2800, the Hangul
+// fillers) as themselves, so padding made of them wraps a body onto what
+// looks like a fresh "url" or "author" line; they are escaped here
+// first (cameronsjo/forgectl#1215). Call it inside a capped SafeLineMax. Only
+// the title and body are free text: the other fields are GitHub logins,
+// owner/repo names and numbers, which GitHub restricts to ASCII.
+func escapeInvisible(s string) string {
+	if strings.IndexFunc(s, termsafe.IsInvisibleRune) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if termsafe.IsInvisibleRune(r) {
+			if r > 0xffff {
+				fmt.Fprintf(&b, "\\U%08X", r)
+			} else {
+				fmt.Fprintf(&b, "\\u%04X", r)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func reportIntake(out io.Writer, r intakeResult, asJSON bool) error {
