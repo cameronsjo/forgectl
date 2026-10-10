@@ -626,9 +626,13 @@ func foldConfusables(s string) string {
 	}, s)
 }
 
-// skeleton is s lowercased with everything but a-z and 0-9 dropped, so
-// "**Cadence-Review**:" and "cadence.review" both read "cadencereview".
+// skeleton is s decomposed (NFKD), lowercased, with everything but a-z and
+// 0-9 dropped. Decomposing splits a marked letter (ẹ, á) into the letter
+// and its combining mark, which the filter then drops, so
+// "**Cadence-Review**:", "cadence.review" and "cadẹnce-review" all read
+// "cadencereview".
 func skeleton(s string) string {
+	s = norm.NFKD.String(s)
 	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
 			return r

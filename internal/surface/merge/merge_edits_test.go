@@ -184,6 +184,8 @@ func TestLooseMarkerCatchesAnyStyling(t *testing.T) {
 		"a second, bold one":    "cadence-review: polish crit=1\n**cadence-review**: sec crit=1",
 		"Cyrillic and a colon":  "c\u0430dence-review\u2236 sec",
 		"look-alikes, no colon": "\u0421\u0410DENCE R\u0415V\u0406EW",
+		"a combining dot below": "cad\u1eb9nce-review: sec crit=1",
+		"e plus combining mark": "cade\u0323nce-review\u2236 sec",
 	}
 	for name, body := range outright {
 		t.Run("no name: "+name, func(t *testing.T) {
@@ -307,4 +309,16 @@ func TestEvaluateUnreadFactsRefuse(t *testing.T) {
 	f := passingFacts(t)
 	f.Unread = []string{"file modes: the changes span 101 directory listings, more than the 100 one read makes"}
 	wantRefusal(t, evalManual(f), "not read: file modes: the changes span 101 directory listings")
+}
+
+// The skeleton drops combining marks after decomposition, so a letter with
+// a mark (precomposed or not) still spells the marker. A review by the
+// marker author refuses whatever its body; this pins the scan itself, which
+// decides whether a conversation comment counts.
+func TestSkeletonDropsCombiningMarks(t *testing.T) {
+	for _, s := range []string{"cadẹnce-review: sec", "cadẹnce-review∶ sec", "cádence review"} {
+		if got := skeleton(scanText(s)); !strings.Contains(got, markerSkeleton) {
+			t.Errorf("skeleton(%q) = %q, want it to contain %q", s, got, markerSkeleton)
+		}
+	}
 }

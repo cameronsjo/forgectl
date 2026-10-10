@@ -101,13 +101,16 @@ The policy is resolved from the config file and GitHub is read again on every
 call, with no cache: the PR is found as surface status finds it, and the
 verdict must pass with mode manual or auto.
 
-A person confirms every merge: "manual" means a person at a terminal, and
+A person is asked before every merge: "manual" means a person at a terminal, and
 the drain's autopilot (mode auto) is the one unattended merge path. Once the
 verdict passes and the subject is composed, merge shows the PR, its head,
 the required check runs and reviewer markers counted, and the subject on
 the terminal, and goes on only if "yes" is typed there; the re-read below
 runs after the answer. The answer is read from /dev/tty, never from stdin,
-and stdin must be a terminal as well, so a piped "yes" does not count. No
+and stdin must be a terminal as well, so a plain piped "yes" does not count;
+a process that gives itself a terminal (script, expect, a pty library,
+tmux send-keys, herdr-bridge) can still answer, so this stops accidents,
+not a worker that sets out to merge. No
 terminal, end of input, or any other answer merges nothing and is audited
 as a refusal. No flag skips this; --dry-run asks nothing. The 3-minute cap
 on one merge includes the wait at the question, so an answer after it

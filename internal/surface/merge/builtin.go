@@ -77,6 +77,9 @@ var builtinRefusedGlobs = []string{
 	"helper/**",
 	"internal/**",
 	"cmd/**",
+	// A vendor/modules.txt that matches go.mod makes the build compile the
+	// vendored source without touching go.mod or go.sum.
+	"vendor/**",
 }
 
 // builtinRefusedBase are file names refused in any directory: the module

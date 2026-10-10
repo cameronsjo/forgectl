@@ -98,7 +98,7 @@ func TestBuiltinRefusalsTopLevel(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"scripts/check-changelog-owner.sh", "helper/x.swift", ".github/workflows/ci.yml", ".claude/settings.json",
-		"internal/cli/tasks.go", "internal/cli/execute.go", "internal/pr/remote.go", "internal/tasks/x.go", "cmd/forgectl/main.go"} {
+		"internal/cli/tasks.go", "internal/cli/execute.go", "internal/pr/remote.go", "internal/tasks/x.go", "cmd/forgectl/main.go", "vendor/modules.txt", "vendor/github.com/x/y/z.go"} {
 		if builtinRefusal(p) == "" {
 			t.Errorf("%s is not refused", p)
 		}
