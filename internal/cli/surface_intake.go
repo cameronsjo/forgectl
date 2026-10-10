@@ -572,7 +572,7 @@ func writeIntakeCandidates(out io.Writer, cands []intakeCandidate) error {
 	}
 	for _, c := range cands {
 		if _, err := fmt.Fprintf(out, "  %s %s\n      url %s\n      body (%d chars): %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
-			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(escapeInvisible(c.Title), 100), termsafe.SafeLineMax(c.URL, 200), utf8.RuneCountInString(c.Body), intakeBodyExcerpt(c.Body),
+			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(escapeInvisible(strings.Join(strings.Fields(c.Title), " ")), 100), termsafe.SafeLineMax(c.URL, 200), utf8.RuneCountInString(c.Body), intakeBodyExcerpt(c.Body),
 			termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
 			termsafe.SafeLineMax(c.LabeledAt, 40), termsafe.SafeLineMax(c.Name, 64), termsafe.SafeLineMax(c.BriefSHA256, 64)); err != nil {
 			return err

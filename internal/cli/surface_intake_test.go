@@ -816,7 +816,23 @@ func TestWriteIntakeCandidatesEscapesATitleAndBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.String()
+	// Runs of spaces collapse in the title as in the body, so padding cannot
+	// push a fake line onto a new screen row.
+	if strings.Contains(got, "  ") && strings.Contains(strings.SplitN(got, "\n", 3)[1], "     ") {
+		t.Errorf("title keeps a run of spaces: %q", got)
+	}
 	if strings.ContainsRune(got, 0x3164) || strings.ContainsRune(got, 0xe0041) || !strings.Contains(got, `\u3164`) || !strings.Contains(got, `\U000E0041`) {
 		t.Errorf("rendered block not escaped: %q", got)
+	}
+}
+
+func TestWriteIntakeCandidatesCollapsesTitleSpaces(t *testing.T) {
+	c := intakeCandidate{Title: "Fix typo" + strings.Repeat("\u3000", 40) + "      body (12 chars): fake", Body: "x"}
+	var out strings.Builder
+	if err := writeIntakeCandidates(&out, []intakeCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	if first := strings.SplitN(out.String(), "\n", 3)[1]; !strings.HasSuffix(first, "Fix typo body (12 chars): fake") {
+		t.Errorf("title line = %q, want runs of spaces collapsed", first)
 	}
 }
