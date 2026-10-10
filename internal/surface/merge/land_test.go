@@ -122,7 +122,7 @@ func TestPolicyHash(t *testing.T) {
 	changes := map[string]func(s *config.MergeSettings){
 		"mode":      func(s *config.MergeSettings) { s.Mode = "auto" },
 		"reviewers": func(s *config.MergeSettings) { s.RequiredReviewers = s.RequiredReviewers[:1] },
-		"paths":     func(s *config.MergeSettings) { s.Repos[0].Paths = []string{"docs/**"} },
+		"paths":     func(s *config.MergeSettings) { s.Repos[0].Paths = []string{"docs/adr/**"} },
 		"checks":    func(s *config.MergeSettings) { s.Repos[0].RequiredChecks = []string{"lint"} },
 		"author":    func(s *config.MergeSettings) { s.MarkerAuthorID = 1 },
 	}
