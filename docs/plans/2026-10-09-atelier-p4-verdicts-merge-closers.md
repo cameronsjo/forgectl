@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "T10.1 merged (cameronsjo/cadence-hooks#1357; release pending). T10.2 in review on cameronsjo/forgectl#1207. T10.3 (closers, prune) built on feat/p4-closers, PR not opened yet. T10.4 (merge, audit, autopilot, brief rule, mutation sweep, cameronsjo/forgectl#1208) built on feat/p4-merge, PR not opened yet. Next: the T10.4 security review and live check."
+next: "T10.1 shipped (cadence-hooks v0.125.0); T10.2 and T10.3 merged (cameronsjo/forgectl#1207, #1209; forgectl v0.39.0). T10.4 in review; then the live check: mode = manual on sjomba (operator approved 2026-10-10), one real surface merge of a docs-only worker PR, mode back to off."
 branch: plan/atelier-p4
 pr: "cameronsjo/forgectl#1207"
 updated: 2026-10-09
@@ -128,9 +128,9 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 
 ### T10.1: `cadence-hooks metrics price` (cameronsjo/cadence-hooks, one PR)
 
-- [ ] Subcommand beside `metrics grade` with the same `CADENCE_BYPASS` exemption; reuse the scan and price table.
-- [ ] Test: a finished transcript fixture matches its `sessions.jsonl` `costUsd` within $0.01; an unpriced model is listed; an unreadable file exits 1.
-- [ ] Changelog entry and release through cadence-hooks' normal path.
+- [x] Subcommand beside `metrics grade` with the same `CADENCE_BYPASS` exemption; reuse the scan and price table.
+- [x] Test: a finished transcript fixture matches its `sessions.jsonl` `costUsd` within $0.01; an unpriced model is listed; an unreadable file exits 1.
+- [x] Changelog entry and release through cadence-hooks' normal path.
 
 ### T10.2: ADR amendment, `[surface.merge]`, `surface status` (forgectl, one PR)
 
@@ -148,12 +148,12 @@ Reuses the transcript scan and `by_model_json`; prints `{costUsd, byModel, unpri
 
 ### T10.4: merge, audit, autopilot (forgectl, one PR; after T10.2)
 
-- [ ] Order: T10.3 (with the SelectPR launch binding) must merge before T10.4 or any PR that lets SelectPR drive a close or a merge (chief-of-staff, 2026-10-09).
+- [x] Order: T10.3 (with the SelectPR launch binding) must merge before T10.4 or any PR that lets SelectPR drive a close or a merge (chief-of-staff, 2026-10-09).
 - [x] `surface merge <name> [--dry-run]` and the drain's autopilot step (`mode = "auto"` only), both calling `Evaluate` on fresh reads, the pre-merge re-read, the composed message, and the post-merge check.
 - [x] `merge-audit.jsonl` and `surface audit --pr`.
 - [x] Worker brief rule: never post review markers, approve or merge.
 - [x] Mutation sweep: force each predicate true in turn; a named test goes red for each (table below, under "T10.4 mutation sweep").
-- [ ] Security review (Opus) of the gate's file set (merge package, status reads, merge path, audit, config resolution, drain autopilot, launch recording, worker brief, `.github/workflows/ci.yml` and `ship.yml`, and the live `estate-main` ruleset) before any machine sets `mode = "auto"`.
+- [x] Security review (Opus) of the gate's file set (merge package, status reads, merge path, audit, config resolution, drain autopilot, launch recording, worker brief, `.github/workflows/ci.yml` and `ship.yml`, and the live `estate-main` ruleset) before any machine sets `mode = "auto"`.
 - [ ] Live check: `mode = "manual"` on sjomba; merge one real worker PR on cameronsjo/forgectl, from the drain, whose paths are inside a narrow allowlist; confirm the squash body, the audit line, and the T10.3 closer.
 
 ## Verification

@@ -107,9 +107,11 @@ const (
 // maxGHError caps a gh error kept in an audit line or a reason.
 const maxGHError = 300
 
-// AuditOutcomeReserve is the room an attempt line leaves in the audit file
-// for its outcome line, so a merge that runs always has room to record how
-// it ended. The outcome line may use it; nothing else checks it.
+// AuditOutcomeReserve is the room, beyond a second copy of the attempt
+// line's own size, an attempt line leaves in the audit file for its outcome
+// line: the outcome carries the same checks and markers as the attempt plus
+// its reasons and result, so a merge that runs has room to record how it
+// ended. The outcome line may use it; nothing else checks it.
 const AuditOutcomeReserve = 8 << 10
 
 // ErrAuditNoRoom reports an audit file with no room for an attempt line and
@@ -300,15 +302,15 @@ var ErrAuditUnwritten = errors.New("merge: the audit store wrote no line")
 
 // record appends line to the audit file, chained onto it, and returns the
 // line's hash and whether it was written (a repeated refusal is not). An
-// attempt line needs room for itself and AuditOutcomeReserve under
-// AuditCap, or it is ErrAuditNoRoom.
+// attempt line needs room for itself, an outcome line as large again, and
+// AuditOutcomeReserve under AuditCap, or it is ErrAuditNoRoom.
 func (l Lander) record(line AuditLine) (hash string, written bool, err error) {
 	err = l.Audit(func(existing []byte) ([]byte, error) {
 		data, h, write, err := AppendAudit(existing, line)
 		if err != nil || !write {
 			return nil, err
 		}
-		if line.Result == AuditMerging && (l.AuditCap <= 0 || len(existing)+len(data)+AuditOutcomeReserve > l.AuditCap) {
+		if line.Result == AuditMerging && (l.AuditCap <= 0 || len(existing)+2*len(data)+AuditOutcomeReserve > l.AuditCap) {
 			return nil, ErrAuditNoRoom
 		}
 		hash, written = h, true

@@ -30,11 +30,12 @@ var subjectPattern = regexp.MustCompile(`^(fix|feat|docs|refactor|test|chore)(\(
 // closing #12, and a subject is the one piece of PR text a merge copies.
 var subjectIssueRef = regexp.MustCompile(`(?i)#[0-9]|\bgh-[0-9]`)
 
-// subjectIssueURL is an issue or PR link a subject may not hold, in any
-// case, with or without a scheme or "www.": GitHub may read
-// "fix: closes https://github.com/o/r/issues/12" on the default branch as
-// closing it.
-var subjectIssueURL = regexp.MustCompile(`(?i)github\.com/[^/ ]+/[^/ ]+/(issues|pulls?)/[0-9]`)
+// subjectIssueURL refuses any mention of github.com in a subject, in any
+// case: GitHub may read "fix: closes https://github.com/o/r/issues/12" on the
+// default branch as closing it, and matching every link shape (a port,
+// percent-encoding, a fragment) is a list that never finishes. A subject
+// has no reason to name github.com at all.
+var subjectIssueURL = regexp.MustCompile(`(?i)github\.com`)
 
 // subjectSkipCI is a directive a subject may not hold: on the default
 // branch it skips every push-triggered workflow for the merge commit (CI,
@@ -56,7 +57,7 @@ func Subject(title string) (string, error) {
 		return "", fmt.Errorf("%w: %q holds an issue reference (#N or GH-N), which a commit on the default branch could read as closing it", ErrSubject, title)
 	}
 	if subjectIssueURL.MatchString(title) {
-		return "", fmt.Errorf("%w: %q holds an issue or PR link, which a commit on the default branch could read as closing it", ErrSubject, title)
+		return "", fmt.Errorf("%w: %q mentions github.com, and an issue or PR link there could be read on the default branch as closing it", ErrSubject, title)
 	}
 	if subjectSkipCI.MatchString(title) {
 		return "", fmt.Errorf("%w: %q holds a CI-skip directive ([skip ci], [ci skip], [no ci], [skip actions], [actions skip] or skip-checks), which would skip the default branch's workflows for the merge commit", ErrSubject, title)

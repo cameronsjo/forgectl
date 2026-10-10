@@ -18,7 +18,6 @@ func TestSubject(t *testing.T) {
 		"test: cover the closers",
 		"chore: bump",
 		"fix: " + strings.Repeat("x", 72),
-		"docs: link the github.com docs",
 		"fix: skip the ci step when offline",
 		"docs: describe [skip] markers",
 	} {
@@ -53,10 +52,13 @@ func TestSubject(t *testing.T) {
 	// Titles that pass the shape but hold a link or a CI-skip directive
 	// refuse for that reason (T10.4 security review).
 	for _, c := range []struct{ title, want string }{
-		{"fix: closes https://github.com/cameronsjo/forgectl/issues/12", "issue or PR link"},
-		{"fix: see github.com/cameronsjo/forgectl/pull/12", "issue or PR link"},
-		{"fix: see www.github.com/o/r/pulls/3", "issue or PR link"},
-		{"fix: closes HTTP://GITHUB.COM/O/R/ISSUES/1", "issue or PR link"},
+		{"fix: closes https://github.com/cameronsjo/forgectl/issues/12", "mentions github.com"},
+		{"fix: see github.com/cameronsjo/forgectl/pull/12", "mentions github.com"},
+		{"fix: see www.github.com/o/r/pulls/3", "mentions github.com"},
+		{"fix: closes HTTP://GITHUB.COM/O/R/ISSUES/1", "mentions github.com"},
+		{"fix: closes github.com:443/o/r/issues/1", "mentions github.com"},
+		{"fix: closes github.com/o/r/issues/%31%32", "mentions github.com"},
+		{"docs: link the github.com docs", "mentions github.com"},
 		{"docs: fix typo [skip ci]", "CI-skip directive"},
 		{"docs: fix typo [ci skip]", "CI-skip directive"},
 		{"docs: fix typo [no ci]", "CI-skip directive"},
