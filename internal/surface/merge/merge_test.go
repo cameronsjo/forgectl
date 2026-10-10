@@ -23,6 +23,10 @@ import (
 // keeps only status and the file list, and each tree keeps only the changed
 // files' entries. discover_synthetic_fork.json is the #1204 discovery with
 // three PRs added on the same head name that the filter must drop.
+// Every review node in the PR fixtures gained "lastEditedAt": null and an
+// empty inline "comments" connection by hand, after the query grew them; a
+// read-only live check on 2026-10-09 showed lastEditedAt null on every #1203
+// review and no inline comments.
 
 const (
 	head1204   = "3afe70e8bff88488d3aebd691ffb943829bf676c"
@@ -53,7 +57,7 @@ func goodSettings() config.MergeSettings {
 		Repos: []config.MergeRepo{{
 			Name: "cameronsjo/forgectl", Workflow: ".github/workflows/ci.yml",
 			RequiredChecks: []string{"build-test", "lint", "macos-test"},
-			Paths:          []string{"internal/tasks/**", "docs/**"},
+			Paths:          []string{"docs/**"},
 		}},
 	}
 }
@@ -80,8 +84,8 @@ func passingFacts(t *testing.T) Facts {
 		markerReview("cadence-forge-security-reviewer", head1204, 0, 0, "2026-10-09T17:00:00Z"),
 		markerReview("polish", head1204, 0, 0, "2026-10-09T17:00:01Z"))
 	files := []File{
-		{Path: "internal/tasks/upgrade.go", Status: "modified", BaseMode: "100644", HeadMode: "100644"},
-		{Path: "internal/tasks/upgrade_test.go", Status: "modified", BaseMode: "100644", HeadMode: "100644"},
+		{Path: "docs/tasks/upgrade.md", Status: "modified", BaseMode: "100644", HeadMode: "100644"},
+		{Path: "docs/tasks/notes.md", Status: "modified", BaseMode: "100644", HeadMode: "100644"},
 		{Path: "docs/upgrade.md", Status: "added", HeadMode: "100644"},
 		{Path: "docs/new.md", PreviousPath: "docs/old.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"},
 	}
@@ -433,30 +437,27 @@ func TestEvaluatePaths(t *testing.T) {
 		files []File
 		want  string
 	}{
-		"outside the allowlist":        {[]File{file("internal/tasks2/x.go", "modified")}, `"internal/tasks2/x.go" matches none of [surface.merge.paths]`},
+		"outside the allowlist":        {[]File{file("notes/x.md", "modified")}, `"notes/x.md" matches none of [surface.merge.paths]`},
 		"allowlist is case-sensitive":  {[]File{file("Docs/x.md", "modified")}, "matches none"},
 		"built-in: .github":            {[]File{file(".github/workflows/ci.yml", "modified")}, "built-in refused set (.github/**)"},
 		"built-in: .github any case":   {[]File{file(".GitHub/workflows/ci.yml", "modified")}, "built-in refused set (.github/**)"},
 		"built-in: .claude":            {[]File{file(".claude/settings.json", "added")}, "(.claude/**)"},
 		"built-in: coderabbit config":  {[]File{file(".coderabbit.yaml", "modified")}, "top-level files"},
-		"built-in: the gate":           {[]File{file("internal/surface/merge/merge.go", "modified")}, "(internal/surface/**)"},
-		"built-in: surface cli":        {[]File{file("internal/cli/surface_status.go", "modified")}, "(internal/cli/**)"},
-		"built-in: config":             {[]File{file("internal/config/surface_merge.go", "modified")}, "(internal/config/**)"},
-		"built-in: launch":             {[]File{file("internal/launch/x.go", "modified")}, "(internal/launch/**)"},
-		"built-in: gitenv":             {[]File{file("internal/gitenv/x.go", "modified")}, "(internal/gitenv/**)"},
-		"built-in: exec":               {[]File{file("internal/exec/x.go", "modified")}, "(internal/exec/**)"},
-		"built-in: githubauth":         {[]File{file("internal/githubauth/runner.go", "modified")}, "(internal/githubauth/**)"},
-		"built-in: bless":              {[]File{file("internal/bless/bless.go", "modified")}, "(internal/bless/**)"},
-		"built-in: selfupdate":         {[]File{file("internal/selfupdate/selfupdate.go", "modified")}, "(internal/selfupdate/**)"},
+		"built-in: the gate":           {[]File{file("internal/surface/merge/merge.go", "modified")}, "(internal/**)"},
+		"built-in: surface cli":        {[]File{file("internal/cli/surface_status.go", "modified")}, "(internal/**)"},
+		"built-in: githubauth":         {[]File{file("internal/githubauth/runner.go", "modified")}, "(internal/**)"},
+		"built-in: any Go package":     {[]File{file("internal/tasks/upgrade.go", "modified")}, "(internal/**)"},
+		"built-in: a new Go package":   {[]File{file("internal/newpkg/x.go", "added")}, "(internal/**)"},
+		"built-in: cmd":                {[]File{file("cmd/tool/main.go", "added")}, "(cmd/**)"},
 		"built-in: go.mod at the root": {[]File{file("go.mod", "modified")}, "top-level files"},
 		"built-in: go.sum nested":      {[]File{file("docs/x/go.sum", "added")}, "module files"},
 		"built-in: go.work":            {[]File{file("docs/go.work", "added")}, "module files"},
 		"built-in: Cargo.toml nested":  {[]File{file("docs/x/Cargo.toml", "added")}, "build and toolchain files"},
 		"built-in: .cargo nested":      {[]File{file("docs/.cargo/config.toml", "added")}, "a .cargo directory"},
 		"renamed out of the gate":      {[]File{{Path: "docs/x.go", PreviousPath: "internal/surface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/surface/x.go" is refused`},
-		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "internal/tasks2/README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"internal/tasks2/README.md" matches none`},
-		"removed test file":            {[]File{file("internal/tasks/x_test.go", "removed")}, "removes a test file"},
-		"test renamed away":            {[]File{{Path: "internal/tasks/x.go", PreviousPath: "internal/tasks/x_test.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, "removes a test file"},
+		"renamed out of the allowlist": {[]File{{Path: "docs/x.md", PreviousPath: "notes/README.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, `"notes/README.md" matches none`},
+		"removed test file":            {[]File{file("docs/x_test.go", "removed")}, "removes a test file"},
+		"test renamed away":            {[]File{{Path: "docs/x.go", PreviousPath: "docs/x_test.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}}, "removes a test file"},
 		"status copied":                {[]File{file("docs/a.md", "copied")}, `status "copied"`},
 		"status changed":               {[]File{file("docs/a.md", "changed")}, `status "changed"`},
 		"executable":                   {[]File{{Path: "docs/a.sh", Status: "added", HeadMode: "100755"}}, "added with mode 100755"},
@@ -481,17 +482,16 @@ func TestEvaluatePaths(t *testing.T) {
 		})
 	}
 	// I1 (T10.2 security review): U+017F long s folds onto 's' on a
-	// case-folding checkout, so internal/ſurface/x.go would land on
-	// internal/surface/x.go while matching no built-in refusal. A config
-	// glob wide enough to reach it (internal/**) must still refuse it.
+	// case-folding checkout, so a path spelled with it would land on another
+	// file while matching no refusal meant for that file. A config glob wide
+	// enough to reach it (docs/**) must still refuse it.
 	t.Run("a non-ASCII path is refused, under both names of a rename", func(t *testing.T) {
 		s := goodSettings()
-		s.Repos[0].Paths = []string{"internal/**", "docs/**"}
 		for name, files := range map[string][]File{
-			"modified":      {file("internal/ſurface/x.go", "modified")},
-			"renamed to":    {{Path: "internal/ſurface/x.go", PreviousPath: "docs/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
-			"renamed from":  {{Path: "docs/x.go", PreviousPath: "internal/ſurface/x.go", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
-			"invalid UTF-8": {file("internal/\xffsurface/x.go", "modified")},
+			"modified":      {file("docs/ſurface/x.md", "modified")},
+			"renamed to":    {{Path: "docs/ſurface/x.md", PreviousPath: "docs/x.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
+			"renamed from":  {{Path: "docs/x.md", PreviousPath: "docs/ſurface/x.md", Status: "renamed", BaseMode: "100644", HeadMode: "100644"}},
+			"invalid UTF-8": {file("docs/\xffsurface/x.md", "modified")},
 		} {
 			t.Run(name, func(t *testing.T) {
 				f := passingFacts(t)
@@ -506,7 +506,7 @@ func TestEvaluatePaths(t *testing.T) {
 		}
 		// Control: the same glob passes the ASCII path it is meant for.
 		f := passingFacts(t)
-		f.Files, f.PR.ChangedFiles = []File{file("internal/tasks/x.go", "modified")}, 1
+		f.Files, f.PR.ChangedFiles = []File{file("docs/surface/x.md", "modified")}, 1
 		if v := Evaluate(f, Policy{Settings: s}); v.Result != Pass {
 			t.Fatalf("control: %s %q", v.Result, v.Reasons)
 		}
@@ -720,7 +720,7 @@ func TestEvaluateOpenFindingsFailClosed(t *testing.T) {
 		"a mention past the first line, any case": {late(body("Looks fine.\n\nCADENCE-REVIEW: polish crit=1")),
 			`its first line "Looks fine." is not an exact marker`},
 		"a second marker in a passing review": {late(body(good + "\n<!-- cadence-review: polish head=" + head1204 + " crit=1 imp=0 -->")),
-			"it mentions cadence-review: 2 times, expected one marker"},
+			"it mentions cadence-review 2 times, expected one marker"},
 	}
 	for name, c := range reviews {
 		t.Run(name, func(t *testing.T) {
@@ -823,8 +823,8 @@ func TestDecodePRCommentFields(t *testing.T) {
 	if err != nil || len(r.Comments) != 1 || r.Comments[0].URL != "https://example.test/c/1" || r.Comments[0].CreatedAt != "2026-10-09T18:00:00Z" {
 		t.Fatalf("comments %+v, %v", r.Comments, err)
 	}
-	if !strings.Contains(PRQuery, "body url createdAt }") {
-		t.Fatal("PRQuery does not ask for the comment's url and createdAt")
+	if !strings.Contains(PRQuery, "body url createdAt lastEditedAt }") {
+		t.Fatal("PRQuery does not ask for the comment's url, createdAt and lastEditedAt")
 	}
 }
 

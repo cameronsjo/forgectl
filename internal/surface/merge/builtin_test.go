@@ -1,13 +1,11 @@
 package merge
 
 import (
-	"go/parser"
-	"go/token"
+	"maps"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,94 +26,65 @@ func moduleRoot(t *testing.T) string {
 	return filepath.Dir(gomod)
 }
 
-// mergePathRoots are the packages the merge path starts from: this package,
-// and every module package imported by internal/cli's surface*.go files and
-// execute.go (the surface commands, the drain, and the runner every gate
-// read goes through), parsed whatever their build tags. internal/cli itself
-// is refused whole (internal/cli/**) but not followed as a root: the
-// package links every command, so its closure is the whole module.
-func mergePathRoots(t *testing.T, root string) []string {
-	t.Helper()
-	files, err := filepath.Glob(filepath.Join(root, "internal", "cli", "surface*.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	files = append(files, filepath.Join(root, "internal", "cli", "execute.go"))
-	roots := []string{modulePath + "/internal/surface/merge"}
-	parsed := 0
-	for _, file := range files {
-		if strings.HasSuffix(file, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
-		parsed++
-		for _, imp := range f.Imports {
-			p, err := strconv.Unquote(imp.Path.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.HasPrefix(p, modulePath+"/") && !slices.Contains(roots, p) {
-				roots = append(roots, p)
-			}
-		}
-	}
-	// Self-guard: the glob must still find the surface commands, or the
-	// closure below is a closure of almost nothing.
-	if parsed < 5 || !slices.Contains(roots, modulePath+"/internal/surface/worker") {
-		t.Fatalf("parsed %d merge-path files with roots %q; expected the surface commands", parsed, roots)
-	}
-	return roots
-}
-
-// TestBuiltinRefusalsCoverTheGateClosure derives the module packages the
-// merge path compiles in, for each target OS, and checks a file in each one
-// is a built-in refusal. A new dependency of the gate fails here until
-// builtinRefusedGlobs lists it (T10.2 security review I2).
-func TestBuiltinRefusalsCoverTheGateClosure(t *testing.T) {
+// TestBuiltinRefusalsCoverTheBinary derives every module package the binary
+// compiles in (`go list -deps .`, the main package's closure), for each
+// target OS, and checks a file in each one is a built-in refusal: no Go
+// package the nightly release ships is merged by the drain (T10.2 security
+// review I2, T10.4 security review I1, independent review I2 of
+// cameronsjo/forgectl#1212).
+func TestBuiltinRefusalsCoverTheBinary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs go list")
 	}
 	root := moduleRoot(t)
-	roots := mergePathRoots(t, root)
 	seen := map[string]bool{}
 	for _, goos := range []string{"darwin", "linux", "windows"} {
-		args := append([]string{"list", "-deps", "-f", "{{.ImportPath}}"}, roots...)
-		cmd := osexec.CommandContext(t.Context(), "go", args...) //nolint:gosec // G204: go with package paths parsed from this module's own files
+		cmd := osexec.CommandContext(t.Context(), "go", "list", "-deps", "-f", "{{.ImportPath}}", ".") //nolint:gosec // G204: a literal go list call
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "GOOS="+goos)
 		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("GOOS=%s go list -deps: %v", goos, err)
+			t.Fatalf("GOOS=%s go list -deps .: %v", goos, err)
 		}
 		for _, pkg := range strings.Fields(string(out)) {
-			if strings.HasPrefix(pkg, modulePath+"/internal/") {
+			if pkg == modulePath || strings.HasPrefix(pkg, modulePath+"/") {
 				seen[pkg] = true
 			}
 		}
 	}
-	for _, want := range []string{"internal/surface/merge", "internal/githubauth", "internal/exec", "internal/termsafe", "internal/privdir"} {
-		if !seen[modulePath+"/"+want] {
-			t.Fatalf("the closure lacks %s; the derivation is broken", want)
+	// Self-guard: the closure must hold the binary's main package and the
+	// gates, or the derivation is broken.
+	for _, want := range []string{"", "/internal/cli", "/internal/surface/merge", "/internal/githubauth", "/internal/bless", "/internal/workflow",
+		"/internal/digest", "/internal/skill", "/internal/selfupdate", "/internal/tasks"} {
+		if !seen[modulePath+want] {
+			t.Fatalf("the closure lacks %s%s; the derivation is broken", modulePath, want)
 		}
 	}
-	pkgs := make([]string, 0, len(seen))
-	for p := range seen {
-		pkgs = append(pkgs, p)
-	}
-	slices.Sort(pkgs)
+	pkgs := slices.Sorted(maps.Keys(seen))
 	for _, pkg := range pkgs {
-		file := strings.TrimPrefix(pkg, modulePath+"/") + "/x.go"
+		file := "x.go"
+		if pkg != modulePath {
+			file = strings.TrimPrefix(pkg, modulePath+"/") + "/x.go"
+		}
 		if builtinRefusal(file) == "" {
-			t.Errorf("%s is in the merge path's closure, but %s is not a built-in refusal: add its directory to builtinRefusedGlobs", pkg, file)
+			t.Errorf("%s is compiled into the binary, but %s is not a built-in refusal: add its directory to builtinRefusedGlobs", pkg, file)
 		}
 	}
 	if t.Failed() {
 		return
 	}
-	t.Logf("%d module packages in the merge path's closure, all refused", len(pkgs))
+	t.Logf("%d module packages in the binary's closure, all refused", len(pkgs))
+}
+
+// TestBuiltinRefusalsShippedSkill pins that the agent skill the binary
+// embeds and installs is refused, not only its Go package.
+func TestBuiltinRefusalsShippedSkill(t *testing.T) {
+	for _, p := range []string{"internal/skill/skill/SKILL.md", "internal/skill/skill/references/x.md", "internal/skill/skill.go",
+		"internal/digest/digest.go", "internal/workflow/exec.go"} {
+		if builtinRefusal(p) == "" {
+			t.Errorf("%s is not refused", p)
+		}
+	}
 }
 
 // TestBuiltinRefusalsTopLevel pins that no file at the repository root is
@@ -129,7 +98,7 @@ func TestBuiltinRefusalsTopLevel(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"scripts/check-changelog-owner.sh", "helper/x.swift", ".github/workflows/ci.yml", ".claude/settings.json",
-		"internal/cli/tasks.go", "internal/cli/execute.go", "internal/pr/remote.go"} {
+		"internal/cli/tasks.go", "internal/cli/execute.go", "internal/pr/remote.go", "internal/tasks/x.go", "cmd/forgectl/main.go", "vendor/modules.txt", "vendor/github.com/x/y/z.go"} {
 		if builtinRefusal(p) == "" {
 			t.Errorf("%s is not refused", p)
 		}
@@ -140,7 +109,7 @@ func TestBuiltinRefusalsTopLevel(t *testing.T) {
 			t.Errorf("nested agent or CI file %s is not refused", p)
 		}
 	}
-	for _, p := range []string{"internal/tasks/x.go", "docs/x.md"} {
+	for _, p := range []string{"docs/x.md", "docs/sub/x.go"} {
 		if why := builtinRefusal(p); why != "" {
 			t.Errorf("%s refused: %s", p, why)
 		}
@@ -156,13 +125,13 @@ func TestBuiltinRefusalsBuildFiles(t *testing.T) {
 		".npmrc", ".yarnrc", ".yarnrc.yml", "requirements.txt", "requirements-dev.txt", "Requirements_Test.TXT",
 		"pyproject.toml", "uv.lock", "poetry.lock", "Pipfile", "Pipfile.lock", "Gemfile", "Gemfile.lock",
 		".tool-versions", ".mise.toml", "mise.toml", "flake.nix", "flake.lock", "Dockerfile", "Makefile", "cargo.TOML"} {
-		for _, dir := range []string{"docs/", "internal/tasks/sub/"} {
+		for _, dir := range []string{"docs/", "internal/tasks/sub/", "docs/a/b/"} {
 			if why := builtinRefusal(dir + base); !strings.Contains(why, "build and toolchain files") {
 				t.Errorf("%s%s: %q, want the build-file refusal", dir, base, why)
 			}
 		}
 	}
-	for _, p := range []string{"docs/.cargo/config.toml", "internal/tasks/a/.cargo/x", "docs/.CARGO/config"} {
+	for _, p := range []string{"docs/.cargo/config.toml", "docs/a/.cargo/x", "docs/.CARGO/config"} {
 		if why := builtinRefusal(p); !strings.Contains(why, "a .cargo directory is refused at any depth") {
 			t.Errorf("%s: %q, want the .cargo refusal", p, why)
 		}
@@ -170,7 +139,7 @@ func TestBuiltinRefusalsBuildFiles(t *testing.T) {
 	if why := builtinRefusal("docs/x/go.mod"); !strings.Contains(why, "module files (go.mod") {
 		t.Errorf("docs/x/go.mod: %q, want the Go module-file reason unchanged", why)
 	}
-	for _, p := range []string{"docs/requirements.md", "docs/makefile-notes.md", "docs/cargo.md", "internal/tasks/build.go"} {
+	for _, p := range []string{"docs/requirements.md", "docs/makefile-notes.md", "docs/cargo.md", "docs/build.go"} {
 		if why := builtinRefusal(p); why != "" {
 			t.Errorf("%s refused: %s", p, why)
 		}

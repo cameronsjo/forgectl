@@ -141,7 +141,7 @@ func (r Reader) Read(ctx context.Context, row Row) (Snapshot, error) {
 	}
 	head, base := pr.PR.HeadRefOid, pr.PR.BaseRefOid
 	f := &snap.Facts
-	f.PR, f.Reviews, f.Comments = pr.PR, pr.Reviews, pr.Comments
+	f.PR, f.Reviews, f.Comments, f.ReviewComments = pr.PR, pr.Reviews, pr.Comments, pr.ReviewComments
 	data, err = r.graphQL(ctx, ChecksQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number, "-f", "head="+head)
 	if err != nil {
 		return Snapshot{}, err
@@ -198,6 +198,89 @@ func (r Reader) Discover(ctx context.Context, row Row) (Candidate, error) {
 		return Candidate{}, fmt.Errorf("%w: %s is id %d on GitHub, the row recorded %d", ErrRepoChanged, row.GitHubRepo, disc.Repository.DatabaseID, row.GitHubRepoID)
 	}
 	return SelectPR(disc, row.Branch, row.StartedAt)
+}
+
+// Recheck reads the PR again by number with PRQuery, and the check runs at
+// the verdict's head with ChecksQuery, just before a merge, and returns what
+// changed since f was read: Moved, a head or base the checks query names
+// differently, and ChecksMoved for the required checks named in checks. The
+// merge aborts on any change.
+func (r Reader) Recheck(ctx context.Context, f Facts, checks []string) ([]string, error) {
+	owner, name, err := SplitNameWithOwner(f.Row.GitHubRepo)
+	if err != nil {
+		return nil, ErrNoRecordedRepo
+	}
+	number := strconv.Itoa(f.PR.Number)
+	data, err := r.graphQL(ctx, PRQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number)
+	if err != nil {
+		return nil, err
+	}
+	pr, err := DecodePR(data)
+	if err != nil {
+		return nil, decodeErr(err)
+	}
+	why := Moved(f, pr)
+	data, err = r.graphQL(ctx, ChecksQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+number, "-f", "head="+f.PR.HeadRefOid)
+	if err != nil {
+		return nil, err
+	}
+	read, err := DecodeChecks(data, f.PR.HeadRefOid)
+	if err != nil {
+		return nil, decodeErr(err)
+	}
+	if read.HeadRefOid != f.PR.HeadRefOid || read.BaseRefOid != f.PR.BaseRefOid {
+		why = append(why, fmt.Sprintf("the checks read names head %s and base %s, the verdict had %s and %s",
+			short(read.HeadRefOid), short(read.BaseRefOid), short(f.PR.HeadRefOid), short(f.PR.BaseRefOid)))
+	}
+	return append(why, ChecksMoved(f.Checks, read.Runs, checks)...), nil
+}
+
+// Landing is what a merge left: whether GitHub says the PR merged, at which
+// head, its merge commit and that commit's message, and whether the commit
+// is on the default branch (compare(mergeCommit...defaultHead) is ahead or
+// identical).
+type Landing struct {
+	State        string
+	Merged       bool
+	HeadRefOid   string
+	MergeCommit  string
+	MergeMessage string
+	// DefaultBranch and DefaultHead are the default branch and its head.
+	DefaultBranch string
+	DefaultHead   string
+	// Ancestry is the compare's status, "" when it was not run.
+	Ancestry  string
+	OnDefault bool
+}
+
+// Landed reads what a merge of f's PR left (LandedQuery), and when GitHub
+// names a merge commit, whether the default branch's head descends from it.
+func (r Reader) Landed(ctx context.Context, f Facts) (Landing, error) {
+	owner, name, err := SplitNameWithOwner(f.Row.GitHubRepo)
+	if err != nil {
+		return Landing{}, ErrNoRecordedRepo
+	}
+	data, err := r.graphQL(ctx, LandedQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+strconv.Itoa(f.PR.Number))
+	if err != nil {
+		return Landing{}, err
+	}
+	l, err := DecodeLanded(data)
+	if err != nil {
+		return Landing{}, decodeErr(err)
+	}
+	if l.Repository.DatabaseID != f.Repository.DatabaseID || l.Number != f.PR.Number {
+		return Landing{}, fmt.Errorf("%w: the landing read names repository %d PR #%d, expected %d #%d", ErrRead, l.Repository.DatabaseID, l.Number, f.Repository.DatabaseID, f.PR.Number)
+	}
+	out := Landing{State: l.State, Merged: l.Merged, HeadRefOid: l.HeadRefOid, MergeCommit: l.MergeCommit, MergeMessage: l.MergeMessage,
+		DefaultBranch: l.Repository.DefaultBranch, DefaultHead: l.DefaultHead}
+	if !l.Merged || !isSHA(l.MergeCommit) || !isSHA(l.DefaultHead) {
+		return out, nil
+	}
+	if out.Ancestry, err = r.compareStatus(ctx, owner, name, l.MergeCommit, l.DefaultHead); err != nil {
+		return Landing{}, err
+	}
+	out.OnDefault = out.Ancestry == CompareAhead || out.Ancestry == CompareIdentical
+	return out, nil
 }
 
 // compareStatus is compare(from...to).status. A compare GitHub answers

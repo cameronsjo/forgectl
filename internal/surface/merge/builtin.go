@@ -60,12 +60,12 @@ func refusedRepoFor(name string, id int64) (refusedRepo, bool) {
 
 // builtinRefusedGlobs are paths no drain merge may touch, beside every
 // top-level file (builtinRefusal): CI, agent and release inputs (.github,
-// .claude, scripts, the shipped helper), and every package compiled into
-// the merge path: the merge policy and status reads, the whole CLI package,
-// config resolution, launch, git and process plumbing, the host-pinned gh
-// runner, the bless and signing helpers, self-update, and every package
-// those import. TestBuiltinRefusalsCoverTheGateClosure derives that closure
-// from `go list -deps` and fails when a new dependency is not listed here.
+// .claude, scripts, the shipped helper), and the whole Go tree, internal/**
+// and cmd/**. Every Go package of the module is compiled into the binary the
+// nightly release ships, the merge path, the bless ceremony, self-update and
+// the shipped agent skill included, so none is merged by the drain; the
+// per-repository allowlist cannot reach one. TestBuiltinRefusalsCoverTheBinary
+// checks every package in the binary's `go list -deps` closure is refused.
 //
 // They are matched case-insensitively. A changed path is printable ASCII
 // (config.CheckChangedPath), so ASCII case folding is all a case-folding
@@ -75,39 +75,11 @@ var builtinRefusedGlobs = []string{
 	".claude/**",
 	"scripts/**",
 	"helper/**",
-	"internal/bless/**",
-	"internal/cli/**",
-	"internal/config/**",
-	"internal/desk/**",
-	"internal/exec/**",
-	"internal/forgive/**",
-	"internal/ghfail/**",
-	"internal/ghostty/**",
-	"internal/gitenv/**",
-	"internal/githubauth/**",
-	"internal/herdr/**",
-	"internal/keymap/**",
-	"internal/launch/**",
-	"internal/meta/**",
-	"internal/module/**",
-	"internal/notify/**",
-	"internal/pr/**",
-	"internal/privdir/**",
-	"internal/procstart/**",
-	"internal/projects/**",
-	"internal/quarantine/**",
-	"internal/redact/**",
-	"internal/resume/**",
-	"internal/runview/**",
-	"internal/sandbox/**",
-	"internal/selfupdate/**",
-	"internal/step/**",
-	"internal/surface/**",
-	"internal/termsafe/**",
-	"internal/theme/**",
-	"internal/tmux/**",
-	"internal/tomlerr/**",
-	"internal/tui/**",
+	"internal/**",
+	"cmd/**",
+	// A vendor/modules.txt that matches go.mod makes the build compile the
+	// vendored source without touching go.mod or go.sum.
+	"vendor/**",
 }
 
 // builtinRefusedBase are file names refused in any directory: the module

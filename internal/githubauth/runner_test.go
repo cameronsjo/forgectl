@@ -605,3 +605,38 @@ func TestTokenScrubRuleIsSharedWithTheReviewWindow(t *testing.T) {
 		t.Errorf("GHTokenVarsToScrub(non-default) = %v, want %v", got, tokenEnvVars)
 	}
 }
+
+// TestRunner_InDirPinsGhAndKeepsTheDirectory: the chosen-directory path
+// carries the same pin, beats a caller's GH_HOST, and passes the directory
+// through; a base that cannot run in a directory is refused, never run in
+// the caller's own directory instead.
+func TestRunner_InDirPinsGhAndKeepsTheDirectory(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{}
+	dir := t.TempDir()
+	r, ok := Runner(fake, DefaultHost).(exec.DirRunner)
+	if !ok {
+		t.Fatal("the pinned runner does not implement exec.DirRunner")
+	}
+	if _, err := r.RunWithEnvFilteredInDir(t.Context(), dir, map[string]string{"GH_HOST": "evil.example"}, nil, "gh", "pr", "merge", "1"); err != nil {
+		t.Fatalf("RunWithEnvFilteredInDir: %v", err)
+	}
+	last := fake.Last()
+	if last.Env["GH_HOST"] != DefaultHost || last.Dir != dir {
+		t.Fatalf("GH_HOST %q dir %q; want %q in %q", last.Env["GH_HOST"], last.Dir, DefaultHost, dir)
+	}
+	if _, err := r.RunWithEnvFilteredInDir(t.Context(), "relative", nil, nil, "gh", "pr", "merge", "1"); !errors.Is(err, exec.ErrRelativeDir) {
+		t.Fatalf("a relative directory: %v, want ErrRelativeDir", err)
+	}
+	noDir, ok := Runner(&hookFake{}, DefaultHost).(exec.DirRunner)
+	if !ok {
+		t.Fatal("the pinned runner does not implement exec.DirRunner")
+	}
+	if _, err := noDir.RunWithEnvFilteredInDir(t.Context(), dir, nil, nil, "gh", "pr", "merge", "1"); !errors.Is(err, ErrUnpinnableGhPath) {
+		t.Fatalf("a base with no directory path: %v, want ErrUnpinnableGhPath", err)
+	}
+	bad, _ := Runner(fake, "bad host!").(exec.DirRunner)
+	if _, err := bad.RunWithEnvFilteredInDir(t.Context(), dir, nil, nil, "gh", "pr", "merge", "1"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("an invalid host: %v, want ErrUnpinnableHost", err)
+	}
+}

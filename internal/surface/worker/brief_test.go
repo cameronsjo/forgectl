@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -165,5 +166,35 @@ func TestFindReportCapsLength(t *testing.T) {
 	got, ok := FindReport(screen, testMarker)
 	if !ok || len([]rune(got)) != maxReportRunes {
 		t.Fatalf("report length %d, ok %v; want %d", len([]rune(got)), ok, maxReportRunes)
+	}
+}
+
+// TestComposeLaunchCarriesTheWorkerRules pins forgectl's rule in every launch
+// brief: never post a review marker, approve, or merge. It sits between the
+// task and the report instruction, and holds no "cadence-review:" with a
+// colon, so a worker echoing it posts nothing the merge policy reads as a
+// marker.
+func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
+	got := Compose("Fix the login bug.", testMarker, ViaLaunch)
+	for _, want := range []string{"never post a cadence-review marker", "never approve a pull request", "never merge one"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("launch brief lacks %q:\n%s", want, got)
+		}
+	}
+	task, rest, _ := strings.Cut(got, "\n\n")
+	rules, instruction, _ := strings.Cut(rest, "\n\n")
+	if task != "Fix the login bug." || rules != WorkerRules || !strings.HasPrefix(instruction, "When you finish") {
+		t.Fatalf("launch brief shape:\n%s", got)
+	}
+	if regexp.MustCompile(`(?i)review\s*:`).MatchString(WorkerRules) {
+		t.Fatalf("the rule holds a marker-shaped mention: %q", WorkerRules)
+	}
+	if err := CheckBrief(got, ViaLaunch); err != nil {
+		t.Fatalf("the composed launch brief fails its own check: %v", err)
+	}
+	// A typed follow-up goes to a worker given the rules at launch, and must
+	// fit MaxTypedBrief: it carries the report instruction only.
+	if typed := Compose("Run the tests.", testMarker, ViaTyped); strings.Contains(typed, WorkerRules) {
+		t.Fatalf("typed brief carries the rules: %q", typed)
 	}
 }

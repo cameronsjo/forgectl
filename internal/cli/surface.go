@@ -76,9 +76,12 @@ events and stop inspect and end it:
   forgectl surface drain status
 
 status shows a worker's PR and what the merge policy ([surface.merge])
-decides about it; merge-machine prints this machine's policy value:
+decides about it; merge merges it when the policy passes, and audit prints
+its merge-audit lines; merge-machine prints this machine's policy value:
 
   forgectl surface status fix-login --json
+  forgectl surface merge fix-login --dry-run
+  forgectl surface audit --pr cameronsjo/forgectl#1204
   forgectl surface merge-machine
 
 prune removes old closed, failed and expired queue rows and closed ledger
@@ -100,6 +103,8 @@ rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
 	cmd.AddCommand(newSurfaceStatusCmd(deps))
+	cmd.AddCommand(newSurfaceMergeCmd(deps))
+	cmd.AddCommand(newSurfaceAuditCmd(deps))
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	cmd.AddCommand(newSurfacePruneCmd(deps))
 	return cmd

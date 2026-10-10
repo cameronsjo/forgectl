@@ -10,11 +10,16 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// Inside a drain worker, surface enqueue and surface launch refuse before
-// doing anything, as intake does: a worker must not start another worker by
-// accident (security review of cameronsjo/forgectl#1203).
+// Inside a drain worker, surface enqueue, surface launch, surface merge
+// and the drain's start, stop and process refuse before doing anything, as intake does: a worker must not start
+// another worker, or merge a PR, by accident (security review of
+// cameronsjo/forgectl#1203; independent review of cameronsjo/forgectl#1212).
 func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 	t.Setenv(launch.DrainWorkerEnv, "1")
+	// A scratch state dir: if a refusal were ever missing, the command must
+	// not reach the operator's real queue or drain (drain stop would signal
+	// a live drain).
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cmd := &cobra.Command{}
 	for name, run := range map[string]func() error{
 		"surface enqueue": func() error {
@@ -22,6 +27,21 @@ func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 		},
 		"surface launch": func() error {
 			return runSurfaceLaunch(cmd, module.Deps{}, surfaceLaunchOptions{Backend: "herdr"})
+		},
+		"surface merge": func() error {
+			return runSurfaceMerge(newSurfaceMergeCmd(module.Deps{}), mergeDeps{}, mergeOptions{Name: "x"})
+		},
+		// The kill switch: a worker must not restart a drain the operator
+		// stopped (independent review of cameronsjo/forgectl#1212).
+		"surface drain start": func() error {
+			return runSurfaceDrainStart(cmd, module.Deps{}, false)
+		},
+		"surface drain stop": func() error {
+			return runSurfaceDrainStop(cmd, false)
+		},
+		"surface _drain": func() error {
+			c := newSurfaceDrainProcessCmd(module.Deps{})
+			return c.RunE(c, nil)
 		},
 	} {
 		err := run()

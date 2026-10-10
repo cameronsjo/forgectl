@@ -99,6 +99,11 @@ type drainIO struct {
 	// prune.
 	pruneDay    func() (string, error)
 	setPruneDay func(day string) error
+	// mergeSettings resolves [surface.merge] from the config file, fresh;
+	// the autopilot runs only while it says auto.
+	mergeSettings func() config.MergeSettings
+	// land is the merge path `surface merge` uses (merge.Lander.Land).
+	land landFunc
 }
 
 // drainProber reads one live worker's pane.
@@ -133,12 +138,30 @@ type drainer struct {
 	// was read from drain-prune-day.
 	pruneDay     string
 	pruneDayRead bool
+	// autopilotTried is when each reported row's merge was last tried, so a
+	// row is tried at most every drain.AutopilotEvery; autopilotNote is the
+	// last refusal recorded for each row (head and reasons), so a repeated
+	// refusal is one event. A restart forgets both.
+	autopilotTried map[string]time.Time
+	autopilotNote  map[string]string
+	// autopilotMerged holds the rows (autopilotKey) the autopilot merged, or
+	// whose merge may have happened (merged-unconfirmed, merged-elsewhere,
+	// merge-unknown), skipped while they stay reported, so such a row is not
+	// tried again before the closers settle it: a merge-queue PR, say, would
+	// otherwise add an attempt and an outcome line to the audit file every
+	// drain.AutopilotEvery. A restart forgets it; a fresh attempt then
+	// refuses on the PR's state.
+	autopilotMerged map[string]bool
 }
+
+// autopilotKey names one launch of a row: its name and launch_id.
+func autopilotKey(q worker.QueueRow) string { return q.Name + "\x00" + q.LaunchID }
 
 func newDrainer(io drainIO, session string, stopping func() bool) *drainer {
 	return &drainer{io: io, session: session, pauses: drain.Pauses{}, memo: map[string]drain.Memo{},
 		settings: config.DefaultDrainSettings(), stopping: stopping,
-		closerRead: map[string]time.Time{}, closerNote: map[string]string{}, closerReadFail: map[string]string{}}
+		closerRead: map[string]time.Time{}, closerNote: map[string]string{}, closerReadFail: map[string]string{},
+		autopilotTried: map[string]time.Time{}, autopilotNote: map[string]string{}, autopilotMerged: map[string]bool{}}
 }
 
 // announce records what the drain starts without: one note when claude-slots
@@ -285,8 +308,8 @@ func nonEmptyState(s, fallback worker.QueueState) worker.QueueState {
 }
 
 // tick runs one pass: reload the config, settle claimed rows a dead launch
-// left, watch live workers, run the closers on reported rows, expire, claim
-// and launch, and once a UTC day prune. It returns the rows as last read,
+// left, watch live workers, run the closers on reported rows, with mode auto
+// try one merge, expire, claim and launch, and once a UTC day prune. It returns the rows as last read,
 // for drain.json.
 func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	d.lastErr = ""
@@ -315,6 +338,10 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 		return rows
 	}
 	d.closers(ctx, rows, ledgers)
+	if d.stopping() {
+		return rows
+	}
+	d.autopilot(ctx)
 	if d.stopping() {
 		return rows
 	}
@@ -687,6 +714,104 @@ func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Ro
 		d.closerEvent(d.closerNote, q, drain.EventNote, "close: "+res.Note)
 	}
 	d.apply(q, drain.Change{Name: q.Name, From: q.State, To: worker.QueueClosed, Error: why, CostUSD: cost})
+}
+
+// autopilot makes at most one merge attempt a tick, only while
+// [surface.merge] resolves to mode auto (read again every tick, so setting
+// the mode to anything else stops the next attempt). It reads the queue and
+// ledgers again, since the closers may have just closed a row, and tries the
+// reported row tried longest ago, at most every drain.AutopilotEvery, through
+// the merge path `surface merge` uses, as the drain. A merge is one merged
+// event, lets the closers read the row at the next tick, and the row is not
+// tried again while it stays reported, nor is one whose merge may have
+// happened (merged-unconfirmed, merged-elsewhere, merge-unknown); a refusal,
+// failure or unconfirmed merge is one merge-refused event per row, head and
+// reasons; GitHub unreadable is one unreadable event per condition.
+func (d *drainer) autopilot(ctx context.Context) {
+	if d.io.mergeSettings == nil || d.io.land == nil {
+		return
+	}
+	s := d.io.mergeSettings()
+	if s.Mode != config.MergeAuto {
+		return
+	}
+	rows, ok := d.readRows()
+	if !ok {
+		return
+	}
+	ledgers := d.ledgers(rows)
+	now := d.io.now()
+	type candidate struct {
+		q   worker.QueueRow
+		led worker.Row
+	}
+	var due []candidate
+	seen := map[string]bool{}
+	reported := map[string]bool{}
+	for _, q := range rows {
+		if q.State == worker.QueueReported {
+			reported[autopilotKey(q)] = true
+		}
+	}
+	for key := range d.autopilotMerged {
+		if !reported[key] {
+			delete(d.autopilotMerged, key)
+		}
+	}
+	for _, q := range rows {
+		l := ledgers[q.Name]
+		if d.autopilotMerged[autopilotKey(q)] || !drain.AutopilotCandidate(q, l) {
+			continue
+		}
+		seen[q.Name] = true
+		if drain.AutopilotDue(d.autopilotTried[q.Name], now) {
+			due = append(due, candidate{q, l.Row})
+		}
+	}
+	for name := range d.autopilotTried {
+		if !seen[name] {
+			delete(d.autopilotTried, name)
+		}
+	}
+	for name := range d.autopilotNote {
+		if !seen[name] {
+			delete(d.autopilotNote, name)
+		}
+	}
+	if len(due) == 0 || d.stopping() {
+		return
+	}
+	slices.SortStableFunc(due, func(a, b candidate) int {
+		if c := d.autopilotTried[a.q.Name].Compare(d.autopilotTried[b.q.Name]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.q.Name, b.q.Name)
+	})
+	c := due[0]
+	d.autopilotTried[c.q.Name] = now
+	out := d.io.land(ctx, s, merge.ByDrain, mergeRow(c.led, &c.q), false)
+	if out.AuditErr != nil {
+		// A line that could not be written is an error, a refusal's
+		// included (a full audit file); a repeated refusal is not.
+		d.event(drain.Event{Kind: drain.EventError, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State), Error: "merge audit: " + out.AuditNote})
+	}
+	switch out.Result {
+	case merge.LandMerged:
+		d.autopilotMerged[autopilotKey(c.q)] = true
+		delete(d.autopilotNote, c.q.Name)
+		delete(d.closerRead, c.q.Name) // the closers read it at the next tick
+		d.event(drain.Event{Kind: drain.EventMerged, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State),
+			Error: fmt.Sprintf("PR #%d merged at head %s as %s (audit line %s); the closers close the worker at their next read", out.PR, shortSHA(out.Head), out.MergeCommit, shortSHA(out.AuditLine))})
+	case merge.LandUnreadable:
+		d.closerEvent(d.autopilotNote, c.q, drain.EventUnreadable, "the autopilot could not read the worker's PR: "+strings.Join(out.Reasons, "; "))
+	default:
+		if out.Result == merge.LandUnconfirmed || out.Result == merge.LandMergedElsewhere || out.Result == merge.LandUnknown {
+			// The PR may have merged: leave it to the closers.
+			d.autopilotMerged[autopilotKey(c.q)] = true
+		}
+		why := fmt.Sprintf("PR #%d at head %s: %s, %s", out.PR, shortSHA(out.Head), out.Result, strings.Join(merge.ReasonSet(out.Reasons), "; "))
+		d.closerEvent(d.autopilotNote, c.q, drain.EventMergeRefused, why)
+	}
 }
 
 // dailyPrune runs `surface prune` with the default cutoff once per UTC day.
@@ -1104,8 +1229,18 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 			defer cancel()
 			return runPrune(ctx, d, now, drain.PruneAfter, false)
 		},
-		pruneDay:    files.ReadPruneDay,
-		setPruneDay: files.WritePruneDay,
+		pruneDay:      files.ReadPruneDay,
+		setPruneDay:   files.WritePruneDay,
+		mergeSettings: localMergeSettings,
+		land: func(ctx context.Context, s config.MergeSettings, by merge.By, row merge.Row, dryRun bool) merge.Outcome {
+			l, err := realLander(deps.Runner)
+			if err != nil {
+				return merge.Outcome{Result: merge.LandFailed, Reasons: []string{"the merge audit file could not be opened: " + err.Error()}, Err: err}
+			}
+			ctx, cancel := context.WithTimeout(ctx, mergeTimeout)
+			defer cancel()
+			return l.Land(ctx, s, by, row, dryRun)
+		},
 	}, nil
 }
 

@@ -136,6 +136,11 @@ private run directory).
 }
 
 func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) error {
+	// A worker must not restart a drain the operator stopped as the kill
+	// switch (ADR-0011): the drain's autopilot could then merge rows.
+	if err := refuseInDrainWorker(os.Getenv, "surface drain start"); err != nil {
+		return err
+	}
 	if err := deps.Cfg.Surface.Drain.Validate(); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
@@ -297,6 +302,9 @@ match). Exit 2: drain.json cannot be read.
 }
 
 func runSurfaceDrainStop(cmd *cobra.Command, asJSON bool) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface drain stop"); err != nil {
+		return err
+	}
 	files, err := worker.OpenDrainFiles()
 	if err != nil {
 		return WithExitCode(err, exitUsage)
@@ -492,7 +500,9 @@ func newSurfaceDrainEventsCmd() *cobra.Command {
 		Long: `events prints drain-events.jsonl (and the rotated drain-events.jsonl.1 before
 it), oldest first: one event per row state change, pause, resume, drain start
 and stop, a row becoming unreadable, claude-slots holding launches
-(slots-held), and a note such as claude-slots missing. seq counts from 1 in each drain
+(slots-held), a note such as claude-slots missing, and with [surface.merge]
+mode auto the autopilot's merges (merged) and refusals (merge-refused, once
+per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 
@@ -574,6 +584,12 @@ func newSurfaceDrainProcessCmd(deps module.Deps) *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// drain start refuses inside a worker, so a drain it spawns
+			// never carries the marker; this catches a worker calling
+			// _drain directly.
+			if err := refuseInDrainWorker(os.Getenv, "surface _drain"); err != nil {
+				return err
+			}
 			return runDrainProcess(context.Background(), deps, session, herdrPath)
 		},
 	}

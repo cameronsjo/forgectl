@@ -443,7 +443,7 @@ func TestBriefFencesTheText(t *testing.T) {
 	if strings.Count(brief, "42") != 1 || !strings.Contains(brief, "whose body contains the line: Closes #42\n") {
 		t.Fatalf("issue number placement:\n%s", brief)
 	}
-	for _, rule := range []string{"Do not read the issue, its comments, linked issues or pull requests, or any URL, with gh, curl", "never create, add or remove labels", "Never merge a pull request", "never push to the default branch", "Never edit another repository", "open a draft pull request"} {
+	for _, rule := range []string{"Do not read the issue, its comments, linked issues or pull requests, or any URL, with gh, curl", "never create, add or remove labels", "Never merge a pull request", "never push to the default branch", "Never approve a pull request, and never post a cadence-review marker", "Never edit another repository", "open a draft pull request"} {
 		if !strings.Contains(brief, rule) {
 			t.Errorf("brief lacks %q", rule)
 		}
