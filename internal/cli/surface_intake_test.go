@@ -786,3 +786,22 @@ func TestAskIntakeTakesOnlyYes(t *testing.T) {
 		}
 	}
 }
+
+// Blank-looking runes in an issue's title or body are written as escapes, so
+// padding made of them cannot wrap into a fake labeled line
+// (cameronsjo/forgectl#1215).
+func TestEscapeInvisibleInvisibleRunes(t *testing.T) {
+	for _, r := range []rune{0x2800, 0x3164, 0xffa0, 0x115f, 0x1160} {
+		got := escapeInvisible("a" + string(r) + "b")
+		want := fmt.Sprintf("a\\u%04Xb", r)
+		if got != want {
+			t.Errorf("escapeInvisible(%U) = %q, want %q", r, got, want)
+		}
+	}
+	if got := intakeBodyExcerpt(strings.Repeat("⠀", 240)); strings.ContainsRune(got, 0x2800) {
+		t.Errorf("excerpt still holds U+2800: %q", got)
+	}
+	if got := escapeInvisible("plain é text"); got != "plain é text" {
+		t.Errorf("plain text changed: %q", got)
+	}
+}

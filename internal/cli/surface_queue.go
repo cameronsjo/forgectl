@@ -249,6 +249,9 @@ or a usage or setup error.
 }
 
 func runSurfaceDequeue(cmd *cobra.Command, name string, asJSON bool) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface dequeue"); err != nil {
+		return err
+	}
 	if err := worker.ValidName(name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
