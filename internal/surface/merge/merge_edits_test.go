@@ -139,11 +139,11 @@ func TestLooseMarkerScanIsWide(t *testing.T) {
 			wantRefusal(t, evalManual(f), "(review "+findingURL+", 2026-10-09T18:00:00Z), expected a later passing marker by polish")
 		})
 	}
-	// Controls: text that only resembles the word is not a mention.
+	// Controls: text that does not spell the word is not a mention.
 	for name, body := range map[string]string{
-		"reviewer, not review": "cadence-reviewer: polish crit=1",
-		"no colon":             "the cadence-review marker is below",
-		"another word":         "cadence-preview: polish crit=1",
+		"another word":    "cadence-preview: polish crit=1",
+		"a plain comment": "Looks good; the cadence of these reviews is fine.",
+		"the words apart": "cadence and then a review: polish crit=1",
 	} {
 		t.Run("control: "+name, func(t *testing.T) {
 			f := passingFacts(t)
@@ -155,6 +155,60 @@ func TestLooseMarkerScanIsWide(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLooseMarkerCatchesAnyStyling pins the skeleton scan (independent
+// review I3 of cameronsjo/forgectl#1212): a body whose letters spell
+// "cadencereview", however it is styled, is a marker mention. One whose
+// reviewer name the loose parse can read is an open finding for that
+// reviewer; one it cannot read a name from refuses outright.
+func TestLooseMarkerCatchesAnyStyling(t *testing.T) {
+	post := func(t *testing.T, body string) Verdict {
+		t.Helper()
+		f := passingFacts(t)
+		r := markerReview("polish", head1204, 0, 0, "2026-10-09T18:00:00Z")
+		r.URL, r.Body = findingURL, "Notes.\n"+body
+		f.Reviews = append(f.Reviews, r)
+		return evalManual(f)
+	}
+	outright := map[string]string{
+		"bold":                  "**cadence-review**: sec crit=1",
+		"a code span":           "`cadence-review`: sec crit=1",
+		"an asterisk":           "cadence*review: sec crit=1",
+		"a full stop":           "cadence.review: sec crit=1",
+		"U+2043 hyphen bullet":  "cadence\u2043review: sec crit=1",
+		"U+2236 ratio":          "cadence-review\u2236 sec crit=1",
+		"strike-through":        "~~cadence-review~~: sec crit=1",
+		"reviewer, not review":  "cadence-reviewer: polish crit=1",
+		"no colon":              "the cadence-review marker is below",
+		"a second, bold one":    "cadence-review: polish crit=1\n**cadence-review**: sec crit=1",
+		"Cyrillic and a colon":  "c\u0430dence-review\u2236 sec",
+		"look-alikes, no colon": "\u0421\u0410DENCE R\u0415V\u0406EW",
+	}
+	for name, body := range outright {
+		t.Run("no name: "+name, func(t *testing.T) {
+			wantRefusal(t, post(t, body), "open finding: review "+findingURL+" mentions cadence-review")
+			wantRefusal(t, post(t, body), "in a form no reviewer name can be read from")
+		})
+	}
+	named := map[string]string{
+		"Cyrillic i in review":    "cadence-rev\u0456ew: polish crit=1",
+		"Greek alpha and epsilon": "c\u03b1d\u03b5nce-review: polish crit=1",
+		"Cyrillic capitals":       "\u0421ADEN\u0421E-REVIEW: polish crit=1",
+		"small capitals":          "\u1d04\u1d00\u1d05\u1d07\u0274\u1d04\u1d07-\u0280\u1d07\u1d20\u026a\u1d07\u1d21: polish crit=1",
+		"Greek omicron elsewhere": "cadence-review: p\u03bflish crit=1",
+		"full-width, Cyrillic e":  "\uff43\uff41\uff44\u0435\uff4e\uff43\uff45-review: polish crit=1",
+	}
+	for name, body := range named {
+		t.Run("named: "+name, func(t *testing.T) {
+			wantRefusal(t, post(t, body), "(review "+findingURL+", 2026-10-09T18:00:00Z), expected a later passing marker by polish")
+		})
+	}
+	t.Run("the strict pass still passes", func(t *testing.T) {
+		if v := evalManual(passingFacts(t)); v.Result != Pass {
+			t.Fatalf("%s %q", v.Result, v.Reasons)
+		}
+	})
 }
 
 // TestInlineReviewCommentsAreFindings pins that an inline review comment by

@@ -574,22 +574,67 @@ func passingAt(m marker, head string) bool {
 	return !m.edited && m.Head == head && m.commit == head && m.Crit == 0 && m.Imp == 0
 }
 
-// looseMarker finds a mention of the marker's word, with the token after it
-// (the reviewer name the mention claims), in a body scanText has normalized:
-// any case, any run of space, backslash, underscore or hyphen (ASCII or
-// Unicode) between "cadence" and "review", and space before the colon. The
-// strict markerPattern decides what passes; this decides what may hold a
-// finding, so it errs wide.
+// looseMarker reads the reviewer name a mention of the marker claims (the
+// token after it), in a body scanText has normalized: any case, any run of
+// space, backslash, underscore or hyphen (ASCII or Unicode) between
+// "cadence" and "review", and space before the colon. Whether a body
+// mentions the marker at all is markerSkeleton's to say, which errs wider:
+// a mention this cannot read a name from refuses outright.
 var looseMarker = regexp.MustCompile(`(?i)cadence[\s\\_\-\x{2010}-\x{2015}\x{2212}]*review\s*:[ \t]*(\S*)`)
 
-// scanText is a body as looseMarker reads it: invisible, zero-width, bidi
-// and control characters (other than space, tab and line ends) and invalid
-// UTF-8 removed, NFKC-normalized (so full-width letters and compatibility
-// hyphens and spaces fold to ASCII), HTML entities decoded, and then removed
-// and normalized again, since an entity can spell a hidden character.
+// markerSkeleton is the marker's word as skeleton keeps it. A body whose
+// skeleton holds it mentions the marker, however it is styled: markdown
+// emphasis, code spans or strike-through, any punctuation between or after
+// the words, look-alike letters, or none of these.
+const markerSkeleton = "cadencereview"
+
+// scanText is a body as looseMarker and skeleton read it: invisible,
+// zero-width, bidi and control characters (other than space, tab and line
+// ends) and invalid UTF-8 removed, NFKC-normalized (so full-width letters
+// and compatibility hyphens and spaces fold to ASCII), HTML entities
+// decoded, and then removed and normalized again, since an entity can spell
+// a hidden character; then Cyrillic, Greek and small-capital letters that
+// look like Latin ones folded onto them (foldConfusables).
 func scanText(body string) string {
 	once := func(s string) string { return norm.NFKC.String(stripHidden(s)) }
-	return once(html.UnescapeString(once(body)))
+	return foldConfusables(once(html.UnescapeString(once(body))))
+}
+
+// confusables maps letters that look like Latin ones onto those letters,
+// case kept: Cyrillic, Greek, and small capitals NFKC leaves alone.
+var confusables = map[rune]rune{
+	// Cyrillic.
+	'а': 'a', 'в': 'b', 'г': 'r', 'ԁ': 'd', 'е': 'e', 'һ': 'h', 'і': 'i', 'ј': 'j', 'к': 'k', 'ӏ': 'l', 'м': 'm', 'н': 'h',
+	'о': 'o', 'р': 'p', 'ԛ': 'q', 'с': 'c', 'ѕ': 's', 'т': 't', 'у': 'y', 'ѵ': 'v', 'ԝ': 'w', 'х': 'x',
+	'А': 'A', 'В': 'B', 'Е': 'E', 'Һ': 'H', 'І': 'I', 'Ј': 'J', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O', 'Р': 'P',
+	'С': 'C', 'Ѕ': 'S', 'Т': 'T', 'У': 'Y', 'Х': 'X',
+	// Greek.
+	'α': 'a', 'ε': 'e', 'η': 'n', 'ι': 'i', 'κ': 'k', 'ν': 'v', 'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'u', 'χ': 'x',
+	'Α': 'A', 'Β': 'B', 'Ε': 'E', 'Ζ': 'Z', 'Η': 'H', 'Ι': 'I', 'Κ': 'K', 'Μ': 'M', 'Ν': 'N', 'Ο': 'O', 'Ρ': 'P',
+	'Τ': 'T', 'Υ': 'Y', 'Χ': 'X',
+	// Latin small capitals and dotless i.
+	'ᴀ': 'a', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ɪ': 'i', 'ı': 'i', 'ɴ': 'n', 'ᴏ': 'o', 'ʀ': 'r', 'ᴠ': 'v', 'ᴡ': 'w',
+}
+
+// foldConfusables replaces each look-alike letter in s (confusables).
+func foldConfusables(s string) string {
+	return strings.Map(func(r rune) rune {
+		if l, ok := confusables[r]; ok {
+			return l
+		}
+		return r
+	}, s)
+}
+
+// skeleton is s lowercased with everything but a-z and 0-9 dropped, so
+// "**Cadence-Review**:" and "cadence.review" both read "cadencereview".
+func skeleton(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, strings.ToLower(s))
 }
 
 func stripHidden(s string) string {
@@ -630,14 +675,29 @@ type markerPost struct {
 	edited     string
 	editUnread bool
 	body       string
-	mentions   [][]string
+	// count is how many times the body's skeleton holds markerSkeleton,
+	// and mentions the names looseMarker reads, at most one per count.
+	count    int
+	mentions [][]string
 	// review is nil for a comment.
 	review *Review
 }
 
+// mentionsOf reports how many times body mentions the marker (its skeleton
+// holding markerSkeleton) and the names looseMarker reads from it; 0 is no
+// mention.
+func mentionsOf(body string) (int, [][]string) {
+	text := scanText(body)
+	n := strings.Count(skeleton(text), markerSkeleton)
+	if n == 0 {
+		return 0, nil
+	}
+	return n, looseMarker.FindAllStringSubmatch(text, -1)
+}
+
 // markerPosts lists the reviews (any state, any commit), conversation
 // comments and inline review comments by s.MarkerAuthorID that mention the
-// marker's word (looseMarker over scanText).
+// marker's word (mentionsOf).
 func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 	var out []markerPost
 	for i := range f.Reviews {
@@ -645,9 +705,9 @@ func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 		if r.Author.DatabaseID != s.MarkerAuthorID {
 			continue
 		}
-		if m := looseMarker.FindAllStringSubmatch(scanText(r.Body), -1); m != nil {
+		if n, m := mentionsOf(r.Body); n > 0 {
 			out = append(out, markerPost{kind: postReview, where: "review " + nonEmpty(r.URL, "with no URL"), stampField: "submittedAt", stamp: r.SubmittedAt,
-				edited: r.LastEditedAt, editUnread: r.EditUnread, body: r.Body, mentions: m, review: r})
+				edited: r.LastEditedAt, editUnread: r.EditUnread, body: r.Body, count: n, mentions: m, review: r})
 		}
 	}
 	for _, list := range []struct {
@@ -658,9 +718,9 @@ func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 			if c.Author.DatabaseID != s.MarkerAuthorID {
 				continue
 			}
-			if m := looseMarker.FindAllStringSubmatch(scanText(c.Body), -1); m != nil {
+			if n, m := mentionsOf(c.Body); n > 0 {
 				out = append(out, markerPost{kind: list.kind, where: list.kind + " " + nonEmpty(c.URL, "with no URL"), stampField: "createdAt", stamp: c.CreatedAt,
-					edited: c.LastEditedAt, editUnread: c.EditUnread, body: c.Body, mentions: m})
+					edited: c.LastEditedAt, editUnread: c.EditUnread, body: c.Body, count: n, mentions: m})
 			}
 		}
 	}
@@ -672,7 +732,7 @@ func markerPosts(f Facts, s config.MergeSettings) []markerPost {
 // in a first line that is an exact marker naming head, posted at head, with
 // crit=0 imp=0.
 func strictPass(p markerPost, head string, s config.MergeSettings) (Marker, bool) {
-	if p.review == nil || p.edited != "" || p.editUnread || !countedReview(*p.review, s) || len(p.mentions) != 1 {
+	if p.review == nil || p.edited != "" || p.editUnread || !countedReview(*p.review, s) || p.count != 1 || len(p.mentions) != 1 {
 		return Marker{}, false
 	}
 	m, ok := ParseMarker(p.body)
@@ -699,8 +759,8 @@ func whyNotPassing(p markerPost, head string) string {
 	if p.edited != "" {
 		why = append(why, fmt.Sprintf("it was edited at %s; an edited post never counts as a passing marker", p.edited))
 	}
-	if n := len(p.mentions); n > 1 {
-		why = append(why, fmt.Sprintf("it mentions cadence-review: %d times, expected one marker", n))
+	if p.count > 1 {
+		why = append(why, fmt.Sprintf("it mentions cadence-review %d times, expected one marker", p.count))
 	}
 	m, ok := ParseMarker(p.body)
 	switch {
@@ -720,15 +780,16 @@ func whyNotPassing(p markerPost, head string) string {
 
 // checkOpenFindings fails closed on cadence-review markers. Every review
 // (any state, any commit), conversation comment and inline review comment by
-// marker_author_id whose body mentions the marker's word (looseMarker over
-// scanText) and that is not a strict passing marker at the head (strictPass)
+// marker_author_id whose body mentions the marker's word in any styling
+// (mentionsOf) and that is not a strict passing marker at the head (strictPass)
 // is an open finding for each reviewer it names, unless a strict passing
 // marker at the head by the same reviewer was submitted later (a marker in
 // the same second is not later). A post counts at its last edit when it was
 // edited, and an edited post is never a strict pass, so an edit can neither
 // hide a finding behind an earlier pass nor turn a finding into a pass. Each
-// finding not cleared adds its own reason. One that names a reviewer that
-// does not parse, or whose timestamp or edit time does not, refuses
+// finding not cleared adds its own reason. One with a mention no reviewer
+// name can be read from (looseMarker), one that names a reviewer that does
+// not parse, or one whose timestamp or edit time does not, refuses
 // outright: no later marker can be shown to clear it. It runs outside the
 // approver loop, so it refuses under every approver set (ADR-0011,
 // 2026-10-09 amendment, decision 1).
@@ -769,6 +830,11 @@ func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 			continue
 		}
 		why := whyNotPassing(p, head)
+		if len(p.mentions) == 0 || p.count > len(p.mentions) {
+			add("open finding: %s mentions cadence-review %d time(s) in a form no reviewer name can be read from (%d read), so no marker can clear it: %s; this refuses under every approver",
+				p.where, p.count, len(p.mentions), why)
+			continue
+		}
 		var names []string
 		bad, badName := false, ""
 		for _, mention := range p.mentions {

@@ -720,7 +720,7 @@ func TestEvaluateOpenFindingsFailClosed(t *testing.T) {
 		"a mention past the first line, any case": {late(body("Looks fine.\n\nCADENCE-REVIEW: polish crit=1")),
 			`its first line "Looks fine." is not an exact marker`},
 		"a second marker in a passing review": {late(body(good + "\n<!-- cadence-review: polish head=" + head1204 + " crit=1 imp=0 -->")),
-			"it mentions cadence-review: 2 times, expected one marker"},
+			"it mentions cadence-review 2 times, expected one marker"},
 	}
 	for name, c := range reviews {
 		t.Run(name, func(t *testing.T) {
