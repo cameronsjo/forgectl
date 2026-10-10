@@ -35,6 +35,9 @@ type mergeCall struct {
 	dryRun   bool
 }
 
+// mergeTestDeps stubs the merge path: it records each call and returns out,
+// asking the confirm Land would be given first, as Land does, for a
+// surface merge that is not a dry run. The confirmer says yes.
 func mergeTestDeps(row worker.Row, settings config.MergeSettings, out merge.Outcome, calls *[]mergeCall) mergeDeps {
 	q := &worker.QueueRow{Name: row.Name, LaunchID: "launch-abc", State: worker.QueueReported}
 	return mergeDeps{
@@ -42,12 +45,139 @@ func mergeTestDeps(row worker.Row, settings config.MergeSettings, out merge.Outc
 			return row, q, nil
 		},
 		settings: func() config.MergeSettings { return settings },
-		land: func() (landFunc, error) {
-			return func(_ context.Context, s config.MergeSettings, by merge.By, r merge.Row, dryRun bool) merge.Outcome {
+		land: func(confirm func(context.Context, merge.Confirmation) error) (landFunc, error) {
+			return func(ctx context.Context, s config.MergeSettings, by merge.By, r merge.Row, dryRun bool) merge.Outcome {
 				*calls = append(*calls, mergeCall{s, by, r, dryRun})
+				if by == merge.ByCLI && !dryRun {
+					if err := confirm(ctx, sampleConfirmation); err != nil {
+						return merge.Outcome{Result: merge.LandRefused, PR: 1204, Reasons: []string{"not confirmed at a terminal: " + err.Error()}}
+					}
+				}
 				return out
 			}, nil
 		},
+		confirm: func(io.Reader, merge.Confirmation) error { return nil },
+		getenv:  func(string) string { return "" },
+	}
+}
+
+var sampleConfirmation = merge.Confirmation{Repo: "cameronsjo/forgectl", PR: 1204, URL: "https://github.com/cameronsjo/forgectl/pull/1204", Head: status1204Head,
+	Subject: "fix(upgrade): say when brew's update lock is held \x1b[2J",
+	Checks:  []merge.CheckSeen{{Name: "build-test", RunID: 7, Event: "pull_request", Status: "COMPLETED", Conclusion: "SUCCESS"}},
+	Markers: []merge.Evidence{{Reviewer: "polish", URL: "https://github.com/cameronsjo/forgectl/pull/1204#pullrequestreview-1", Head: status1204Head}}}
+
+// TestSurfaceMergeRefusesInADrainWorker: FORGECTL_DRAIN_WORKER set to any
+// non-empty value refuses with exit 2 before the row is read or anything
+// merges, dry run or not.
+func TestSurfaceMergeRefusesInADrainWorker(t *testing.T) {
+	for _, args := range [][]string{{"gh1175-forgectl"}, {"gh1175-forgectl", "--dry-run"}} {
+		var calls []mergeCall
+		d := mergeTestDeps(statusRow1204(), manualSettings(), merge.Outcome{Result: merge.LandMerged}, &calls)
+		read := false
+		rows := d.rows
+		d.rows = func(ctx context.Context, w io.Writer, repo, name string) (worker.Row, *worker.QueueRow, error) {
+			read = true
+			return rows(ctx, w, repo, name)
+		}
+		d.getenv = func(k string) string {
+			if k == "FORGECTL_DRAIN_WORKER" {
+				return "any"
+			}
+			return ""
+		}
+		_, err := runMergeCmd(t, d, args...)
+		if exitOf(err) != exitUsage || !strings.Contains(err.Error(), "surface merge refuses to run inside a drain worker") || read || len(calls) != 0 {
+			t.Fatalf("%q: exit %d (%v), read %v, calls %+v", args, exitOf(err), err, read, calls)
+		}
+	}
+}
+
+// TestSurfaceMergeAsksAPersonAtATerminal: a merge that is not a dry run asks
+// the confirmer once with the command's stdin; no is exit 1, no terminal
+// exit 2, and either merges nothing; a dry run never asks.
+func TestSurfaceMergeAsksAPersonAtATerminal(t *testing.T) {
+	merged := merge.Outcome{Result: merge.LandMerged, PR: 1204, Head: status1204Head, MergeCommit: "1111111111111111111111111111111111111111"}
+	stdin := strings.NewReader("")
+	cases := map[string]struct {
+		answer error
+		nilFn  bool
+		code   int
+		want   error
+	}{
+		"yes":          {nil, false, 0, nil},
+		"not yes":      {WithExitCode(errMergeNotConfirmed, exitFailed), false, exitFailed, errMergeNotConfirmed},
+		"no terminal":  {WithExitCode(errMergeNoTerminal, exitUsage), false, exitUsage, errMergeNoTerminal},
+		"no confirmer": {nil, true, exitUsage, errMergeNoTerminal},
+	}
+	for name, c := range cases {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(name+map[bool]string{true: " json"}[asJSON], func(t *testing.T) {
+				var calls []mergeCall
+				d := mergeTestDeps(statusRow1204(), manualSettings(), merged, &calls)
+				var asked []io.Reader
+				d.confirm = func(in io.Reader, got merge.Confirmation) error {
+					asked = append(asked, in)
+					return c.answer
+				}
+				if c.nilFn {
+					d.confirm = nil
+				}
+				cmd := newSurfaceMergeCmdWith(d)
+				var out bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(io.Discard)
+				cmd.SetIn(stdin)
+				args := []string{"gh1175-forgectl"}
+				if asJSON {
+					args = append(args, "--json")
+				}
+				cmd.SetArgs(args)
+				err := cmd.Execute()
+				if exitOf(err) != c.code || (c.want != nil && !asJSON && !errors.Is(err, c.want)) {
+					t.Fatalf("exit %d (%v); want %d, %v", exitOf(err), err, c.code, c.want)
+				}
+				if !c.nilFn && (len(asked) != 1 || asked[0] != stdin) {
+					t.Fatalf("the confirmer was asked %d times, with %v", len(asked), asked)
+				}
+				if c.code != 0 && strings.Contains(out.String(), "merge commit") {
+					t.Fatalf("a declined merge reported a merge: %s", out.String())
+				}
+			})
+		}
+	}
+	var calls []mergeCall
+	d := mergeTestDeps(statusRow1204(), manualSettings(), merge.Outcome{Result: merge.LandWouldMerge, PR: 1204}, &calls)
+	d.confirm = func(io.Reader, merge.Confirmation) error { return errors.New("asked on a dry run") }
+	if _, err := runMergeCmd(t, d, "gh1175-forgectl", "--dry-run"); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+}
+
+// TestConfirmMergeAtTerminal: the production confirmer refuses a piped
+// "yes" as no terminal; on a terminal it shows the PR, head, evidence and
+// subject through termsafe, and takes only "yes" from the tty.
+func TestConfirmMergeAtTerminal(t *testing.T) {
+	if err := confirmMergeAtTerminal(strings.NewReader("yes\n"), sampleConfirmation); exitOf(err) != exitUsage || !errors.Is(err, errMergeNoTerminal) {
+		t.Fatalf("a piped yes: exit %d (%v)", exitOf(err), err)
+	}
+	isTerm := func(io.Reader) bool { return true }
+	for answer, want := range map[string]error{"yes\n": nil, "no\n": errMergeNotConfirmed, "yes": errMergeNotConfirmed} {
+		tty := &fakeTTY{in: strings.NewReader(answer)}
+		tc := terminalConfirm{stdinIsTerminal: isTerm, openTTY: func() (io.ReadWriteCloser, error) { return tty, nil }}
+		err := tc.confirm(strings.NewReader("yes\n"), errMergeNoTerminal, func(in io.Reader, out io.Writer) error { return askMerge(in, out, sampleConfirmation) })
+		if !errors.Is(err, want) || (err != nil && exitOf(err) != exitFailed) || (err == nil) != (want == nil) {
+			t.Fatalf("answer %q: %v (exit %d), want %v", answer, err, exitOf(err), want)
+		}
+		shown := tty.out.String()
+		for _, part := range []string{"cameronsjo/forgectl#1204", "head " + status1204Head, "commit subject: fix(upgrade): say when brew's update lock is held",
+			"check build-test (run 7, pull_request): COMPLETED/SUCCESS", "marker polish crit=0 imp=0", `Type "yes" to merge it`} {
+			if !strings.Contains(shown, part) {
+				t.Fatalf("the tty lacks %q:\n%s", part, shown)
+			}
+		}
+		if strings.Contains(shown, "\x1b") {
+			t.Fatalf("an escape reached the terminal: %q", shown)
+		}
 	}
 }
 
@@ -132,7 +262,9 @@ func TestSurfaceMergeUsage(t *testing.T) {
 		t.Fatalf("no recorded repository: exit %d (%v)", exitOf(err), err)
 	}
 	d := mergeTestDeps(statusRow1204(), manualSettings(), merge.Outcome{}, &calls)
-	d.land = func() (landFunc, error) { return nil, errors.New("no state dir") }
+	d.land = func(func(context.Context, merge.Confirmation) error) (landFunc, error) {
+		return nil, errors.New("no state dir")
+	}
 	if _, err := runMergeCmd(t, d, "gh1175-forgectl"); exitOf(err) != 1 {
 		t.Fatalf("the audit file cannot be opened: exit %d (%v)", exitOf(err), err)
 	}

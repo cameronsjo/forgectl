@@ -41,6 +41,13 @@ type fakeLand struct {
 	audit          []byte
 	auditErr       error
 	auditCap       int
+	// confirms are the Confirm calls, steps the order of Confirm and
+	// Recheck calls; confirmErr is Confirm's answer, and noConfirm leaves
+	// Confirm nil.
+	confirms   []Confirmation
+	steps      []string
+	confirmErr error
+	noConfirm  bool
 }
 
 func newFakeLand(t *testing.T) *fakeLand {
@@ -50,11 +57,12 @@ func newFakeLand(t *testing.T) *fakeLand {
 }
 
 func (fl *fakeLand) lander() Lander {
-	return Lander{
+	l := Lander{
 		Read: func(context.Context, Row) (Snapshot, error) {
 			return Snapshot{Facts: fl.facts, HasPR: fl.hasPR, NoPR: "merge: no pull request on the worker's branch"}, fl.readErr
 		},
 		Recheck: func(_ context.Context, _ Facts, checks []string) ([]string, error) {
+			fl.steps = append(fl.steps, "recheck")
 			fl.recheckNames = checks
 			return fl.moved, fl.recheck
 		},
@@ -91,6 +99,14 @@ func (fl *fakeLand) lander() Lander {
 		Now:      func() time.Time { return time.Date(2026, 10, 9, 21, 0, 0, 0, time.UTC) },
 		Sleep:    func(context.Context, time.Duration) { fl.sleeps++ },
 	}
+	if !fl.noConfirm {
+		l.Confirm = func(_ context.Context, c Confirmation) error {
+			fl.steps = append(fl.steps, "confirm")
+			fl.confirms = append(fl.confirms, c)
+			return fl.confirmErr
+		}
+	}
+	return l
 }
 
 func (fl *fakeLand) land(t *testing.T, s config.MergeSettings, by By, dryRun bool) Outcome {
@@ -154,6 +170,64 @@ func TestLandMerges(t *testing.T) {
 	if out := fl.land(t, s, ByDrain, false); out.Result != LandMerged || !strings.HasSuffix(fl.merges[0][len(fl.merges[0])-1], "Merged-By: forgectl-drain\n") {
 		t.Fatalf("drain merge: %+v", out)
 	}
+}
+
+// TestLandConfirmsByCLIOnly pins the person at a terminal: a surface merge
+// that is not a dry run asks Confirm once, after the verdict and the subject
+// and before the re-read, and merges nothing unless it says yes; a dry run
+// and the drain never ask.
+func TestLandConfirmsByCLIOnly(t *testing.T) {
+	fl := newFakeLand(t)
+	if out := fl.land(t, goodSettings(), ByCLI, false); out.Result != LandMerged {
+		t.Fatalf("outcome %+v", out)
+	}
+	if !slices.Equal(fl.steps, []string{"confirm", "recheck"}) || len(fl.confirms) != 1 {
+		t.Fatalf("steps %q, confirms %+v; want one confirm before the re-read", fl.steps, fl.confirms)
+	}
+	c := fl.confirms[0]
+	if c.Repo != "cameronsjo/forgectl" || c.PR != 1204 || c.Head != head1204 || c.Subject != "fix(upgrade): say when brew's update lock is held" ||
+		len(c.Checks) == 0 || len(c.Markers) != 2 || c.URL == "" {
+		t.Fatalf("confirmation %+v", c)
+	}
+	for name, mutate := range map[string]func(*fakeLand){
+		"the answer is no": func(fl *fakeLand) { fl.confirmErr = errors.New(`the answer was not "yes"`) },
+		"no confirmer":     func(fl *fakeLand) { fl.noConfirm = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fl := newFakeLand(t)
+			mutate(fl)
+			out := fl.land(t, goodSettings(), ByCLI, false)
+			if out.Result != LandRefused || !strings.HasPrefix(strings.Join(out.Reasons, ";"), "not confirmed at a terminal: ") || len(fl.merges) != 0 || len(fl.recheckNames) != 0 {
+				t.Fatalf("outcome %+v, merges %q, recheck %q", out, fl.merges, fl.recheckNames)
+			}
+			if got := fl.results(t); !slices.Equal(got, []string{AuditRefused}) {
+				t.Fatalf("audit %q", got)
+			}
+		})
+	}
+	t.Run("a refused verdict asks nothing", func(t *testing.T) {
+		fl := newFakeLand(t)
+		fl.facts.PR.IsDraft = true
+		if out := fl.land(t, goodSettings(), ByCLI, false); out.Result != LandRefused || len(fl.confirms) != 0 {
+			t.Fatalf("outcome %+v, confirms %d", out, len(fl.confirms))
+		}
+	})
+	t.Run("a dry run asks nothing", func(t *testing.T) {
+		fl := newFakeLand(t)
+		fl.confirmErr = errors.New("asked")
+		if out := fl.land(t, goodSettings(), ByCLI, true); out.Result != LandWouldMerge || len(fl.confirms) != 0 {
+			t.Fatalf("outcome %+v, confirms %d", out, len(fl.confirms))
+		}
+	})
+	t.Run("the drain asks nothing", func(t *testing.T) {
+		fl := newFakeLand(t)
+		fl.confirmErr = errors.New("asked")
+		s := goodSettings()
+		s.Mode = config.MergeAuto
+		if out := fl.land(t, s, ByDrain, false); out.Result != LandMerged || len(fl.confirms) != 0 {
+			t.Fatalf("outcome %+v, confirms %d", out, len(fl.confirms))
+		}
+	})
 }
 
 func TestLandRefusesAndAudits(t *testing.T) {

@@ -50,12 +50,24 @@ type mergeOptions struct {
 // landFunc is merge.Lander.Land with its I/O already wired.
 type landFunc func(ctx context.Context, s config.MergeSettings, by merge.By, row merge.Row, dryRun bool) merge.Outcome
 
-// mergeDeps are `surface merge`'s seams.
+// mergeConfirmer shows a person the merge `surface merge` is about to make
+// and returns nil only when that person typed "yes" at a terminal. stdin is
+// the command's input, which must itself be a terminal.
+type mergeConfirmer func(stdin io.Reader, c merge.Confirmation) error
+
+// mergeDeps are `surface merge`'s seams. newSurfaceMergeCmd fills confirm
+// with confirmMergeAtTerminal and getenv with os.Getenv; tests build the
+// command with their own. No flag or variable replaces the confirmer, so
+// production has no path that skips it.
 type mergeDeps struct {
 	rows     func(ctx context.Context, warn io.Writer, repo, name string) (worker.Row, *worker.QueueRow, error)
 	settings func() config.MergeSettings
-	// land returns the merge path, or why its state cannot be opened.
-	land func() (landFunc, error)
+	// land returns the merge path, asking confirm before a merge (as
+	// merge.Lander.Confirm), or why its state cannot be opened.
+	land    func(confirm func(context.Context, merge.Confirmation) error) (landFunc, error)
+	confirm mergeConfirmer
+	// getenv is the environment lookup the drain-worker refusal reads.
+	getenv func(string) string
 }
 
 func newSurfaceMergeCmd(deps module.Deps) *cobra.Command {
@@ -64,13 +76,16 @@ func newSurfaceMergeCmd(deps module.Deps) *cobra.Command {
 			return statusRows(ctx, warn, deps, repo, name)
 		},
 		settings: localMergeSettings,
-		land: func() (landFunc, error) {
+		land: func(confirm func(context.Context, merge.Confirmation) error) (landFunc, error) {
 			l, err := realLander(deps.Runner)
 			if err != nil {
 				return nil, err
 			}
+			l.Confirm = confirm
 			return l.Land, nil
 		},
+		confirm: confirmMergeAtTerminal,
+		getenv:  os.Getenv,
 	})
 }
 
@@ -84,7 +99,22 @@ func newSurfaceMergeCmdWith(d mergeDeps) *cobra.Command {
 
 The policy is resolved from the config file and GitHub is read again on every
 call, with no cache: the PR is found as surface status finds it, and the
-verdict must pass with mode manual or auto. The PR title becomes the commit
+verdict must pass with mode manual or auto.
+
+A person confirms every merge: "manual" means a person at a terminal, and
+the drain's autopilot (mode auto) is the one unattended merge path. Once the
+verdict passes and the subject is composed, merge shows the PR, its head,
+the required check runs and reviewer markers counted, and the subject on
+the terminal, and goes on only if "yes" is typed there; the re-read below
+runs after the answer. The answer is read from /dev/tty, never from stdin,
+and stdin must be a terminal as well, so a piped "yes" does not count. No
+terminal, end of input, or any other answer merges nothing and is audited
+as a refusal. No flag skips this; --dry-run asks nothing. The 3-minute cap
+on one merge includes the wait at the question, so an answer after it
+merges nothing. merge refuses to run at all, before reading GitHub, when
+FORGECTL_DRAIN_WORKER is set, as it is in every drain worker.
+
+The PR title becomes the commit
 subject only when it matches
 ^(fix|feat|docs|refactor|test|chore)(\([a-z0-9-]+\))?: [ -~]{1,72}$ and holds
 no issue reference, issue or PR link, or CI-skip directive ([skip ci] and
@@ -116,10 +146,11 @@ would-merge, refused, unreadable, merge-failed, merged-unconfirmed,
 merged-elsewhere (GitHub says merged, by something else) or merge-unknown
 (gh failed and GitHub could not be read after it).
 
-Exit 0: merged, or a dry run that would merge. Exit 1: refused, GitHub
-could not be read, the merge failed, could not be confirmed, was made by
-something else, or is not known; the message says which. Exit 2: a usage or setup error (no such
-worker, a row that records no GitHub repository).
+Exit 0: merged, or a dry run that would merge. Exit 1: refused (the answer
+not "yes" included), GitHub could not be read, the merge failed, could not
+be confirmed, was made by something else, or is not known; the message says
+which. Exit 2: a usage or setup error (no such worker, a row that records
+no GitHub repository, no terminal to confirm at, run inside a drain worker).
 
   forgectl surface merge gh1175-forgectl --dry-run
   forgectl surface merge fix-login --repo forgectl`,
@@ -136,6 +167,14 @@ worker, a row that records no GitHub repository).
 }
 
 func runSurfaceMerge(cmd *cobra.Command, d mergeDeps, opts mergeOptions) error {
+	getenv := d.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	// First of all, so a worker that runs merge reads nothing from GitHub.
+	if err := refuseInDrainWorker(getenv, "surface merge"); err != nil {
+		return err
+	}
 	if err := worker.ValidName(opts.Name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
@@ -146,7 +185,18 @@ func runSurfaceMerge(cmd *cobra.Command, d mergeDeps, opts mergeOptions) error {
 	if row.GitHubRepo == "" || row.GitHubRepoID == 0 {
 		return WithExitCode(fmt.Errorf("worker %q: %w; it was launched before forgectl recorded one, or its origin is not on github.com", opts.Name, merge.ErrNoRecordedRepo), exitUsage)
 	}
-	land, err := d.land()
+	// confirmErr is the confirmer's answer, kept for the exit code: no
+	// terminal is a setup error (exit 2), any other answer a refusal.
+	var confirmErr error
+	confirm := func(_ context.Context, c merge.Confirmation) error {
+		if d.confirm == nil {
+			confirmErr = WithExitCode(errMergeNoTerminal, exitUsage)
+		} else {
+			confirmErr = d.confirm(cmd.InOrStdin(), c)
+		}
+		return confirmErr
+	}
+	land, err := d.land(confirm)
 	if err != nil {
 		return WithExitCode(termsafe.Error(fmt.Errorf("open the merge audit file: %w", err)), exitFailed)
 	}
@@ -159,11 +209,15 @@ func runSurfaceMerge(cmd *cobra.Command, d mergeDeps, opts mergeOptions) error {
 		view.Reasons = []string{}
 	}
 	ok := out.Result == merge.LandMerged || out.Result == merge.LandWouldMerge
+	declined := out.Result == merge.LandRefused && confirmErr != nil
 	if opts.JSON {
 		if err := writeJSON(cmd.OutOrStdout(), view); err != nil {
 			return err
 		}
-		if !ok {
+		switch {
+		case declined:
+			return newSilentCodedError(ExitCode(confirmErr))
+		case !ok:
 			return newSilentCodedError(exitFailed)
 		}
 		return nil
@@ -171,10 +225,63 @@ func runSurfaceMerge(cmd *cobra.Command, d mergeDeps, opts mergeOptions) error {
 	if err := renderMerge(cmd.OutOrStdout(), view); err != nil {
 		return err
 	}
-	if ok {
+	switch {
+	case ok:
 		return nil
+	case declined:
+		return WithExitCode(fmt.Errorf("worker %s: %w", termsafe.SafeLineMax(row.Name, 64), confirmErr), ExitCode(confirmErr))
 	}
 	return WithExitCode(fmt.Errorf("worker %s: %s", termsafe.SafeLineMax(row.Name, 64), mergeFailureSentence(out)), exitFailed)
+}
+
+// errMergeNoTerminal refuses a merge nobody can confirm.
+var errMergeNoTerminal = errors.New("surface merge needs a person at a terminal to confirm; run it from a plain terminal, or use --dry-run (the drain's autopilot, with mode auto, is the one unattended merge path)")
+
+// errMergeNotConfirmed reports an answer other than "yes".
+var errMergeNotConfirmed = errors.New(`surface merge: the answer was not "yes"; nothing was merged`)
+
+// confirmMergeAtTerminal is the production confirmer: stdin must be a
+// terminal, /dev/tty must open as one, and the answer is read from /dev/tty
+// (terminalConfirm).
+func confirmMergeAtTerminal(stdin io.Reader, c merge.Confirmation) error {
+	return productionTerminal().confirm(stdin, errMergeNoTerminal, func(in io.Reader, out io.Writer) error {
+		return askMerge(in, out, c)
+	})
+}
+
+// askMerge writes the merge and the question to out and reads one line from
+// in. Only a complete line that is exactly "yes", once surrounding space is
+// trimmed, confirms.
+func askMerge(in io.Reader, out io.Writer, c merge.Confirmation) error {
+	if err := writeMergeConfirmation(out, c); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprint(out, `Type "yes" to merge it, anything else to cancel: `); err != nil {
+		return err
+	}
+	if !readYes(in) {
+		return WithExitCode(errMergeNotConfirmed, exitFailed)
+	}
+	return nil
+}
+
+// writeMergeConfirmation shows the PR, its head, the verdict's evidence and
+// the commit subject. Every field read from GitHub goes through termsafe.
+func writeMergeConfirmation(out io.Writer, c merge.Confirmation) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "surface merge would squash-merge %s#%d (%s)\n", termsafe.SafeLineMax(c.Repo, 120), c.PR, termsafe.SafeLineMax(c.URL, 200))
+	fmt.Fprintf(&b, "  head %s; the merge policy passes\n", termsafe.SafeLineMax(c.Head, 40))
+	fmt.Fprintf(&b, "  commit subject: %s\n", termsafe.SafeLineMax(c.Subject, 120))
+	for _, ch := range c.Checks {
+		fmt.Fprintf(&b, "  check %s (run %d, %s): %s/%s\n", termsafe.SafeLineMax(ch.Name, 80), ch.RunID, termsafe.SafeLineMax(ch.Event, 40),
+			termsafe.SafeLineMax(ch.Status, 40), termsafe.SafeLineMax(ch.Conclusion, 40))
+	}
+	for _, m := range c.Markers {
+		fmt.Fprintf(&b, "  marker %s crit=%d imp=%d at head %s: %s\n", termsafe.SafeLineMax(m.Reviewer, 40), m.Crit, m.Imp,
+			termsafe.SafeLineMax(shortSHA(m.Head), 12), termsafe.SafeLineMax(m.URL, 200))
+	}
+	_, err := io.WriteString(out, b.String())
+	return err
 }
 
 // mergeFailureSentence says which kind of failure an outcome is.

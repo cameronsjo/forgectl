@@ -708,6 +708,9 @@ var sampleCandidates = []intakeCandidate{{
 	LabeledAt: "2026-10-01T10:00:00Z", Name: "gh7-forgectl", Source: "gh:cameronsjo/forgectl#7", BriefSHA256: "abc123",
 }}
 
+// askSample is intake's question about sampleCandidates.
+func askSample(in io.Reader, out io.Writer) error { return askIntake(in, out, sampleCandidates) }
+
 // TestIntakeTerminalNeedsBothTerminals: stdin must be a terminal and
 // /dev/tty must open as one; the answer comes from the tty, never stdin.
 func TestIntakeTerminalNeedsBothTerminals(t *testing.T) {
@@ -726,7 +729,7 @@ func TestIntakeTerminalNeedsBothTerminals(t *testing.T) {
 
 	// stdin not a terminal: refused before /dev/tty is opened, whatever stdin holds.
 	tty := &fakeTTY{in: strings.NewReader("yes\n")}
-	err := intakeTerminal{stdinIsTerminal: stdinTerminal(false), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), sampleCandidates)
+	err := terminalConfirm{stdinIsTerminal: stdinTerminal(false), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), errIntakeNoTerminal, askSample)
 	if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeNoTerminal) || opened {
 		t.Fatalf("stdin not a terminal: %v (exit %d), opened %v", err, ExitCode(err), opened)
 	}
@@ -735,19 +738,19 @@ func TestIntakeTerminalNeedsBothTerminals(t *testing.T) {
 	}
 
 	// /dev/tty does not open as a terminal.
-	err = intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(nil, errors.New("not a terminal"))}.confirm(nil, sampleCandidates)
+	err = terminalConfirm{stdinIsTerminal: stdinTerminal(true), openTTY: open(nil, errors.New("not a terminal"))}.confirm(nil, errIntakeNoTerminal, askSample)
 	if ExitCode(err) != exitUsage || !errors.Is(err, errIntakeNoTerminal) {
 		t.Fatalf("no tty: %v (exit %d)", err, ExitCode(err))
 	}
 
 	// Both terminals: the answer is the tty's, not stdin's.
 	tty = &fakeTTY{in: strings.NewReader("no\n")}
-	err = intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), sampleCandidates)
+	err = terminalConfirm{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}.confirm(strings.NewReader("yes\n"), errIntakeNoTerminal, askSample)
 	if ExitCode(err) != exitFailed || !errors.Is(err, errIntakeNotConfirmed) || !tty.closed {
 		t.Fatalf("tty says no, stdin says yes: %v (exit %d), closed %v", err, ExitCode(err), tty.closed)
 	}
 	tty = &fakeTTY{in: strings.NewReader("yes\n")}
-	if err := (intakeTerminal{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}).confirm(strings.NewReader(""), sampleCandidates); err != nil {
+	if err := (terminalConfirm{stdinIsTerminal: stdinTerminal(true), openTTY: open(tty, nil)}).confirm(strings.NewReader(""), errIntakeNoTerminal, askSample); err != nil {
 		t.Fatalf("tty says yes: %v", err)
 	}
 	if !strings.Contains(tty.out.String(), "#7 Fix the thing") || !strings.Contains(tty.out.String(), `Type "yes" to queue them`) {
@@ -755,8 +758,8 @@ func TestIntakeTerminalNeedsBothTerminals(t *testing.T) {
 	}
 
 	// The zero value refuses.
-	if err := (intakeTerminal{}).confirm(nil, sampleCandidates); !errors.Is(err, errIntakeNoTerminal) {
-		t.Fatalf("zero intakeTerminal: %v", err)
+	if err := (terminalConfirm{}).confirm(nil, errIntakeNoTerminal, askSample); !errors.Is(err, errIntakeNoTerminal) {
+		t.Fatalf("zero terminalConfirm: %v", err)
 	}
 }
 
@@ -776,7 +779,7 @@ func TestAskIntakeTakesOnlyYes(t *testing.T) {
 		"":             false, // end of input
 		"yes":          false, // end of input before the newline
 		"nope\nyes\n":  false, // only the first line counts
-		strings.Repeat(" ", maxIntakeAnswer) + "yes\n": false,
+		strings.Repeat(" ", maxConfirmAnswer) + "yes\n": false,
 	} {
 		var out strings.Builder
 		err := askIntake(strings.NewReader(answer), &out, sampleCandidates)

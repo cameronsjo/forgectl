@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
@@ -208,13 +206,13 @@ var errIntakeInWorker = errors.New("intake refuses to run inside a drain worker 
 	" is set): a worker must not queue work for another worker; run intake from your own terminal")
 
 // refuseInDrainWorker refuses verb inside a drain worker, the same courtesy
-// refusal intake makes, for the other commands that start a worker:
-// surface enqueue and surface launch.
+// refusal intake makes, for the other commands that start a worker (surface
+// enqueue and surface launch) and for surface merge.
 func refuseInDrainWorker(getenv func(string) string, verb string) error {
 	if getenv(launch.DrainWorkerEnv) == "" {
 		return nil
 	}
-	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start another worker; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
+	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start another worker or merge a PR; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
 }
 
 func runSurfaceIntakeGH(cmd *cobra.Command, d intakeDeps, opts intakeOptions) error {
@@ -531,53 +529,13 @@ func (in intakeRun) consider(is intake.Issue, rules intake.Rules, rows []worker.
 }
 
 // confirmIntakeAtTerminal is the production confirmer: stdin must be a
-// terminal, /dev/tty must open as one, and the answer is read from /dev/tty.
+// terminal, /dev/tty must open as one, and the answer is read from /dev/tty
+// (terminalConfirm).
 func confirmIntakeAtTerminal(stdin io.Reader, cands []intakeCandidate) error {
-	return intakeTerminal{stdinIsTerminal: docsReadInputIsTerminal, openTTY: openIntakeTTY}.confirm(stdin, cands)
+	return productionTerminal().confirm(stdin, errIntakeNoTerminal, func(in io.Reader, out io.Writer) error {
+		return askIntake(in, out, cands)
+	})
 }
-
-// intakeTerminal is the confirmation's two terminal checks, as seams.
-type intakeTerminal struct {
-	stdinIsTerminal func(io.Reader) bool
-	openTTY         func() (io.ReadWriteCloser, error)
-}
-
-// confirm shows the candidates on the controlling terminal and reads the
-// answer from it. Both checks are required: stdin a terminal says the
-// command was started by a person rather than fed by a pipe, and reading
-// /dev/tty rather than stdin means text piped or redirected into the
-// command is never taken as the answer.
-func (t intakeTerminal) confirm(stdin io.Reader, cands []intakeCandidate) error {
-	if t.stdinIsTerminal == nil || t.openTTY == nil || !t.stdinIsTerminal(stdin) {
-		return WithExitCode(errIntakeNoTerminal, exitUsage)
-	}
-	tty, err := t.openTTY()
-	if err != nil {
-		return WithExitCode(errIntakeNoTerminal, exitUsage)
-	}
-	answer := askIntake(tty, tty, cands)
-	if err := tty.Close(); err != nil && answer == nil {
-		return WithExitCode(errIntakeNoTerminal, exitUsage)
-	}
-	return answer
-}
-
-// openIntakeTTY opens the controlling terminal for reading and writing, and
-// refuses one that is not a terminal.
-func openIntakeTTY() (io.ReadWriteCloser, error) {
-	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return nil, err
-	}
-	if !term.IsTerminal(int(f.Fd())) {
-		_ = f.Close() // the refusal below is the result; a close error adds nothing
-		return nil, errors.New("/dev/tty is not a terminal")
-	}
-	return f, nil
-}
-
-// maxIntakeAnswer bounds the answer line read from the terminal.
-const maxIntakeAnswer = 256
 
 // askIntake writes the candidates and the question to out and reads one line
 // from in. Only a complete line that is exactly "yes", once surrounding
@@ -589,8 +547,7 @@ func askIntake(in io.Reader, out io.Writer, cands []intakeCandidate) error {
 	if _, err := fmt.Fprint(out, `Type "yes" to queue them, anything else to cancel: `); err != nil {
 		return err
 	}
-	line, err := bufio.NewReader(io.LimitReader(in, maxIntakeAnswer)).ReadString('\n')
-	if err != nil || strings.TrimSpace(line) != "yes" {
+	if !readYes(in) {
 		return WithExitCode(errIntakeNotConfirmed, exitFailed)
 	}
 	return nil

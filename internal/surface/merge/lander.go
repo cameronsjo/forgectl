@@ -15,7 +15,8 @@ import (
 // Land is the one merge path (atelier P4, T10.4): `surface merge` (ByCLI)
 // and the drain's autopilot (ByDrain) both call it. It reads the facts
 // fresh with no cache, asks Evaluate, takes the subject from the PR title,
-// reads the PR again and aborts on any change, writes the audit attempt
+// asks a person at a terminal (surface merge only, Lander.Confirm), reads
+// the PR again and aborts on any change, writes the audit attempt
 // line, runs `gh pr merge --squash --match-head-commit` with a body it
 // writes, and confirms the merge commit is on the default branch. Every
 // refusal and every outcome is one audit line; repeated refusals are
@@ -69,7 +70,8 @@ type Outcome struct {
 	Err error `json:"-"`
 }
 
-// Lander is Land's I/O. Each field is required.
+// Lander is Land's I/O. Each field is required, except Confirm for the
+// drain (see Confirm).
 type Lander struct {
 	// Read reads the facts with no cache (Reader.Read).
 	Read func(ctx context.Context, row Row) (Snapshot, error)
@@ -91,7 +93,30 @@ type Lander struct {
 	Now      func() time.Time
 	// Sleep waits between landing reads, returning early when ctx ends.
 	Sleep func(ctx context.Context, d time.Duration)
+	// Confirm asks a person at a terminal to approve a merge `surface merge`
+	// (ByCLI) is about to make, and returns nil only when they typed "yes".
+	// Land calls it for every ByCLI merge that is not a dry run, after the
+	// verdict passes and the subject is composed, before the re-read; nil
+	// refuses that merge. The drain (ByDrain) never calls it: the autopilot
+	// is the one unattended merge path.
+	Confirm func(ctx context.Context, c Confirmation) error
 }
+
+// Confirmation is what a person is shown before `surface merge` merges.
+type Confirmation struct {
+	Repo    string
+	PR      int
+	URL     string
+	Head    string
+	Subject string
+	// Checks and Markers are the verdict's evidence: the required check runs
+	// counted and each required reviewer's latest marker.
+	Checks  []CheckSeen
+	Markers []Evidence
+}
+
+// ErrNoConfirmer reports a `surface merge` Lander with no Confirm.
+var ErrNoConfirmer = errors.New("merge: surface merge has no way to ask a person at a terminal; nothing was merged")
 
 // landingTries and landingWait bound the post-merge confirmation: GitHub can
 // take a moment to name the merge commit and move the default branch.
@@ -157,6 +182,18 @@ func (l Lander) Land(ctx context.Context, s config.MergeSettings, by By, row Row
 	subject, err := Subject(f.PR.Title)
 	if err != nil {
 		return refuse([]string{err.Error()})
+	}
+	if by == ByCLI && !dryRun {
+		// A person at a terminal approves every merge by hand; the re-read
+		// below still runs after their answer.
+		err := ErrNoConfirmer
+		if l.Confirm != nil {
+			err = l.Confirm(ctx, Confirmation{Repo: base.Repo, PR: f.PR.Number, URL: f.PR.URL, Head: f.PR.HeadRefOid, Subject: subject,
+				Checks: base.Checks, Markers: base.Markers})
+		}
+		if err != nil {
+			return refuse([]string{"not confirmed at a terminal: " + termsafe.SafeLineMax(err.Error(), maxGHError)})
+		}
 	}
 	repo, _ := s.Repo(f.Row.GitHubRepo) // Evaluate passed, so the repository is listed
 	moved, err := l.Recheck(ctx, f, repo.RequiredChecks)

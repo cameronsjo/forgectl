@@ -10,9 +10,10 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// Inside a drain worker, surface enqueue and surface launch refuse before
-// doing anything, as intake does: a worker must not start another worker by
-// accident (security review of cameronsjo/forgectl#1203).
+// Inside a drain worker, surface enqueue, surface launch and surface merge
+// refuse before doing anything, as intake does: a worker must not start
+// another worker, or merge a PR, by accident (security review of
+// cameronsjo/forgectl#1203; independent review of cameronsjo/forgectl#1212).
 func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 	t.Setenv(launch.DrainWorkerEnv, "1")
 	cmd := &cobra.Command{}
@@ -22,6 +23,9 @@ func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 		},
 		"surface launch": func() error {
 			return runSurfaceLaunch(cmd, module.Deps{}, surfaceLaunchOptions{Backend: "herdr"})
+		},
+		"surface merge": func() error {
+			return runSurfaceMerge(newSurfaceMergeCmd(module.Deps{}), mergeDeps{}, mergeOptions{Name: "x"})
 		},
 	} {
 		err := run()
