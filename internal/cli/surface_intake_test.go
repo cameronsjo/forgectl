@@ -557,14 +557,21 @@ func TestSurfaceIntakeQueuesOnlyAfterConfirmation(t *testing.T) {
 	var shown strings.Builder
 	// The gate refuses an escape in a title (CheckQueueBrief), so the list's
 	// own sanitizing is pinned with a candidate built here.
-	shownCands := append(slices.Clone(rec.calls[0]), intakeCandidate{Number: 9, Title: "Title with \x1b[2J an escape\nand a second line"})
+	shownCands := append(slices.Clone(rec.calls[0]), intakeCandidate{Number: 9, Title: "Title with \x1b[2J an escape\nand a second line",
+		Body: "Body with \x1b[2J an escape\n\nand a second paragraph " + strings.Repeat("x", 300)})
 	if err := writeIntakeCandidates(&shown, shownCands); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#1 Tidy the queue listing", "labeled by cameronsjo at 2026-10-01T10:00:00Z", "row gh1-forgectl, brief sha256 " + first.BriefSHA256} {
+	// The URL and a body excerpt are what let a reader judge an issue whose
+	// author and labeler read as the operator (cameronsjo/forgectl#1205).
+	for _, want := range []string{"#1 Tidy the queue listing", "https://github.com/cameronsjo/forgectl/issues/1\n", "body: one\n",
+		"body: Body with \\x1b[2J an escape and a second paragraph x", "labeled by cameronsjo at 2026-10-01T10:00:00Z", "row gh1-forgectl, brief sha256 " + first.BriefSHA256} {
 		if !strings.Contains(shown.String(), want) {
 			t.Errorf("candidate list lacks %q:\n%s", want, shown.String())
 		}
+	}
+	if strings.Contains(shown.String(), strings.Repeat("x", 300)) {
+		t.Errorf("candidate list shows the whole body, want an excerpt:\n%s", shown.String())
 	}
 	if strings.Contains(shown.String(), "\x1b") || strings.Contains(shown.String(), "\nand a second line") {
 		t.Errorf("candidate list carries a raw escape or a second title line:\n%q", shown.String())

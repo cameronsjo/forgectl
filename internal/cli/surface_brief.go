@@ -114,6 +114,10 @@ Exit 2: a usage or setup error.
 }
 
 func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) error {
+	// A worker must not type into a sibling worker's prompt.
+	if err := refuseInDrainWorker(os.Getenv, "surface brief"); err != nil {
+		return err
+	}
 	if opts.Readback <= 0 || opts.Start <= 0 {
 		return WithExitCode(errors.New("--readback-timeout and --start-timeout must be positive"), exitUsage)
 	}
