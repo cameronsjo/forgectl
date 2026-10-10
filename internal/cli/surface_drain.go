@@ -136,6 +136,11 @@ private run directory).
 }
 
 func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) error {
+	// A worker must not restart a drain the operator stopped as the kill
+	// switch (ADR-0011): the drain's autopilot could then merge rows.
+	if err := refuseInDrainWorker(os.Getenv, "surface drain start"); err != nil {
+		return err
+	}
 	if err := deps.Cfg.Surface.Drain.Validate(); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
@@ -297,6 +302,9 @@ match). Exit 2: drain.json cannot be read.
 }
 
 func runSurfaceDrainStop(cmd *cobra.Command, asJSON bool) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface drain stop"); err != nil {
+		return err
+	}
 	files, err := worker.OpenDrainFiles()
 	if err != nil {
 		return WithExitCode(err, exitUsage)
@@ -576,6 +584,12 @@ func newSurfaceDrainProcessCmd(deps module.Deps) *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// drain start refuses inside a worker, so a drain it spawns
+			// never carries the marker; this catches a worker calling
+			// _drain directly.
+			if err := refuseInDrainWorker(os.Getenv, "surface _drain"); err != nil {
+				return err
+			}
 			return runDrainProcess(context.Background(), deps, session, herdrPath)
 		},
 	}

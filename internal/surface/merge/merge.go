@@ -835,7 +835,7 @@ func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 		}
 		why := whyNotPassing(p, head)
 		if len(p.mentions) == 0 || p.count > len(p.mentions) {
-			add("open finding: %s mentions cadence-review %d time(s) in a form no reviewer name can be read from (%d read), so no marker can clear it: %s; this refuses under every approver",
+			add("open finding: %s mentions cadence-review %d time(s) in a form no reviewer name can be read from (%d read), so no marker can clear it and editing it does not help; delete that post to clear it (%s); this refuses under every approver",
 				p.where, p.count, len(p.mentions), why)
 			continue
 		}
@@ -851,7 +851,7 @@ func checkOpenFindings(f Facts, s config.MergeSettings, add addFunc) {
 			}
 		}
 		if bad {
-			add("open finding: %s mentions cadence-review: with reviewer name %q, which does not parse (expected 1-40 characters of a-z, 0-9 and '-'), so no marker can clear it: %s; this refuses under every approver", p.where, badName, why)
+			add("open finding: %s mentions cadence-review: with reviewer name %q, which does not parse (expected 1-40 characters of a-z, 0-9 and '-'), so no marker can clear it and editing it does not help; delete that post to clear it (%s); this refuses under every approver", p.where, badName, why)
 			continue
 		}
 		for _, n := range names {
