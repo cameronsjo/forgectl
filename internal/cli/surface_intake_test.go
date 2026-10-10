@@ -564,8 +564,8 @@ func TestSurfaceIntakeQueuesOnlyAfterConfirmation(t *testing.T) {
 	}
 	// The URL and a body excerpt are what let a reader judge an issue whose
 	// author and labeler read as the operator (cameronsjo/forgectl#1205).
-	for _, want := range []string{"#1 Tidy the queue listing", "https://github.com/cameronsjo/forgectl/issues/1\n", "body: one\n",
-		"body: Body with \\x1b[2J an escape and a second paragraph x", "labeled by cameronsjo at 2026-10-01T10:00:00Z", "row gh1-forgectl, brief sha256 " + first.BriefSHA256} {
+	for _, want := range []string{"#1 Tidy the queue listing", "url https://github.com/cameronsjo/forgectl/issues/1\n", "body (3 chars): one\n",
+		"chars): Body with \\x1b[2J an escape and a second paragraph x", "labeled by cameronsjo at 2026-10-01T10:00:00Z", "row gh1-forgectl, brief sha256 " + first.BriefSHA256} {
 		if !strings.Contains(shown.String(), want) {
 			t.Errorf("candidate list lacks %q:\n%s", want, shown.String())
 		}

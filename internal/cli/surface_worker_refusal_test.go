@@ -11,10 +11,11 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// Inside a drain worker, surface enqueue, surface launch, surface brief, surface merge
-// and the drain's start, stop and process refuse before doing anything, as intake does: a worker must not start
-// another worker, or merge a PR, by accident (security review of
-// cameronsjo/forgectl#1203; independent review of cameronsjo/forgectl#1212).
+// Inside a drain worker, surface enqueue, surface launch, surface brief,
+// surface merge and the drain's start, stop and process refuse before doing
+// anything, as intake does: a worker must not start or drive another worker,
+// or merge a PR, by accident (security review of cameronsjo/forgectl#1203;
+// independent review of cameronsjo/forgectl#1212; cameronsjo/forgectl#1205).
 func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 	t.Setenv(launch.DrainWorkerEnv, "1")
 	// A scratch state dir: if a refusal were ever missing, the command must
