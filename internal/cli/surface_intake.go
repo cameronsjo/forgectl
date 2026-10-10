@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -109,6 +110,8 @@ type intakeCandidate struct {
 	LabeledAt   string
 	Name        string
 	Source      string
+	URL         string
+	Body        string
 	BriefSHA256 string
 }
 
@@ -207,12 +210,13 @@ var errIntakeInWorker = errors.New("intake refuses to run inside a drain worker 
 
 // refuseInDrainWorker refuses verb inside a drain worker, the same courtesy
 // refusal intake makes, for the other commands that start a worker (surface
-// enqueue and surface launch) and for surface merge.
+// enqueue and surface launch), drive one (surface brief, the drain's start,
+// stop and process) or merge a PR (surface merge).
 func refuseInDrainWorker(getenv func(string) string, verb string) error {
 	if getenv(launch.DrainWorkerEnv) == "" {
 		return nil
 	}
-	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start another worker or merge a PR; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
+	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start or drive another worker or merge a PR; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
 }
 
 func runSurfaceIntakeGH(cmd *cobra.Command, d intakeDeps, opts intakeOptions) error {
@@ -413,6 +417,7 @@ func (in intakeRun) finish(res intakeResult, picked []considered) (intakeResult,
 		cands = append(cands, intakeCandidate{
 			Number: c.view.Number, Title: c.title, Author: c.view.Author, Labeler: c.view.Labeler,
 			LabeledAt: c.view.LabeledAt, Name: c.view.Name, Source: c.view.Source, BriefSHA256: c.view.BriefSHA256,
+			URL: fmt.Sprintf("https://github.com/%s/%s/issues/%d", in.owner, in.repo, c.view.Number), Body: c.body,
 		})
 	}
 	if err := in.confirm(cands); err != nil {
@@ -471,6 +476,7 @@ type considered struct {
 	view  intakeItem
 	brief string
 	title string
+	body  string
 }
 
 // origin is the row origin the item records.
@@ -525,6 +531,7 @@ func (in intakeRun) consider(is intake.Issue, rules intake.Rules, rows []worker.
 	c.view.BriefSHA256 = worker.BriefSHA256(brief)
 	c.brief = brief
 	c.title = is.Title
+	c.body = is.Body
 	return c, true
 }
 
@@ -554,19 +561,36 @@ func askIntake(in io.Reader, out io.Writer, cands []intakeCandidate) error {
 }
 
 // writeIntakeCandidates lists what a run would queue, one issue per block.
-// The title is issue text, so it is cut to one sanitized line.
+// Title and body are issue text, so each is cut to one sanitized line. The
+// body excerpt and URL are there because author and labeler always read as
+// the operator: a worker-filed issue with a plain title is only caught by
+// reading what it asks for (cameronsjo/forgectl#1205).
 func writeIntakeCandidates(out io.Writer, cands []intakeCandidate) error {
 	if _, err := fmt.Fprintf(out, "intake would queue %d issue(s), each for an unattended worker that runs as you:\n", len(cands)); err != nil {
 		return err
 	}
 	for _, c := range cands {
-		if _, err := fmt.Fprintf(out, "  %s %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
-			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
+		if _, err := fmt.Fprintf(out, "  %s %s\n      url %s\n      body (%d chars): %s\n      author %s, labeled by %s at %s\n      row %s, brief sha256 %s\n",
+			termsafe.SafeLineMax(c.Source, 160), termsafe.SafeLineMax(c.Title, 100), termsafe.SafeLineMax(c.URL, 200), utf8.RuneCountInString(c.Body), intakeBodyExcerpt(c.Body),
+			termsafe.SafeLineMax(c.Author, 40), termsafe.SafeLineMax(c.Labeler, 40),
 			termsafe.SafeLineMax(c.LabeledAt, 40), termsafe.SafeLineMax(c.Name, 64), termsafe.SafeLineMax(c.BriefSHA256, 64)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// intakeBodyExcerptRunes caps the body excerpt the intake prompt shows.
+const intakeBodyExcerptRunes = 240
+
+// intakeBodyExcerpt is the start of an issue body on one sanitized line:
+// runs of whitespace, newlines included, collapse to one space.
+func intakeBodyExcerpt(body string) string {
+	flat := strings.Join(strings.Fields(body), " ")
+	if flat == "" {
+		return "(empty)"
+	}
+	return termsafe.SafeLineMax(flat, intakeBodyExcerptRunes)
 }
 
 func reportIntake(out io.Writer, r intakeResult, asJSON bool) error {
