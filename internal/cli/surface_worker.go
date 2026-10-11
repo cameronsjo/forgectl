@@ -435,19 +435,32 @@ func checkProfileHarness(lc config.LaunchConfig, worktree string, spec workerSpe
 // the worker floor, the worker settings and the environment allowlist
 // (launch.BuildInvocation), and gives a claude worker its session id. The
 // harness is known only once the profile resolves, so a claude worker is
-// built a second time with the id.
+// built a second time with the id, and a worker with a prompt is built again
+// with the provenance note (worker.ProvenanceNote) after it.
 func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID func() (string, error), warn io.Writer) (launch.BuiltInvocation, error) {
 	req.Worker = true
 	req.Prompt = prompt
 	built, err := launch.BuildInvocation(req)
-	if err == nil && built.Invocation.Harness == "claude" {
+	if err != nil {
+		return built, err
+	}
+	rebuild := false
+	if built.Invocation.Harness == "claude" {
 		if req.SessionID, err = newID(); err != nil {
 			return launch.BuiltInvocation{}, err
 		}
-		built, err = launch.BuildInvocation(req)
+		rebuild = true
 	}
-	if err != nil {
-		return built, err
+	// The producer-tuple values forgectl knows go after the brief, so the
+	// worker never computes them in the shell (cameronsjo/forgectl#1220).
+	if note := worker.ProvenanceNote(req.SessionID, workerMachineDigest()); prompt != "" && note != "" {
+		req.Prompt = prompt + "\n\n" + note
+		rebuild = true
+	}
+	if rebuild {
+		if built, err = launch.BuildInvocation(req); err != nil {
+			return built, err
+		}
 	}
 	for _, n := range built.Notes {
 		if _, werr := fmt.Fprintln(warn, "forgectl: note: "+termsafe.SafeLineMax(n, 300)); werr != nil {
@@ -455,6 +468,20 @@ func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID fu
 		}
 	}
 	return built, nil
+}
+
+// workerHostname is the host name a worker's Machine trailer is digested
+// from; a variable so tests can pin it.
+var workerHostname = os.Hostname
+
+// workerMachineDigest is this host's producer-tuple Machine value, or "" when
+// the host name cannot be read.
+func workerMachineDigest() string {
+	h, err := workerHostname()
+	if err != nil {
+		return ""
+	}
+	return worker.MachineDigest(h)
 }
 
 // launchBrief turns --brief into the prompt argument and its ledger record:

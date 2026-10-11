@@ -31,7 +31,7 @@ Every forgectl-assigned exit code is one of these. Branch on the exit status fir
 | 1 | `failed` | The verb ran and the result did not hold: a failed step, drift, a partial result, a refusal that carries its reason, a degraded `--strict` report. The default for any error with no class. | Read the output. Re-run once if it names a transient cause; otherwise stop and report. |
 | 2 | `usage` | Nothing was attempted, and the caller or operator can fix it by changing the call or the setup: a bad flag or argument, an unknown verb, a malformed name, something absent or unconfigured (no terminal, no herdr pane, no backend on `PATH`), a config that does not parse. | Stop. Fix the call or setup. Do not retry it unchanged. |
 | 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | Stop. Escalate to whoever owns the credential. |
-| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today only `tasks` host refusal. | Stop. Escalate. |
+| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal, and `tasks done` and `tasks mcp` inside a drain worker (cameronsjo/forgectl#1226). | Stop. Escalate. |
 | 5 | `unreachable` (reserved) | A configured dependency is present but did not answer: the instance, the network, a socket. | Retry with backoff, then escalate. |
 | 6 | `not_found` (reserved) | The thing the caller named does not exist: a task id, a worker, an item, a run. | Stop. List or inspect to find the right name. |
 

@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,5 +70,52 @@ func TestWorkerStartingCommandsRefuseInADrainWorker(t *testing.T) {
 func TestRefuseInDrainWorkerIgnoresAnUnsetMarker(t *testing.T) {
 	if err := refuseInDrainWorker(func(string) string { return "" }, "surface enqueue"); err != nil {
 		t.Fatalf("unset marker refused: %v", err)
+	}
+}
+
+// TestBoardWritesRefuseInADrainWorker pins cameronsjo/forgectl#1226: a drain
+// worker cannot close, create or comment on a board task, through tasks done
+// or the tasks MCP server. Each refuses before its host rule, credential read
+// or any request, with exit 4 (refused, ADR-0015). State, config and home are
+// scratch directories and the host is unroutable, so a missing refusal
+// cannot reach a real board.
+func TestBoardWritesRefuseInADrainWorker(t *testing.T) {
+	t.Setenv(launch.DrainWorkerEnv, "1")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	host := "board.example.invalid"
+	service := "forgectl-test-none"
+	for _, tc := range []struct {
+		verb string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1"}},
+		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1", "--json"}},
+		{"tasks mcp", newTasksMCPCmd(module.Deps{}, &host, &service), nil},
+		// HTTP mode too: the refusal comes before the token-file read and the bind.
+		{"tasks mcp", newTasksMCPCmd(module.Deps{}, &host, &service), []string{"--http", "127.0.0.1:0", "--token-file", filepath.Join(t.TempDir(), "absent-token"), "--pin-ip", "127.0.0.1"}},
+	} {
+		tc.cmd.SetArgs(tc.args)
+		var out, errOut strings.Builder
+		tc.cmd.SetOut(&out)
+		tc.cmd.SetErr(&errOut)
+		err := tc.cmd.Execute()
+		// --json gets the JSON failure on stderr and a silent error; without it
+		// the error carries the text. Either way stdout stays empty.
+		said := err
+		if slices.Contains(tc.args, "--json") {
+			said = fmt.Errorf("%s", errOut.String())
+			if !strings.Contains(errOut.String(), `"code"`) {
+				t.Errorf("%s --json: stderr %q, want the JSON failure", tc.verb, errOut.String())
+			}
+		}
+		if err == nil || ExitCode(err) != exitRefused || said == nil || !strings.Contains(said.Error(), tc.verb+" refuses to run inside a drain worker") {
+			t.Errorf("%s %q: err %v (exit %d), output %q, want the drain-worker refusal, exit 4", tc.verb, tc.args, err, ExitCode(err), errOut.String())
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: a refused call wrote %q to stdout", tc.verb, out.String())
+		}
 	}
 }

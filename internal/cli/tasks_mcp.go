@@ -100,7 +100,9 @@ TRANSPORTS AND CREDENTIALS
              default ` + tasks.DefaultKeychainService + `). A keychain token is sent only to the
              default host or a host under [tasks] allowed_hosts in the
              forgectl config file; any other --host is refused with exit 4
-             before the keychain is read. Close records also go to
+             before the keychain is read. Inside a drain worker
+             (FORGECTL_DRAIN_WORKER set) the server does not start: exit 4,
+             since its tools write the board. Close records also go to
              tasks-closes.jsonl in the forgectl config directory.
   --http     token from --token-file, which is REQUIRED with --http; the file
              must be owner-readable only. There is no environment-variable
@@ -187,6 +189,12 @@ func runTasksMCP(
 	host, keychainService, httpAddr, tokenFile string,
 	pinIPs []string,
 ) error {
+	// Its tools create, comment on and close board tasks, which cannot be
+	// undone: the server does not start inside a drain worker
+	// (cameronsjo/forgectl#1226), before any flag check or credential read.
+	if err := refuseBoardWriteInDrainWorker("tasks mcp"); err != nil {
+		return err
+	}
 	if err := validateMCPFlags(httpAddr, tokenFile, pinIPs); err != nil {
 		return WithExitCode(fmt.Errorf("tasks mcp: %w", err), exitFailed)
 	}
