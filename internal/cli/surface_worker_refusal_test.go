@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -93,6 +94,8 @@ func TestBoardWritesRefuseInADrainWorker(t *testing.T) {
 		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1"}},
 		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1", "--json"}},
 		{"tasks mcp", newTasksMCPCmd(module.Deps{}, &host, &service), nil},
+		// HTTP mode too: the refusal comes before the token-file read and the bind.
+		{"tasks mcp", newTasksMCPCmd(module.Deps{}, &host, &service), []string{"--http", "127.0.0.1:0", "--token-file", filepath.Join(t.TempDir(), "absent-token"), "--pin-ip", "127.0.0.1"}},
 	} {
 		tc.cmd.SetArgs(tc.args)
 		var out, errOut strings.Builder

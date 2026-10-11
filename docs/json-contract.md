@@ -73,7 +73,7 @@ On failure it writes the standard `{"error","code","path"}` object to stderr, wi
 | `write_refused` | 1 | The update was sent and the server refused it. The task is unchanged. |
 | `not_confirmed` | 1 | The update was sent and nothing read afterwards shows the task done. It may have been applied: read the task before retrying. |
 | `unauthorized` | 3 | The server rejected the credential, on the first read or on the update. On the update it means the credential can read the task and may not change it; retrying does not help. |
-| `failed` | 2, 4, or 1 | Anything else. Exit `2` when the instance could not be reached, `4` when the host is not one a keychain credential may be sent to, and `1` otherwise. |
+| `failed` | 2, 4, or 1 | Anything else. Exit `2` when the instance could not be reached, `4` when the host is not one a keychain credential may be sent to or the call runs inside a drain worker, and `1` otherwise. |
 
 The host rule covers every `tasks` verb that reads the keychain (`ls`, `show`, `ready`, `done`, and `mcp` over stdio). A keychain credential is sent only to the built-in default host or to a host listed in the user's `config.toml`:
 

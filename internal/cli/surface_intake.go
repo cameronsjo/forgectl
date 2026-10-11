@@ -220,8 +220,10 @@ func refuseInDrainWorker(getenv func(string) string, verb string) error {
 	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start or drive another worker or merge a PR; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
 }
 
-// boardWriteGetenv reads the drain-worker marker for the board-write refusal.
-var boardWriteGetenv = os.Getenv
+// inDrainWorker reports whether the drain-worker marker is set, for the
+// board-write refusal. It answers that one question so no tasks file can use
+// it to read another variable.
+var inDrainWorker = func() bool { return os.Getenv(launch.DrainWorkerEnv) != "" }
 
 // refuseBoardWriteInDrainWorker refuses a board write (tasks done, tasks mcp)
 // inside a drain worker: a closed or created task cannot be undone, so the
@@ -233,7 +235,7 @@ var boardWriteGetenv = os.Getenv
 // input from it (TestTasksSources_ReadNoEnvironmentVariable): the marker can
 // only refuse a write, never feed one.
 func refuseBoardWriteInDrainWorker(verb string) error {
-	if boardWriteGetenv(launch.DrainWorkerEnv) == "" {
+	if !inDrainWorker() {
 		return nil
 	}
 	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not create, comment on or close a board task, which cannot be undone; run it from your own terminal", verb, launch.DrainWorkerEnv), exitRefused)

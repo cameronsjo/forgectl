@@ -147,7 +147,7 @@ func CheckBrief(text, via string) error {
 // operator's GitHub identity, so this asks; it cannot stop one (ADR-0011,
 // 2026-10-09 amendment). It names the marker without the colon the merge
 // policy's marker scan looks for, so a worker echoing it writes no marker.
-const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way; and never create, comment on or mark done a board task, with forgectl tasks or its MCP tools. The operator, or forgectl under its merge policy, merges.\n\n" + CommandRules
+const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way; and never create, comment on or mark done a board task, with forgectl tasks or the MCP tools create_task, add_comment and complete_task (also seen as vikunja_create_task and the like). The operator, or forgectl under its merge policy, merges.\n\n" + CommandRules
 
 // CommandRules asks a worker for shell commands its permission mode can
 // approve without stopping (cameronsjo/forgectl#1220): a command whose value
