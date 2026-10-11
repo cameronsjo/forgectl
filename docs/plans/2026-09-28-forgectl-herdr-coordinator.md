@@ -145,6 +145,7 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 - [ ] T8 (atelier P2): queue and drain. Own plan at pickup.
 - [ ] T9 (atelier P3): intake from GitHub labels and the board. Own plan at pickup.
 - [ ] T10 (atelier P4): verdicts, usage, merge gate, closers. Own plan at pickup.
+- [ ] T11 (atelier inbox): `forgectl inbox --json`, one needs-you list, and a decisions store. Own plan: `docs/plans/2026-10-11-atelier-inbox.md`.
 
 ## Amendment: atelier queue, drain, and merge gate (2026-10-05)
 
@@ -159,6 +160,15 @@ The atelier plan (`cadence-ecosystem` `docs/plans/2026-10-05-atelier-a-herdr-wor
 - **T6 grows** a coordinator mode: split an ask, `surface enqueue --batch` per task, point the operator at `/atelier`. It still ships in `cameronsjo/cadence`.
 - **T7 grows** `scripts/atelier-acceptance.sh` in the meta-repo, with negative cases: a review at an older SHA does not merge, a racing push does not merge, a worker-posted `cadence-review` marker does not merge, a second `drain start` is refused.
 - **herdr package boundary (forgectl#721, agreed).** herdr reads for the drain (agent status hints, pane reads) go through the shared `internal/herdr` client (forgectl#723), with a pinned server passed as a `Runner` that sets `HERDR_SOCKET_PATH`. Starting and closing workers stays in `internal/surface/herdradapter` through the sensitive runner. Readiness predicates live in `internal/herdr/ready`, which T2 creates. An errored herdr read is `unreadable`, never `gone`.
+
+## Amendment: the needs-you inbox (2026-10-11)
+
+The cockpit north star (Claude Doc "The Cockpit: north star", 2026-10-11, Sequence step 2) asks for one list of everything that waits on the operator. forgectl already records most of it in four places that nothing merges: the desk, the drain's `needs-you` and `failed` rows, reported worker PRs, and herdr's `blocked` panes. Decisions are recorded nowhere. T11 adds the read verb that merges them and a small store for decisions. Its plan is `docs/plans/2026-10-11-atelier-inbox.md`.
+
+- **T11 adds, and changes nothing that shipped:** `forgectl inbox [--json]`, a read verb with no GitHub call and no pane screen read; `inbox ask|answer|wait|withdraw|prune` for decisions; a `drain-pr.json` side file, written by the T10.3 closer from the read it already makes (not a queue-row field: `queue.json` is decoded strictly, so a new field would break a rollback); `signal_session` on desk items, because herdr pane ids repeat across sessions.
+- **The north star's "P4 `ready-to-close` rows" become the `pr` kind.** P4 dropped board `ready-to-close`; what waits on the operator after P4 is a reported worker's PR when `[surface.merge] mode` is not `auto`.
+- **An answer is not an approval.** No verb reads a decision as consent to merge, run a desk item, or loosen a posture. `inbox answer` needs a terminal and refuses inside a drain worker, which stops accidents only (ADR-0012).
+- **Order:** T11 I1 can start now; the atelier mod (P6) reads its output, so it lands before P6's pane is built.
 
 ## Verification
 
