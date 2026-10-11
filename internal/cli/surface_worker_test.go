@@ -74,8 +74,11 @@ func testHerdrRef(t *testing.T) backend.Ref {
 
 func goodSteps(t *testing.T) workerSteps {
 	return workerSteps{
+		identify: func(context.Context) (repoIdentity, error) {
+			return repoIdentity{NameWithOwner: "cameronsjo/forgectl", DatabaseID: 1252924951}, nil
+		},
 		addWorktree: func(context.Context) (worker.Worktree, error) {
-			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123"}, nil
+			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123", BranchFrom: worker.BranchNew}, nil
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
 			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}, Worker: true}, nil
@@ -217,7 +220,7 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 
 // TestBuildWorkerInvocationIsolates pins the call site that turns the worker
 // floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
-// worker gets the isolation argv, a session id, and none of the launcher's
+// worker gets the worker settings, a session id, and none of the launcher's
 // handles. Dropping req.Worker, or the call through it, turns this red.
 func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "coordinator-token")
@@ -236,7 +239,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkerInvocation: %v", err)
 	}
-	if !slices.Contains(built.Invocation.Args, "--setting-sources") || !slices.Contains(built.Invocation.Args, "--safe-mode") || built.SessionID != id {
+	if !slices.Contains(built.Invocation.Args, "--settings") || built.SessionID != id {
 		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
 	}
 	for _, e := range built.Invocation.Env {
@@ -248,7 +251,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 
 // TestWorkerLaunchRefusesANonWorkerBuild closes the bypass where the launch
 // path builds the invocation without marking it a worker: no posture floor,
-// no isolation argv, the launcher's whole environment. runWorkerSteps refuses
+// no worker settings, the launcher's whole environment. runWorkerSteps refuses
 // to start it, and records the failure.
 func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 	led := testWorkerLedger(t)
@@ -279,6 +282,12 @@ func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 // launch. The claude binary resolves to an executable stub.
 func inProcessSteps(t *testing.T, led *worker.Ledger, launched *[]launch.Invocation) workerSteps {
 	t.Helper()
+	return inProcessStepsFor(t, led, launched, workerSpec{name: "w1", branch: "feat/w1", harness: "claude"})
+}
+
+// inProcessStepsFor is inProcessSteps for a given spec.
+func inProcessStepsFor(t *testing.T, led *worker.Ledger, launched *[]launch.Invocation, spec workerSpec) workerSteps {
+	t.Helper()
 	bin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable to resolve as the claude binary
 		t.Fatal(err)
@@ -290,7 +299,8 @@ func inProcessSteps(t *testing.T, led *worker.Ledger, launched *[]launch.Invocat
 	}
 	deps := module.Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}}}
 	setup := workerSetup{top: testRepoTop, led: led, self: "/nonexistent/forgectl"}
-	steps := setup.steps(deps, workerSpec{name: "w1", branch: "feat/w1", harness: "claude"}, "Fix it.", nil, io.Discard)
+	steps := setup.steps(deps, spec, "Fix it.", nil, io.Discard)
+	steps.identify = func(context.Context) (repoIdentity, error) { return repoIdentity{}, nil }
 	steps.addWorktree = func(context.Context) (worker.Worktree, error) {
 		return worker.Worktree{Path: cwd, Branch: "feat/w1", Base: "abc123"}, nil
 	}
@@ -322,7 +332,7 @@ func TestInProcessLaunchKeepsTheWorkerFloor(t *testing.T) {
 				t.Fatalf("worker env kept the caller's %s", e)
 			}
 		}
-		if !slices.Contains(launched[0].Args, "--setting-sources") {
+		if !slices.Contains(launched[0].Args, "--settings") {
 			t.Fatalf("argv %q: not a worker build", launched[0].Args)
 		}
 		if attempt.row == nil || attempt.row.Stage != worker.StageLaunched || attempt.createdNothing() {

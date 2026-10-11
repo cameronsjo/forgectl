@@ -75,7 +75,24 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 // re-resolution, incarnation, and ownership rules Close uses. It runs no
 // mutating command.
 func (a *Adapter) Probe(ctx context.Context, ref backend.Ref) backend.ProbeResult {
-	_, _, state, cause := a.locate(ctx, ref)
+	return a.probeIn(ctx, ref, liveView{a})
+}
+
+// Prober returns a Probe that reads herdr's readiness and workspace listing
+// at most once, on its first call, and judges every reference against that
+// one read under the same rules Probe uses. `surface prune` asks about many
+// ledger rows at once; one listing per prune keeps it from making two herdr
+// calls per row. The answers are as of that one read, so it is for a single
+// pass, not for a long-lived caller.
+func (a *Adapter) Prober() func(context.Context, backend.Ref) backend.ProbeResult {
+	view := &onceView{a: a}
+	return func(ctx context.Context, ref backend.Ref) backend.ProbeResult {
+		return a.probeIn(ctx, ref, view)
+	}
+}
+
+func (a *Adapter) probeIn(ctx context.Context, ref backend.Ref, view workspaceView) backend.ProbeResult {
+	_, _, state, cause := a.locateIn(ctx, ref, view)
 	switch state {
 	case locateMismatch:
 		return backend.NewProbeIdentityMismatch(cause)
@@ -95,6 +112,33 @@ func (a *Adapter) Probe(ctx context.Context, ref backend.Ref) backend.ProbeResul
 		errors.New("the workspace lookup produced no usable state")))
 }
 
+// mayHold reports whether a reference taken through source could name this
+// adapter's session. It compares the SESSION each side resolved, not the way it
+// was found.
+//
+// The default chain and a session named "default" select one server: the
+// drain pins HERDR_SESSION=default, so its references say named-session, and a
+// plain CLI resolving the default chain must still read and close them
+// (forgectl#1187). Comparing the labels for equality refused that as an
+// identity mismatch.
+//
+//   - A default-session reference was taken on the session named "default",
+//     so it is refused by an adapter pinned to any other name.
+//   - A named-session reference does not record its name, so the label cannot
+//     refuse it. The incarnation check in locate does: the ServerID digests
+//     the socket path the roster maps the session to, so a reference from
+//     another session never matches this one's server.
+func (a *Adapter) mayHold(source backend.ServerSource) bool {
+	switch source {
+	case backend.HerdrDefaultSessionServer():
+		return a.session == defaultSession
+	case backend.HerdrNamedSessionServer():
+		return true
+	default:
+		return false
+	}
+}
+
 // locateState is the shared outcome of "find this reference's workspace".
 type locateState uint8
 
@@ -111,22 +155,74 @@ const (
 	locateUnreadable
 )
 
+// workspaceView is where locate reads the server's readiness and the
+// workspace listing: fresh on every call (liveView), or once for a pass
+// (onceView, Prober).
+type workspaceView interface {
+	readiness(ctx context.Context) (serverInfo, *backend.StartCause)
+	snapshot(ctx context.Context) (map[string]workspaceRow, *backend.StartCause)
+}
+
+// liveView reads herdr on every call.
+type liveView struct{ a *Adapter }
+
+func (v liveView) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
+	return v.a.readiness(ctx)
+}
+
+func (v liveView) snapshot(ctx context.Context) (map[string]workspaceRow, *backend.StartCause) {
+	return v.a.snapshot(ctx, exec.KindHerdrProbe)
+}
+
+// onceView reads each of readiness and the listing at most once and answers
+// every later call with that result, failures included.
+type onceView struct {
+	a           *Adapter
+	ready       bool
+	server      serverInfo
+	serverCause *backend.StartCause
+	listed      bool
+	rows        map[string]workspaceRow
+	rowsCause   *backend.StartCause
+}
+
+func (v *onceView) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
+	if !v.ready {
+		v.server, v.serverCause = v.a.readiness(ctx)
+		v.ready = true
+	}
+	return v.server, v.serverCause
+}
+
+func (v *onceView) snapshot(ctx context.Context) (map[string]workspaceRow, *backend.StartCause) {
+	if !v.listed {
+		v.rows, v.rowsCause = v.a.snapshot(ctx, exec.KindHerdrProbe)
+		v.listed = true
+	}
+	return v.rows, v.rowsCause
+}
+
 // locate is the single lookup Close and Probe share, so the two cannot drift.
 // The serverInfo comes back so Close can reuse it: a close that FAILS while the
 // endpoint has vanished is a satisfied rollback, and answering that needs the
 // socket locate already resolved. cmux's adapter does the same with a socket it
 // knows at construction; herdr's comes from the roster, so it has to travel.
 func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, serverInfo, locateState, backend.StartCause) {
+	return a.locateIn(ctx, ref, liveView{a})
+}
+
+// locateIn is locate reading the server and listing through view.
+func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceView) (string, serverInfo, locateState, backend.StartCause) {
 	if ref.Kind() != backend.KindHerdr {
 		return "", serverInfo{}, locateUnreadable, backend.NewStartCause(backend.FailureInternal,
 			backend.ErrRefKindMismatch)
 	}
-	// The selection CHAIN must match, not merely the resolved name. A reference
-	// taken against an explicitly named session must not be answered by an
-	// adapter that resolved the default one.
-	if ref.Source() != a.source {
+	// The reference must name a session this adapter's pin could be. See
+	// mayHold: the label is compared for what it proves about the session, and
+	// the incarnation check below decides the server.
+	if !a.mayHold(ref.Source()) {
 		return "", serverInfo{}, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
-			errors.New("the reference names a different server selection"))
+			errors.New("the reference was taken in the default session, and this adapter is pinned to another"))
 	}
 	identity, err := ref.HerdrIdentity()
 	if err != nil {
@@ -134,7 +230,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, serverIn
 	}
 	want := identity.Workspace()
 
-	server, cause := a.readiness(ctx)
+	server, cause := view.readiness(ctx)
 	if cause != nil {
 		// Absence is concluded from the failure CLASS and the stat together.
 		// Either alone is a different claim: an incompatible or unauthenticated
@@ -152,10 +248,10 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, serverIn
 	// would otherwise read as an ordinary absence.
 	if !ref.Server().Matches(server.incarnation) {
 		return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
-			errors.New("the herdr server restarted since this reference was taken"))
+			errors.New("the herdr server is not the one this reference was taken on: it restarted, or the reference is from another session"))
 	}
 
-	rows, scause := a.snapshot(ctx, exec.KindHerdrProbe)
+	rows, scause := view.snapshot(ctx)
 	if scause != nil {
 		// Neither a truncated listing nor an unreadable one can prove absence,
 		// and reporting gone would discharge an obligation still outstanding.

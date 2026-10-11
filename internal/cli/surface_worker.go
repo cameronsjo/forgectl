@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -34,6 +36,9 @@ type workerLedger interface {
 // workerSteps are the three things a worker launch does, as functions so the
 // ledger bookkeeping between them can be tested without git or herdr.
 type workerSteps struct {
+	// identify reads the repository identity the row records, before the
+	// row is written; a drain launch also refuses a branch that exists.
+	identify    func(ctx context.Context) (repoIdentity, error)
 	addWorktree func(ctx context.Context) (worker.Worktree, error)
 	build       func(cwd string) (launch.BuiltInvocation, error)
 	launch      func(ctx context.Context, inv launch.Invocation) (backend.Ref, error)
@@ -57,7 +62,17 @@ type workerLaunched struct {
 // StageFailed with whatever the earlier steps recorded, so the next
 // coordinator can find a worktree or workspace a dead launch left behind.
 func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, s workerSteps) (workerLaunched, error) {
-	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID}); err != nil {
+	if s.identify == nil {
+		return workerLaunched{}, errNoIdentityStep
+	}
+	// Before Begin: a failed read, or a drain branch that already exists,
+	// leaves no row and nothing else.
+	id, err := s.identify(ctx)
+	if err != nil {
+		return workerLaunched{}, err
+	}
+	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID,
+		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -91,6 +106,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		r.Stage = worker.StageWorktree
 		r.Worktree = wt.Path
 		r.Base = wt.Base
+		r.BranchFrom = wt.BranchFrom
 	}); err != nil {
 		return fail(err)
 	}
@@ -100,7 +116,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		return fail(launchConfigError{err})
 	}
 	// A worker must be built as one: that is what applies the posture floor,
-	// the isolation argv and the environment allowlist. A build step that
+	// the worker settings and the environment allowlist. A build step that
 	// skipped it would launch a worker with the launcher's posture and env.
 	if !built.Worker {
 		return fail(launchConfigError{errors.New("forgectl: the worker invocation was not built as a worker launch")})
@@ -166,6 +182,22 @@ type workerSpec struct {
 	allowPATH bool
 	// launchID is the drain's queue claim; empty for the CLI.
 	launchID string
+	// configDir is the resolved [surface.profiles] config_dir, the worker's
+	// CLAUDE_CONFIG_DIR, or empty for the launcher's own.
+	configDir string
+	// model replaces the launch profile's model, or is empty.
+	model string
+	// drain marks the drain's launch: its branch must not exist yet, in the
+	// checkout or on GitHub (worker.ErrBranchExists).
+	drain bool
+}
+
+// request is the build request for this worker at cwd: the one a surface
+// launch builds, plus the worker's profile config dir and model.
+func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string) launch.InvocationRequest {
+	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
+	req.ConfigDir, req.Model = spec.configDir, spec.model
+	return req
 }
 
 // workerSetup is what a worker launch resolves before it writes anything.
@@ -226,13 +258,16 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, brief *worker.Brief, warn io.Writer) workerSteps {
 	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
 	return workerSteps{
+		identify: func(ctx context.Context) (repoIdentity, error) {
+			return workerRepoIdentity(ctx, deps.Runner, warn, s.top, spec.branch, spec.drain)
+		},
 		addWorktree: func(ctx context.Context) (worker.Worktree, error) {
 			return worker.AddWorktree(ctx, deps.Runner, s.top, spec.name, spec.branch, func() (string, error) {
 				return workerBase(ctx, deps.Runner, s.top, warn)
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, s.injected, s.unset, spec.harness), prompt, worker.NewSessionID, warn)
+			return buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
 			inv.Env = markHerdrPane(inv.Env)
@@ -328,18 +363,34 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	if opts.Backend != "herdr" {
 		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
 	}
-	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH}
+	if opts.Model != "" {
+		if err := config.CheckModelName(opts.Model); err != nil {
+			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	configDir, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir)
+	if err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
+	}
+	if configDir != "" && opts.Harness != "" && opts.Harness != "claude" {
+		return WithExitCode(errProfileNotClaude, exitUsage)
+	}
+	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
+		configDir: configDir, model: opts.Model}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
 		return err
+	}
+	if err := checkProfileHarness(deps.Cfg.Launch, worker.WorktreePath(setup.top, spec.name), spec); err != nil {
+		return WithExitCode(err, exitUsage)
 	}
 	prompt, brief, err := launchBrief(opts.Brief, time.Now)
 	if err != nil {
 		return WithExitCode(err, exitUsage)
 	}
 	if opts.DryRun {
-		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
+		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{spec: spec, injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
 	}
 
 	attempt, err := attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
@@ -355,8 +406,33 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	return err
 }
 
+// errProfileNotClaude refuses --profile for a worker that is not claude.
+var errProfileNotClaude = errors.New("--profile sets CLAUDE_CONFIG_DIR and applies to claude workers only")
+
+// checkProfileHarness refuses a --profile for a worker whose harness, after
+// the --harness override or else the launch profile matched at its worktree,
+// is not claude. It runs before the worktree exists; the build step would
+// refuse the same launch only after it.
+func checkProfileHarness(lc config.LaunchConfig, worktree string, spec workerSpec) error {
+	if spec.configDir == "" {
+		return nil
+	}
+	harness := spec.harness
+	if harness == "" {
+		p, err := launch.Resolve(lc, worktree)
+		if err != nil {
+			return err
+		}
+		harness = p.Harness
+	}
+	if harness != "claude" {
+		return errProfileNotClaude
+	}
+	return nil
+}
+
 // buildWorkerInvocation marks req as a worker launch, which is what turns on
-// the worker floor, the claude isolation argv and the environment allowlist
+// the worker floor, the worker settings and the environment allowlist
 // (launch.BuildInvocation), and gives a claude worker its session id. The
 // harness is known only once the profile resolves, so a claude worker is
 // built a second time with the id.
@@ -413,6 +489,7 @@ func composeLaunchBrief(text string, now func() time.Time) (string, *worker.Brie
 // workerPlanInputs are the pieces runWorkerLaunch has already built when it
 // reaches a --dry-run.
 type workerPlanInputs struct {
+	spec     workerSpec
 	injected map[string]string
 	unset    []string
 	prompt   string
@@ -440,7 +517,7 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if err != nil {
 		return err
 	}
-	built, err := buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, plan.Path, in.injected, in.unset, opts.Harness), in.prompt, worker.NewSessionID, cmd.ErrOrStderr())
+	built, err := buildWorkerInvocation(in.spec.request(deps.Cfg.Launch, plan.Path, in.injected, in.unset), in.prompt, worker.NewSessionID, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}

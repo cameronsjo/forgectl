@@ -279,6 +279,29 @@ func (p pinnedRunner) RunWithEnvFiltered(ctx context.Context, env map[string]str
 	return out, nil
 }
 
+// RunWithEnvFilteredInDir applies the same total pin to the chosen-directory
+// path. The base must implement exec.DirRunner; one that does not gets
+// ErrUnpinnableGhPath for gh and the same refusal for anything else, since
+// running in the caller's directory instead would defeat the point of asking
+// for another one.
+func (p pinnedRunner) RunWithEnvFilteredInDir(ctx context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	base, ok := p.base.(exec.DirRunner)
+	if !ok {
+		return "", ErrUnpinnableGhPath
+	}
+	if name != "gh" {
+		return base.RunWithEnvFilteredInDir(ctx, dir, env, unset, name, args...)
+	}
+	if p.host == "" {
+		return "", ErrUnpinnableHost
+	}
+	out, err := base.RunWithEnvFilteredInDir(ctx, dir, p.pinEnv(env), p.pinUnset(unset), name, args...)
+	if err != nil {
+		return out, classifyContextFailure(ctx, err)
+	}
+	return out, nil
+}
+
 // RunWithInput refuses `gh` rather than running it unpinned: stdin mode carries
 // no environment, so the host pin cannot ride along. Everything else delegates
 // untouched — the pin is a GitHub-identity control, and pbcopy has no host.

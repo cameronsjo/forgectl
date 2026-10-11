@@ -25,7 +25,7 @@
 #     "blocked" only makes the coordinator wait.
 #
 # Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0, and
-# npm on herdr 0.9.1 (testdata/). Screens marked "uncaptured" are written from
+# npm on herdr 0.9.1, and Pi 1.0.4 on herdr 0.9.3 (testdata/). Screens marked "uncaptured" are written from
 # the 2026-09-28 trial notes and have no fixture yet.
 
 version = 1
@@ -100,3 +100,26 @@ any = ['(?i)would you like to run the following command', '(?mi)^[\s│▌]*allo
 [[harness.codex.blocking]]
 name = "selection menu"
 any = ['(?m)^\s*› \d+\. ']  # uncaptured; a typed "1. " in the composer also reads as blocked, the safe direction
+
+[harness.pi]
+agent = "pi"
+prompt_first = true
+# The editor, then only footer rows to the bottom of the screen. A rule line,
+# the input (one empty row, or rows that start in the first column), a rule
+# line, then up to 5 footer rows (model, cwd, extension status lines). Pi 1.0.4
+# draws transcript rows and every dialog indented one space, so a dialog
+# between two rule lines does not read as the editor. A wrapped input row that
+# starts with a space reads as "prompt not visible": the safe direction. Pi
+# keeps the editor on screen while it works, so herdr's status (working) is
+# what says a turn is running.
+prompt = '(?m)^─{20,}\n(?P<input>(?:[^ \n─].*(?:\n[^ \n─].*)*)?)\n─{20,}(?P<footer>(?:\n.*){0,5})\z'
+
+[[harness.pi.blocking]]
+name = "project trust dialog"
+# Shown at start when the folder has .pi settings or resources.
+any = ['Trust project folder\?', '(?m)^\s*→ (?:Trust|Do not trust)']  # captured
+
+[[harness.pi.blocking]]
+name = "selection menu"
+# The footer of pi's selector dialogs, so an unrecognized one is still named.
+any = ['(?m)^\s*↑↓ navigate\s+enter select']  # captured (trust dialog)

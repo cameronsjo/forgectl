@@ -60,16 +60,34 @@ exists.
 The backend is always explicit. There is no default and no detection.
 
 enqueue, dequeue and queue manage the machine's queue of briefs, which
-surface drain launches as claude workers in herdr:
+surface drain launches as claude, codex, or pi workers in herdr:
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
   forgectl surface queue
+
+intake gh queues a brief for each open GitHub issue the operator labeled:
+
+  forgectl surface intake gh --repo forgectl --dry-run
 
 drain start runs the detached process that launches them; drain status,
 events and stop inspect and end it:
 
   forgectl surface drain start
   forgectl surface drain status
+
+status shows a worker's PR and what the merge policy ([surface.merge])
+decides about it; merge merges it when the policy passes, and audit prints
+its merge-audit lines; merge-machine prints this machine's policy value:
+
+  forgectl surface status fix-login --json
+  forgectl surface merge fix-login --dry-run
+  forgectl surface audit --pr cameronsjo/forgectl#1204
+  forgectl surface merge-machine
+
+prune removes old closed, failed and expired queue rows and closed ledger
+rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
+
+  forgectl surface prune --dry-run
 
 send, inbox, flush and event carry messages between a coordinator and
 its workers across harnesses. See forgectl surface send --help.`,
@@ -84,8 +102,14 @@ its workers across harnesses. See forgectl surface send --help.`,
 	cmd.AddCommand(newSurfaceEnqueueCmd(deps))
 	cmd.AddCommand(newSurfaceDequeueCmd(deps))
 	cmd.AddCommand(newSurfaceQueueCmd(deps))
+	cmd.AddCommand(newSurfaceIntakeCmd(deps))
 	cmd.AddCommand(newSurfaceDrainCmd(deps))
 	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
+	cmd.AddCommand(newSurfaceStatusCmd(deps))
+	cmd.AddCommand(newSurfaceMergeCmd(deps))
+	cmd.AddCommand(newSurfaceAuditCmd(deps))
+	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
+	cmd.AddCommand(newSurfacePruneCmd(deps))
 	cmd.AddCommand(newSurfaceSendCmd(deps))
 	cmd.AddCommand(newSurfaceInboxCmd(deps))
 	cmd.AddCommand(newSurfaceFlushCmd(deps))
@@ -101,6 +125,8 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		worktree    string
 		harness     string
 		brief       string
+		profile     string
+		model       string
 		here        bool
 		dryRun      bool
 		asJSON      bool
@@ -143,6 +169,14 @@ brief from a file of at most 64 KiB. The brief stays in the harness's
 process arguments, where any local process can list it, so it must not hold
 a secret; point the worker at a file in the worktree instead.
 
+--profile <name> runs a claude worker with CLAUDE_CONFIG_DIR set to the
+config_dir of [surface.profiles.<name>] (see docs/configuration.md), so it
+uses that Claude account and settings home; main, or no --profile, keeps the
+launcher's own CLAUDE_CONFIG_DIR. An unknown name is refused. --model <name>
+replaces the launch profile's model for this worker and derives its effort
+again; it is a plain token (letters, digits, '.', '-', '_', '[', ']', at most
+64 characters, not starting with '-').
+
 --dry-run runs every check the launch runs before it writes (the backend is
 on PATH, the target resolves, the harness profile builds, and for a worker the
 name, branch and worktree path are free) and prints what it would create, then
@@ -161,6 +195,7 @@ source is default, launch.worker, or repo-profile; the text preview prints
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
+  forgectl surface launch . --surface herdr --worktree fix/y --name y --profile work --model sonnet
   forgectl surface launch . --surface herdr --worktree feat/x --name x --dry-run --json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -172,6 +207,8 @@ source is default, launch.worker, or repo-profile; the text preview prints
 				Worktree:    worktree,
 				Harness:     harness,
 				Brief:       brief,
+				Profile:     profile,
+				Model:       model,
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -194,11 +231,15 @@ source is default, launch.worker, or repo-profile; the text preview prints
 	cmd.Flags().StringVar(&worktree, "worktree", "",
 		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
 	cmd.Flags().StringVar(&harness, "harness", "",
-		"run this harness instead of the one the directory's launch profile names (claude or codex)")
+		"run this harness instead of the one the directory's launch profile names (claude, codex, or pi)")
 	cmd.Flags().BoolVar(&here, "here", false,
 		"start claude in the target itself, not at its repository root when the .claude settings live there (claude only; no effect on workers or codex)")
 	cmd.Flags().StringVar(&brief, "brief", "",
 		"a worker's first brief, text or @file, passed as the harness's prompt argument (--worktree only)")
+	cmd.Flags().StringVar(&profile, "profile", "",
+		"run the worker under this [surface.profiles] entry's config_dir as CLAUDE_CONFIG_DIR; main is the launcher's own (--worktree only, claude)")
+	cmd.Flags().StringVar(&model, "model", "",
+		"run the worker on this model instead of the launch profile's (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -217,6 +258,8 @@ type surfaceLaunchOptions struct {
 	Worktree    string
 	Harness     string
 	Brief       string
+	Profile     string
+	Model       string
 	Here        bool
 	DryRun      bool
 	JSON        bool
@@ -236,6 +279,9 @@ func firstArg(args []string) string {
 // another local user can perturb is actionable at launch time and is routed to
 // this command's stderr explicitly rather than depending on optional logging.
 func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface launch"); err != nil {
+		return err
+	}
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
@@ -249,6 +295,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	}
 	if opts.Brief != "" {
 		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
+	}
+	if opts.Profile != "" || opts.Model != "" {
+		return WithExitCode(errors.New("--profile and --model need --worktree; only a worker launch takes them"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

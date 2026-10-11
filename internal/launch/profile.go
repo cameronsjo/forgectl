@@ -94,7 +94,7 @@ type Profile struct {
 	// configuration. It is a security control for the clean-room review, where
 	// the workspace holds a third party's checkout: a `.mcp.json` there is
 	// executed at session start, before the agent calls any tool, so plan mode
-	// and the workspace allowlist are both downstream of it.
+	// and the reviewer's allowlist are both downstream of it.
 	//
 	// Deliberately NOT surfaced in config and NOT defaulted on: it is set by the
 	// review dispatch alone (internal/pr launchInline). An operator's ordinary

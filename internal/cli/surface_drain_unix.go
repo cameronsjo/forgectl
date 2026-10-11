@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
+	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -46,6 +47,18 @@ var drainSpawn = func(args, env []string) (int, error) {
 	// zombie that reads as alive.
 	go func() { _ = cmd.Wait() }()
 	return pid, nil
+}
+
+// drainRunDirCheck creates and removes one private run directory where every
+// launch will make its own: surface.NewService's empty base, os.TempDir(). The
+// child inherits this command's environment, so a TMPDIR this refuses fails
+// every launch the drain would make (forgectl#1188).
+var drainRunDirCheck = func() error {
+	dir, err := surface.NewRunDir("")
+	if err != nil {
+		return err
+	}
+	return dir.Close()
 }
 
 // drainSignal sends SIGTERM. Tests replace it.
@@ -87,7 +100,10 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 	pid := os.Getpid()
 	// 0 when unreadable; stop then refuses to signal, and the event says why.
 	start, startErr := procstart.Of(pid)
-	base := drain.Status{PID: pid, ProcessStart: start, HerdrSession: session, HerdrPath: herdrPath, StartedAt: time.Now().UTC()}
+	// claude-slots is resolved once, here, like herdr: the PATH a later
+	// launch sees cannot swap it.
+	slotsPath := lookClaudeSlots()
+	base := drain.Status{PID: pid, ProcessStart: start, HerdrSession: session, HerdrPath: herdrPath, ClaudeSlotsPath: slotsPath, StartedAt: time.Now().UTC()}
 	var seq int64
 	emit := func(e drain.Event) error {
 		seq++
@@ -128,11 +144,12 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 	if err := drainSessionPin(session, herdrPath); err != nil {
 		return WithExitCode(termsafe.Error(errors.Join(err, stopped(nil, err))), exitUsage)
 	}
-	dio, err := realDrainIO(deps, session, emit)
+	dio, err := realDrainIO(deps, session, slotsPath, emit)
 	if err != nil {
 		return WithExitCode(termsafe.Error(errors.Join(err, stopped(nil, err))), exitUsage)
 	}
 	d := newDrainer(dio, session, stop.Load)
+	d.announce()
 	d.loadSettings()
 	if err := writeStatus(d.status(base, nil)); err != nil {
 		return termsafe.Error(err)

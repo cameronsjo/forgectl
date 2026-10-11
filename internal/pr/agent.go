@@ -18,10 +18,17 @@ const (
 	// is a security one, not a plumbing one.
 	//
 	// Agent A confines the reviewer with a deny-by-default Claude Code
-	// allowlist (see allowlist.go): four read tools plus eight literal
-	// read-only Bash prefixes, under plan mode. It grants no command-execution
-	// primitive at all — `rg` is excluded by name because `rg --pre <cmd>` is
-	// one.
+	// allowlist (see allowlist.go): three read tools plus a few Bash prefixes
+	// chosen for reading, under plan mode, passed on the command line with no
+	// settings file loaded (reviewSettingSources). Its Bash commands run under
+	// Claude Code's OS sandbox (reviewsandbox.go). The allowlist grants no
+	// command-execution primitive by name — `rg` is excluded because `rg --pre
+	// <cmd>` is one — but an allowed prefix admits every flag, and one git
+	// flag writes files git later executes from (forgectl#694). The sandbox
+	// narrows what such a run can do, and no further than its block says:
+	// writes are denied in the workspace and a linked worktree's shared git
+	// dir, egress is limited to the PR's gh hosts, and reads are NOT
+	// narrowed.
 	//
 	// Codex has no allowlist equivalent. Its `--sandbox read-only` scopes
 	// filesystem WRITES and network egress; it does not scope which commands

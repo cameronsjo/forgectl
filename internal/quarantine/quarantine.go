@@ -98,7 +98,7 @@ var tier1Carriers = []string{
 	// MEASURED (Claude Code 2.1.220): a root .mcp.json planted in a review
 	// workspace made the harness spawn the PR author's `command` + `args` at
 	// session START — before the agent invoked any tool, with `--permission-mode
-	// plan` and the deny-by-default workspace allowlist both in force. Those
+	// plan` and the deny-by-default reviewer allowlist both in force. Those
 	// controls govern which TOOLS the agent may call; neither sits upstream of a
 	// process spawned at MCP registration. That is remote-content-to-local-code-
 	// execution on the reviewer's host, strictly worse than the prompt injection

@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -17,23 +19,34 @@ import (
 )
 
 // `surface enqueue`, `dequeue` and `queue` manage the machine's queue of
-// briefs that `surface drain` launches as claude workers.
+// briefs that `surface drain` launches as workers.
 
 // queueRowView is one queue row as `surface queue --json` and `surface
 // enqueue --json` print it. The brief text is never printed. Additive changes
 // only (ADR-0008 rule 2).
 type queueRowView struct {
-	Name        string    `json:"name"`
-	Repo        string    `json:"repo"`
-	Batch       string    `json:"batch,omitempty"`
-	State       string    `json:"state"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"last_error,omitempty"`
-	LaunchID    string    `json:"launch_id,omitempty"`
-	Session     string    `json:"session,omitempty"`
-	BriefSHA256 string    `json:"brief_sha256"`
-	EnqueuedAt  time.Time `json:"enqueued_at"`
-	StateAt     time.Time `json:"state_at"`
+	Name      string `json:"name"`
+	Repo      string `json:"repo"`
+	Batch     string `json:"batch,omitempty"`
+	State     string `json:"state"`
+	Attempts  int    `json:"attempts"`
+	LastError string `json:"last_error,omitempty"`
+	LaunchID  string `json:"launch_id,omitempty"`
+	Session   string `json:"session,omitempty"`
+	Profile   string `json:"profile,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Harness   string `json:"harness"`
+	Source    string `json:"source,omitempty"`
+	Author    string `json:"author,omitempty"`
+	Labeler   string `json:"labeler,omitempty"`
+	LabeledAt string `json:"labeled_at,omitempty"`
+	// PRClosedAt is when the drain first saw the PR closed unmerged; CostUSD is
+	// the session cost recorded when the PR merged.
+	PRClosedAt  *time.Time `json:"pr_closed_at,omitempty"`
+	CostUSD     *float64   `json:"cost_usd,omitempty"`
+	BriefSHA256 string     `json:"brief_sha256"`
+	EnqueuedAt  time.Time  `json:"enqueued_at"`
+	StateAt     time.Time  `json:"state_at"`
 	// AgeSeconds is how long the row has been in its state.
 	AgeSeconds int64 `json:"age_seconds"`
 }
@@ -41,8 +54,8 @@ type queueRowView struct {
 func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
 	return queueRowView{
 		Name: r.Name, Repo: r.Repo, Batch: r.Batch, State: string(r.State), Attempts: r.Attempts,
-		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, BriefSHA256: r.BriefSHA256,
-		EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
+		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, Profile: r.Profile, Model: r.Model, Harness: r.Launch().Harness,
+		Source: r.Source, Author: r.Author, Labeler: r.Labeler, LabeledAt: r.LabeledAt, PRClosedAt: r.PRClosedAt, CostUSD: r.CostUSD, BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
 	}
 }
 
@@ -59,43 +72,57 @@ type queueResult struct {
 }
 
 type enqueueOptions struct {
-	Repo  string
-	Name  string
-	Brief string
-	Batch string
-	JSON  bool
+	Repo    string
+	Name    string
+	Brief   string
+	Batch   string
+	Profile string
+	Model   string
+	Harness string
+	JSON    bool
 }
 
 func newSurfaceEnqueueCmd(deps module.Deps) *cobra.Command {
 	opts := enqueueOptions{}
 	cmd := &cobra.Command{
 		Use:   "enqueue --repo <path> --name <slug> --brief <file>",
-		Short: "Queue a brief for surface drain to launch as a claude worker",
+		Short: "Queue a brief for surface drain to launch as a worker",
 		Long: `enqueue adds a row to the machine's queue, $XDG_STATE_HOME/forgectl/surface/queue.json,
-for surface drain to launch as a claude worker on its own branch. The queue
-holds claude workers only.
+for surface drain to launch as a worker on its own branch. --harness names the
+worker's harness: claude (the default), codex, or pi. The drain launches the
+row with it.
 
 --repo is a project name or path; the row records the repository's top level.
 --name is the worker name, unique across the whole queue (1-48 characters of
 a-z, 0-9 and '-'). --brief is a path to the brief file (no '@'), read once and
 stored as text: at most 64 KiB, checked as a launch brief, and it may not
-start with '@'. --batch tags the row for listing.
+start with '@'. --batch tags the row for listing. --profile names a
+[surface.profiles] entry whose config_dir the worker runs under as
+CLAUDE_CONFIG_DIR (main, or none, keeps the drain's own); the row stores the
+name, and the drain resolves it from the config file when it launches the
+row. --profile is for claude workers only. --model replaces the launch
+profile's model for this worker, passed as the harness's --model (a plain
+token: letters, digits, '.', '-', '_', '[', ']', not starting with '-').
 
 enqueue is idempotent on the name: the same brief again changes nothing and
 prints the row's current state; a different brief, or another repository, is
-refused naming both brief hashes. To replace a row, dequeue it first. The
+refused naming both brief hashes, as is another --harness, --profile or --model. To replace a row, dequeue it first. The
 queue file stays under 768 KiB; an enqueue past that is refused before
 anything is written. --json prints {"added","name","repo","batch","state",
-"attempts","last_error","launch_id","session","brief_sha256","enqueued_at",
-"state_at","age_seconds"}.
+"attempts","last_error","launch_id","session","profile","model","harness",
+"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
-holds another brief or repository, or the queue is full). Exit 2: a usage or
+holds another brief, repository, launch setting, or intake origin (source,
+author, labeler, labeled_at),
+or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
-  forgectl surface enqueue --repo . --name docs-pass --brief b.md --batch oct-07 --json`,
+  forgectl surface enqueue --repo . --name docs-pass --brief b.md --batch oct-07 --json
+  forgectl surface enqueue --repo forgectl --name tidy --brief b.md --profile work --model sonnet
+  forgectl surface enqueue --repo forgectl --name lint-pass --brief b.md --harness codex`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSurfaceEnqueue(cmd, deps, opts)
@@ -105,11 +132,17 @@ setup error, such as an unusable brief or an unreadable queue file.
 	cmd.Flags().StringVar(&opts.Name, "name", "", "worker name, unique across the queue — required")
 	cmd.Flags().StringVar(&opts.Brief, "brief", "", "path to the brief file, at most 64 KiB — required")
 	cmd.Flags().StringVar(&opts.Batch, "batch", "", "batch id to tag the row with (a-z, 0-9 and '-')")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"} as JSON`)
+	cmd.Flags().StringVar(&opts.Profile, "profile", "", "[surface.profiles] name the worker runs under (main: the drain's own CLAUDE_CONFIG_DIR)")
+	cmd.Flags().StringVar(&opts.Model, "model", "", "model the worker runs on, instead of the launch profile's")
+	cmd.Flags().StringVar(&opts.Harness, "harness", worker.DefaultQueueHarness, "harness the drain launches the worker with: claude, codex, or pi")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","brief_sha256","enqueued_at","state_at","age_seconds"} as JSON`)
 	return cmd
 }
 
 func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface enqueue"); err != nil {
+		return err
+	}
 	if opts.Repo == "" || opts.Name == "" || opts.Brief == "" {
 		return WithExitCode(errors.New("enqueue needs --repo, --name and --brief"), exitUsage)
 	}
@@ -118,6 +151,9 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 	}
 	if strings.HasPrefix(opts.Brief, "@") {
 		return WithExitCode(errors.New("--brief takes a path to the brief file; drop the leading '@'"), exitUsage)
+	}
+	if err := checkQueueLaunchFlags(deps, opts.Profile, opts.Model, opts.Harness); err != nil {
+		return err
 	}
 	target, err := projects.New(deps.Runner).ResolveTarget(opts.Repo)
 	if err != nil {
@@ -139,7 +175,7 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 		return WithExitCode(err, exitUsage)
 	}
 	now := time.Now()
-	row, added, err := q.Enqueue(opts.Name, top, text, opts.Batch, now)
+	row, added, err := q.EnqueueLaunch(opts.Name, top, text, opts.Batch, worker.QueueLaunch{Profile: opts.Profile, Model: opts.Model, Harness: opts.Harness}, now)
 	switch {
 	case errors.Is(err, worker.ErrQueueNameTaken), errors.Is(err, worker.ErrQueueFull):
 		return termsafe.Error(err)
@@ -147,6 +183,31 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	return reportEnqueue(cmd.OutOrStdout(), enqueueResult{Added: added, queueRowView: viewQueueRow(row, now)}, opts.JSON)
+}
+
+// checkQueueLaunchFlags refuses a --model, --harness or --profile a queue row
+// cannot carry, as a usage error.
+func checkQueueLaunchFlags(deps module.Deps, profile, model, harness string) error {
+	if model != "" {
+		if err := config.CheckModelName(model); err != nil {
+			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	switch harness {
+	case "claude":
+	case "codex", "pi":
+		if profile != "" && profile != config.MainProfile {
+			return WithExitCode(errProfileNotClaude, exitUsage)
+		}
+	default:
+		return WithExitCode(fmt.Errorf("--harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(harness, 0)), exitUsage)
+	}
+	// Only the name is stored; resolving it now refuses a name the config
+	// does not define, and the drain resolves it again at launch.
+	if _, err := deps.Cfg.Surface.ProfileConfigDir(profile, os.UserHomeDir); err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
+	}
+	return nil
 }
 
 func reportEnqueue(out io.Writer, r enqueueResult, asJSON bool) error {
@@ -171,8 +232,8 @@ func newSurfaceDequeueCmd(_ module.Deps) *cobra.Command {
 may be running (claimed, launched, needs-you): run surface close first. After
 dequeue the same name can be enqueued again, which is how a failed row is
 retried. --json prints the removed row as it was: {"name","repo","batch",
-"state","attempts","last_error","launch_id","session","brief_sha256",
-"enqueued_at","state_at","age_seconds"}.
+"state","attempts","last_error","launch_id","session","profile","model","harness",
+"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: removed. Exit 1: refused, the worker is live. Exit 2: no such row,
 or a usage or setup error.
@@ -183,11 +244,14 @@ or a usage or setup error.
 			return runSurfaceDequeue(cmd, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
 	return cmd
 }
 
 func runSurfaceDequeue(cmd *cobra.Command, name string, asJSON bool) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface dequeue"); err != nil {
+		return err
+	}
 	if err := worker.ValidName(name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
@@ -222,7 +286,15 @@ brief text is never printed. States: queued, claimed, launched, needs-you,
 reported, failed, closed, expired. A dequeued row is removed, not kept.
 
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
-"launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"}]}.
+"launch_id","session","profile","model","harness","source","author",
+"labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at",
+"state_at","age_seconds"}]}.
+source, author, labeler and labeled_at are set on rows surface intake made:
+gh:<owner>/<repo>#<number>, the issue's author, and the login and RFC 3339
+time of the labeling that admitted it. pr_closed_at (RFC 3339) is when the
+drain first saw a reported row's PR closed unmerged; it closes the worker 24
+hours later, and a reopened PR clears it. cost_usd is the session's cost in
+US dollars, set when the PR merged and every model was priced.
 
 Exit 0: listed. Exit 2: the queue file cannot be read.
 
@@ -241,7 +313,7 @@ Exit 0: listed. Exit 2: the queue file cannot be read.
 			return reportQueue(cmd.OutOrStdout(), rows, time.Now(), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
 	return cmd
 }
 

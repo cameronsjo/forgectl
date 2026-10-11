@@ -94,6 +94,9 @@ brief the worker to read it. @file reads the brief from a file. A typed brief
 may not start with - / ! # ? @ or &, which herdr reads as an option or the
 harness reads as a mode or menu.
 
+brief refuses inside a drain worker (FORGECTL_DRAIN_WORKER set), so one
+worker does not type into another by accident.
+
 Exit 0: sent and working. Exit 1: refused (not at its prompt, a dialog, text
 already in the input box, a read-back that did not match) or unconfirmed.
 Exit 2: a usage or setup error.
@@ -114,6 +117,10 @@ Exit 2: a usage or setup error.
 }
 
 func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) error {
+	// A worker must not type into a sibling worker's prompt.
+	if err := refuseInDrainWorker(os.Getenv, "surface brief"); err != nil {
+		return err
+	}
 	if opts.Readback <= 0 || opts.Start <= 0 {
 		return WithExitCode(errors.New("--readback-timeout and --start-timeout must be positive"), exitUsage)
 	}

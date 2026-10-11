@@ -17,6 +17,10 @@ var drainSpawn = func([]string, []string) (int, error) { return 0, errDrainUnsup
 
 var drainSignal = func(int) error { return errDrainUnsupported }
 
+// drainRunDirCheck passes here so start reports errDrainUnsupported, not a
+// run-directory refusal that would send the operator to TMPDIR.
+var drainRunDirCheck = func() error { return nil }
+
 func runDrainProcess(context.Context, module.Deps, string, string) error {
 	return WithExitCode(errDrainUnsupported, exitUsage)
 }

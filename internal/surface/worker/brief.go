@@ -140,8 +140,18 @@ func CheckBrief(text, via string) error {
 	return nil
 }
 
-// Compose appends the report instruction to text. A launch brief gets it as
-// its own paragraph; a typed brief, which must stay on one line, after a
+// WorkerRules is the rule forgectl puts in every launch brief, after the
+// task and before the report instruction: a worker never posts a review
+// marker, approves, or merges (atelier P4, T10.4). Workers run on the
+// operator's GitHub identity, so this asks; it cannot stop one (ADR-0011,
+// 2026-10-09 amendment). It names the marker without the colon the merge
+// policy's marker scan looks for, so a worker echoing it writes no marker.
+const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way. The operator, or forgectl under its merge policy, merges."
+
+// Compose appends forgectl's text to a brief. A launch brief gets
+// WorkerRules and then the report instruction, each as its own paragraph; a
+// typed brief, which must stay on one line and goes to a worker that was
+// given the rules at launch, gets the report instruction alone, after a
 // space.
 //
 // The instruction spells the REPORT line out in words rather than showing
@@ -150,11 +160,11 @@ func CheckBrief(text, via string) error {
 func Compose(text, marker, via string) string {
 	instruction := "When you finish, end your final message with one line made of: the word REPORT, a space, the code " +
 		marker + ", a colon, then a one-line summary of what you did and where it is (branch, commit, PR)."
-	sep := "\n\n"
+	text = strings.TrimRight(text, " \t\n")
 	if via == ViaTyped {
-		sep = " "
+		return text + " " + instruction
 	}
-	return strings.TrimRight(text, " \t\n") + sep + instruction
+	return text + "\n\n" + WorkerRules + "\n\n" + instruction
 }
 
 // reportPrefix is what may precede REPORT on its line: indentation, then at

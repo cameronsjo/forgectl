@@ -141,6 +141,41 @@ func TestBarSolid(t *testing.T) {
 	}
 }
 
+func TestBarThin(t *testing.T) {
+	cases := []struct {
+		frac  float64
+		width int
+		want  string
+	}{
+		{0, 8, "────────"},
+		{1, 8, "━━━━━━━━"},
+		{0.5, 8, "━━━━────"},
+		{-1, 4, "────"},
+		{7, 4, "━━━━"},
+		{0.5, 0, ""},
+	}
+	for _, c := range cases {
+		if got := plain(BarThin(testStyles(), c.width, c.frac)); got != c.want {
+			t.Errorf("BarThin(%v,%d) = %q, want %q", c.frac, c.width, got, c.want)
+		}
+	}
+}
+
+func TestPanelPadded_PadsBothSides(t *testing.T) {
+	rows := strings.Split(plain(PanelPadded(testStyles(), 14, 2, "t", "", []string{"0123456789abcdef"})), "\n")
+	if rows[1] != "│  01234567…  │" && rows[1] != "│  0123456…  │" {
+		t.Errorf("padded row = %q", rows[1])
+	}
+	for _, r := range rows {
+		if w := ansi.StringWidth(r); w != 14 {
+			t.Errorf("row %q is %d cells, want 14", r, w)
+		}
+	}
+	if plain(PanelPadded(testStyles(), 12, 1, "t", "", []string{"x"})) != plain(Panel(testStyles(), 12, "t", "", []string{"x"})) {
+		t.Error("PanelPadded with pad 1 differs from Panel")
+	}
+}
+
 func TestBarSegments(t *testing.T) {
 	d, r, w, f := SegDone, SegRunning, SegWaiting, SegFailed
 	cases := []struct {

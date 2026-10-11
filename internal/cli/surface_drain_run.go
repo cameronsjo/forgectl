@@ -7,11 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -19,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -70,10 +77,33 @@ type drainIO struct {
 	// load reads the config file with the normal loader.
 	load   func() (config.Config, error)
 	notify drainNotifier
+	// slots runs `claude-slots check <need>` before a launch; nil when
+	// claude-slots was not on PATH at drain start, and the drain launches
+	// without the cap.
+	slots func(ctx context.Context, need int) drain.SlotsCheck
 	// emit records one event.
 	emit     func(drain.Event) error
 	now      func() time.Time
 	launchID func() (string, error)
+	// prRead finds a reported worker's PR through the discovery filter
+	// (merge.Reader.Discover), for the closers.
+	prRead func(ctx context.Context, row merge.Row) (merge.Candidate, error)
+	// price prices a transcript, or returns nil (priceTranscript).
+	price func(ctx context.Context, transcript string) *statusUsage
+	// closeRow runs the close `surface close` runs on a reported row's own
+	// ledger row.
+	closeRow func(ctx context.Context, q worker.QueueRow, led worker.Row) closeResult
+	// prune runs `surface prune` with the default cutoff.
+	prune func(ctx context.Context, now time.Time) (pruneResult, error)
+	// pruneDay and setPruneDay read and record the UTC day of the last daily
+	// prune.
+	pruneDay    func() (string, error)
+	setPruneDay func(day string) error
+	// mergeSettings resolves [surface.merge] from the config file, fresh;
+	// the autopilot runs only while it says auto.
+	mergeSettings func() config.MergeSettings
+	// land is the merge path `surface merge` uses (merge.Lander.Land).
+	land landFunc
 }
 
 // drainProber reads one live worker's pane.
@@ -93,11 +123,82 @@ type drainer struct {
 	stopping func() bool
 	// lastErr is the last I/O error a tick met, for drain.json.
 	lastErr string
+	// slotsCond is the condition the last claude-slots check left
+	// (drain.SlotsDecision.Cond), so each is recorded once on entry.
+	slotsCond string
+	// closerRead is when each reported row's PR was last read, so a row is
+	// read at most every drain.CloserReadEvery. A restart forgets it.
+	closerRead map[string]time.Time
+	// closerNote is the last closer event recorded for each row, so a
+	// repeated refusal or note is one event, not one per read. closerReadFail
+	// is the same for a failed PR read, and a read that works clears it.
+	closerNote     map[string]string
+	closerReadFail map[string]string
+	// pruneDay is the UTC day of the last daily prune; pruneDayRead says it
+	// was read from drain-prune-day.
+	pruneDay     string
+	pruneDayRead bool
+	// autopilotTried is when each reported row's merge was last tried, so a
+	// row is tried at most every drain.AutopilotEvery; autopilotNote is the
+	// last refusal recorded for each row (head and reasons), so a repeated
+	// refusal is one event. A restart forgets both.
+	autopilotTried map[string]time.Time
+	autopilotNote  map[string]string
+	// autopilotMerged holds the rows (autopilotKey) the autopilot merged, or
+	// whose merge may have happened (merged-unconfirmed, merged-elsewhere,
+	// merge-unknown), skipped while they stay reported, so such a row is not
+	// tried again before the closers settle it: a merge-queue PR, say, would
+	// otherwise add an attempt and an outcome line to the audit file every
+	// drain.AutopilotEvery. A restart forgets it; a fresh attempt then
+	// refuses on the PR's state.
+	autopilotMerged map[string]bool
 }
+
+// autopilotKey names one launch of a row: its name and launch_id.
+func autopilotKey(q worker.QueueRow) string { return q.Name + "\x00" + q.LaunchID }
 
 func newDrainer(io drainIO, session string, stopping func() bool) *drainer {
 	return &drainer{io: io, session: session, pauses: drain.Pauses{}, memo: map[string]drain.Memo{},
-		settings: config.DefaultDrainSettings(), stopping: stopping}
+		settings: config.DefaultDrainSettings(), stopping: stopping,
+		closerRead: map[string]time.Time{}, closerNote: map[string]string{}, closerReadFail: map[string]string{},
+		autopilotTried: map[string]time.Time{}, autopilotNote: map[string]string{}, autopilotMerged: map[string]bool{}}
+}
+
+// announce records what the drain starts without: one note when claude-slots
+// was not found, since every launch then goes ahead without the session cap.
+func (d *drainer) announce() {
+	if d.io.slots == nil {
+		d.event(drain.Event{Kind: drain.EventNote, Error: drain.NoSlotsNote})
+	}
+}
+
+// slotsHold runs the claude-slots check for the claimed row q, asking for need
+// slots, and reports whether to hold it, with the reason. An event is
+// recorded once per entry into a held or failed condition.
+func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow, need int) (bool, string) {
+	if d.io.slots == nil {
+		return false, ""
+	}
+	dec := drain.DecideSlots(d.io.slots(ctx, need), d.slotsCond)
+	d.slotsCond = dec.Cond
+	if dec.Emit {
+		e := dec.Event
+		e.Name, e.Repo = q.Name, q.Repo
+		d.event(e)
+	}
+	return dec.Hold, dec.Reason
+}
+
+// unclaim puts a held row back to queued, quietly: the slots-held event
+// already said why, once, and a state event per tick would repeat it.
+func (d *drainer) unclaim(q worker.QueueRow, why string) {
+	_, err := d.io.queue.UpdateIf(q.Name, worker.SameRead(q), d.io.now(), drain.Unclaim(q, why).Apply)
+	if err != nil && !errors.Is(err, worker.ErrQueueRowChanged) && !errors.Is(err, worker.ErrQueueNoRow) {
+		// The row stays claimed; the next tick's reconcile requeues it.
+		d.lastErr = "queue: " + err.Error()
+		d.event(drain.Event{Kind: drain.EventError, Name: q.Name, Repo: q.Repo, State: string(q.State),
+			Error: "put the held row back to queued: " + err.Error()})
+	}
 }
 
 // event records e, keeping the first write failure for drain.json.
@@ -207,8 +308,9 @@ func nonEmptyState(s, fallback worker.QueueState) worker.QueueState {
 }
 
 // tick runs one pass: reload the config, settle claimed rows a dead launch
-// left, watch live workers, expire, claim and launch, prune. It returns the
-// rows as last read, for drain.json.
+// left, watch live workers, run the closers on reported rows, with mode auto
+// try one merge, expire, claim and launch, and once a UTC day prune. It returns the rows as last read,
+// for drain.json.
 func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	d.lastErr = ""
 	d.loadSettings()
@@ -235,6 +337,14 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	if d.stopping() {
 		return rows
 	}
+	d.closers(ctx, rows, ledgers)
+	if d.stopping() {
+		return rows
+	}
+	d.autopilot(ctx)
+	if d.stopping() {
+		return rows
+	}
 	now := d.io.now()
 	for _, q := range rows {
 		d.apply(q, drain.Expire(q, now))
@@ -249,11 +359,28 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	if d.stopping() {
 		return rows
 	}
-	d.prune(rows)
+	d.dailyPrune(ctx)
 	if fresh, ok := d.readRows(); ok {
 		rows = fresh
 	}
 	return rows
+}
+
+// queueRowUnchanged reports whether the queue row named q.Name is still
+// exactly the row read as q (worker.SameRead). An unreadable queue reads as
+// changed.
+func (d *drainer) queueRowUnchanged(q worker.QueueRow) bool {
+	rows, err := d.io.queue.Rows()
+	if err != nil {
+		return false
+	}
+	same := worker.SameRead(q)
+	for _, r := range rows {
+		if r.Name == q.Name {
+			return same(r)
+		}
+	}
+	return false
 }
 
 func (d *drainer) readRows() ([]worker.QueueRow, bool) {
@@ -337,17 +464,45 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 // the slots allow and nothing pauses claiming.
 func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
 	plan := drain.PlanClaims(rows, ledgers, d.settings)
-	if len(plan) == 0 && !d.pauseHeld(drain.PauseHerdr) {
-		return
+	if len(plan) == 0 {
+		// Nothing to launch ends a hold: the next one is a new entry and
+		// records its own slots-held event.
+		d.slotsCond = ""
+		if !d.pauseHeld(drain.PauseHerdr) {
+			return
+		}
 	}
+	// started counts the launches this tick made that may have started a
+	// session, so the next check asks for one more slot than that: a session
+	// launched moments ago may not be registered with claude-slots yet.
+	started := 0
 	if err := d.io.herdrReady(ctx); err != nil {
 		d.pause(drain.PauseHerdr, termsafe.SafeLineMax(err.Error(), maxDrainErrorLen))
 	} else {
 		d.resume(drain.PauseHerdr)
 	}
+	// claudeHeld is set once claude-slots holds a claude row this tick: later
+	// claude rows are skipped unclaimed, and codex and pi rows, which are not
+	// claude sessions, still launch.
+	claudeHeld := false
+	// probe lets one launch through this tick when a GitHub-read pause from
+	// an earlier tick is the only one held: that launch's identity read is
+	// the re-check, and a success clears the pause. A pause set during this
+	// tick stops claiming until the next.
+	probe := d.onlyPause(drain.PauseGitHub)
 	for _, q := range plan {
-		if d.pauses.Paused() || d.stopping() {
+		if d.stopping() {
 			return
+		}
+		probing := false
+		if d.pauses.Paused() {
+			if !probe || !d.onlyPause(drain.PauseGitHub) {
+				return
+			}
+			probing = true
+		}
+		if claudeHeld && q.Launch().Harness == "claude" {
+			continue
 		}
 		id, err := d.io.launchID()
 		if err != nil {
@@ -362,17 +517,41 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 			}
 			continue
 		}
+		checkErr := drain.CheckClaimed(claimed)
+		// claude-slots caps claude sessions; a codex or pi worker is not one.
+		if checkErr == nil && claimed.Launch().Harness == "claude" {
+			// The machine's session cap, checked as late as possible: a held
+			// row goes back to queued, and no more claude rows are claimed
+			// this tick.
+			if hold, why := d.slotsHold(ctx, claimed, started+1); hold {
+				d.unclaim(claimed, why)
+				if ctx.Err() != nil {
+					return // a stop cut the check short: launch nothing more
+				}
+				claudeHeld = true
+				continue
+			}
+		}
 		d.event(drain.Event{Kind: drain.EventState, Name: claimed.Name, Repo: claimed.Repo, State: string(claimed.State), Attempt: claimed.Attempts})
 		var a drain.Attempt
-		if err := drain.CheckClaimed(claimed); err != nil {
-			a = drain.Attempt{Class: drain.ErrRowInvalid, Err: err.Error(), CreatedNothing: true}
+		if checkErr != nil {
+			a = drain.Attempt{Class: drain.ErrRowInvalid, Err: checkErr.Error(), CreatedNothing: true}
 		} else {
 			a = d.io.launch(ctx, d.cfg, claimed)
+		}
+		if !a.CreatedNothing {
+			started++
+		}
+		if probing {
+			probe = false
 		}
 		a.Err = termsafe.SafeLineMax(a.Err, maxDrainErrorLen)
 		dec := drain.DecideLaunch(claimed, a)
 		if dec.Pause != "" {
 			d.pause(dec.Pause, dec.PauseReason)
+		}
+		if a.Class == drain.ErrNone {
+			d.resume(drain.PauseGitHub)
 		}
 		d.apply(claimed, dec.Change)
 	}
@@ -383,22 +562,290 @@ func (d *drainer) pauseHeld(k drain.PauseKind) bool {
 	return ok
 }
 
-// prune removes terminal rows past drain.PruneAfter, each only if it is
-// still the row read.
-func (d *drainer) prune(rows []worker.QueueRow) {
+// onlyPause reports that k is the one pause held.
+func (d *drainer) onlyPause(k drain.PauseKind) bool {
+	return len(d.pauses) == 1 && d.pauseHeld(k)
+}
+
+// closers reads the PR of each reported row due a read, oldest read first,
+// at most drain.CloserReadsPerTick a tick, and closes the worker once its PR
+// merged, or drain.ClosedGrace after it closed unmerged.
+func (d *drainer) closers(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
 	now := d.io.now()
+	type candidate struct {
+		q   worker.QueueRow
+		led worker.Row
+	}
+	var due []candidate
+	seen := map[string]bool{}
 	for _, q := range rows {
-		if !drain.Prunable(q, now) {
+		l := ledgers[q.Name]
+		ok, identity := drain.CloserCandidate(q, l)
+		if !ok {
 			continue
 		}
-		_, err := d.io.queue.RemoveIf(q.Name, worker.SameRead(q))
-		switch {
-		case err == nil:
-			d.event(drain.Event{Kind: drain.EventState, Name: q.Name, Repo: q.Repo, State: "pruned", Attempt: q.Attempts})
-		case errors.Is(err, worker.ErrQueueRowChanged), errors.Is(err, worker.ErrQueueNoRow):
-		default:
-			d.lastErr = "queue: " + err.Error()
+		seen[q.Name] = true
+		if !identity {
+			d.closerEvent(d.closerNote, q, drain.EventNote, fmt.Sprintf("the worker's ledger row records no GitHub repository, so the closers skip it; close it with surface close %s", q.Name))
+			continue
 		}
+		if drain.CloserDue(d.closerRead[q.Name], now) {
+			due = append(due, candidate{q, l.Row})
+		}
+	}
+	slices.SortStableFunc(due, func(a, b candidate) int {
+		if c := d.closerRead[a.q.Name].Compare(d.closerRead[b.q.Name]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.q.Name, b.q.Name)
+	})
+	for i, c := range due {
+		if i >= drain.CloserReadsPerTick || d.stopping() {
+			break
+		}
+		d.closeOne(ctx, c.q, c.led, now)
+	}
+	for name := range d.closerRead {
+		if !seen[name] {
+			delete(d.closerRead, name)
+		}
+	}
+	for _, notes := range []map[string]string{d.closerNote, d.closerReadFail} {
+		for name := range notes {
+			if !seen[name] {
+				delete(notes, name)
+			}
+		}
+	}
+}
+
+// closerEvent records one closer event for q, unless the last one notes
+// holds for it says the same.
+func (d *drainer) closerEvent(notes map[string]string, q worker.QueueRow, kind, text string) {
+	key := kind + "\x00" + text
+	if notes[q.Name] == key {
+		return
+	}
+	notes[q.Name] = key
+	d.event(drain.Event{Kind: kind, Name: q.Name, Repo: q.Repo, State: string(q.State), Attempt: q.Attempts, Error: text})
+}
+
+// closeOne reads one reported row's PR and acts on drain.DecideCloser. A
+// read that fails changes nothing: a network failure, server error or rate
+// limit is an unreadable event, anything else (a refusal, an ambiguous PR, a
+// repository whose id changed) an error event, each once until it changes.
+func (d *drainer) closeOne(ctx context.Context, q worker.QueueRow, led worker.Row, now time.Time) {
+	d.closerRead[q.Name] = now
+	cand, err := d.io.prRead(ctx, mergeRow(led, &q))
+	pr := drain.PRRead{State: drain.PRNone}
+	switch {
+	case errors.Is(err, merge.ErrNoPR):
+	case err != nil:
+		if transientGitHubFailure(err) {
+			d.closerEvent(d.closerReadFail, q, drain.EventUnreadable, "the closer could not read the worker's PR from GitHub: "+err.Error())
+		} else {
+			d.closerEvent(d.closerReadFail, q, drain.EventError, "the closer's PR read was refused; the row stays reported: "+err.Error())
+		}
+		return
+	default:
+		pr = drain.PRRead{State: drain.PRState(cand.State), Number: cand.Number}
+	}
+	// A read that worked ends any failure condition: the next one is new.
+	delete(d.closerReadFail, q.Name)
+	dec := drain.DecideCloser(q, pr, now)
+	if dec.Change.Writes() {
+		written, ok := d.apply(q, dec.Change)
+		if !ok {
+			return
+		}
+		q = written
+		if dec.Note != "" {
+			d.closerEvent(d.closerNote, q, drain.EventNote, dec.Note)
+		}
+	}
+	if !dec.Close {
+		return
+	}
+	var cost *float64
+	if dec.Merged && led.Transcript != "" {
+		// A partial price (a model with no price) is not the session's cost.
+		if u := d.io.price(ctx, led.Transcript); u != nil && u.Priced {
+			c := u.CostUSD
+			cost = &c
+		}
+	}
+	// The ledger row was read at the start of the tick, and the watch, the
+	// PR reads and the pricing ran since. Check the queue row is still the
+	// one read; closeRow checks the ledger row the same way right before it
+	// closes anything, so a close or relaunch by hand in the window is left
+	// alone.
+	if !d.queueRowUnchanged(q) {
+		d.closerEvent(d.closerNote, q, drain.EventNote, "the queue row changed since the closer read it; the close waits for the next read")
+		return
+	}
+	res := d.io.closeRow(ctx, q, led)
+	if !res.Closed {
+		if cost != nil {
+			if written, ok := d.apply(q, drain.Change{Name: q.Name, From: q.State, CostUSD: cost}); ok {
+				q = written
+			}
+		}
+		d.closerEvent(d.closerNote, q, drain.EventError, "close refused, the row stays reported: "+res.Reason)
+		return
+	}
+	if res.ledgerFailed {
+		// The workspace is closed but the ledger row still says the worker is
+		// open. The row stays reported, so the next read closes again (herdr
+		// then answers already gone) and retries the ledger write; a closed
+		// queue row over an open ledger row would never be looked at again.
+		note := "closed the worker, but its ledger row could not be updated; the row stays reported and the close is tried again: " + res.Note
+		if written, ok := d.apply(q, drain.Change{Name: q.Name, From: q.State, Error: note, SetError: true, CostUSD: cost}); ok {
+			q = written
+		}
+		d.closerEvent(d.closerNote, q, drain.EventError, note)
+		return
+	}
+	why := dec.Why
+	if res.Worktree == closeWorktreeKept {
+		why += "; worktree kept: " + strings.Join(res.KeptBecause, "; ")
+	}
+	if res.Note != "" {
+		why += "; " + res.Note
+		d.closerEvent(d.closerNote, q, drain.EventNote, "close: "+res.Note)
+	}
+	d.apply(q, drain.Change{Name: q.Name, From: q.State, To: worker.QueueClosed, Error: why, CostUSD: cost})
+}
+
+// autopilot makes at most one merge attempt a tick, only while
+// [surface.merge] resolves to mode auto (read again every tick, so setting
+// the mode to anything else stops the next attempt). It reads the queue and
+// ledgers again, since the closers may have just closed a row, and tries the
+// reported row tried longest ago, at most every drain.AutopilotEvery, through
+// the merge path `surface merge` uses, as the drain. A merge is one merged
+// event, lets the closers read the row at the next tick, and the row is not
+// tried again while it stays reported, nor is one whose merge may have
+// happened (merged-unconfirmed, merged-elsewhere, merge-unknown); a refusal,
+// failure or unconfirmed merge is one merge-refused event per row, head and
+// reasons; GitHub unreadable is one unreadable event per condition.
+func (d *drainer) autopilot(ctx context.Context) {
+	if d.io.mergeSettings == nil || d.io.land == nil {
+		return
+	}
+	s := d.io.mergeSettings()
+	if s.Mode != config.MergeAuto {
+		return
+	}
+	rows, ok := d.readRows()
+	if !ok {
+		return
+	}
+	ledgers := d.ledgers(rows)
+	now := d.io.now()
+	type candidate struct {
+		q   worker.QueueRow
+		led worker.Row
+	}
+	var due []candidate
+	seen := map[string]bool{}
+	reported := map[string]bool{}
+	for _, q := range rows {
+		if q.State == worker.QueueReported {
+			reported[autopilotKey(q)] = true
+		}
+	}
+	for key := range d.autopilotMerged {
+		if !reported[key] {
+			delete(d.autopilotMerged, key)
+		}
+	}
+	for _, q := range rows {
+		l := ledgers[q.Name]
+		if d.autopilotMerged[autopilotKey(q)] || !drain.AutopilotCandidate(q, l) {
+			continue
+		}
+		seen[q.Name] = true
+		if drain.AutopilotDue(d.autopilotTried[q.Name], now) {
+			due = append(due, candidate{q, l.Row})
+		}
+	}
+	for name := range d.autopilotTried {
+		if !seen[name] {
+			delete(d.autopilotTried, name)
+		}
+	}
+	for name := range d.autopilotNote {
+		if !seen[name] {
+			delete(d.autopilotNote, name)
+		}
+	}
+	if len(due) == 0 || d.stopping() {
+		return
+	}
+	slices.SortStableFunc(due, func(a, b candidate) int {
+		if c := d.autopilotTried[a.q.Name].Compare(d.autopilotTried[b.q.Name]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.q.Name, b.q.Name)
+	})
+	c := due[0]
+	d.autopilotTried[c.q.Name] = now
+	out := d.io.land(ctx, s, merge.ByDrain, mergeRow(c.led, &c.q), false)
+	if out.AuditErr != nil {
+		// A line that could not be written is an error, a refusal's
+		// included (a full audit file); a repeated refusal is not.
+		d.event(drain.Event{Kind: drain.EventError, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State), Error: "merge audit: " + out.AuditNote})
+	}
+	switch out.Result {
+	case merge.LandMerged:
+		d.autopilotMerged[autopilotKey(c.q)] = true
+		delete(d.autopilotNote, c.q.Name)
+		delete(d.closerRead, c.q.Name) // the closers read it at the next tick
+		d.event(drain.Event{Kind: drain.EventMerged, Name: c.q.Name, Repo: c.q.Repo, State: string(c.q.State),
+			Error: fmt.Sprintf("PR #%d merged at head %s as %s (audit line %s); the closers close the worker at their next read", out.PR, shortSHA(out.Head), out.MergeCommit, shortSHA(out.AuditLine))})
+	case merge.LandUnreadable:
+		d.closerEvent(d.autopilotNote, c.q, drain.EventUnreadable, "the autopilot could not read the worker's PR: "+strings.Join(out.Reasons, "; "))
+	default:
+		if out.Result == merge.LandUnconfirmed || out.Result == merge.LandMergedElsewhere || out.Result == merge.LandUnknown {
+			// The PR may have merged: leave it to the closers.
+			d.autopilotMerged[autopilotKey(c.q)] = true
+		}
+		why := fmt.Sprintf("PR #%d at head %s: %s, %s", out.PR, shortSHA(out.Head), out.Result, strings.Join(merge.ReasonSet(out.Reasons), "; "))
+		d.closerEvent(d.autopilotNote, c.q, drain.EventMergeRefused, why)
+	}
+}
+
+// dailyPrune runs `surface prune` with the default cutoff once per UTC day.
+// The day is recorded before the prune runs, so neither a failure nor a
+// restart runs it again that day; a failure is an error event and never
+// stops the drain. A drain-prune-day that cannot be read counts as never:
+// one error event, and the prune runs and rewrites it with today.
+func (d *drainer) dailyPrune(ctx context.Context) {
+	now := d.io.now()
+	if !d.pruneDayRead {
+		day, err := d.io.pruneDay()
+		if err != nil {
+			day = ""
+			d.event(drain.Event{Kind: drain.EventError, Error: "read the last daily prune day; pruning now and rewriting it with today: " + err.Error()})
+		}
+		d.pruneDay, d.pruneDayRead = day, true
+	}
+	if !drain.PruneDue(d.pruneDay, now) {
+		return
+	}
+	d.pruneDay = now.UTC().Format(worker.UTCDayLayout)
+	if err := d.io.setPruneDay(d.pruneDay); err != nil {
+		d.event(drain.Event{Kind: drain.EventError, Error: "record the daily prune day: " + err.Error()})
+	}
+	res, err := d.io.prune(ctx, now)
+	if err != nil {
+		d.event(drain.Event{Kind: drain.EventError, Error: "daily prune: " + err.Error()})
+		return
+	}
+	for _, it := range res.Removed {
+		d.event(drain.Event{Kind: drain.EventState, Name: it.Name, Repo: it.Repo, State: "pruned", Error: it.Kind + " row: " + it.Reason})
+	}
+	for _, n := range res.Notes {
+		d.event(drain.Event{Kind: drain.EventNote, Error: "daily prune: " + n})
 	}
 }
 
@@ -426,7 +873,7 @@ func newDrainLaunchID() (string, error) {
 }
 
 // drainLaunch is the real launch: the in-process worker launch (T8.1) with
-// harness claude, the row's brief text, and the branch worker/<name>. The
+// the row's harness, the row's brief text, and the branch worker/<name>. The
 // repo must still resolve to the top the row records.
 func drainLaunch(runner exec.Runner) func(context.Context, config.Config, worker.QueueRow) drain.Attempt {
 	return drainLaunchWith(runner, launchWorker)
@@ -446,15 +893,28 @@ func drainLaunchWith(runner exec.Runner, launchFn workerLauncher) func(context.C
 			return drain.Attempt{Class: drain.ErrRowInvalid, CreatedNothing: true,
 				Err: fmt.Sprintf("the repository top is now %s, expected the queued %s", top, row.Repo)}
 		}
-		attempt, err := launchFn(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, drainSpec(row), row.Brief)
+		// The row names its profile only; it resolves against the config
+		// file as loaded now. An unknown name fails every row that names it
+		// the same way, so it is a launch-config failure, before anything is
+		// created.
+		configDir, err := cfg.Surface.ProfileConfigDir(row.Profile, os.UserHomeDir)
+		if err != nil {
+			return drain.Attempt{Class: drain.ErrLaunchConfig, Err: "profile: " + err.Error(), CreatedNothing: true}
+		}
+		spec := drainSpec(row)
+		spec.configDir = configDir
+		attempt, err := launchFn(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, spec, row.Brief)
 		return attemptOf(attempt, err, row)
 	}
 }
 
-// drainSpec is the worker launch for a claimed row: harness claude, branch
-// worker/<name>, no $PATH binary, and the claim's launch id for the ledger.
+// drainSpec is the worker launch for a claimed row: the row's harness (claude
+// when it names none), branch worker/<name>, which must not exist yet, no
+// $PATH binary, the row's model, and the claim's launch id for the ledger. The row's profile is resolved by the caller, against the
+// config it launches with.
 func drainSpec(row worker.QueueRow) workerSpec {
-	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", allowPATH: false, launchID: row.LaunchID}
+	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: row.Launch().Harness, allowPATH: false,
+		launchID: row.LaunchID, model: row.Model, drain: true}
 }
 
 // attemptOf turns a workerAttempt and its error into the drain's view.
@@ -482,22 +942,35 @@ func classifyLaunchError(err error) drain.ErrClass {
 		return drain.ErrNone
 	case errors.Is(err, worker.ErrNameTaken):
 		return drain.ErrNameTaken
+	case errors.Is(err, worker.ErrBranchExists):
+		// The branch is there before the launch made anything; a retry
+		// would find it again.
+		return drain.ErrRowInvalid
 	case launchConfigFailure(err):
 		return drain.ErrLaunchConfig
 	case herdrUnavailable(err):
 		return drain.ErrHerdrDown
 	case githubAuthFailure(err):
 		return drain.ErrGitHubAuth
+	case errors.Is(err, errIdentityRead):
+		// GitHub could not be read before anything was created: pause and
+		// requeue, never spend the row's attempts on an outage.
+		return drain.ErrGitHubRead
 	}
 	return drain.ErrOther
 }
 
 // launchConfigFailure reports a launch whose configuration cannot build a
-// worker: the build step, the worker posture or harness override, or the
-// binary policy (a claude found only on $PATH, unusable, or forgectl).
+// worker: the build step, the worker posture or harness override, the binary
+// policy (a claude found only on $PATH, unusable, or forgectl), or a private
+// run directory the environment cannot provide (a TMPDIR that is unset, a
+// symlink, too long, or shared without the sticky bit). Each fails every
+// launch the same way, so a retry only leaves another worktree behind
+// (forgectl#1188).
 func launchConfigFailure(err error) bool {
 	for _, target := range []error{errLaunchConfig, launch.ErrWorkerPosture, launch.ErrHarnessOverride,
-		surface.ErrBinaryProvenance, surface.ErrBinaryUnusable, surface.ErrBinarySelfLoop} {
+		surface.ErrBinaryProvenance, surface.ErrBinaryUnusable, surface.ErrBinarySelfLoop,
+		surface.ErrRunDir, surface.ErrSocketPathTooLong} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -616,14 +1089,99 @@ func probeWorker(ctx context.Context, herdr screenReader, table *ready.Table, se
 // drainHerdrTimeout bounds the pre-claim herdr readiness check.
 const drainHerdrTimeout = 15 * time.Second
 
+// claudeSlotsTimeout caps one claude-slots check; a slower one launches
+// without the cap. Tests shorten it.
+var claudeSlotsTimeout = 5 * time.Second
+
+// maxClaudeSlotsOutput bounds what a check's output is read into.
+const maxClaudeSlotsOutput = 4 << 10
+
+// lookClaudeSlots is the absolute claude-slots path on PATH, or "" when it is
+// not there (or not usable): the drain then launches without the cap.
+func lookClaudeSlots() string {
+	path, err := osexec.LookPath("claude-slots")
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// cappedOutput keeps the first maxClaudeSlotsOutput bytes written to it and
+// drops the rest, so a noisy tool cannot grow the drain.
+type cappedOutput struct{ b []byte }
+
+func (c *cappedOutput) Write(p []byte) (int, error) {
+	if room := maxClaudeSlotsOutput - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
+}
+
+// runClaudeSlots runs `<path> check <need>` with the drain's environment,
+// stdin from /dev/null, and a claudeSlotsTimeout cap, and reports how it
+// ended with the first non-empty line of its output as the reason. A check
+// cut short by parent (the drain stopping) is Stopped, never a timeout.
+func runClaudeSlots(parent context.Context, path string, need int) drain.SlotsCheck {
+	if parent.Err() != nil {
+		return drain.SlotsCheck{Need: need, Exit: -1, Stopped: true}
+	}
+	ctx, cancel := context.WithTimeout(parent, claudeSlotsTimeout)
+	defer cancel()
+	var out cappedOutput
+	cmd := osexec.CommandContext(ctx, path, "check", strconv.Itoa(need)) //nolint:gosec // G204: the claude-slots path resolved at drain start, a count argument
+	cmd.Stdout, cmd.Stderr = &out, &out
+	// A child that keeps the pipes open after the kill must not hold the tick.
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	c := drain.SlotsCheck{Need: need, Exit: -1, Reason: slotsReason(string(out.b))}
+	var exitErr *osexec.ExitError
+	switch {
+	case err == nil:
+		c.Exit = 0
+	case parent.Err() != nil:
+		c.Stopped = true
+	case ctx.Err() != nil:
+		c.TimedOut = true
+	case errors.As(err, &exitErr):
+		c.Exit = exitErr.ExitCode()
+	default:
+		c.Err = termsafe.SafeLineMax(err.Error(), 200)
+	}
+	return c
+}
+
+// slotsReason is the first non-empty line of s, safe to print and capped.
+func slotsReason(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return termsafe.SafeLineMax(line, 200)
+		}
+	}
+	return ""
+}
+
 // realDrainIO wires the tick to the queue, the ledgers, herdr, the config
-// file and the launch path. emit records an event.
-func realDrainIO(deps module.Deps, session string, emit func(drain.Event) error) (drainIO, error) {
+// file, claude-slots (slotsPath, or "" when it was not found at start) and
+// the launch path. emit records an event.
+func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Event) error) (drainIO, error) {
 	q, err := worker.OpenQueue()
 	if err != nil {
 		return drainIO{}, err
 	}
+	files, err := worker.OpenDrainFiles()
+	if err != nil {
+		return drainIO{}, err
+	}
+	var slots func(context.Context, int) drain.SlotsCheck
+	if slotsPath != "" {
+		slots = func(ctx context.Context, need int) drain.SlotsCheck { return runClaudeSlots(ctx, slotsPath, need) }
+	}
 	return drainIO{
+		slots: slots,
 		queue: q,
 		ledgerRows: func(repo, s string) ([]worker.Row, error) {
 			led, err := worker.Open(repo, s)
@@ -652,5 +1210,92 @@ func realDrainIO(deps module.Deps, session string, emit func(drain.Event) error)
 		emit:     emit,
 		now:      time.Now,
 		launchID: newDrainLaunchID,
+		prRead: func(ctx context.Context, row merge.Row) (merge.Candidate, error) {
+			ctx, cancel := context.WithTimeout(ctx, statusTimeout)
+			defer cancel()
+			// No cache: the closers read live state only.
+			return merge.Reader{GH: githubauth.Runner(deps.Runner, githubauth.DefaultHost)}.Discover(ctx, row)
+		},
+		price: func(ctx context.Context, transcript string) *statusUsage {
+			return priceTranscript(ctx, deps.Runner, osexec.LookPath, transcript)
+		},
+		closeRow: drainCloseRow(deps.Runner, session),
+		prune: func(ctx context.Context, now time.Time) (pruneResult, error) {
+			d, err := realPruneDeps()
+			if err != nil {
+				return pruneResult{}, err
+			}
+			ctx, cancel := context.WithTimeout(ctx, drainPruneTimeout)
+			defer cancel()
+			return runPrune(ctx, d, now, drain.PruneAfter, false)
+		},
+		pruneDay:      files.ReadPruneDay,
+		setPruneDay:   files.WritePruneDay,
+		mergeSettings: localMergeSettings,
+		land: func(ctx context.Context, s config.MergeSettings, by merge.By, row merge.Row, dryRun bool) merge.Outcome {
+			l, err := realLander(deps.Runner)
+			if err != nil {
+				return merge.Outcome{Result: merge.LandFailed, Reasons: []string{"the merge audit file could not be opened: " + err.Error()}, Err: err}
+			}
+			ctx, cancel := context.WithTimeout(ctx, mergeTimeout)
+			defer cancel()
+			return l.Land(ctx, s, by, row, dryRun)
+		},
 	}, nil
+}
+
+// drainCloseRow is the closers' close: the close `surface close` runs
+// (closeWorker through realCloseSteps), on the row's own ledger row, through
+// a herdr adapter that must resolve the drain's pinned session.
+func drainCloseRow(run exec.Runner, session string) func(context.Context, worker.QueueRow, worker.Row) closeResult {
+	return func(ctx context.Context, q worker.QueueRow, led worker.Row) closeResult {
+		refuse := func(why string) closeResult {
+			return closeResult{Name: led.Name, Branch: led.Branch, Workspace: closeWorkspaceRefused, Worktree: closeWorktreeUntouched, Reason: why}
+		}
+		adapter, err := newHerdrAdapter(io.Discard)
+		if err != nil {
+			return refuse("herdr: " + err.Error())
+		}
+		herdr, ok := adapter.(*herdradapter.Adapter)
+		if !ok {
+			return refuse("the herdr adapter has an unexpected type")
+		}
+		if herdr.Session() != session || (q.Session != "" && q.Session != session) {
+			return refuse(fmt.Sprintf("the worker is in herdr session %q, the drain's is %q", q.Session, session))
+		}
+		ledger, err := worker.Open(q.Repo, session)
+		if err != nil {
+			return refuse("the ledger: " + err.Error())
+		}
+		// Right before anything is closed: the ledger row must still be the
+		// one the closer read (same launch, same stage). A close by hand, a
+		// close that kept the worktree, or a relaunch under the same name in
+		// the meantime refuses here, so the new launch's worktree is never
+		// the one inspected or removed.
+		if why := ledgerRowChanged(ledger, led); why != "" {
+			return refuse(why)
+		}
+		ctx, cancel := context.WithTimeout(ctx, closeTimeout)
+		defer cancel()
+		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr, ledger, q.Repo, led))
+	}
+}
+
+// ledgerRowChanged returns why the ledger's row named led.Name is no longer
+// led (worker.SameRow), or "" when it still is.
+func ledgerRowChanged(ledger interface{ Rows() ([]worker.Row, error) }, led worker.Row) string {
+	rows, err := ledger.Rows()
+	if err != nil {
+		return "the ledger could not be read again before the close: " + err.Error()
+	}
+	same := worker.SameRow(led)
+	for _, r := range rows {
+		if r.Name == led.Name {
+			if same(r) {
+				return ""
+			}
+			return "the ledger row changed since the closer read it (closed or relaunched by hand); the close waits for the next read"
+		}
+	}
+	return "the ledger row is gone since the closer read it"
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -109,12 +110,10 @@ type InvocationRequest struct {
 	// wins over a removal, because it is the operator naming a value explicitly.
 	UnsetEnv []string
 	Resolve  BinaryResolver
-	// Harness, when set, replaces the harness of the profile matched by CWD.
-	// Only claude and codex are accepted: pi has no permission or sandbox flag
-	// forgectl can pass, so an override to it would start an agent with no
-	// posture at all. The override changes no posture field: the matched
+	// Harness, when set, replaces the harness of the profile matched by CWD:
+	// claude, codex or pi. The override changes no posture field: the matched
 	// profile's permission mode, allow_danger, approval policy and sandbox all
-	// stay. Those fields are per harness, so a repo block that set only claude
+	// stay. Pi takes none of them; a pi launch runs with pi's own config. Those fields are per harness, so a repo block that set only claude
 	// fields gives a codex override the codex values from [launch.defaults];
 	// the worker profile (T5) is what compares the two.
 	Harness string
@@ -128,12 +127,23 @@ type InvocationRequest struct {
 	// Prompt is a worker's first brief. It goes last in the argv, after a
 	// `--`, so the harness starts its first turn with it and no keystroke is
 	// typed into its TUI. Only a worker takes one; the caller validates its
-	// text (worker.CheckBrief).
+	// text (worker.CheckBrief). A pi prompt may not start with '@': pi reads
+	// an '@' argument as a file to attach, even after `--`.
 	Prompt string
 	// SessionID, when set, is passed to a claude worker as --session-id, so
 	// the coordinator knows which transcript the worker writes. Only a claude
 	// worker takes one; it must be a lowercase UUID.
 	SessionID string
+	// Model, when set, replaces the matched profile's model for a worker
+	// launch (`--model`), and effort is derived again from it, as a harness
+	// override does. It must pass config.CheckModelName. Only a worker takes
+	// one.
+	Model string
+	// ConfigDir, when set, is a claude worker's CLAUDE_CONFIG_DIR: the
+	// [surface.profiles] entry it runs under, already resolved to an absolute
+	// path. It is set last, over the inherited value and the profile's env.
+	// Only a claude worker takes one.
+	ConfigDir string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -145,7 +155,7 @@ type InvocationRequest struct {
 
 var (
 	// ErrHarnessOverride reports a --harness value outside the overridable set.
-	ErrHarnessOverride = errors.New("launch: harness override must be claude or codex")
+	ErrHarnessOverride = errors.New("launch: harness override must be claude, codex, or pi")
 	// ErrWorkerPosture reports a resolved posture a worker may not start with.
 	ErrWorkerPosture = errors.New("launch: this posture is not allowed for a worker")
 )
@@ -177,10 +187,12 @@ func allowedUpTo(r postureRank, limit string) string {
 // applyWorkerFloor caps a worker's posture after the worker profile
 // (applyWorkerProfile) has set it.
 //
-// Workers run unattended in panes the operator is not watching. pi is refused
-// whichever way it was chosen, because forgectl can pass it no permission or
-// sandbox flag. A posture outside the allowlists above is refused rather than
-// quietly narrowed, so the operator sees the conflict. allow_danger is turned
+// Workers run unattended in panes the operator is not watching. A posture
+// outside the allowlists above is refused rather than quietly narrowed, so
+// the operator sees the conflict. A pi worker has no posture flag to cap: it
+// runs with pi's own config, as a full-harness claude worker runs with the
+// operator's settings (ADR-0010, 2026-10-08 amendment). A harness this
+// switch does not name is refused. allow_danger is turned
 // off rather than refused: it is on by default, and refusing it would refuse
 // every worker on a default config.
 func applyWorkerFloor(p Profile) (Profile, error) {
@@ -190,6 +202,8 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 			return Profile{}, fmt.Errorf("%w: permission_mode %q (workers allow %s)",
 				ErrWorkerPosture, p.PermissionMode, allowedUpTo(claudePermissionRank, workerMaxPermissionMode))
 		}
+	case "pi":
+		// No posture flag to cap; allow_danger and add_dir are cleared below.
 	case "codex":
 		if !codexSandboxRank.atMost(p.Sandbox, workerMaxSandbox) {
 			return Profile{}, fmt.Errorf("%w: sandbox %q (workers allow %s)",
@@ -200,7 +214,7 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 				ErrWorkerPosture, p.ApprovalPolicy, allowedUpTo(codexApprovalRank, workerMaxApproval))
 		}
 	default:
-		return Profile{}, fmt.Errorf("%w: %s has no permission or sandbox flag forgectl can pass", ErrWorkerPosture, p.Harness)
+		return Profile{}, fmt.Errorf("%w: harness %q has no worker floor (workers run claude, codex, or pi)", ErrWorkerPosture, p.Harness)
 	}
 	p.AllowDanger = false
 	// A worker edits its own worktree. Extra directories from the repo profile
@@ -212,78 +226,28 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 
 // workerClaudeSettings is the inline settings JSON every claude worker gets.
 //
+// A worker is a full harness (ADR-0010, 2026-10-08 amendment): it loads the
+// operator's own settings, plugins, skills, hooks, MCP servers, CLAUDE.md and
+// project memory, as an ordinary session would. These settings only add to
+// that.
+//
 // useAutoModeDuringPlan defaults to true: when auto mode is available, a
 // plan-mode session sends shell commands to the auto-mode classifier instead
 // of prompting. A worker runs where nobody watches the prompt, so the
 // classifier would be the only check on its shell (forgectl#1060). Off, a
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
-//
-// SendMessage reaches every other Claude session on the machine, the
-// coordinator included, and RemoteTrigger starts cloud sessions. A worker
-// following planted instructions could ask a session with more authority to
-// act for it, so both are denied.
-//
-// This is the only --settings a worker gets. Claude Code's handling of a
-// repeated --settings flag is unverified, so a second source (the sandbox
-// slice's settings) must merge its keys into this one value, not add a flag.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
-// every task, so it stops at a prompt only for the rest (atelier P2 autonomy
-// decision, 2026-10-07; ADR-0010). A plan, default or manual worker keeps
-// prompting for everything: the list would let a plan worker commit and push.
-// A merge or `gh api` typed as its own command still prompts. Two limits: a
-// prefix rule cannot see a push's target, so `git push origin HEAD:main`
-// matches `git push *` and only a repository ruleset refuses it; and four
-// listed commands can run any other command with no prompt, through code the
-// worker can write itself or through a flag: `go test` (test code, `-exec`),
-// `go build -toolexec`, `make`, and `git push --receive-pack`/`--exec`. That
-// is accepted under ADR-0010's "accidents, not adversaries" boundary.
+// every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
+// allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
-	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
-	`"deny":["SendMessage","RemoteTrigger"]}}`
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
 
-// workerClaudeIsolation returns the argv that keeps everything but forgectl's own
-// settings out of a claude worker (ADR-0010, forgectl#1050). Measured on
-// Claude Code 2.1.289 with `claude -p` in a repo whose branch carried a
-// SessionStart hook, a .mcp.json server and a skill:
-//
-//   - `--setting-sources ""` loads no user, project or local settings: the
-//     branch's hooks do not run, and the operator's plugins, hooks and
-//     skills do not load. Only Claude Code's built-in plugins, skills and
-//     agents remain, and --settings still applies.
-//   - `--strict-mcp-config` with an empty `--mcp-config` loads no MCP server:
-//     not the branch's .mcp.json, not the operator's, and not a plugin's
-//     (a herdr-driving one included).
-//   - `--no-chrome` turns off Claude in Chrome. It is enabled from
-//     ~/.claude.json, not a settings layer, so the flags above leave it on: a
-//     live worker still listed the claude-in-chrome MCP server, which drives
-//     the operator's browser.
-//   - `--safe-mode` also stops the operator's project auto-memory loading
-//     (MEMORY.md under ~/.claude/projects), which a live worker loaded
-//     without it. Every session writes that memory and the operator's own
-//     later sessions read it.
-//     It keeps the --settings deny rules (measured), and sets
-//     CLAUDE_CODE_DISABLE_CLAUDE_MDS, which covers CLAUDE.md files that
-//     load lazily from subdirectories (read from the binary, not measured).
-//
-// CLAUDE.md: a live interactive worker with these flags loaded no CLAUDE.md
-// or AGENTS.md at any level, a branch-committed one included. `claude -p`
-// did load the cwd's CLAUDE.md under the same flags, so the result holds for
-// the interactive sessions workers run, not for print mode.
-func workerClaudeIsolation() []string {
-	return []string{
-		"--setting-sources", "",
-		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
-		"--no-chrome",
-		"--safe-mode",
-	}
-}
-
-// withWorkerSettings inserts workerClaudeIsolation() and the worker settings
-// right after the posture's leading --permission-mode pair:
+// withWorkerSettings inserts the worker settings right after the posture's
+// leading --permission-mode pair:
 // workerClaudeEditSettings for an acceptEdits worker, workerClaudeSettings for
 // any other mode.
 //
@@ -300,7 +264,6 @@ func withWorkerSettings(args []string) ([]string, error) {
 	}
 	out := make([]string, 0, len(args)+8)
 	out = append(out, args[:2]...)
-	out = append(out, workerClaudeIsolation()...)
 	settings := workerClaudeSettings
 	if args[1] == "acceptEdits" {
 		settings = workerClaudeEditSettings
@@ -313,8 +276,9 @@ func withWorkerSettings(args []string) ([]string, error) {
 // in the launcher's environment is dropped: when the launcher is a Claude Code
 // session, that environment carries its user settings' env block and its own
 // handles (the cross-session messaging socket and token, the herdr and cmux
-// sockets, a computer-use token file), which a worker's Bash could use to
-// act as the coordinator. The profile's own env and forgectl's injected
+// sockets, a computer-use token file). Dropping them keeps a nested `claude`
+// from inheriting the launcher's identity; it is hygiene, not containment,
+// since a full-harness worker has SendMessage and herdr-bridge directly. The profile's own env and forgectl's injected
 // values still apply on top, so a variable a worker needs goes in config.
 //
 // SSH_AUTH_SOCK is a deliberate grant: the operator's remotes push over SSH,
@@ -325,8 +289,19 @@ func withWorkerSettings(args []string) ([]string, error) {
 var workerEnvKeys = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
 	"LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK",
-	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "XDG_CONFIG_HOME",
+	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME",
 }
+
+// DrainWorkerEnv marks a worker's environment: BuildInvocation sets it to "1"
+// on every worker launch (the drain's, and `surface launch --worktree`'s,
+// which share that path), after the allowlist and the profile's env, so the
+// harness and the shells it starts inherit it. `surface intake gh` refuses to run when it
+// is set, so a worker cannot queue work for the next worker by accident.
+//
+// It is a courtesy refusal, not a control: a worker runs as the operator and
+// can unset it. The gate is intake's requirement that a person type "yes" at
+// a terminal (docs/herdr.md § Intake).
+const DrainWorkerEnv = "FORGECTL_DRAIN_WORKER"
 
 // workerBaseEnv keeps the entries of env named in workerEnvKeys, and the
 // LC_* locale variables.
@@ -372,7 +347,7 @@ func applyHarnessOverride(p Profile, harness string) (Profile, error) {
 	if harness == "" {
 		return p, nil
 	}
-	if harness != "claude" && harness != "codex" {
+	if harness != "claude" && harness != "codex" && harness != "pi" {
 		return Profile{}, ErrHarnessOverride
 	}
 	if harness == p.Harness {
@@ -393,7 +368,7 @@ type BuiltInvocation struct {
 	// SessionID is the --session-id the argv carries, or "".
 	SessionID string
 	// Worker reports that the request was a worker launch, so the worker
-	// floor, the claude isolation argv and the environment allowlist applied.
+	// floor, the worker settings and the environment allowlist applied.
 	// Only BuildInvocation sets it.
 	Worker bool
 	// Notes are posture notices for the operator, one per line: today, an
@@ -434,11 +409,30 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if profile, err = applyHarnessOverride(profile, req.Harness); err != nil {
 		return BuiltInvocation{}, err
 	}
+	if req.Model != "" {
+		if !req.Worker {
+			return BuiltInvocation{}, errors.New("launch: only a worker launch takes a model override")
+		}
+		if err := config.CheckModelName(req.Model); err != nil {
+			return BuiltInvocation{}, fmt.Errorf("launch: model %s: %w", termsafe.QuoteArgMax(req.Model, 0), err)
+		}
+		profile.Model = req.Model
+		profile.Effort = EffortForModel(req.Model)
+	}
+	if req.ConfigDir != "" && (!req.Worker || profile.Harness != "claude" || !filepath.IsAbs(req.ConfigDir)) {
+		return BuiltInvocation{}, fmt.Errorf("launch: a config dir is for a claude worker only, as an absolute path (got %s for harness %s)",
+			termsafe.QuoteArgMax(req.ConfigDir, 0), profile.Harness)
+	}
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
 	}
 	if req.Prompt != "" && !req.Worker {
 		return BuiltInvocation{}, errors.New("launch: only a worker launch takes a prompt")
+	}
+	if profile.Harness == "pi" && strings.HasPrefix(strings.TrimLeft(req.Prompt, " \t\n"), "@") {
+		// Measured on Pi 1.0.4: `pi -- '@README.md say OK'` exits "File not
+		// found: <cwd>/README.md say OK".
+		return BuiltInvocation{}, errors.New("launch: a pi brief cannot start with '@': pi reads it as a file to attach")
 	}
 	if req.Worker {
 		// A user arg lands after the posture, where Claude Code's last-flag-wins
@@ -475,10 +469,10 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		harnessArgs = append(harnessArgs, "--session-id", req.SessionID)
 	}
 	if req.Prompt != "" {
-		// The `--` ends option parsing in both harnesses, so a prompt that
+		// The `--` ends option parsing in every harness, so a prompt that
 		// starts with '-' or names a subcommand (`mcp`, `update`) stays the
 		// prompt. Measured: Claude Code 2.1.289 answered `-- mcp` as a prompt,
-		// and Codex 0.160.0 took `-- --help` as one.
+		// and Codex 0.160.0 and Pi 1.0.4 took `-- --help` as one.
 		harnessArgs = append(harnessArgs, "--", req.Prompt)
 	}
 
@@ -501,6 +495,16 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	}
 
 	env := MergeEnv(base, extra)
+	if req.ConfigDir != "" {
+		// The worker's named profile is the operator's choice for this one
+		// launch, so it outranks the inherited value and the profile's env.
+		env = MergeEnv(env, map[string]string{"CLAUDE_CONFIG_DIR": req.ConfigDir})
+	}
+	if req.Worker {
+		// Set last, so neither the inherited snapshot nor a profile's env
+		// can remove or change it.
+		env = MergeEnv(env, map[string]string{DrainWorkerEnv: "1"})
+	}
 	dir := runDirectory(req, posture)
 	if dir != req.CWD {
 		// The harness inherits PWD; left alone it would still name the

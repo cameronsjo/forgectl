@@ -88,6 +88,24 @@ const (
 	deskNameMax = 36
 )
 
+// deskPad is the blank columns between a panel's side border and its text:
+// two in a wide window, one where every column counts.
+func deskPad(width int) int {
+	if width >= deskWideMin {
+		return 2
+	}
+	return 1
+}
+
+// deskTextW is the width of a panel's text area in a frame width cells wide.
+func deskTextW(width int) int { return width - 2 - 2*deskPad(width) }
+
+// deskPanel is Panel with the frame's padding. frameWidth picks the padding
+// and w is this panel's own width; they differ only for the stat tiles.
+func deskPanel(st theme.Styles, frameWidth, w int, title, strip string, lines []string) string {
+	return PanelPadded(st, w, deskPad(frameWidth), title, strip, lines)
+}
+
 // deskText renders untrusted text as one inert line. Tabs become spaces
 // first, so a script's indentation reads as indentation rather than "\t".
 func deskText(s string) string {
@@ -207,6 +225,10 @@ type deskFrame struct {
 	// history puts the finished-runs panel (h) where the timeline panel sits
 	// by default.
 	history bool
+	// roomy is set by layout for a frame with room to spare: the header
+	// splits, panels stack with a blank line between and the timeline spaces
+	// its entries. It is never an input.
+	roomy bool
 }
 
 func (f deskFrame) styles() (theme.Styles, theme.Theme) {
@@ -265,22 +287,28 @@ func (f deskFrame) layout() ([]string, bool) {
 	footer := f.footerLines(st, width)
 	focusMin := f.focusPanel(st, width, rows, cursor, 0)
 	if f.height <= 0 {
+		// No height to spend: the frame is as tall as it needs, so it breathes.
+		f.roomy = true
+		head := f.headerRoomy(st, width)
 		top := []string{cut(f.summary(st), width)}
 		if width >= deskWideMin {
 			top = f.tiles(st, width)
 		}
 		queue := f.queuePanel(st, width, rows, cursor, max(len(rows), 1))
 		focus := f.focusPanel(st, width, rows, cursor, deskFocusBody)
-		lines := slices.Concat([]string{header}, top, queue, focus, f.lowerPanel(st, width, -1), footer)
-		return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
+		lines := slices.Concat(stack(head, top, queue, focus, f.lowerPanel(st, width, -1)), footer)
+		focusAt := len(stack(head, top, queue)) + 1
+		return lines, f.essentialShown(lines, focusAt, focusMin, rows, cursor)
 	}
 
 	avail := f.height - 1 - len(footer)
 	need := deskQueueMin + len(focusMin)
 	var top []string
+	haveTiles := false
 	switch {
 	case width >= deskWideMin && avail-deskTileRows >= need:
 		top = f.tiles(st, width)
+		haveTiles = true
 	case avail-1 >= need:
 		top = []string{cut(f.summary(st), width)}
 	}
@@ -291,6 +319,17 @@ func (f deskFrame) layout() ([]string, bool) {
 
 	queueLines := min(max(len(rows), 1), max(deskQueueMin, avail/3), avail-2-len(focusMin))
 	queue := f.queuePanel(st, width, rows, cursor, queueLines)
+
+	// A tall pane breathes: the header splits in two, a blank line sits
+	// between stacked panels and the timeline spaces its entries. The extra
+	// lines are paid out of the timeline's room, and only when it still keeps
+	// what it wants, so a short pane keeps today's density.
+	roomy := haveTiles && f.snap != nil && !f.history &&
+		avail-len(queue)-len(f.focusPanel(st, width, rows, cursor, deskFocusBody))-deskRoomyExtra >= f.roomyLowerNeed(st, width)
+	if roomy {
+		f.roomy = true
+		avail -= deskRoomyExtra
+	}
 
 	body := deskFocusBody
 	if f.snap != nil {
@@ -314,9 +353,50 @@ func (f deskFrame) layout() ([]string, bool) {
 	}
 	lower := f.lowerPanel(st, width, max(avail-len(queue)-len(focus), 0))
 
-	lines := fitHeight(slices.Concat([]string{header}, top, queue, focus, lower), f.height-len(footer))
+	focusAt := 1 + len(top) + len(queue)
+	sections := slices.Concat([]string{header}, top, queue, focus, lower)
+	if roomy {
+		head := f.headerRoomy(st, width)
+		sections = stack(head, top, queue, focus, lower)
+		focusAt = len(stack(head, top, queue)) + 1
+	}
+	lines := fitHeight(sections, f.height-len(footer))
 	lines = append(lines, footer...)
-	return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
+	return lines, f.essentialShown(lines, focusAt, focusMin, rows, cursor)
+}
+
+// deskRoomyExtra is what a roomy frame spends over a compact one: the
+// header's stats line and a blank line between each of the four stacked
+// sections. deskRoomyLowerMin is the most the timeline must still keep after
+// that, in lines, for the frame to go roomy.
+const (
+	deskRoomyExtra    = 5
+	deskRoomyLowerMin = 12
+)
+
+// roomyLowerNeed is the lines the panel under the focus must keep, once a
+// roomy frame has paid for its blank lines, for the frame to go roomy: all of
+// what it wants spaced out, up to deskRoomyLowerMin. The history panel (h)
+// is a dense list and never goes roomy.
+func (f deskFrame) roomyLowerNeed(st theme.Styles, width int) int {
+	f.roomy = true
+	return min(f.lowerWant(st, width), deskRoomyLowerMin)
+}
+
+// stack joins sections top to bottom with one blank line between each pair
+// of non-empty ones.
+func stack(sections ...[]string) []string {
+	var out []string
+	for _, s := range sections {
+		if len(s) == 0 {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, s...)
+	}
+	return out
 }
 
 // deskQueueMin is the queue panel's height with one row: its border and the
@@ -475,6 +555,37 @@ func (f deskFrame) header(st theme.Styles, width int) string {
 	room := width - ansi.StringWidth(r) - 2
 	left = cut(left, room)
 	return left + strings.Repeat(" ", max(width-ansi.StringWidth(left)-ansi.StringWidth(r), 1)) + r
+}
+
+// headerRoomy is the header for a frame with room: a title line (the desk,
+// what it is doing, the clock) over a quieter stats line (version, host,
+// uptime, directory). Uptime is dimmed, not dropped: the stats line is
+// where the operator checks which desk this is.
+func (f deskFrame) headerRoomy(st theme.Styles, width int) []string {
+	n, _, _ := f.waiting()
+	dot := st.Dim.Render("○ idle")
+	switch running := f.runningCount(); {
+	case n > 0:
+		dot = st.Accent.Render("● " + strconv.Itoa(n) + " waiting")
+	case running > 0:
+		dot = st.Active.Render("● " + strconv.Itoa(running) + " running")
+	}
+	left := st.Header.Render("desk") + " " + dot
+	clockText := st.Muted.Render(f.now.Format("15:04"))
+	title := left + strings.Repeat(" ", max(width-ansi.StringWidth(left)-ansi.StringWidth(clockText), 1)) + clockText
+
+	parts := []string{st.Muted.Render("forgectl " + deskText(f.opts.Version))}
+	if f.opts.Host != "" {
+		parts = append(parts, st.Muted.Render(deskText(f.opts.Host)))
+	}
+	if !f.opts.Started.IsZero() {
+		parts = append(parts, st.Dim.Render("up "+uptime(f.now.Sub(f.opts.Started))))
+	}
+	if f.opts.Dir != "" {
+		parts = append(parts, st.Muted.Render(deskText(f.opts.Dir)))
+	}
+	stats := strings.Join(parts, st.Dim.Render(" · "))
+	return []string{cut(title, width), cut(stats, width)}
 }
 
 // uptime is a compact duration: 12m, 4h37m, 3d4h.
@@ -647,20 +758,20 @@ func (f deskFrame) tiles(st theme.Styles, width int) []string {
 		changed += " · " + strconv.Itoa(s.lost) + " lost"
 	}
 	panels := [3]string{
-		Panel(st, widths[0], "waiting", "", []string{
+		deskPanel(st, width, widths[0], "waiting", "", []string{
 			st.Header.Render(strconv.Itoa(s.waiting)),
 			st.Muted.Render(oldest),
-			st.Accent.Render(Sparkline(s.arrivals, min(widths[0]-4, deskSparkHours))),
+			st.Accent.Render(Sparkline(s.arrivals, min(widths[0]-2-2*deskPad(width), deskSparkHours))),
 		}),
-		Panel(st, widths[1], "started today", "", []string{
+		deskPanel(st, width, widths[1], "started today", "", []string{
 			st.Header.Render(strconv.Itoa(s.startedToday)),
 			st.Muted.Render(med),
-			st.Active.Render(Sparkline(s.runs, min(widths[1]-4, deskSparkHours))),
+			st.Active.Render(Sparkline(s.runs, min(widths[1]-2-2*deskPad(width), deskSparkHours))),
 		}),
-		Panel(st, widths[2], "outcomes", "", []string{
+		deskPanel(st, width, widths[2], "outcomes", "", []string{
 			outcome,
 			st.Muted.Render(changed),
-			st.Danger.Render(Sparkline(s.failures, min(widths[2]-4, deskSparkHours))),
+			st.Danger.Render(Sparkline(s.failures, min(widths[2]-2-2*deskPad(width), deskSparkHours))),
 		}),
 	}
 	split := [3][]string{}
@@ -727,7 +838,7 @@ func itemLabel(name string) string {
 
 // queueWidths returns the name and bar widths for a content width cw.
 func queueWidths(width int) (nameW, barW, detailW int) {
-	cw := width - 4
+	cw := deskTextW(width)
 	barW, detailW = 16, 12
 	if width < deskWideMin {
 		barW, detailW = 8, 9
@@ -772,7 +883,7 @@ func (f deskFrame) queuePanel(st theme.Styles, width int, rows []queueRow, curso
 			content = append(content, f.queueLine(st, width, rows[i], i == cursor))
 		}
 	}
-	return strings.Split(Panel(st, width, "queue", strip, content), "\n")
+	return strings.Split(deskPanel(st, width, width, "queue", strip, content), "\n")
 }
 
 func (f deskFrame) queueLine(st theme.Styles, width int, r queueRow, selected bool) string {
@@ -806,13 +917,13 @@ func (f deskFrame) rowBar(st theme.Styles, r queueRow, w int) (string, string) {
 		case it.TTY:
 			detail = st.Steel.Render("tty")
 		}
-		return BarSolid(st, w, 0), detail
+		return BarThin(st, w, 0), detail
 	case rowRefused:
-		return BarSolid(st, w, 0), st.Danger.Render("refused")
+		return BarThin(st, w, 0), st.Danger.Render("refused")
 	case rowLost:
-		return BarSolid(st, w, 0), st.Warn.Render("lost")
+		return BarThin(st, w, 0), st.Warn.Render("lost")
 	case rowChanged:
-		return BarSolid(st, w, 0), st.Warn.Render("changed")
+		return BarThin(st, w, 0), st.Warn.Render("changed")
 	case rowDone, rowFailed:
 		fill := st
 		detail := st.Muted.Render(clock(it.Ended.Sub(it.Started)))
@@ -827,7 +938,7 @@ func (f deskFrame) rowBar(st theme.Styles, r queueRow, w int) (string, string) {
 				detail = st.Danger.Render("exit " + strconv.Itoa(*it.ExitCode))
 			}
 		}
-		return BarSolid(fill, w, 1), detail
+		return BarThin(fill, w, 1), detail
 	}
 	// running
 	elapsed := time.Duration(0)
@@ -852,7 +963,7 @@ func (f deskFrame) rowBar(st theme.Styles, r queueRow, w int) (string, string) {
 	}
 	detail := st.Active.Render(clock(elapsed))
 	if typical, ok := f.typical(it.Stem); ok && typical > 0 {
-		return BarSolid(st, w, float64(elapsed)/float64(typical)), detail
+		return BarThin(st, w, float64(elapsed)/float64(typical)), detail
 	}
 	// No earlier run to compare with: the shimmer is activity, not progress,
 	// and the detail says the length so far (#1107).
@@ -912,7 +1023,7 @@ func stepGlyph(st theme.Styles, state string) string {
 // section out entirely.
 func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, cursor, body int) []string {
 	if len(rows) == 0 {
-		return strings.Split(Panel(st, width, "focus", "", []string{st.Muted.Render("the selected item's sha256, what and why show here")}), "\n")
+		return strings.Split(deskPanel(st, width, width, "focus", "", []string{st.Muted.Render("the selected item's sha256, what and why show here")}), "\n")
 	}
 	r := rows[cursor]
 	it := r.item
@@ -926,7 +1037,7 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 		// never the part the panel cuts off. The panel's own cut ends in a
 		// "…" cell, so the hash must end one cell short of the edge.
 		hash = st.Muted.Render(" · sha256 ") + st.Fg.Render(it.Meta.SHA256[:deskShortHash])
-		label = cut(label, max(width-5-ansi.StringWidth(hash), 8))
+		label = cut(label, max(deskTextW(width)-1-ansi.StringWidth(hash), 8))
 	}
 	head := st.Selected.Render(label) + hash
 	head += st.Muted.Render(" · " + f.focusState(r))
@@ -936,13 +1047,13 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	// panel (body 0) leaves it out: it is not what y needs, and y, s and u
 	// say the same in the footer.
 	if note := stateNote(r); note != "" && body > 0 {
-		for _, l := range strings.Split(ansi.Wrap(note, max(width-4, 10), ""), "\n") {
+		for _, l := range strings.Split(ansi.Wrap(note, max(deskTextW(width), 10), ""), "\n") {
 			lines = append(lines, st.Warn.Render(strings.TrimRight(l, " ")))
 		}
 	}
 	// The panel's text area is the width less the border and its padding.
-	what, why := wrapField(it.What, width-4), wrapField(it.Why, width-4)
-	what, why = capFields(what, why, f.fieldRoom(width), max(width-4-deskFieldLabelW, 10))
+	what, why := wrapField(it.What, deskTextW(width)), wrapField(it.Why, deskTextW(width))
+	what, why = capFields(what, why, f.fieldRoom(width), max(deskTextW(width)-deskFieldLabelW, 10))
 	lines = append(lines, drawField(st, "what", st.Fg.Bold(true), what)...)
 	lines = append(lines, drawField(st, "why", st.Meta, why)...)
 	content := it.Content
@@ -980,7 +1091,7 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 			lines = append(lines, bar+st.Muted.Render(fmt.Sprintf("… %d more lines · v to view", hidden)))
 		}
 	}
-	return strings.Split(Panel(st, width, "focus", "", lines), "\n")
+	return strings.Split(deskPanel(st, width, width, "focus", "", lines), "\n")
 }
 
 // deskScriptMin is the fewest script rows worth a preview; with fewer left
@@ -1217,7 +1328,7 @@ const deskTimelineMin = 3
 // tlView is the timeline frame the panel draws its lines from: no selection,
 // and nothing marked new (that is the t hint's job).
 func (f deskFrame) tlView(width int) tlFrame {
-	return tlFrame{snap: f.snap, steps: f.opts.Steps, width: width - 4, now: f.now, seen: f.now, cursor: -1}
+	return tlFrame{snap: f.snap, steps: f.opts.Steps, width: deskTextW(width), now: f.now, seen: f.now, cursor: -1, loose: f.roomy}
 }
 
 // timelinePanel is the timeline in a panel: what needs the operator first,
@@ -1235,7 +1346,7 @@ func (f deskFrame) timelinePanel(st theme.Styles, width int, tl tlFrame, entries
 	if width >= deskWideMin {
 		legend = st.Muted.Render("newest first")
 	}
-	return strings.Split(Panel(st, width, "timeline", legend, content), "\n")
+	return strings.Split(deskPanel(st, width, width, "timeline", legend, content), "\n")
 }
 
 // timelineSummary is the timeline as one line, for a window with no room for
@@ -1294,11 +1405,11 @@ func (f deskFrame) historyPanel(st theme.Styles, width, rows int) []string {
 	if width >= deskWideMin && len(done) > 0 {
 		legend = st.Muted.Render("bar: run length, longest full")
 	}
-	return strings.Split(Panel(st, width, "history", legend, content), "\n")
+	return strings.Split(deskPanel(st, width, width, "history", legend, content), "\n")
 }
 
 func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest time.Duration) string {
-	cw := width - 4
+	cw := deskTextW(width)
 	spark := 0
 	if width >= deskWideMin {
 		spark = 8

@@ -28,6 +28,9 @@ type Call struct {
 	Input       string
 	Env         map[string]string
 	UnsetEnv    []string
+	// Dir is the working directory a RunWithEnvFilteredInDir call asked for;
+	// "" for every other mode.
+	Dir string
 }
 
 // FakeRunner is the test double for Runner. It records every Call and produces
@@ -71,6 +74,17 @@ func (f *FakeRunner) RunWithEnv(_ context.Context, env map[string]string, name s
 // then delegates to RunFunc like the other captured-output modes.
 func (f *FakeRunner) RunWithEnvFiltered(_ context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
 	return f.answer(Call{Name: name, Env: env, UnsetEnv: unset}, args)
+}
+
+// RunWithEnvFilteredInDir records the directory with the environment
+// overrides and removals, then delegates to RunFunc like the other
+// captured-output modes. A relative directory is refused as OSRunner refuses
+// it.
+func (f *FakeRunner) RunWithEnvFilteredInDir(_ context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", ErrRelativeDir
+	}
+	return f.answer(Call{Name: name, Env: env, UnsetEnv: unset, Dir: dir}, args)
 }
 
 // RunInteractive records the call (flagged interactive) and returns InteractiveErr.

@@ -118,7 +118,7 @@ func TrustedMarketplaces(user, local Document) map[string]json.RawMessage {
 // key already on disk (permissions, hooks, a human's other local overrides,
 // …) is preserved untouched — only enabledPlugins and
 // extraKnownMarketplaces are replaced. The read-modify-write's own directory
-// creation mirrors allowlist.go's writeSettings (MkdirAll(0700)), but the
+// creation uses MkdirAll(0700), but the
 // final write goes through writeLocalAtomic (temp file + rename, mirroring
 // internal/env's writeAtomic) rather than a bare os.WriteFile — this file
 // commonly also holds a human's other local overrides, so a crash or a

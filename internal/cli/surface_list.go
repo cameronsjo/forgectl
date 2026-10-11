@@ -215,7 +215,7 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 	case backend.ProbeGone:
 		return workerGone, "the herdr workspace is gone"
 	case backend.ProbeIdentityMismatch:
-		return workerUnreadable, "herdr restarted, or the workspace id no longer carries forgectl's marker (" + causeText(res) + ")"
+		return workerUnreadable, "herdr restarted, the reference is from another herdr session, or the workspace id no longer carries forgectl's marker (" + causeText(res) + ")"
 	default:
 		return workerUnreadable, "herdr could not be read (" + causeText(res) + ")"
 	}

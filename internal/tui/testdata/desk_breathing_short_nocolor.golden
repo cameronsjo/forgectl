@@ -1,0 +1,24 @@
+desk ● 3 waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk                up 4h37m · 19:07
+╭ waiting ─────────────────────────╮╭ started today ───────────────────╮╭ outcomes ──────────────────────────╮
+│  3                               ││  5                               ││  ✓ 2  ✗ 1                          │
+│  oldest 30h                      ││  median 41s                      ││  1 changed                         │
+│  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁█        ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁█        ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█          │
+╰──────────────────────────────────╯╰──────────────────────────────────╯╰────────────────────────────────────╯
+╭ queue ─┤ ● 2 running  ◌ 3 waiting  ⌨ 1 tty ├───────────────────────────────────────────────────────────────╮
+│  ▸ ◌ waiting  17 merge-feature-branch                ────────────────  needs you                           │
+│    ◌ waiting  18 refresh-credentials               ⌨ ────────────────  tty                                 │
+│    ◌ waiting  19 old-cleanup                         ────────────────  stale                               │
+│    ● running  14 sync-mirror                         ━━━━━━━─────────  0:50                                │
+│    ● running  16 nightly-batch                       ███████▓▓▓██░░░░  4/7 steps                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ focus ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  17 merge-feature-branch · sha256 283128acef14 · unchanged since queued 12m ago                            │
+│  what  Merge the feature branch once checks pass                                                           │
+│  why   The review is done; merges are yours                                                                │
+│  ┆ script: 5 lines · v to view                                                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ timeline · 3 need you · 2 running · 9 in all · t to open
+
+
+
+ y run · s skip · v view · a all · l log · r runs · t timeline · h history · j/k move · ? help · q quit

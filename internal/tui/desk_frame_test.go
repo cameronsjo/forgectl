@@ -287,7 +287,7 @@ func TestDeskFrame_RunningBars(t *testing.T) {
 	st := testStyles()
 	// 14-sync-mirror has a 2m history: 50s against it is a partial solid bar.
 	bar, _ := f.rowBar(st, queueRow{rowRunning, snap.Running[0]}, 16)
-	if got := plain(bar); got != "███████░░░░░░░░░" {
+	if got := plain(bar); got != "━━━━━━━─────────" {
 		t.Errorf("sync bar = %q, want 50s of a 2m median", got)
 	}
 	// With no history the bar is the shimmer, a pure function of elapsed time.
@@ -1086,6 +1086,128 @@ func TestDeskFrame_HistoryTightHeightLeavesNoBareBorder(t *testing.T) {
 		for i, l := range strings.Split(out, "\n") {
 			if strings.HasPrefix(l, "╭ history") && !strings.Contains(strings.Split(out, "\n")[min(i+1, h-1)], "│") {
 				t.Errorf("height %d: history border with no row under it:\n%s", h, out)
+			}
+		}
+	}
+}
+
+// breathingSizes are the two windows the whitespace work is judged at: tall
+// enough to breathe, and short enough to keep today's density.
+var breathingSizes = []struct {
+	name          string
+	width, height int
+}{
+	{"tall", 110, 50},
+	{"short", 110, 24},
+}
+
+// TestGoldenDeskBreathing pins a tall and a short window of the same desk, in
+// colour and through NO_COLOR.
+func TestGoldenDeskBreathing(t *testing.T) {
+	forceTrueColor(t)
+	for _, sz := range breathingSizes {
+		t.Run(sz.name, func(t *testing.T) {
+			snap, opts := busySnapshot()
+			got := RenderDeskFrame(snap, sz.width, sz.height, deskNow, opts)
+			assertGolden(t, "desk_breathing_"+sz.name, got)
+			var buf bytes.Buffer
+			wr := theme.Default().Writer(&buf, []string{"NO_COLOR=1", "TERM=xterm-256color"})
+			if _, err := wr.Write([]byte(got)); err != nil {
+				t.Fatal(err)
+			}
+			assertGolden(t, "desk_breathing_"+sz.name+"_nocolor", buf.String())
+		})
+	}
+}
+
+// A tall window splits the header, leaves a blank line between stacked panels
+// and spaces the timeline; a short one keeps one header line and no blank
+// lines. Both keep the header's facts and fit the window exactly.
+func TestDeskFrame_BreathesOnlyWhenTall(t *testing.T) {
+	blankBetween := func(lines []string) int {
+		n := 0
+		for i := 1; i < len(lines)-1; i++ {
+			if lines[i] == "" && strings.HasPrefix(lines[i+1], "╭") {
+				n++
+			}
+		}
+		return n
+	}
+	for _, sz := range breathingSizes {
+		snap, opts := busySnapshot()
+		out := ansi.Strip(RenderDeskFrame(snap, sz.width, sz.height, deskNow, opts))
+		lines := strings.Split(out, "\n")
+		if len(lines) != sz.height {
+			t.Fatalf("%s: %d lines, want %d", sz.name, len(lines), sz.height)
+		}
+		for _, fact := range []string{"forgectl " + opts.Version, opts.Host, "up 4h37m", opts.Dir} {
+			if !strings.Contains(lines[0]+"\n"+lines[1], fact) {
+				t.Errorf("%s: the header lost %q:\n%s", sz.name, fact, out)
+			}
+		}
+		gaps := blankBetween(lines)
+		switch sz.name {
+		case "tall":
+			if gaps < 3 {
+				t.Errorf("tall: %d blank lines before a panel, want at least 3:\n%s", gaps, out)
+			}
+			if strings.Contains(lines[0], "forgectl") {
+				t.Errorf("tall: the title line carries the stats:\n%s", out)
+			}
+		default:
+			if gaps != 0 || strings.Contains(strings.Join(lines[:len(lines)-3], "\n"), "\n\n") {
+				t.Errorf("short: blank lines between panels:\n%s", out)
+			}
+			if !strings.Contains(lines[0], "forgectl") {
+				t.Errorf("short: the header is not one line:\n%s", out)
+			}
+		}
+	}
+}
+
+// Every panel's text sits two columns in from its border in a wide window and
+// one in a narrow one: the focus panel's what line starts that far in, and no
+// panel line reaches closer to either border.
+func TestDeskFrame_PanelPadding(t *testing.T) {
+	for _, c := range []struct{ width, pad int }{{110, 2}, {60, 1}} {
+		snap, opts := busySnapshot()
+		out := ansi.Strip(RenderDeskFrame(snap, c.width, 40, deskNow, opts))
+		sawWhat := false
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, "│") || !strings.HasSuffix(l, "│") {
+				continue
+			}
+			body := strings.TrimSuffix(strings.TrimPrefix(l, "│"), "│")
+			if !strings.HasPrefix(body, strings.Repeat(" ", c.pad)) || !strings.HasSuffix(body, strings.Repeat(" ", c.pad)) {
+				t.Errorf("width %d: %q is closer than %d to a border", c.width, l, c.pad)
+			}
+			if strings.HasPrefix(strings.TrimLeft(body, " "), "what ") {
+				sawWhat = true
+				if got := len(body) - len(strings.TrimLeft(body, " ")); got != c.pad {
+					t.Errorf("width %d: what line is %d columns in, want %d", c.width, got, c.pad)
+				}
+			}
+		}
+		if !sawWhat {
+			t.Errorf("width %d: no what line:\n%s", c.width, out)
+		}
+	}
+}
+
+// y runs an item only when the focus panel's head, what and why are on
+// screen, so every window size from short to roomy must still report them
+// shown, and fill the window exactly.
+func TestDeskFrame_FocusStaysShownAcrossRoomyThreshold(t *testing.T) {
+	for _, w := range []int{72, 110} {
+		for h := 14; h <= 80; h++ {
+			snap, opts := busySnapshot()
+			f := deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts}
+			lines, shown := f.layout()
+			if len(lines) != h {
+				t.Fatalf("%dx%d: %d lines", w, h, len(lines))
+			}
+			if !shown {
+				t.Errorf("%dx%d: the focus panel is not reported shown:\n%s", w, h, ansi.Strip(f.render()))
 			}
 		}
 	}

@@ -54,8 +54,15 @@ func padTo(s string, w int) string {
 // width under 4 is raised to 4. The title and strip are cut first when the
 // top border is too short for them.
 func Panel(st theme.Styles, width int, title, strip string, lines []string) string {
-	if width < minPanelWidth {
-		width = minPanelWidth
+	return PanelPadded(st, width, 1, title, strip, lines)
+}
+
+// PanelPadded is Panel with pad blank cells between each side border and the
+// content, at least 1. Each content line is cut to width-2-2*pad cells.
+func PanelPadded(st theme.Styles, width, pad int, title, strip string, lines []string) string {
+	pad = max(pad, 1)
+	if width < minPanelWidth+2*(pad-1) {
+		width = minPanelWidth + 2*(pad-1)
 	}
 	inner := width - 2
 	border := st.Dim
@@ -72,8 +79,9 @@ func Panel(st theme.Styles, width int, title, strip string, lines []string) stri
 	var b strings.Builder
 	b.WriteString(border.Render("╭") + top + border.Render("╮"))
 	side := border.Render("│")
+	gap := strings.Repeat(" ", pad)
 	for _, l := range lines {
-		b.WriteString("\n" + side + " " + padTo(cut(l, inner-2), inner-2) + " " + side)
+		b.WriteString("\n" + side + gap + padTo(cut(l, inner-2*pad), inner-2*pad) + gap + side)
 	}
 	b.WriteString("\n" + border.Render("╰"+strings.Repeat("─", inner)+"╯"))
 	return b.String()
@@ -184,6 +192,27 @@ func BarSolid(st theme.Styles, width int, frac float64) string {
 			cells[i] = barCell{kindFill, st.Active, "█"}
 		} else {
 			cells[i] = barCell{kindEmpty, st.Dim, "░"}
+		}
+	}
+	return renderCells(cells)
+}
+
+// BarThin draws a width-cell gauge with frac of it filled: a heavy ━ run
+// (Active) then a light ─ run (Dim). It carries the same reading as BarSolid
+// in lighter glyphs, so a row's gauge does not read as a block. frac is
+// clamped to [0,1] and the filled count rounds to nearest.
+func BarThin(st theme.Styles, width int, frac float64) string {
+	if width <= 0 {
+		return ""
+	}
+	frac = min(max(frac, 0), 1)
+	filled := int(frac*float64(width) + 0.5)
+	cells := make([]barCell, width)
+	for i := range cells {
+		if i < filled {
+			cells[i] = barCell{kindFill, st.Active, "━"}
+		} else {
+			cells[i] = barCell{kindEmpty, st.Dim, "─"}
 		}
 	}
 	return renderCells(cells)

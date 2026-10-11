@@ -91,14 +91,15 @@ func pinReviewWindowEnv(env []string, host string) []string {
 }
 
 // reviewWindowEnv is the environment a review window for sess is created
-// with: the resolved window environment plus, for a remote PR, the gh host
-// pin for that PR's host. A local session has no forge and its allow-list
+// with: the resolved window environment, the git hardening pins
+// (pinReviewGitEnv), and, for a remote PR, the gh host pin for that PR's host. A local session has no forge and its allow-list
 // grants no gh at all, so it gets the resolved environment unchanged.
 func (c *Client) reviewWindowEnv(sess Session) ([]string, error) {
 	env, err := c.resolveWindowEnv()
 	if err != nil {
 		return nil, err
 	}
+	env = pinReviewGitEnv(env)
 	if sess.Ref.IsLocal() {
 		return env, nil
 	}

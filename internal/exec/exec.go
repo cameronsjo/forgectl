@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -133,6 +134,20 @@ type DiscardingRunner interface {
 	RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 }
 
+// DirRunner is the optional seam for a caller that must run a command in a
+// chosen working directory instead of the process's own. It behaves like
+// Runner.RunWithEnvFiltered with the child's working directory set to dir,
+// which must be an absolute path (ErrRelativeDir otherwise). `forgectl
+// surface merge` runs `gh pr merge` through it from a fresh temporary
+// directory, so gh never reads a worker's checkout. A caller type-asserts
+// for it and refuses when the runner does not implement it.
+type DirRunner interface {
+	RunWithEnvFilteredInDir(ctx context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error)
+}
+
+// ErrRelativeDir reports a DirRunner call whose directory is not absolute.
+var ErrRelativeDir = errors.New("exec: the working directory must be an absolute path")
+
 // HomebrewNoAutoUpdate disables Homebrew's own implicit "auto-update and
 // refresh taps" behavior: several brew subcommands beyond `update` itself —
 // `outdated`, `upgrade`, `install`, `list --versions`, … — silently trigger
@@ -210,6 +225,18 @@ func (r OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string,
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
 	cmd.Env = filteredEnvironment(env, unset)
 	return runAndWrap(ctx, cmd, r.ceiling(), "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", args, name)
+}
+
+// RunWithEnvFilteredInDir is RunWithEnvFiltered with the child's working
+// directory set to dir, which must be absolute.
+func (r OSRunner) RunWithEnvFilteredInDir(ctx context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", ErrRelativeDir
+	}
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
+	cmd.Env = filteredEnvironment(env, unset)
+	cmd.Dir = dir
+	return runAndWrap(ctx, cmd, r.ceiling(), "Preparing to run command in a chosen directory.", "Successfully ran command in a chosen directory.", "Failed to run command in a chosen directory.", args, name)
 }
 
 func filteredEnvironment(overrides map[string]string, unset []string) []string {

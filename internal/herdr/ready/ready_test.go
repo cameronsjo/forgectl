@@ -12,7 +12,8 @@ import (
 
 // fixture loads a captured screen and the herdr status read beside it. The
 // screens were captured from live panes on herdr 0.9.1 (Claude Code 2.1.289,
-// Codex 0.160.0) and sanitized of paths, hostnames, and session ids.
+// Codex 0.160.0) and herdr 0.9.3 (Pi 1.0.4), and sanitized of paths,
+// hostnames, and session ids.
 func fixture(t *testing.T, name string) Screen {
 	t.Helper()
 	text, err := os.ReadFile(filepath.Join("testdata", name+".screen")) //nolint:gosec // G304: name is a literal at every call site
@@ -81,6 +82,23 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		// A claude screen is never a ready codex, and the reverse.
 		{"claude-ready-acceptedits", "codex", StateNotReady, "", ""},
 		{"codex-ready", "claude", StateNotReady, "", ""},
+		// Pi 1.0.4: an empty editor, after a turn (herdr says done), typed
+		// input, and input that wraps (continuation rows are not indented).
+		{"pi-ready", "pi", StateReady, "", ""},
+		{"pi-ready-after-turn", "pi", StateReady, "", ""},
+		{"pi-typed-unsent", "pi", StateReady, "", "Run the shell command date -u once. Do nothing else."},
+		{"pi-typed-wrapped", "pi", StateReady, "", "Run the shell command date -u once. Do nothing else. This pi editor line is deliberately long so that it wraps onto a second visual row inside the editor area of the pi terminal interface, and then a third row as well. Adding more words here so that the editor definitely has to wrap to another row now, and keep going a little longer to be very sure of it."},
+		// Pi keeps its editor on screen while a turn runs; herdr's working
+		// status is what keeps it not ready.
+		{"pi-working", "pi", StateNotReady, "", ""},
+		{"pi-trust-dialog", "pi", StateBlocked, "project trust dialog", ""},
+		{"npm-ok-to-proceed", "pi", StateBlocked, "npm install prompt", ""},
+		{"shell-idle", "pi", StateNotReady, "", ""},
+		// Another harness's screen is never a ready pi, and the reverse.
+		{"claude-ready-acceptedits", "pi", StateNotReady, "", ""},
+		{"codex-ready", "pi", StateNotReady, "", ""},
+		{"pi-ready", "claude", StateNotReady, "", ""},
+		{"pi-ready", "codex", StateNotReady, "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.fixture+"/"+c.harness, func(t *testing.T) {
@@ -195,9 +213,34 @@ func TestEvaluate_ShellPromptIsNotClaude(t *testing.T) {
 	}
 }
 
+// TestEvaluate_PiTranscriptIsNotADialog: pi draws transcript rows indented
+// one space, as it draws its dialogs. With the editor at the bottom, a reply
+// that quotes a dialog's wording is transcript.
+func TestEvaluate_PiTranscriptIsNotADialog(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "pi-ready-after-turn")
+	box := strings.LastIndex(s.Text, "\n─")
+	box = strings.LastIndex(s.Text[:box], "\n─")
+	s.Text = s.Text[:box] + "\n Trust project folder?\n → Trust\n ↑↓ navigate  enter select  escape/ctrl+c cancel" + s.Text[box:]
+	if v := tab.Evaluate("pi", s); !v.Ready() {
+		t.Fatalf("verdict %+v, want ready", v)
+	}
+}
+
+// TestEvaluate_PiDialogRowInTheFooterIsBlocked: a selector footer under the
+// editor is checked, as for claude.
+func TestEvaluate_PiDialogRowInTheFooterIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "pi-ready")
+	s.Text += "\n ↑↓ navigate  enter select  escape/ctrl+c cancel"
+	if v := tab.Evaluate("pi", s); v.State != StateBlocked {
+		t.Fatalf("verdict %+v, want blocked", v)
+	}
+}
+
 func TestEvaluate_UnknownHarness(t *testing.T) {
-	v := defaultTable(t).Evaluate("pi", fixture(t, "claude-ready-acceptedits"))
-	if v.State != StateNotReady || !strings.Contains(v.Reason, `"pi"`) {
+	v := defaultTable(t).Evaluate("gemini", fixture(t, "claude-ready-acceptedits"))
+	if v.State != StateNotReady || !strings.Contains(v.Reason, `"gemini"`) {
 		t.Fatalf("verdict %+v, want not-ready naming the harness", v)
 	}
 }

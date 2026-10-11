@@ -108,6 +108,11 @@ type Client struct {
 	// startup failures without sleeping once per review.
 	dispatchWait func(context.Context) error
 
+	// sandboxSupported reports whether Claude Code's sandbox can run on this
+	// host; launchInline refuses to dispatch the Claude reviewer when it
+	// cannot (claudeSandboxSupported, forgectl#694). Tests inject a decision.
+	sandboxSupported func() error
+
 	// windowEnv resolves the environment forgectl adds to a review window, as
 	// `KEY=VALUE` entries. It is a FUNCTION rather than a slice for two
 	// reasons, both load-bearing:
@@ -300,13 +305,14 @@ func WithNotifier(n interface {
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
-		run:         run,
-		githubHost:  defaultGitHubHost,
-		pin:         func(string) exec.Runner { return run },
-		tmuxClient:  tmux.New(run),
-		tmuxSession: defaultTmuxSession,
-		fs:          osRecordFS{},
-		isTTY:       launch.IsInteractiveTTY,
+		run:              run,
+		githubHost:       defaultGitHubHost,
+		pin:              func(string) exec.Runner { return run },
+		tmuxClient:       tmux.New(run),
+		tmuxSession:      defaultTmuxSession,
+		fs:               osRecordFS{},
+		isTTY:            launch.IsInteractiveTTY,
+		sandboxSupported: claudeSandboxSupported,
 		dispatchWait: func(ctx context.Context) error {
 			timer := time.NewTimer(8 * time.Second)
 			defer timer.Stop()

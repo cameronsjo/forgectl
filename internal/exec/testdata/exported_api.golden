@@ -98,6 +98,7 @@ method (*FakeRunner) Run(_ context.Context, name string, args ...string) (string
 method (*FakeRunner) RunInteractive(_ context.Context, name string, args ...string) error
 method (*FakeRunner) RunWithEnv(_ context.Context, env map[string]string, name string, args ...string) (string, error)
 method (*FakeRunner) RunWithEnvFiltered(_ context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
+method (*FakeRunner) RunWithEnvFilteredInDir(_ context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error)
 method (*FakeRunner) RunWithInput(_ context.Context, stdin string, name string, args ...string) (string, error)
 method (*FakeRunner) answer(call Call, args []string) (string, error)
 method (*FakeSensitiveRunner) Calls() []SensitiveCommand
@@ -164,6 +165,7 @@ method (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout io.W
 method (OSRunner) RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error
 method (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
 method (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
+method (OSRunner) RunWithEnvFilteredInDir(ctx context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error)
 method (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
 method (OSRunner) ceiling() int
 method (Outcome) String() string
@@ -229,10 +231,11 @@ method (onceCloser) WriteString(s string) (n int, err error)
 method (onceCloser) WriteTo(w io.Writer) (n int64, err error)
 type Arg struct{v github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; kind argKind}
 type BoundedOutput struct{buf *outputBuf; overflow bool; forced bool}
-type Call struct{Name string; Args []string; TmuxUTF8 bool; Interactive bool; Input string; Env map[string]string; UnsetEnv []string}
+type Call struct{Name string; Args []string; TmuxUTF8 bool; Interactive bool; Input string; Env map[string]string; UnsetEnv []string; Dir string}
 type CaptureMode uint8
 type CommandError struct{Name string; Args []string; Stderr string; StderrDropped int64; Output string; ExitCode int; Err error; span opaqueSpan}
 type CommandKind uint8
+type DirRunner interface{RunWithEnvFilteredInDir(ctx context.Context, dir string, env map[string]string, unset []string, name string, args ...string) (string, error)}
 type DiscardingRunner interface{RunDiscardingStdout(ctx context.Context, name string, args ...string) error}
 type EnvMutation struct{key string; value SecretArg; op envOp}
 type EnvStreamingRunner interface{RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
@@ -274,6 +277,7 @@ var ErrInvalidCommand error
 var ErrNonzeroExit error
 var ErrOutputLimit error
 var ErrOutputTooLarge error
+var ErrRelativeDir error
 var ErrStartFailed error
 var ErrTimeout error
 sealed: func New(v string) Value

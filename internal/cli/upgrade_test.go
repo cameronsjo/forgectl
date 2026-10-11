@@ -191,6 +191,45 @@ func TestUpgrade_Apply_UpdateFailure_NeverRunsUpgrade(t *testing.T) {
 	}
 }
 
+// TestUpgrade_Apply_UpdateLocked pins #1175: a `brew update` that lost brew's
+// lock to another `brew update` says so, and any other `brew update` failure
+// keeps the network hint.
+func TestUpgrade_Apply_UpdateLocked(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+
+	for _, tc := range []struct {
+		name     string
+		stderr   string
+		want     string
+		dontWant string
+	}{
+		{
+			"locked",
+			"lockf: 200: already locked\nError: Another `brew update` process is already running.\nPlease wait for it to finish or terminate it to continue.",
+			"another brew update is running; wait for it, then rerun `forgectl upgrade`",
+			"network",
+		},
+		{"network", "fatal: unable to access 'https://github.com/cameronsjo/homebrew-tap/'", "check network access to the Homebrew tap", "another brew update"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Stderr: tc.stderr}
+			}}
+			_, err := execUpgrade(t, fr)
+			if err == nil {
+				t.Fatal("Execute() = nil, want an error")
+			}
+			if ExitCode(err) != 1 {
+				t.Errorf("ExitCode = %d, want 1", ExitCode(err))
+			}
+			if msg := err.Error(); !strings.Contains(msg, tc.want) || strings.Contains(msg, tc.dontWant) {
+				t.Errorf("error = %q, want %q and not %q", msg, tc.want, tc.dontWant)
+			}
+		})
+	}
+}
+
 // TestUpgrade_Check_NeverEchoesBrew pins #738: `upgrade --check` words both
 // outcomes from fixed text and version tokens, never from brew's stdout or
 // its CommandError (argv plus stderr, which relays the tap's server).

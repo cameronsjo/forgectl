@@ -27,6 +27,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -52,6 +53,33 @@ type fakeDrain struct {
 	events    []drain.Event
 	ids       int
 	t         *testing.T
+	// prs answers the closers' PR reads by row name; a missing name has no
+	// PR. prErr, when set for a name, is the read's error. prReads counts
+	// reads by name.
+	prs     map[string]merge.Candidate
+	prErr   map[string]error
+	prReads map[string]int
+	// usage is what pricing a transcript returns. onPrice, when set, runs
+	// while pricing: the window between the closer's read and its close.
+	usage   *statusUsage
+	onPrice func()
+	// closeRes, when set, is what closeRow returns; otherwise the close
+	// succeeds and removes the ledger row. closed lists the rows closed.
+	closeRes *closeResult
+	closed   []string
+	// pruneRuns counts daily prunes; pruneDay is the recorded day.
+	pruneRuns int
+	pruneDay  string
+	pruneErr  error
+	// pruneDayErr is what reading the recorded day returns.
+	pruneDayErr error
+	// mergeSettings is what [surface.merge] resolves to (mode off unless a
+	// test sets it); landed lists the rows the autopilot tried, landBy who
+	// it tried as, and landOut is what each try returns.
+	mergeSettings config.MergeSettings
+	landed        []merge.Row
+	landBy        []merge.By
+	landOut       merge.Outcome
 }
 
 // checkOwnLedger fails the test when the drain hands the notifier a ledger
@@ -82,7 +110,7 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeDrain{now: drainT0, t: t}
+	f := &fakeDrain{now: drainT0, t: t, prs: map[string]merge.Candidate{}, prErr: map[string]error{}, prReads: map[string]int{}}
 	f.launch = func(worker.QueueRow) drain.Attempt { return drain.Attempt{} }
 	f.probe = func(worker.QueueRow, worker.Row) drain.Probe { return drain.Probe{} }
 	io := drainIO{
@@ -109,6 +137,54 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 		launchID: func() (string, error) {
 			f.ids++
 			return fmt.Sprintf("launch-%d", f.ids), nil
+		},
+		prRead: func(_ context.Context, row merge.Row) (merge.Candidate, error) {
+			f.prReads[row.Name]++
+			if err := f.prErr[row.Name]; err != nil {
+				return merge.Candidate{}, err
+			}
+			c, ok := f.prs[row.Name]
+			if !ok {
+				return merge.Candidate{}, merge.ErrNoPR
+			}
+			return c, nil
+		},
+		price: func(context.Context, string) *statusUsage {
+			if f.onPrice != nil {
+				f.onPrice()
+			}
+			return f.usage
+		},
+		closeRow: func(_ context.Context, q worker.QueueRow, led worker.Row) closeResult {
+			if f.closeRes != nil {
+				return *f.closeRes
+			}
+			f.closed = append(f.closed, q.Name)
+			l, err := worker.Open(q.Repo, drainTestSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RemoveIf(led.Name, worker.SameRow(led)); err != nil {
+				t.Fatal(err)
+			}
+			return closeResult{Name: q.Name, Closed: true, Workspace: closeWorkspaceClosed, Worktree: closeWorktreeRemoved, Forgotten: true}
+		},
+		prune: func(context.Context, time.Time) (pruneResult, error) {
+			f.pruneRuns++
+			return pruneResult{}, f.pruneErr
+		},
+		pruneDay:    func() (string, error) { return f.pruneDay, f.pruneDayErr },
+		setPruneDay: func(day string) error { f.pruneDay = day; return nil },
+		mergeSettings: func() config.MergeSettings {
+			if f.mergeSettings.Mode == "" {
+				return config.MergeSettings{Mode: config.MergeOff}
+			}
+			return f.mergeSettings
+		},
+		land: func(_ context.Context, _ config.MergeSettings, by merge.By, row merge.Row, _ bool) merge.Outcome {
+			f.landed = append(f.landed, row)
+			f.landBy = append(f.landBy, by)
+			return f.landOut
 		},
 	}
 	return f, newDrainer(io, drainTestSession, func() bool { return false }), q
@@ -280,6 +356,46 @@ func TestDrainTickPauses(t *testing.T) {
 			t.Fatalf("status %s, want paused", st.Status)
 		}
 	})
+	t.Run("github unreadable: requeued, no attempt, one probe a tick, cleared by a launch", func(t *testing.T) {
+		f, d, q := newFakeDrain(t)
+		enqueueAt(t, q, "w", "/repo/a", drainT0)
+		enqueueAt(t, q, "x", "/repo/b", drainT0.Add(time.Minute))
+		down := true
+		f.launch = func(worker.QueueRow) drain.Attempt {
+			if down {
+				return drain.Attempt{Class: drain.ErrGitHubRead, Err: "HTTP 502", CreatedNothing: true}
+			}
+			return drain.Attempt{}
+		}
+		for tick := 1; tick <= 3; tick++ {
+			d.tick(t.Context())
+			if len(f.launched) != tick {
+				t.Fatalf("tick %d: launched %v; want one probe per tick while GitHub is unreadable", tick, f.launched)
+			}
+			for _, name := range []string{"w", "x"} {
+				if r := rowNamed(t, q, name); r.State != worker.QueueQueued || r.Attempts != 0 {
+					t.Fatalf("tick %d: row %s is %s with %d attempts; want queued, no attempt spent", tick, name, r.State, r.Attempts)
+				}
+			}
+			if !strings.Contains(d.pauses.Reason(), "GitHub could not be read: HTTP 502") {
+				t.Fatalf("tick %d: pause %q", tick, d.pauses.Reason())
+			}
+		}
+		down = false
+		d.tick(t.Context())
+		if d.pauses.Paused() {
+			t.Fatalf("GitHub back: pause %q still held", d.pauses.Reason())
+		}
+		if r := rowNamed(t, q, "w"); r.State != worker.QueueLaunched {
+			t.Fatalf("GitHub back: row w is %s", r.State)
+		}
+	})
+	t.Run("an identity read failure classifies as GitHub unreadable", func(t *testing.T) {
+		err := fmt.Errorf("forgectl: read o/r's repository name and id from GitHub, which a worker launch records: %w: %w", errIdentityRead, errors.New("HTTP 502"))
+		if got := classifyLaunchError(err); got != drain.ErrGitHubRead {
+			t.Fatalf("class %v, want ErrGitHubRead", got)
+		}
+	})
 	t.Run("herdr down: no claim, retried each tick", func(t *testing.T) {
 		f, d, q := newFakeDrain(t)
 		enqueueAt(t, q, "w", "/repo/a", drainT0)
@@ -381,11 +497,23 @@ func TestDrainTickExpireAndPrune(t *testing.T) {
 	if r := rowNamed(t, q, "old"); r.State != worker.QueueExpired {
 		t.Fatalf("after 7 days: %s, want expired", r.State)
 	}
+	// The daily prune is surface prune's own run over the real queue.
+	d.io.prune = func(ctx context.Context, now time.Time) (pruneResult, error) {
+		f.pruneRuns++
+		return runPrune(ctx, testPruneDeps(t, q, nil, errors.New("no herdr in this test")), now, drain.PruneAfter, false)
+	}
 	f.now = f.now.Add(drain.PruneAfter + time.Minute)
 	d.tick(t.Context())
 	rows, err := q.Rows()
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("after 30 more days: rows %+v, err %v; want pruned", rows, err)
+	}
+	pruned := false
+	for _, e := range f.events {
+		pruned = pruned || (e.Kind == drain.EventState && e.Name == "old" && e.State == "pruned")
+	}
+	if !pruned {
+		t.Fatalf("no pruned event for old: %+v", f.events)
 	}
 }
 
@@ -444,6 +572,7 @@ func TestDrainKillAtEachLaunchStage(t *testing.T) {
 			kl := &killLedger{Ledger: led, killAt: c.killAt}
 			ref := testHerdrRef(t)
 			steps := workerSteps{
+				identify: func(context.Context) (repoIdentity, error) { return repoIdentity{}, nil },
 				addWorktree: func(context.Context) (worker.Worktree, error) {
 					if c.failAt == "worktree" {
 						return worker.Worktree{}, errors.New("base lookup failed")
@@ -492,6 +621,8 @@ func TestClassifyLaunchError(t *testing.T) {
 		"gh 404 is other":            {fmt.Errorf("read: %w", ghOther), drain.ErrOther},
 		"401 text from git is other": {&exec.CommandError{Name: "git", Stderr: "HTTP 401"}, drain.ErrOther},
 		"surface launch error":       {&surface.LaunchError{}, drain.ErrOther},
+		"run directory":              {fmt.Errorf("launch: %w: base is not absolute", surface.ErrRunDir), drain.ErrLaunchConfig},
+		"socket path too long":       {fmt.Errorf("launch: %w: set TMPDIR shorter", surface.ErrSocketPathTooLong), drain.ErrLaunchConfig},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -999,6 +1130,99 @@ func TestDrainPausesOnLaunchConfig(t *testing.T) {
 	}
 }
 
+// symlinkedRunDir is a short base that is a symlink to a private directory:
+// the shape of /tmp on macOS, which every launch hit with TMPDIR unset in the
+// atelier P2 live run (forgectl#1188).
+func symlinkedRunDir(t *testing.T) string {
+	t.Helper()
+	target, err := os.MkdirTemp("", "rd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+	link := filepath.Join(target, "l")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+// symlinkedRunDirErr is the real error NewRunDir returns for that base.
+func symlinkedRunDirErr(t *testing.T) error {
+	t.Helper()
+	dir, err := surface.NewRunDir(symlinkedRunDir(t))
+	if err == nil {
+		_ = dir.Close()
+		t.Fatal("NewRunDir accepted a symlinked base; the fixture cannot fail")
+	}
+	if !errors.Is(err, surface.ErrRunDir) {
+		t.Fatalf("NewRunDir on a symlinked base = %v, want ErrRunDir", err)
+	}
+	return err
+}
+
+// TestDrainPausesOnARunDirectoryFailure is forgectl#1188: a run directory the
+// environment cannot provide fails every launch the same way, so the first
+// row fails naming its worktree and claiming pauses rather than burning the
+// queue one worktree at a time.
+func TestDrainPausesOnARunDirectoryFailure(t *testing.T) {
+	rdErr := fmt.Errorf("surface: launch failed in setup (not-mutated): %w", symlinkedRunDirErr(t))
+	f, d, q := newFakeDrain(t)
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	enqueueAt(t, q, "b", "/repo/b", drainT0.Add(time.Minute))
+	enqueueAt(t, q, "c", "/repo/c", drainT0.Add(2*time.Minute))
+	f.launch = func(row worker.QueueRow) drain.Attempt {
+		wt := worker.WorktreePath(row.Repo, row.Name)
+		seedLedger(t, row.Repo, row.Name, row.LaunchID, worker.StageFailed, func(r *worker.Row) { r.Worktree = wt })
+		return drain.Attempt{Class: classifyLaunchError(rdErr), Err: rdErr.Error(), Worktree: wt, Row: &worker.Row{Stage: worker.StageFailed, Worktree: wt}}
+	}
+	d.tick(t.Context())
+	d.tick(t.Context())
+	if len(f.launched) != 1 {
+		t.Fatalf("launched %v; a run-directory failure must stop further claims", f.launched)
+	}
+	if r := rowNamed(t, q, "a"); r.State != worker.QueueFailed || !strings.Contains(r.LastError, "/repo/a/.claude/worktrees/a") {
+		t.Fatalf("row a %s %q", r.State, r.LastError)
+	}
+	reason := d.pauses.Reason()
+	if b := rowNamed(t, q, "b"); b.State != worker.QueueQueued || !strings.Contains(reason, "launch-config") || !strings.Contains(reason, "private run directory") {
+		t.Fatalf("row b %s, pause %q", b.State, reason)
+	}
+}
+
+// TestDrainStartRefusesARunDirectoryItCannotCreate: start makes the run
+// directory a launch would, and refuses with exit 2 naming TMPDIR before any
+// child starts.
+func TestDrainStartRefusesARunDirectoryItCannotCreate(t *testing.T) {
+	cases := map[string]func(t *testing.T){
+		"TMPDIR is a symlink": func(t *testing.T) { t.Setenv("TMPDIR", symlinkedRunDir(t)) },
+	}
+	if runtime.GOOS == "darwin" {
+		// The live run: no TMPDIR, so the base is /tmp, a symlink on macOS.
+		cases["TMPDIR is unset on macOS"] = func(t *testing.T) {
+			t.Setenv("TMPDIR", "")
+			if err := os.Unsetenv("TMPDIR"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for name, setTMPDIR := range cases {
+		t.Run(name, func(t *testing.T) {
+			drainCmdEnv(t)
+			spawned := false
+			stubSpawn(t, func([]string, []string) (int, error) { spawned = true; return 1, nil })
+			setTMPDIR(t)
+			_, err := runQueueCmd(t, newSurfaceDrainStartCmd(module.Deps{}))
+			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "TMPDIR") || !strings.Contains(err.Error(), "private run directory") {
+				t.Fatalf("start: err %v (exit %d), want exit 2 naming TMPDIR and the run directory", err, ExitCode(err))
+			}
+			if spawned {
+				t.Fatal("start spawned a drain whose every launch would fail")
+			}
+		})
+	}
+}
+
 // TestLaunchConfigErrorsClassify drives a real build-step failure through
 // runWorkerSteps and checks the drain reads it as a launch-config failure.
 func TestLaunchConfigErrorsClassify(t *testing.T) {
@@ -1021,6 +1245,13 @@ func TestLaunchConfigErrorsClassify(t *testing.T) {
 		"binary on PATH at launch": func(s workerSteps) workerSteps {
 			s.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
 				return backend.Ref{}, fmt.Errorf("launch: %w: /usr/bin/claude", surface.ErrBinaryProvenance)
+			}
+			return s
+		},
+		"run directory under a symlinked base": func(s workerSteps) workerSteps {
+			rdErr := symlinkedRunDirErr(t)
+			s.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+				return backend.Ref{}, fmt.Errorf("surface: launch failed in setup: %w", rdErr)
 			}
 			return s
 		},

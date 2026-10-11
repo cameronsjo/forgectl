@@ -170,6 +170,19 @@ func Upgrade(ctx context.Context, run exec.Runner, stream io.Writer) (Result, er
 	return Result{Output: strings.Join(parts, "\n\n")}, nil
 }
 
+// brewUpdateLockedLine is what `brew update` prints when another `brew update`
+// holds its lock (forgectl#1175).
+const brewUpdateLockedLine = "Another `brew update` process is already running"
+
+// UpdateLocked reports whether err is a failed `brew update` step that failed
+// because another `brew update` held brew's lock, not because of the network.
+// It reads brew's output only to classify it; callers still word the failure
+// from fixed text.
+func UpdateLocked(err error) bool {
+	var se *StepError
+	return errors.As(err, &se) && errors.Is(se.Kind, ErrTapUpdate) && strings.Contains(se.Output, brewUpdateLockedLine)
+}
+
 func newStepError(step string, kind error, out string, err error, cause string) *StepError {
 	code := -1
 	var ce *exec.CommandError

@@ -175,7 +175,7 @@ forgectl resume hooks status       # watcher installed/loaded, recorded versions
 # surface — start a harness inside a terminal manager without exposing its invocation
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
-forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude or codex)
+forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude, codex, or pi)
 forgectl surface launch . --surface tmux --here      # start claude in the target, not at its repo root
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 forgectl surface launch . --surface herdr --worktree feat/x --name x --brief @brief.md   # first brief as the harness's prompt argument, nothing typed

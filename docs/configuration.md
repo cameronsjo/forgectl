@@ -53,8 +53,47 @@ Several command groups own their own config section, documented alongside that c
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
 - [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
 - [`desk`](commands/desk.md#forgectl-desk-add-file) — `[desk]`, `notify_herdr` and `notify_macos`: whether `desk add` signals the operator through herdr and macOS (both default on)
-- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default
+- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default. `[surface.profiles]`, the named Claude config directories a worker can run under; see [Worker profiles](#worker-profiles). `[surface.intake]`, which GitHub issues `surface intake gh` may queue: `authors` (default: the repository owner, when that owner is the `gh` account), `labels` (default `["queue:drain"]`), `max_per_run`; an unknown key makes the file invalid; see [Intake](herdr.md#intake). `[surface.merge]`, the worker PR merge policy (ADR-0011): `mode` (`off`; `manual`, where a person at a terminal confirms each `surface merge`; `auto`, which also lets the drain's autopilot merge, the only unattended merge path), `machine` (the value `forgectl surface merge-machine` prints), `approvers` (`cadence-review` is the one accepted; any other entry makes the file invalid), `marker_author_id` (required when `mode` is not `off`), `required_reviewers`, `method`, `repos`, and per-repository `workflow`, `required_checks` and `paths` tables (`paths` can reach no Go package: the built-in refusals cover every top-level file and the whole Go tree, `internal/**` and `cmd/**`, so for this repository a useful value is `["docs/**"]`). A missing table, any error, a machine mismatch, or a config file that is a symlink, not a regular file, not owned by you, not mode `0600` or with more than one hard link resolves the mode to `off`; an unknown key also makes the file invalid; see [Status and merge policy](herdr.md#status-and-merge-policy)
+
+  A complete `[surface.merge]` table looks like this; replace the machine value, the user id and the repository with your own:
+
+  ```toml
+  [surface.merge]
+  mode = "off"  # "manual": a person confirms each surface merge at a terminal; "auto": the drain's autopilot also merges
+  machine = "<the value forgectl surface merge-machine prints>"
+  approvers = ["cadence-review"]
+  marker_author_id = 0  # your numeric GitHub user id (gh api user --jq .id); 0 itself makes the file invalid
+  required_reviewers = ["cadence-forge-security-reviewer", "polish"]
+  method = "squash"
+  repos = ["owner/repo"]
+
+  [surface.merge.workflow]
+  "owner/repo" = ".github/workflows/ci.yml"
+
+  [surface.merge.required_checks]
+  "owner/repo" = ["build-test", "lint"]
+
+  [surface.merge.paths]
+  "owner/repo" = ["docs/**"]
+  ```
+
 - `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
+
+## Worker profiles
+
+`[surface.profiles.<name>]` names a Claude config directory a coordinator worker can run under, so one machine can run workers on a second Claude account. `surface launch --worktree ... --profile <name>` and `surface enqueue ... --profile <name>` set the worker's `CLAUDE_CONFIG_DIR` to that entry's `config_dir`; the worker's transcript path follows it.
+
+```toml
+[surface.profiles.work]
+config_dir = "~/.claude-work"   # absolute, or starting with "~/"
+```
+
+- `main`, or no `--profile`, keeps today's behavior: the worker inherits the launcher's `CLAUDE_CONFIG_DIR` through the worker environment allowlist. `main` cannot be defined as an entry.
+- A name is 1 to 32 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.
+- `config_dir` is checked when the file loads: a relative path, `~user/...`, an empty value, or the home directory (`~`) or root (`/`) itself makes the file invalid, and the whole `[surface.profiles]` table is dropped, so no worker runs under a directory the loader refused. A leading `~` expands to the home directory at launch.
+- A queue row stores the profile's name, never its path. The drain resolves the name from the config file when it launches the row, so a changed `config_dir` applies to rows already queued. A name the config no longer defines fails that launch as a launch-config error, which pauses claiming until the next `drain start`.
+- That pause stops the whole drain, rows with no profile included, so removing a profile while rows still name it holds every queued row until you dequeue those rows and run `drain start` again.
+- A profile applies to claude workers only, and sets only `CLAUDE_CONFIG_DIR`; it adds nothing else to the worker's environment.
 
 ## Theme
 

@@ -2,40 +2,23 @@ package pr
 
 // Test plan for allowlist.go
 //
-// writeAllowlist (Classification: deny-by-default security control)
-//   [x] Writes .claude/settings.local.json into the workspace
+// remoteProfile (Classification: deny-by-default security control)
 //   [x] Denies every posting/mutation surface (gh pr review/comment/merge,
 //       push, commit, WebFetch, Write/Edit)
 //   [x] Allows only read-only inspection (Read/Grep/Glob + read-only Bash)
 //   [x] Never grants gh pr review/comment/merge under allow
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestWriteAllowlist(t *testing.T) {
-	ws := t.TempDir()
-	path, err := writeAllowlist(ws, "github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+func TestRemoteProfile(t *testing.T) {
+	perms, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
 	if err != nil {
-		t.Fatalf("writeAllowlist: %v", err)
+		t.Fatalf("remoteProfile: %v", err)
 	}
-	want := filepath.Join(ws, ".claude", "settings.local.json")
-	if path != want {
-		t.Errorf("path = %q, want %q", path, want)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	var s allowlistSettings
-	if err := json.Unmarshal(data, &s); err != nil {
-		t.Fatalf("unmarshal settings: %v", err)
-	}
+	s := reviewSettings{Permissions: perms}
 
 	// Deny-by-default posting surfaces must be present.
 	mustDeny := []string{
@@ -269,8 +252,8 @@ func TestPrGhReadRules_RefusesValuesOutsideTheCharsets(t *testing.T) {
 			t.Errorf("%s: prGhReadRules accepted it and produced %v", name, rules)
 		}
 	}
-	if _, err := writeAllowlist(t.TempDir(), "ghe.*", good); err == nil {
-		t.Error("writeAllowlist wrote a settings file for an invalid host")
+	if _, err := remoteProfile("ghe.*", good); err == nil {
+		t.Error("remoteProfile built a permission set for an invalid host")
 	}
 }
 
@@ -294,44 +277,6 @@ func TestLocalAllowReadOnly_IsExactlyBaseReadOnly(t *testing.T) {
 		if strings.Contains(a, "rg") {
 			t.Errorf("localAllowReadOnly must grant no rg (command-execution primitive); found %q", a)
 		}
-	}
-}
-
-// TestWriteLocalAllowlist_WritesLocalProfileSettings covers writeLocalAllowlist
-// (mirrors writeAllowlist, but through the new shared writeSettings core):
-// the file must land at the same path writeAllowlist uses, and decode back to
-// exactly localProfile's permissions.
-func TestWriteLocalAllowlist_WritesLocalProfileSettings(t *testing.T) {
-	ws := t.TempDir()
-	findingsDir := filepath.Join(t.TempDir(), "findings")
-
-	path, err := writeLocalAllowlist(ws, findingsDir)
-	if err != nil {
-		t.Fatalf("writeLocalAllowlist: %v", err)
-	}
-	want := filepath.Join(ws, ".claude", "settings.local.json")
-	if path != want {
-		t.Errorf("path = %q, want %q", path, want)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	var s allowlistSettings
-	if err := json.Unmarshal(data, &s); err != nil {
-		t.Fatalf("unmarshal settings: %v", err)
-	}
-
-	wantPerms := localProfile(findingsDir)
-	if s.Permissions.DefaultMode != wantPerms.DefaultMode {
-		t.Errorf("DefaultMode = %q, want %q", s.Permissions.DefaultMode, wantPerms.DefaultMode)
-	}
-	if !equalArgs(s.Permissions.Allow, wantPerms.Allow) {
-		t.Errorf("Allow = %v, want %v", s.Permissions.Allow, wantPerms.Allow)
-	}
-	if !equalArgs(s.Permissions.Deny, wantPerms.Deny) {
-		t.Errorf("Deny = %v, want %v", s.Permissions.Deny, wantPerms.Deny)
 	}
 }
 

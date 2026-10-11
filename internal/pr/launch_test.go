@@ -289,6 +289,13 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 		t.Fatalf("write fake claude: %v", err)
 	}
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+	// launchInline runs the symlink-resolved binary, and on macOS t.TempDir()
+	// sits under /var, a link to /private/var, so the argv carries the
+	// resolved spelling.
+	wantClaude, err := filepath.EvalSymlinks(claudeBin)
+	if err != nil {
+		t.Fatalf("resolve fake claude: %v", err)
+	}
 
 	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
@@ -306,7 +313,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
 		t.Fatalf("expected tmux new-window; got %+v", call)
 	}
-	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
+	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, wantClaude) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
 	if !contains(call.Args, "-p") || !contains(call.Args, remoteReviewPrompt("github.com", sess.Ref)) {
@@ -321,7 +328,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	// SECURITY: the review agent must launch HARDENED even though the launch
 	// default posture is AllowDanger=true (builtinAllowDanger). A leaked
 	// --allow-dangerously-skip-permissions would let the agent ignore the
-	// deny-by-default workspace allowlist. Assert it is forced off and plan mode on.
+	// deny-by-default reviewer allowlist. Assert it is forced off and plan mode on.
 	if contains(call.Args, "--allow-dangerously-skip-permissions") {
 		t.Errorf("clean-room review must never skip permissions; argv: %v", call.Args)
 	}
@@ -404,8 +411,9 @@ func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
 
 // TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin is the control: with no
 // resolver configured, a github.com review's window gets no -e beyond the
-// forgectl#673 pin, which empties the enterprise token pair. Anything more
-// would change every existing `pr` user's window environment.
+// forgectl#694 git pins and the forgectl#673 pin, which empties the
+// enterprise token pair. Anything more would change every existing `pr`
+// user's window environment.
 func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
@@ -427,7 +435,8 @@ func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 			envs = append(envs, args[i+1])
 		}
 	}
-	if want := []string{"GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN="}; !slices.Equal(envs, want) {
+	want := append(append([]string{}, reviewGitEnv...), "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=")
+	if !slices.Equal(envs, want) {
 		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}
 }
@@ -841,7 +850,7 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 // review's cwd IS the workspace holding the PR author's checkout. A discovered
 // server's `command` + `args` are spawned at session START, before the agent
 // invokes any tool — so --permission-mode plan and the deny-by-default
-// workspace allowlist, which govern which TOOLS the agent may call, both sit
+// reviewer allowlist, which govern which TOOLS the agent may call, both sit
 // downstream of a boundary already crossed. Measured on 2.1.220: with the flag
 // a planted carrier did not spawn; without it, the same carrier did.
 //

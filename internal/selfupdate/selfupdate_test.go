@@ -229,6 +229,27 @@ func TestUpgrade_UpdateFailure_CarriesOutput(t *testing.T) {
 	}
 }
 
+func TestUpdateLocked(t *testing.T) {
+	const locked = "lockf: 200: already locked\nError: Another `brew update` process is already running."
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"update locked", &StepError{Kind: ErrTapUpdate, Output: locked}, true},
+		{"update other failure", &StepError{Kind: ErrTapUpdate, Output: "fatal: unable to access"}, false},
+		{"cask step with the line", &StepError{Kind: ErrCaskUpgrade, Output: locked}, false},
+		{"not a step error", errors.New(locked), false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UpdateLocked(tc.err); got != tc.want {
+				t.Errorf("UpdateLocked() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // brew exits non-zero though the cask is installed and current: success.
 func TestUpgrade_AlreadyCurrentIsSuccess(t *testing.T) {
 	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {

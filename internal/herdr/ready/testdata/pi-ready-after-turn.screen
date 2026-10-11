@@ -1,0 +1,59 @@
+██████    pi v1.0.4
+██  ██    escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+████  ██  Press ctrl+o to show full startup help and loaded resources.
+██    ██
+          There are many agent harnesses, but this one is yours.
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 1.1.0 is available. Run pi update
+ Changelog: https://pi.dev/changelog
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ Run the shell command date -u once. Do nothing else. This pi editor line is deliberately long so that it wraps onto a second visual row inside the editor area of the pi terminal interface, and then a
+ third row as well. Adding more words here so that the editor definitely has to wrap to another row now, and keep going a little longer to be very sure of it.
+
+
+ Thought for 1s
+ I need to run the date command with the -u flag to get the UTC time.
+
+ ✓ Bash date -u
+   ↳ 1 line returned • click to show more
+
+ Thought for 18s • (21 more lines, click to show more)
+ 1. Human: (system prompt + "Run the shell command date -u once. Do nothing else. This pi editor line is deliberately long...")
+ 2. Assistant: runs bash `date -u`, gets result
+ 3. Human: "Run
+
+ Operation aborted
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Local/qwen-27b · ⌁ main · $0.00 · 2m · host
+🛡 jev off · board · worktree: exempt
+~/src/project · ██░░░░░░░░░░░░░░░░ 26k/229k (11%) · medium effort · shift+tab to cycle

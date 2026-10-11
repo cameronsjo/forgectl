@@ -23,7 +23,7 @@ import (
 )
 
 // `surface drain start|stop|status|events` run and inspect the detached
-// process that launches queued briefs as herdr claude workers. `surface
+// process that launches queued briefs as herdr workers. `surface
 // _drain` is that process.
 
 // drainStartWait is how long `drain start` waits for the child to report
@@ -78,13 +78,19 @@ type drainEventsResult struct {
 func newSurfaceDrainCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drain",
-		Short: "Run the process that launches queued briefs as herdr claude workers",
+		Short: "Run the process that launches queued briefs as herdr workers",
 		Long: `drain runs a detached process that launches the queue's briefs as herdr
-claude workers, at most [surface.drain] cap at a time (default 3) and per_repo
+workers, each with the harness its row names (claude, codex, or pi), at most [surface.drain] cap at a time (default 3) and per_repo
 in one repository (default 1), and watches each worker: its REPORT line marks
 the row reported, a permission prompt or other blocking screen marks it
 needs-you, and a worker at its prompt with no report for idle_minutes is
 needs-you too. The drain never types into a pane or answers a prompt.
+
+Before each claude launch the drain runs claude-slots check N (found on PATH
+at start, 5 s cap), where N is 1 plus the launches this tick already made: exit
+1 puts the row back to queued and waits; a missing or failing claude-slots
+launches without the session cap. A row's --profile is
+resolved from the config file at launch; an unknown name pauses claiming.
 
   forgectl surface drain start
   forgectl surface drain status
@@ -116,7 +122,8 @@ anything starts.
 
 Exit 0: running. Exit 1: already running, or the child never reached
 running. Exit 2: a usage or setup error (herdr not found, invalid config,
-an unsupported platform).
+an unsupported platform, or a TMPDIR under which a launch cannot create its
+private run directory).
 
   forgectl surface drain start --json`,
 		Args: cobra.NoArgs,
@@ -129,6 +136,11 @@ an unsupported platform).
 }
 
 func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) error {
+	// A worker must not restart a drain the operator stopped as the kill
+	// switch (ADR-0011): the drain's autopilot could then merge rows.
+	if err := refuseInDrainWorker(os.Getenv, "surface drain start"); err != nil {
+		return err
+	}
 	if err := deps.Cfg.Surface.Drain.Validate(); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
@@ -147,6 +159,9 @@ func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) err
 	}
 	if err := lock.Close(); err != nil {
 		return err
+	}
+	if err := drainRunDirCheck(); err != nil {
+		return WithExitCode(termsafe.Error(runDirRefusal(err)), exitUsage)
 	}
 	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
 	if err != nil {
@@ -174,6 +189,17 @@ func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) err
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "drain %s: pid %d, herdr session %s\n", res.Status, res.PID, termsafe.SafeLineMax(res.HerdrSession, 64))
 	return err
+}
+
+// runDirRefusal names TMPDIR in a run-directory failure, since TMPDIR is what
+// chose the base and what the operator changes.
+func runDirRefusal(err error) error {
+	tmpdir := "TMPDIR is unset"
+	if v, ok := os.LookupEnv("TMPDIR"); ok {
+		tmpdir = "TMPDIR is " + termsafe.QuotePath(v)
+	}
+	return fmt.Errorf("forgectl: the drain would fail every launch: %s, and a launch cannot create its private run directory under %s: %w; "+
+		"set TMPDIR to a private directory that is not a symlink, then run drain start again", tmpdir, termsafe.QuotePath(os.TempDir()), err)
 }
 
 // lookHerdr is the absolute herdr path, resolved as newHerdrAdapter does.
@@ -276,6 +302,9 @@ match). Exit 2: drain.json cannot be read.
 }
 
 func runSurfaceDrainStop(cmd *cobra.Command, asJSON bool) error {
+	if err := refuseInDrainWorker(os.Getenv, "surface drain stop"); err != nil {
+		return err
+	}
 	files, err := worker.OpenDrainFiles()
 	if err != nil {
 		return WithExitCode(err, exitUsage)
@@ -470,7 +499,10 @@ func newSurfaceDrainEventsCmd() *cobra.Command {
 		Short: "Print the drain's events: state changes, pauses and resumes",
 		Long: `events prints drain-events.jsonl (and the rotated drain-events.jsonl.1 before
 it), oldest first: one event per row state change, pause, resume, drain start
-and stop, and a row becoming unreadable. seq counts from 1 in each drain
+and stop, a row becoming unreadable, claude-slots holding launches
+(slots-held), a note such as claude-slots missing, and with [surface.merge]
+mode auto the autopilot's merges (merged) and refusals (merge-refused, once
+per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 
@@ -552,6 +584,12 @@ func newSurfaceDrainProcessCmd(deps module.Deps) *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// drain start refuses inside a worker, so a drain it spawns
+			// never carries the marker; this catches a worker calling
+			// _drain directly.
+			if err := refuseInDrainWorker(os.Getenv, "surface _drain"); err != nil {
+				return err
+			}
 			return runDrainProcess(context.Background(), deps, session, herdrPath)
 		},
 	}

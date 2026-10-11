@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -86,7 +87,158 @@ type QueueRow struct {
 	// launched. With Repo and Name it names the ledger row (Open(Repo,
 	// Session), then the row called Name).
 	Session string `json:"session,omitempty"`
+	// Profile is the [surface.profiles] name the worker runs under, or empty
+	// for the launcher's own CLAUDE_CONFIG_DIR. Only the name is stored; the
+	// drain resolves it from the config file when it launches.
+	Profile string `json:"profile,omitempty"`
+	// Model replaces the launch profile's model for this worker, or is empty.
+	Model string `json:"model,omitempty"`
+	// Harness is the harness the drain launches the worker with: claude,
+	// codex, or pi. A row written before the field existed has none, and
+	// runs claude.
+	Harness string `json:"harness,omitempty"`
+	// Source names where the row came from when something other than the
+	// operator wrote its brief: "gh:<owner>/<repo>#<number>" for a row
+	// `surface intake gh` made from a GitHub issue. Empty for `surface
+	// enqueue`.
+	Source string `json:"source,omitempty"`
+	// Author is the login of whoever wrote the source text, for an intake
+	// row the issue's author. Empty when Source is.
+	Author string `json:"author,omitempty"`
+	// Labeler is the login whose labeling admitted the source, for an intake
+	// row the account that applied the eligible label. Empty when Source is.
+	Labeler string `json:"labeler,omitempty"`
+	// LabeledAt is when that labeling happened, an RFC 3339 time as GitHub
+	// recorded it. Empty when Labeler is.
+	LabeledAt string `json:"labeled_at,omitempty"`
+	// PRClosedAt is when the drain first saw the worker's PR closed without
+	// a merge, RFC 3339. The drain closes the worker 24 hours after it; a
+	// PR seen open again clears it.
+	PRClosedAt *time.Time `json:"pr_closed_at,omitempty"`
+	// CostUSD is the worker session's cost in US dollars, written when its
+	// PR merged and cadence-hooks priced every model in the transcript.
+	// Prune adds it to usage-daily.jsonl before it removes the row.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }
+
+// QueueOrigin is where a queue row's brief came from, for a row another
+// command than `surface enqueue` wrote: its Source and Author, and the
+// labeling that admitted it.
+type QueueOrigin struct {
+	Source    string
+	Author    string
+	Labeler   string
+	LabeledAt string
+}
+
+// maxOriginLen bounds a row's Source and Author; both are printed in
+// `surface queue --json`.
+const maxOriginLen = 200
+
+// Check refuses a Source, Author, Labeler or LabeledAt that is too long, or
+// that holds anything but printable ASCII; an Author or Labeler without a
+// Source; a Labeler that is not a GitHub login; and a Labeler and LabeledAt
+// that are not both set or both empty, or a LabeledAt that is not RFC 3339.
+func (o QueueOrigin) Check() error {
+	if err := o.checkLabeling(); err != nil {
+		return err
+	}
+	for _, f := range []struct{ name, v string }{{"source", o.Source}, {"author", o.Author}, {"labeler", o.Labeler}, {"labeled_at", o.LabeledAt}} {
+		if len(f.v) > maxOriginLen {
+			return fmt.Errorf("worker: queue row %s is %d bytes, limit %d", f.name, len(f.v), maxOriginLen)
+		}
+		for _, r := range f.v {
+			if r <= ' ' || r > '~' {
+				return fmt.Errorf("worker: queue row %s holds a character outside printable ASCII", f.name)
+			}
+		}
+	}
+	if (o.Author != "" || o.Labeler != "") && o.Source == "" {
+		return errors.New("worker: a queue row with an author or a labeler needs a source")
+	}
+	return nil
+}
+
+// checkLabeling refuses a Labeler without a LabeledAt or the reverse, a
+// Labeler that is not a GitHub login, and a LabeledAt that is not RFC 3339.
+func (o QueueOrigin) checkLabeling() error {
+	if (o.Labeler == "") != (o.LabeledAt == "") {
+		return errors.New("worker: a queue row's labeler and labeled_at are set together or not at all")
+	}
+	if o.Labeler == "" {
+		return nil
+	}
+	if err := config.CheckGitHubLogin(o.Labeler); err != nil {
+		return fmt.Errorf("worker: queue row labeler: %w", err)
+	}
+	if _, err := time.Parse(time.RFC3339, o.LabeledAt); err != nil {
+		return errors.New("worker: queue row labeled_at is not an RFC 3339 time")
+	}
+	return nil
+}
+
+// QueueLaunch is what a queue row asks of its launch beyond the brief.
+type QueueLaunch struct {
+	// Profile is a [surface.profiles] name; "main" is stored as empty.
+	Profile string
+	// Model is a model name for the harness's --model.
+	Model string
+	// Harness is claude, codex, or pi; empty is claude.
+	Harness string
+}
+
+// DefaultQueueHarness is the harness of a row that names none.
+const DefaultQueueHarness = "claude"
+
+// queueHarnesses are the harnesses a queue row may name.
+var queueHarnesses = []string{"claude", "codex", "pi"}
+
+// ErrProfileNotClaude reports a profile on a row whose harness is not
+// claude: a profile sets CLAUDE_CONFIG_DIR, which only claude reads.
+var ErrProfileNotClaude = errors.New("worker: a profile sets CLAUDE_CONFIG_DIR and applies to claude workers only")
+
+// normalized fills in the default harness, so a row that names none and a
+// row that names claude compare equal.
+func (l QueueLaunch) normalized() QueueLaunch {
+	if l.Harness == "" {
+		l.Harness = DefaultQueueHarness
+	}
+	return l
+}
+
+// check refuses a harness outside the three, a profile for a harness other
+// than claude, and a profile name or model outside its shape. Whether the
+// profile exists is the config's question, asked at enqueue and at launch.
+func (l QueueLaunch) check() error {
+	l = l.normalized()
+	if !slices.Contains(queueHarnesses, l.Harness) {
+		return fmt.Errorf("worker: harness %q: want claude, codex, or pi", l.Harness)
+	}
+	if l.Profile != "" && l.Harness != "claude" {
+		return fmt.Errorf("%w (harness %s)", ErrProfileNotClaude, l.Harness)
+	}
+	if l.Profile != "" {
+		if err := config.CheckProfileName(l.Profile); err != nil {
+			return fmt.Errorf("worker: profile %q: %w", l.Profile, err)
+		}
+	}
+	if l.Model != "" {
+		if err := config.CheckModelName(l.Model); err != nil {
+			return fmt.Errorf("worker: model %q: %w", l.Model, err)
+		}
+	}
+	return nil
+}
+
+// Launch is the row's QueueLaunch, with the default harness filled in.
+func (r QueueRow) Launch() QueueLaunch {
+	return QueueLaunch{Profile: r.Profile, Model: r.Model, Harness: r.Harness}.normalized()
+}
+
+// CheckLaunch re-checks a stored row's harness, profile name and model
+// shape, for the drain, which reads rows the store checked only for version
+// and state.
+func (r QueueRow) CheckLaunch() error { return r.Launch().check() }
 
 // queueVersion is the on-disk format version. A file with another version is
 // refused rather than rewritten, as the ledger does.
@@ -184,6 +336,9 @@ func decodeQueue(data []byte) (queueFile, error) {
 		if !r.State.valid() {
 			return queueFile{}, fmt.Errorf("%w: row %q has unknown state %q", ErrQueueUnreadable, r.Name, r.State)
 		}
+		if r.CostUSD != nil && *r.CostUSD < 0 {
+			return queueFile{}, fmt.Errorf("%w: row %q has a negative cost_usd", ErrQueueUnreadable, r.Name)
+		}
 	}
 	return f, nil
 }
@@ -223,6 +378,15 @@ func enqueueRow(rows []QueueRow, row QueueRow) (out []QueueRow, existing QueueRo
 		if r.BriefSHA256 != row.BriefSHA256 {
 			return nil, r, false, fmt.Errorf("%w: %q holds brief sha256 %s, this brief is sha256 %s (state %s); dequeue it first to replace it",
 				ErrQueueNameTaken, r.Name, r.BriefSHA256, row.BriefSHA256, r.State)
+		}
+		if r.Source != row.Source || r.Author != row.Author || r.Labeler != row.Labeler || r.LabeledAt != row.LabeledAt {
+			return nil, r, false, fmt.Errorf("%w: %q has source %q, author %q, labeler %q and labeled_at %q, this enqueue has source %q, author %q, labeler %q and labeled_at %q (state %s); dequeue it first to replace it",
+				ErrQueueNameTaken, r.Name, r.Source, r.Author, r.Labeler, r.LabeledAt, row.Source, row.Author, row.Labeler, row.LabeledAt, r.State)
+		}
+		if r.Launch() != row.Launch() {
+			was, want := r.Launch(), row.Launch()
+			return nil, r, false, fmt.Errorf("%w: %q is queued with harness %q, profile %q and model %q, this enqueue asks for harness %q, profile %q and model %q (state %s); dequeue it first to replace it",
+				ErrQueueNameTaken, r.Name, was.Harness, was.Profile, was.Model, want.Harness, want.Profile, want.Model, r.State)
 		}
 		return nil, r, false, errQueueUnchanged
 	}
@@ -303,6 +467,32 @@ func (q *Queue) Rows() ([]QueueRow, error) {
 // ErrQueueNameTaken naming both. A row that would push the document past
 // MaxQueueBytes is ErrQueueFull, and nothing is written.
 func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row QueueRow, added bool, err error) {
+	return q.EnqueueLaunch(name, repo, brief, batch, QueueLaunch{}, now)
+}
+
+// EnqueueLaunch is Enqueue for a row that names a harness, a profile or a
+// model. The profile is stored by name ("main" as empty), never as a path,
+// and the harness always (claude when none is named). A name already queued
+// with another harness, profile or model is ErrQueueNameTaken.
+func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunch, now time.Time) (row QueueRow, added bool, err error) {
+	return q.EnqueueFrom(name, repo, brief, batch, launch, QueueOrigin{}, now)
+}
+
+// EnqueueFrom is EnqueueLaunch for a row whose brief came from somewhere
+// other than the operator: it records origin's Source, Author, Labeler and
+// LabeledAt on the row. A name already queued with another origin is
+// ErrQueueNameTaken.
+func (q *Queue) EnqueueFrom(name, repo, brief, batch string, launch QueueLaunch, origin QueueOrigin, now time.Time) (row QueueRow, added bool, err error) {
+	if err := origin.Check(); err != nil {
+		return QueueRow{}, false, err
+	}
+	if launch.Profile == config.MainProfile {
+		launch.Profile = ""
+	}
+	launch = launch.normalized()
+	if err := launch.check(); err != nil {
+		return QueueRow{}, false, err
+	}
 	if err := ValidName(name); err != nil {
 		return QueueRow{}, false, err
 	}
@@ -318,7 +508,8 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 	now = now.UTC()
 	candidate := QueueRow{
 		Name: name, Repo: repo, Brief: brief, BriefSHA256: BriefSHA256(brief), Batch: batch,
-		State: QueueQueued, EnqueuedAt: now, StateAt: now,
+		State: QueueQueued, EnqueuedAt: now, StateAt: now, Profile: launch.Profile, Model: launch.Model, Harness: launch.Harness,
+		Source: origin.Source, Author: origin.Author, Labeler: origin.Labeler, LabeledAt: origin.LabeledAt,
 	}
 	err = q.mutate(MaxQueueBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, existing, ok, err := enqueueRow(rows, candidate)
@@ -386,6 +577,39 @@ func (q *Queue) RemoveIf(name string, match func(QueueRow) bool) (QueueRow, erro
 		return nil, ErrQueueNoRow
 	})
 	return removed, err
+}
+
+// PruneIf removes, under the queue lock, every row remove accepts, and
+// returns them. before is called with those rows while the lock is still
+// held, and when it fails nothing is removed: `surface prune` appends their
+// cost to usage-daily.jsonl there, so a row is never removed without its
+// cost recorded, and two prunes cannot both count one row. With no row to
+// remove, before is not called and nothing is written.
+func (q *Queue) PruneIf(remove func(QueueRow) bool, before func([]QueueRow) error) ([]QueueRow, error) {
+	var removed []QueueRow
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
+		removed = nil
+		kept := make([]QueueRow, 0, len(rows))
+		for _, r := range rows {
+			if remove(r) {
+				removed = append(removed, r)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		if len(removed) == 0 {
+			return nil, errQueueUnchanged
+		}
+		if err := before(removed); err != nil {
+			removed = nil
+			return nil, err
+		}
+		return kept, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 // SameRead matches a row that is still exactly as read: the same launch, the

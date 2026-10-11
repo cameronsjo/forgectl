@@ -1,0 +1,17 @@
+{
+  "__typename": "Issue",
+  "number": 42,
+  "title": "Tidy the queue listing",
+  "body": "Make `surface queue` print the batch column last.\n",
+  "lastEditedAt": "2026-10-01T09:00:00Z",
+  "author": {"__typename": "User", "login": "cameronsjo"},
+  "labels": {"pageInfo": {"hasNextPage": false}, "nodes": [{"name": "kind:chore"}, {"name": "queue:drain"}]},
+  "timelineItems": {
+    "pageInfo": {"hasNextPage": false},
+    "nodes": [
+      {"__typename": "LabeledEvent", "createdAt": "2026-10-01T08:00:00Z", "actor": {"__typename": "User", "login": "cameronsjo"}, "label": {"name": "kind:chore"}},
+      {"__typename": "RenamedTitleEvent", "createdAt": "2026-10-01T08:30:00Z"},
+      {"__typename": "LabeledEvent", "createdAt": "2026-10-01T10:00:00Z", "actor": {"__typename": "User", "login": "cameronsjo"}, "label": {"name": "queue:drain"}}
+    ]
+  }
+}
