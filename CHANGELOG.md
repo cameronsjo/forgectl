@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.41.1](https://github.com/cameronsjo/forgectl/compare/v0.41.0...v0.41.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **surface:** intake prompt context and a brief refusal in workers ([#1214](https://github.com/cameronsjo/forgectl/issues/1214)) ([97dc513](https://github.com/cameronsjo/forgectl/commit/97dc5134ad6f43d52d7f2a43958ec93ff8ba7b00))
+* **surface:** refuse close/dequeue in a drain worker; escape blank runes in intake ([#1216](https://github.com/cameronsjo/forgectl/issues/1216)) ([75175ac](https://github.com/cameronsjo/forgectl/commit/75175ac5c137c1d0d44d3947a7d675d27af35fb6))
+
 ## [0.41.0](https://github.com/cameronsjo/forgectl/compare/v0.40.0...v0.41.0) (2026-10-10)
 
 
