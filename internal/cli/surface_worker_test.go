@@ -437,3 +437,47 @@ func TestInProcessLaunchRefusesBeforeTouchingAnything(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildWorkerInvocationAddsProvenance pins #1220's second half: the
+// worker's prompt ends with the producer-tuple values forgectl knows (its own
+// session id and the host digest), so it never computes them in the shell.
+// An empty prompt stays empty.
+func TestBuildWorkerInvocationAddsProvenance(t *testing.T) {
+	saved := workerHostname
+	t.Cleanup(func() { workerHostname = saved })
+	workerHostname = func() (string, error) { return "sjomba.local", nil }
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}
+	req := surfaceInvocationRequest(cfg, cwd, nil, nil, "claude")
+	req.Resolve = func(string, config.LaunchDefaults) (launch.ResolvedBinary, error) {
+		return launch.ResolvedBinary{Path: "/stub/claude", Source: launch.BinaryPATH}, nil
+	}
+	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+	built, err := buildWorkerInvocation(req, "Fix it.", func() (string, error) { return id, nil }, io.Discard)
+	if err != nil {
+		t.Fatalf("buildWorkerInvocation: %v", err)
+	}
+	prompt := ""
+	for _, a := range built.Invocation.Args {
+		if strings.HasPrefix(a, "Fix it.") {
+			prompt = a
+		}
+	}
+	for _, want := range []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: cf6e768835c7"`} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt lacks %q: %q (args %q)", want, prompt, built.Invocation.Args)
+		}
+	}
+	empty, err := buildWorkerInvocation(req, "", func() (string, error) { return id, nil }, io.Discard)
+	if err != nil {
+		t.Fatalf("buildWorkerInvocation with no prompt: %v", err)
+	}
+	for _, a := range empty.Invocation.Args {
+		if strings.Contains(a, "Provenance from forgectl") {
+			t.Fatalf("an empty prompt gained a note: %q", empty.Invocation.Args)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -146,7 +147,50 @@ func CheckBrief(text, via string) error {
 // operator's GitHub identity, so this asks; it cannot stop one (ADR-0011,
 // 2026-10-09 amendment). It names the marker without the colon the merge
 // policy's marker scan looks for, so a worker echoing it writes no marker.
-const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way. The operator, or forgectl under its merge policy, merges."
+const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way. The operator, or forgectl under its merge policy, merges.\n\n" + CommandRules
+
+// CommandRules asks a worker for shell commands its permission mode can
+// approve without stopping (cameronsjo/forgectl#1220): a command whose value
+// comes from $(...), backticks or a heredoc, or that writes under /tmp,
+// stops an acceptEdits worker at a prompt nobody is there to answer. It is
+// part of WorkerRules, so every launch brief carries it.
+const CommandRules = "Run each shell command on its own, with no $(...), backticks or heredocs, and write nothing under /tmp. Write a file you need (a message, notes) with your file-writing tool inside this worktree, and do not commit it. For a commit, pass the message with -m, once per paragraph, and each trailer with --trailer."
+
+// ProvenanceNote gives a worker the producer-tuple values forgectl knows, so
+// it writes them as given instead of computing them in the shell
+// (cameronsjo/forgectl#1220). sessionID is the worker's own session id
+// (empty for a harness forgectl gives none), machine the salted host digest
+// (MachineDigest; empty when the host name is unknown). With neither it
+// returns "".
+func ProvenanceNote(sessionID, machine string) string {
+	var known []string
+	if sessionID != "" {
+		known = append(known, "--trailer \"Session-Id: "+sessionID+"\"")
+	}
+	if machine != "" {
+		known = append(known, "--trailer \"Machine: "+machine+"\"")
+	}
+	if len(known) == 0 {
+		return ""
+	}
+	return "Provenance from forgectl: when your commits carry the producer-tuple trailers, pass " + strings.Join(known, " and ") +
+		" exactly as written here, and take Model and Harness from what you know about yourself. Never run a command to compute any of them."
+}
+
+// machineSalt is the producer tuple's salt for the host digest; it is the
+// cadence convention, not forgectl's merge-policy salt.
+const machineSalt = "cadence-prov-v1"
+
+// MachineDigest is the producer tuple's Machine value: the first 12 hex
+// characters of sha256(hostname + "cadence-prov-v1"). An empty hostname gives
+// "".
+func MachineDigest(hostname string) string {
+	if hostname == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(hostname + machineSalt))
+	return hex.EncodeToString(sum[:6])
+}
 
 // Compose appends forgectl's text to a brief. A launch brief gets
 // WorkerRules and then the report instruction, each as its own paragraph; a

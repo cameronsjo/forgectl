@@ -217,7 +217,7 @@ func refuseInDrainWorker(getenv func(string) string, verb string) error {
 	if getenv(launch.DrainWorkerEnv) == "" {
 		return nil
 	}
-	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start or drive another worker or merge a PR; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
+	return WithExitCode(fmt.Errorf("%s refuses to run inside a drain worker (%s is set): a worker must not start or drive another worker, merge a PR, or close a board task; run it from your own terminal", verb, launch.DrainWorkerEnv), exitUsage)
 }
 
 func runSurfaceIntakeGH(cmd *cobra.Command, d intakeDeps, opts intakeOptions) error {

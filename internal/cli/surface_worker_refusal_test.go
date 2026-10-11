@@ -69,3 +69,28 @@ func TestRefuseInDrainWorkerIgnoresAnUnsetMarker(t *testing.T) {
 		t.Fatalf("unset marker refused: %v", err)
 	}
 }
+
+// TestTasksDoneRefusesInADrainWorker pins cameronsjo/forgectl#1226: a drain
+// worker cannot close a board task. It refuses before the host rule, the
+// keychain read or any request, with exit 1 (the tasks verbs give 2 to an
+// unreachable instance). State, config and home are scratch directories, and
+// the host is unroutable, so a missing refusal cannot reach a real board.
+func TestTasksDoneRefusesInADrainWorker(t *testing.T) {
+	t.Setenv(launch.DrainWorkerEnv, "1")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	host := "board.example.invalid"
+	cmd := newTasksDoneCmd(module.Deps{}, &host)
+	cmd.SetArgs([]string{"42", "--evidence", "merged owner/repo#1"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil || ExitCode(err) != exitFailed || !strings.Contains(err.Error(), "tasks done refuses to run inside a drain worker") {
+		t.Fatalf("err %v (exit %d), want the drain-worker refusal, exit 1", err, ExitCode(err))
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a refused call wrote %q", out.String())
+	}
+}

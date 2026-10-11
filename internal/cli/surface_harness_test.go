@@ -144,7 +144,10 @@ func TestPiWorkerLaunchesThroughTheRealBuild(t *testing.T) {
 		t.Fatalf("launched %d", len(launched))
 	}
 	inv := launched[0]
-	if inv.Harness != "pi" || inv.Binary.Path != bin || !slices.Equal(inv.Args, []string{"--model", "qwen-27b", "--", "Fix it."}) {
+	// The brief is the last argument: the task, then the provenance note (#1220),
+	// which for pi carries the host digest and no session id.
+	if inv.Harness != "pi" || inv.Binary.Path != bin || len(inv.Args) != 4 || !slices.Equal(inv.Args[:3], []string{"--model", "qwen-27b", "--"}) ||
+		!strings.HasPrefix(inv.Args[3], "Fix it.") || strings.Contains(inv.Args[3], "Session-Id") {
 		t.Fatalf("invocation harness %q binary %q argv %q; want pi with --model qwen-27b -- <brief>", inv.Harness, inv.Binary.Path, inv.Args)
 	}
 	if row := onlyRow(t, led); row.Harness != "pi" || row.SessionID != "" || row.Transcript != "" {

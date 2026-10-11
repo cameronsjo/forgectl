@@ -136,6 +136,12 @@ EXIT CODES
 // elsewhere. readTasksKeychainToken applies the rule again before the read; by
 // then it cannot refuse, so it records nothing twice.
 func runTasksDone(cmd *cobra.Command, deps module.Deps, in tasksDoneInput) error {
+	// Before everything, the host rule included: a drain worker must not close
+	// a board task, which cannot be undone (cameronsjo/forgectl#1226). Exit 1,
+	// since this verb's exit table gives 2 to an unreachable instance.
+	if err := refuseInDrainWorker(os.Getenv, "tasks done"); err != nil {
+		return WithExitCode(err, exitFailed)
+	}
 	ctx := cmd.Context()
 
 	if err := tasks.CheckAllowedHost(in.host, deps.Cfg.Tasks.AllowedHosts); err != nil {

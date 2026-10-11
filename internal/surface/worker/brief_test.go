@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const testMarker = "0a1b2c3d4e5f"
@@ -182,7 +183,7 @@ func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 		}
 	}
 	task, rest, _ := strings.Cut(got, "\n\n")
-	rules, instruction, _ := strings.Cut(rest, "\n\n")
+	rules, instruction := rest[:min(len(WorkerRules), len(rest))], strings.TrimPrefix(rest[min(len(WorkerRules), len(rest)):], "\n\n")
 	if task != "Fix the login bug." || rules != WorkerRules || !strings.HasPrefix(instruction, "When you finish") {
 		t.Fatalf("launch brief shape:\n%s", got)
 	}
@@ -196,5 +197,65 @@ func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 	// fit MaxTypedBrief: it carries the report instruction only.
 	if typed := Compose("Run the tests.", testMarker, ViaTyped); strings.Contains(typed, WorkerRules) {
 		t.Fatalf("typed brief carries the rules: %q", typed)
+	}
+}
+
+// TestCommandRulesInEveryLaunchBrief pins the #1220 rule: a launch brief asks
+// for commands an acceptEdits worker can run without a prompt, and a typed
+// follow-up does not repeat it.
+func TestCommandRulesInEveryLaunchBrief(t *testing.T) {
+	got := Compose("Fix the login bug.", testMarker, ViaLaunch)
+	for _, want := range []string{"no $(...), backticks or heredocs", "nothing under /tmp", "--trailer", "file-writing tool inside this worktree"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("launch brief lacks %q:\n%s", want, got)
+		}
+	}
+	if typed := Compose("Run the tests.", testMarker, ViaTyped); strings.Contains(typed, CommandRules) {
+		t.Fatalf("typed brief carries the command rules: %q", typed)
+	}
+	if n := utf8.RuneCountInString(Compose("x", strings.Repeat("0", 16), ViaTyped)); n > MaxTypedBrief {
+		t.Fatalf("typed brief is %d characters", n)
+	}
+}
+
+func TestProvenanceNote(t *testing.T) {
+	const id = "0a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
+	tests := []struct {
+		name, id, machine string
+		want              []string
+		absent            []string
+	}{
+		{"both", id, "cf6e768835c7", []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: cf6e768835c7"`, "Never run a command"}, nil},
+		{"machine only (no session id for the harness)", "", "cf6e768835c7", []string{`--trailer "Machine: cf6e768835c7"`}, []string{"Session-Id"}},
+		{"session only (host name unknown)", id, "", []string{`--trailer "Session-Id: ` + id + `"`}, []string{"Machine:"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ProvenanceNote(tt.id, tt.machine)
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Fatalf("note lacks %q: %s", w, got)
+				}
+			}
+			for _, a := range tt.absent {
+				if strings.Contains(got, a) {
+					t.Fatalf("note has %q: %s", a, got)
+				}
+			}
+		})
+	}
+	if ProvenanceNote("", "") != "" {
+		t.Fatal("a note with nothing known is not empty")
+	}
+}
+
+// TestMachineDigest pins the cadence producer-tuple salt: the digest of
+// "sjomba.local" is the value commits on that host carry.
+func TestMachineDigest(t *testing.T) {
+	if got := MachineDigest("sjomba.local"); got != "cf6e768835c7" {
+		t.Fatalf("MachineDigest = %q", got)
+	}
+	if MachineDigest("") != "" {
+		t.Fatal("an empty host name gave a digest")
 	}
 }
