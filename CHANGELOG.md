@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.0](https://github.com/cameronsjo/forgectl/compare/v0.41.1...v0.42.0) (2026-10-11)
+
+
+### Features
+
+* **surface:** surface usage sums worker cost by day (atelier P6a) ([#1222](https://github.com/cameronsjo/forgectl/issues/1222)) ([025e597](https://github.com/cameronsjo/forgectl/commit/025e597163d23c74e3a85f4ca832d56babf1500c))
+
 ## [0.41.1](https://github.com/cameronsjo/forgectl/compare/v0.41.0...v0.41.1) (2026-10-10)
 
 
