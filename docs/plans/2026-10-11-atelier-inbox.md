@@ -39,7 +39,7 @@ A `pane` item is a hint, never a verdict (`docs/lore/herdr-fleet.md` in the meta
 The closer already reads each reported row's PR at most every 5 minutes (T10.3, `merge.Reader.Discover`), so the inbox reads what the drain recorded and calls no GitHub API itself.
 
 - **Where it is kept.** `decodeQueue` refuses unknown fields (`internal/surface/worker/queue.go:322-333`), so a new field on queue rows would make `queue.json` unreadable to an older binary after a rollback, pausing its drain and every `surface` verb. The facts go in a separate `drain-pr.json` beside the queue instead, keyed by row name and `launch_id`: `{number, state, head, read_at, merge_refused: {head, at} | null}`. The closer writes an entry only when the number, state or head changes, not at every read. `surface prune` drops an entry with its row. Every read-modify-write of `drain-pr.json` (the closer, the autopilot's `merge_refused`, the daily prune and a manual `surface prune`) holds the queue's flock for the whole update and replaces the file by atomic rename, so a prune running beside the drain can neither lose a `merge_refused` nor bring back a removed entry.
-- **What the closer adds.** It records `state: "none"` on an `ErrNoPR` read, which today writes nothing. The URL is built from the row's GitHub repo and the number; `DiscoverQuery` does not change. The autopilot writes `merge_refused` when it emits a `merge-refused` event, so the condition survives a drain restart (today it lives only in the event file and in process).
+- **What the closer adds.** It records `state: "none"` on an `ErrNoPR` read, which today writes nothing. It records `state: "ambiguous"` on `ErrAmbiguousPR` (more than one open PR on the branch), and `state: "unreadable"` with the error's first line when any other read fails non-transiently or is refused (`merge.ErrRepoChanged`, `merge.ErrUnboundPR`). Today a row stuck on either waits on the operator with no record outside the event file. A transient failure (network, server, rate limit) writes nothing. The next successful read replaces the state. The URL is built from the row's GitHub repo and the number; `DiscoverQuery` does not change. The autopilot writes `merge_refused` when it emits a `merge-refused` event, so the condition survives a drain restart (today it lives only in the event file and in process).
 - **A row with no GitHub repo recorded** is never read by the closer (`closer.go:50-54`). It is a `pr` item at once, "reported, no PR read", with `forgectl surface close <name>`.
 - **When it needs the operator, and the actions, by `[surface.merge] mode`** (the inbox resolves merge settings from the config, one read):
 
@@ -47,6 +47,8 @@ The closer already reads each reported row's PR at most every 5 minutes (T10.3, 
   |---|---|---|---|
   | PR open | item: `surface status <name>` and the PR URL | item: `surface status <name>`, then `surface merge <name>` (`tty`, it asks at a terminal) | item only with `merge_refused` at the current head: `surface status <name>` |
   | `none` | item: `surface close <name>` | same | same |
+  | `ambiguous` | item: "close all but one PR", with `surface status <name>` | same | same |
+  | `unreadable` | item: the recorded error, with `surface status <name>` | same | same |
   | merged or closed | no item: the closer acts | same | same |
 
 ### Sessions
@@ -56,7 +58,7 @@ herdr pane ids such as `w3p2` repeat across herdr sessions, and `internal/herdr`
 - The inbox resolves its session the way `surface launch` does (`HERDR_SESSION`, then `default`; `--session` overrides) and calls herdr with an explicit `--session` and `HERDR_SOCKET_PATH` stripped, as the herdr adapter does.
 - When the drain runs on another session (its `herdr_session` in `drain.json`), the inbox reads that session too: two `agent list` calls. Worker panes live there.
 - Every pane is keyed by (session, pane id): cover rules, hold entries, item ids, and the `--session <s>` in every focus action.
-- The desk records `signal_pane` without a session. I1 adds `signal_session` to the desk item's meta (additive; the desk's meta reader is checked for strict decoding first, and if strict, the same rollback note as `drain-pr.json` applies). A desk item with no `signal_session` covers no pane.
+- The desk records `signal_pane` without a session. I1 adds `signal_session` to the desk item's meta (additive and rollback-safe: the desk's meta reader does not refuse unknown fields). A desk item with no `signal_session` covers no pane.
 
 ### Covering a pane once
 
@@ -64,7 +66,7 @@ One stuck session can show up in several places. A pane gets one item, by these 
 
 1. **Desk.** A pane is covered by a waiting desk item only when the item's `signal_pane` and `signal_session` name it **and** herdr's agent row for that pane is labelled `forgectl-desk` (the desk reports under that `--agent` label, `internal/herdr/pane.go:136`). Any other blocked pane a desk item names gets its own item too: `signal_pane` is written by whoever queued the item, and must not hide a real prompt.
 2. **Decision.** The same rule with a pending decision's asker pane and the `forgectl-inbox` label.
-3. **Worker.** A pane a ledger row names belongs to that worker. A `worker` item (row at `needs-you`) covers it. A row still `launched` while herdr reports the pane blocked under a label other than `forgectl-desk` or `forgectl-inbox` is a `pane` item carrying the worker's name. The drain moves rows on its own screen check, not on herdr's status, so a worker that is blocked in herdr may stay `launched`.
+3. **Worker.** A pane a ledger row names belongs to that worker. A `worker` item (row at `needs-you`) covers it. That includes the pane's `blocked` state under `forgectl-drain`, which the drain sets when it moves the row to `needs-you`. A row still `launched` while herdr reports the pane blocked under a label other than `forgectl-desk`, `forgectl-inbox` or `forgectl-drain` is a `pane` item carrying the worker's name. The drain moves rows on its own screen check, not on herdr's status, so a worker that is blocked in herdr may stay `launched`.
 4. **Anything else** blocked past `--hold` is a `pane` item.
 
 The I1 fixtures confirm that `herdr agent list` shows the reporting label for a pane blocked by `pane report-agent`. If it does not, rules 1 and 2 cover nothing and both items show.
@@ -197,7 +199,7 @@ The read verb itself closes nothing. Every item closes where it came from: the d
 - [ ] The read-only desk listing (no hash pinning, no moves, no hooks), and `signal_session` written by `desk add`.
 - [ ] herdr reads with an explicit `--session`, `HERDR_SOCKET_PATH` stripped; the drain's session read too when it differs; panes keyed by (session, pane id).
 - [ ] The hold file: versioned, pinned directory, flock, atomic rename, server identity in the key; a read that cannot write it still prints, with `since: null` on pane items.
-- [ ] `drain-pr.json`: every update under the queue flock with atomic rename; the closer writes on change and records `none`; the autopilot records `merge_refused`; `surface prune` removes entries with their rows; `surface queue --json` joins it.
+- [ ] `drain-pr.json`: every update under the queue flock with atomic rename; the closer writes on change and records `none`, `ambiguous` and `unreadable`; the autopilot records `merge_refused`; `surface prune` removes entries with their rows; `surface queue --json` joins it.
 - [ ] The drain's pause kinds: `drain.json` keeps them only in the joined `pause_reason` (`"kind: reason; …"`). I1 parses the kind prefix against the `PauseKind` constants and treats an unknown prefix as a plain pause, rather than adding a field to the strictly decoded `drain.json`.
 - [ ] `forgectl inbox` text and `--json`, exit codes as above, `docs/commands/inbox.md`, the command in `docs/README.md`'s command list, `inbox` added to `docs/json-contract.md`'s form-1 list, and a line in the embedded skill (`internal/skill/skill/SKILL.md`) so agents find it.
 - [ ] Tests:
@@ -206,7 +208,7 @@ The read verb itself closes nothing. Every item closes where it came from: the d
   - the same pane id in two sessions gives two items with two focus actions;
   - the hold: first read `settling`, a later read an item, `--hold 0s` an item on the first read, a new seq or a new server restarts it, a read of one session leaves the other's entries;
   - a poll changes nothing on disk outside the hold file (desk, queue, `drain-pr.json`, decisions);
-  - each merge mode's `pr` actions; `merge_refused` survives a drain restart;
+  - each merge mode's `pr` actions; an `ErrAmbiguousPR` read and a refused read each give a `pr` item, and a transient failure changes nothing; `merge_refused` survives a drain restart;
   - a stopped drain with queued rows is a `drain` item;
   - an unreadable herdr read keeps the other sources' items and exits 1;
   - an action argv never contains text from `title` or `detail` (a desk WHAT holding `; rm -rf ~` stays in `title` only);

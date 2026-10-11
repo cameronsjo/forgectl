@@ -166,9 +166,9 @@ The atelier plan (`cadence-ecosystem` `docs/plans/2026-10-05-atelier-a-herdr-wor
 The cockpit north star (Claude Doc "The Cockpit: north star", 2026-10-11, Sequence step 2) asks for one list of everything that waits on the operator. forgectl already records most of it in four places that nothing merges: the desk, the drain's `needs-you` and `failed` rows, reported worker PRs, and herdr's `blocked` panes. Decisions are recorded nowhere. T11 adds the read verb that merges them and a small store for decisions. Its plan is `docs/plans/2026-10-11-atelier-inbox.md`.
 
 - **T11 adds, and changes nothing that shipped:** `forgectl inbox [--json]`, a read verb with no GitHub call and no pane screen read; `inbox ask|answer|wait|withdraw|prune` for decisions; a `drain-pr.json` side file, written by the T10.3 closer from the read it already makes (not a queue-row field: `queue.json` is decoded strictly, so a new field would break a rollback); `signal_session` on desk items, because herdr pane ids repeat across sessions.
-- **The north star's "P4 `ready-to-close` rows" become the `pr` kind.** P4 dropped board `ready-to-close`; what waits on the operator after P4 is a reported worker's PR when `[surface.merge] mode` is not `auto`.
+- **The north star's "P4 `ready-to-close` rows" become the `pr` kind.** P4 dropped board `ready-to-close`; what waits on the operator after P4 is a reported worker's PR: under `off` or `manual` whenever it is open, under `auto` only after a refused merge at its head, and under any mode when the PR is missing, ambiguous or unreadable.
 - **An answer is not an approval.** No verb reads a decision as consent to merge, run a desk item, or loosen a posture. `inbox answer` needs a terminal and refuses inside a drain worker, which stops accidents only (ADR-0012).
-- **Order:** T11 I1 can start now; the atelier mod (P6) reads its output, so it lands before P6's pane is built.
+- **Order:** T11 I1 can start now. The atelier mod (P6) is being built in parallel against the plan's JSON shape, with a fallback to `surface drain status`; it reads real `inbox` output once I1 lands.
 
 ## Verification
 
