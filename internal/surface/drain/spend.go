@@ -23,12 +23,15 @@ type SpendDay struct {
 
 // Spend is the cost of the drain's workers over a window of UTC days.
 // Skipped counts usage-daily.jsonl lines that did not parse as a valid
-// UsageLine, and lines or rows dated after today.
+// UsageLine, and lines or rows dated after today. Unpriced counts the
+// finished queue rows in the window (closed or failed, with a launch) that
+// carry no cost: while it is above zero, TotalUSD is a floor, not the total.
 type Spend struct {
 	Days     int        `json:"days"`
 	TotalUSD float64    `json:"total_usd"`
 	ByDay    []SpendDay `json:"by_day"`
 	Skipped  int        `json:"skipped"`
+	Unpriced int        `json:"unpriced"`
 }
 
 // SumSpend adds the cost of every priced row whose UTC day falls in the
@@ -83,6 +86,12 @@ func SumSpend(usage []byte, rows []worker.QueueRow, now time.Time, days int) Spe
 	}
 	for _, u := range UsageLines(rows) {
 		add(u)
+	}
+	for _, r := range rows {
+		day := r.StateAt.UTC().Format(worker.UTCDayLayout)
+		if r.CostUSD == nil && r.LaunchID != "" && (r.State == worker.QueueClosed || r.State == worker.QueueFailed) && day >= first && day <= last {
+			out.Unpriced++
+		}
 	}
 	for _, d := range byDay {
 		d.USD = roundCents(d.USD)

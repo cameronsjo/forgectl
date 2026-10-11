@@ -72,6 +72,19 @@ func TestSumSpend(t *testing.T) {
 			want: Spend{Days: 30, TotalUSD: 0.5, Skipped: 4, ByDay: []SpendDay{{Day: "2026-10-09", USD: 0.5, Rows: 1}}},
 		},
 		{
+			name: "finished rows with no cost are counted as unpriced, live and unlaunched ones are not",
+			rows: []worker.QueueRow{
+				{Name: "a", LaunchID: "l1", StateAt: now, State: worker.QueueClosed},
+				{Name: "b", LaunchID: "l2", StateAt: now, State: worker.QueueFailed},
+				{Name: "c", LaunchID: "l3", StateAt: now, State: worker.QueueClosed, CostUSD: cost(1)},
+				{Name: "d", LaunchID: "l4", StateAt: now, State: worker.QueueLaunched},
+				{Name: "e", StateAt: now, State: worker.QueueFailed},
+				{Name: "f", LaunchID: "l6", StateAt: now.AddDate(0, 0, -40), State: worker.QueueClosed},
+			},
+			days: 30,
+			want: Spend{Days: 30, TotalUSD: 1, Unpriced: 2, ByDay: []SpendDay{{Day: "2026-10-10", USD: 1, Rows: 1}}},
+		},
+		{
 			name: "unpriced rows are not counted",
 			rows: []worker.QueueRow{row("a", "l1", now, nil)},
 			days: 30,

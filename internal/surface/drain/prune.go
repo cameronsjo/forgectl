@@ -282,7 +282,8 @@ type UsageLine struct {
 const MaxUsageLineUSD = 1e6
 
 // Valid reports whether the line has a real UTC day, a name, and a finite
-// cost from 0 to MaxUsageLineUSD.
+// cost from 0 to MaxUsageLineUSD. Only the reader (SumSpend) calls it; prune
+// writes lines from queue rows it has already decoded.
 func (u UsageLine) Valid() bool {
 	if u.Name == "" || math.IsNaN(u.CostUSD) || u.CostUSD < 0 || u.CostUSD > MaxUsageLineUSD {
 		return false

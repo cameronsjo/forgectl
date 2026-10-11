@@ -52,7 +52,7 @@ func TestSurfaceUsageSumsFileAndQueue(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
-	if got.Days != 30 || got.TotalUSD != 4 || got.Skipped != 1 || len(got.ByDay) != 1 || got.ByDay[0].Rows != 2 {
+	if got.Days != 30 || got.TotalUSD != 4 || got.Skipped != 1 || got.Unpriced != 1 || len(got.ByDay) != 1 || got.ByDay[0].Rows != 2 {
 		t.Fatalf("usage --json = %+v", got)
 	}
 
@@ -60,7 +60,8 @@ func TestSurfaceUsageSumsFileAndQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{day + "  $4.00  2 workers", "total over 7 days: $4.00", "skipped 1 entry"} {
+	// The text check does not name the day, so it holds across a UTC midnight.
+	for _, want := range []string{"  $4.00  2 workers", "total over 7 days: $4.00 (partial: 1 finished worker unpriced)", "skipped 1 entry"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text output missing %q:\n%s", want, text)
 		}

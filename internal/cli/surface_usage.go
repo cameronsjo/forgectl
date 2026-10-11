@@ -36,11 +36,13 @@ was not priced) are not counted, so the total is a floor.
 
 --days is the window, counting today (UTC); default 30, at most 365.
 
---json prints {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped"}.
+--json prints {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped","unpriced"}.
 skipped counts usage-daily.jsonl lines that did not parse or are not valid
 (no name, a bad day, a cost outside 0 to 1,000,000), and lines or rows dated
-after today; they are left out. total_usd rounds the raw sum, so it can differ
-by a cent from the sum of the rounded days.
+after today; they are left out. unpriced counts finished rows (closed or failed
+after a launch) in the window with no cost: while it is above zero, total_usd
+is a floor and the text says "partial". total_usd rounds the raw sum, so it
+can differ by a cent from the sum of the rounded days.
 
 Exit 0: summed. Exit 1: the queue or usage file could not be read. Exit 2: a
 --days out of range.
@@ -61,7 +63,7 @@ Exit 0: summed. Exit 1: the queue or usage file could not be read. Exit 2: a
 			return reportSpend(cmd.OutOrStdout(), drain.SumSpend(usage, rows, time.Now(), days), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped"} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped","unpriced"} as JSON`)
 	cmd.Flags().IntVar(&days, "days", defaultSpendDays, "window in UTC days, counting today (1-365)")
 	return cmd
 }
@@ -95,7 +97,11 @@ func reportSpend(out io.Writer, s drain.Spend, asJSON bool) error {
 	for _, d := range s.ByDay {
 		fmt.Fprintf(&b, "%s  $%.2f  %s\n", d.Day, d.USD, plural(d.Rows, "worker", "workers"))
 	}
-	fmt.Fprintf(&b, "total over %d days: $%.2f\n", s.Days, s.TotalUSD)
+	if s.Unpriced > 0 {
+		fmt.Fprintf(&b, "total over %d days: $%.2f (partial: %s unpriced)\n", s.Days, s.TotalUSD, plural(s.Unpriced, "finished worker", "finished workers"))
+	} else {
+		fmt.Fprintf(&b, "total over %d days: $%.2f\n", s.Days, s.TotalUSD)
+	}
 	if s.Skipped > 0 {
 		fmt.Fprintf(&b, "skipped %s of usage state that did not parse or was out of range\n", plural(s.Skipped, "entry", "entries"))
 	}
