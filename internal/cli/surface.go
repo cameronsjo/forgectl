@@ -89,6 +89,10 @@ rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 
   forgectl surface prune --dry-run
 
+usage sums what the drain's workers cost by UTC day:
+
+  forgectl surface usage --days 7
+
 send, inbox, flush and event carry messages between a coordinator and
 its workers across harnesses. See forgectl surface send --help.`,
 	}
@@ -110,6 +114,7 @@ its workers across harnesses. See forgectl surface send --help.`,
 	cmd.AddCommand(newSurfaceAuditCmd(deps))
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	cmd.AddCommand(newSurfacePruneCmd(deps))
+	cmd.AddCommand(newSurfaceUsageCmd(deps))
 	cmd.AddCommand(newSurfaceSendCmd(deps))
 	cmd.AddCommand(newSurfaceInboxCmd(deps))
 	cmd.AddCommand(newSurfaceFlushCmd(deps))
