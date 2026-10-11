@@ -38,7 +38,7 @@ A `pane` item is a hint, never a verdict (`docs/lore/herdr-fleet.md` in the meta
 
 The closer already reads each reported row's PR at most every 5 minutes (T10.3, `merge.Reader.Discover`), so the inbox reads what the drain recorded and calls no GitHub API itself.
 
-- **Where it is kept.** `decodeQueue` refuses unknown fields (`internal/surface/worker/queue.go:322-333`), so a new field on queue rows would make `queue.json` unreadable to an older binary after a rollback, pausing its drain and every `surface` verb. The facts go in a separate `drain-pr.json` beside the queue instead, keyed by row name and `launch_id`: `{number, state, head, read_at, merge_refused: {head, at} | null}`. The closer writes an entry only when the number, state or head changes, not at every read. `surface prune` drops an entry with its row.
+- **Where it is kept.** `decodeQueue` refuses unknown fields (`internal/surface/worker/queue.go:322-333`), so a new field on queue rows would make `queue.json` unreadable to an older binary after a rollback, pausing its drain and every `surface` verb. The facts go in a separate `drain-pr.json` beside the queue instead, keyed by row name and `launch_id`: `{number, state, head, read_at, merge_refused: {head, at} | null}`. The closer writes an entry only when the number, state or head changes, not at every read. `surface prune` drops an entry with its row. Every read-modify-write of `drain-pr.json` (the closer, the autopilot's `merge_refused`, the daily prune and a manual `surface prune`) holds the queue's flock for the whole update and replaces the file by atomic rename, so a prune running beside the drain can neither lose a `merge_refused` nor bring back a removed entry.
 - **What the closer adds.** It records `state: "none"` on an `ErrNoPR` read, which today writes nothing. The URL is built from the row's GitHub repo and the number; `DiscoverQuery` does not change. The autopilot writes `merge_refused` when it emits a `merge-refused` event, so the condition survives a drain restart (today it lives only in the event file and in process).
 - **A row with no GitHub repo recorded** is never read by the closer (`closer.go:50-54`). It is a `pr` item at once, "reported, no PR read", with `forgectl surface close <name>`.
 - **When it needs the operator, and the actions, by `[surface.merge] mode`** (the inbox resolves merge settings from the config, one read):
@@ -75,7 +75,7 @@ herdr gives no time for a status change, only `state_change_seq`, a per-server c
 
 - An entry is keyed by (session, server identity, pane id, `state_change_seq`) and holds the time a read first saw that pane `blocked`. The server identity is the socket's inode and change time; a new server drops that session's entries, so a restarted server's repeated seqs do not inherit old holds.
 - A read prunes entries only for the sessions it read: a pane no longer blocked, or no longer listed there.
-- The first read after a pane blocks counts it in `settling`, not as an item. The pane polls every few seconds, so a 20 s hold costs it nothing. A one-off reader passes `--hold 0s`.
+- With a positive hold, the first read after a pane blocks counts it in `settling`, not as an item. The pane polls every few seconds, so a 20 s hold costs it nothing. With `--hold 0s`, a blocked pane is an item on the first read that sees it; a one-off reader passes that.
 - When the file cannot be read or written, `pane` items are shown with `since: null` and the `herdr` source row stays `ok` with the error in `error`. Items with `since: null` sort last.
 
 The item id carries the server identity too: `pane:<session>/<pane_id>@<server>.<seq>`.
@@ -197,14 +197,14 @@ The read verb itself closes nothing. Every item closes where it came from: the d
 - [ ] The read-only desk listing (no hash pinning, no moves, no hooks), and `signal_session` written by `desk add`.
 - [ ] herdr reads with an explicit `--session`, `HERDR_SOCKET_PATH` stripped; the drain's session read too when it differs; panes keyed by (session, pane id).
 - [ ] The hold file: versioned, pinned directory, flock, atomic rename, server identity in the key; a read that cannot write it still prints, with `since: null` on pane items.
-- [ ] `drain-pr.json`: the closer writes on change and records `none`; the autopilot records `merge_refused`; `surface prune` removes entries with their rows; `surface queue --json` joins it.
+- [ ] `drain-pr.json`: every update under the queue flock with atomic rename; the closer writes on change and records `none`; the autopilot records `merge_refused`; `surface prune` removes entries with their rows; `surface queue --json` joins it.
 - [ ] The drain's pause kinds: `drain.json` keeps them only in the joined `pause_reason` (`"kind: reason; …"`). I1 parses the kind prefix against the `PauseKind` constants and treats an unknown prefix as a plain pause, rather than adding a field to the strictly decoded `drain.json`.
 - [ ] `forgectl inbox` text and `--json`, exit codes as above, `docs/commands/inbox.md`, the command in `docs/README.md`'s command list, `inbox` added to `docs/json-contract.md`'s form-1 list, and a line in the embedded skill (`internal/skill/skill/SKILL.md`) so agents find it.
 - [ ] Tests:
   - each cover rule with a negative control: a pane a desk item names, blocked under `forgectl-desk`, gets no `pane` item; the same pane blocked under the agent's own label gets one; the desk item gone, it gets one;
   - a worker waiting on a decision (row `launched`, pane blocked under `forgectl-inbox`) shows once, as the decision;
   - the same pane id in two sessions gives two items with two focus actions;
-  - the hold: first read `settling`, a later read an item, a new seq or a new server restarts it, a read of one session leaves the other's entries;
+  - the hold: first read `settling`, a later read an item, `--hold 0s` an item on the first read, a new seq or a new server restarts it, a read of one session leaves the other's entries;
   - a poll changes nothing on disk outside the hold file (desk, queue, `drain-pr.json`, decisions);
   - each merge mode's `pr` actions; `merge_refused` survives a drain restart;
   - a stopped drain with queued rows is a `drain` item;
