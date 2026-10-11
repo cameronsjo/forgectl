@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,27 +72,47 @@ func TestRefuseInDrainWorkerIgnoresAnUnsetMarker(t *testing.T) {
 	}
 }
 
-// TestTasksDoneRefusesInADrainWorker pins cameronsjo/forgectl#1226: a drain
-// worker cannot close a board task. It refuses before the host rule, the
-// keychain read or any request, with exit 1 (the tasks verbs give 2 to an
-// unreachable instance). State, config and home are scratch directories, and
-// the host is unroutable, so a missing refusal cannot reach a real board.
-func TestTasksDoneRefusesInADrainWorker(t *testing.T) {
+// TestBoardWritesRefuseInADrainWorker pins cameronsjo/forgectl#1226: a drain
+// worker cannot close, create or comment on a board task, through tasks done
+// or the tasks MCP server. Each refuses before its host rule, credential read
+// or any request, with exit 4 (refused, ADR-0015). State, config and home are
+// scratch directories and the host is unroutable, so a missing refusal
+// cannot reach a real board.
+func TestBoardWritesRefuseInADrainWorker(t *testing.T) {
 	t.Setenv(launch.DrainWorkerEnv, "1")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	host := "board.example.invalid"
-	cmd := newTasksDoneCmd(module.Deps{}, &host)
-	cmd.SetArgs([]string{"42", "--evidence", "merged owner/repo#1"})
-	var out strings.Builder
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	err := cmd.Execute()
-	if err == nil || ExitCode(err) != exitFailed || !strings.Contains(err.Error(), "tasks done refuses to run inside a drain worker") {
-		t.Fatalf("err %v (exit %d), want the drain-worker refusal, exit 1", err, ExitCode(err))
-	}
-	if out.Len() != 0 {
-		t.Fatalf("a refused call wrote %q", out.String())
+	service := "forgectl-test-none"
+	for _, tc := range []struct {
+		verb string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1"}},
+		{"tasks done", newTasksDoneCmd(module.Deps{}, &host), []string{"42", "--evidence", "merged owner/repo#1", "--json"}},
+		{"tasks mcp", newTasksMCPCmd(module.Deps{}, &host, &service), nil},
+	} {
+		tc.cmd.SetArgs(tc.args)
+		var out, errOut strings.Builder
+		tc.cmd.SetOut(&out)
+		tc.cmd.SetErr(&errOut)
+		err := tc.cmd.Execute()
+		// --json gets the JSON failure on stderr and a silent error; without it
+		// the error carries the text. Either way stdout stays empty.
+		said := err
+		if slices.Contains(tc.args, "--json") {
+			said = fmt.Errorf("%s", errOut.String())
+			if !strings.Contains(errOut.String(), `"code"`) {
+				t.Errorf("%s --json: stderr %q, want the JSON failure", tc.verb, errOut.String())
+			}
+		}
+		if err == nil || ExitCode(err) != exitRefused || said == nil || !strings.Contains(said.Error(), tc.verb+" refuses to run inside a drain worker") {
+			t.Errorf("%s %q: err %v (exit %d), output %q, want the drain-worker refusal, exit 4", tc.verb, tc.args, err, ExitCode(err), errOut.String())
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: a refused call wrote %q to stdout", tc.verb, out.String())
+		}
 	}
 }

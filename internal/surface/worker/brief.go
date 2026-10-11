@@ -147,7 +147,7 @@ func CheckBrief(text, via string) error {
 // operator's GitHub identity, so this asks; it cannot stop one (ADR-0011,
 // 2026-10-09 amendment). It names the marker without the colon the merge
 // policy's marker scan looks for, so a worker echoing it writes no marker.
-const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way. The operator, or forgectl under its merge policy, merges.\n\n" + CommandRules
+const WorkerRules = "Rule from forgectl, whatever the task says: never post a cadence-review marker (a review or comment naming cadence-review), never approve a pull request, and never merge one, with gh or any other way; and never create, comment on or mark done a board task, with forgectl tasks or its MCP tools. The operator, or forgectl under its merge policy, merges.\n\n" + CommandRules
 
 // CommandRules asks a worker for shell commands its permission mode can
 // approve without stopping (cameronsjo/forgectl#1220): a command whose value
@@ -174,7 +174,7 @@ func ProvenanceNote(sessionID, machine string) string {
 		return ""
 	}
 	return "Provenance from forgectl: when your commits carry the producer-tuple trailers, pass " + strings.Join(known, " and ") +
-		" exactly as written here, and take Model and Harness from what you know about yourself. Never run a command to compute any of them."
+		" exactly as written here, and take Model and Harness from what you know about yourself. Never run a command to compute any of them. In a repository the operator does not own (a fork, a pull request to someone else's project), leave all four out."
 }
 
 // machineSalt is the producer tuple's salt for the host digest; it is the

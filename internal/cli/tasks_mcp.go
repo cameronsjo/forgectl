@@ -187,6 +187,12 @@ func runTasksMCP(
 	host, keychainService, httpAddr, tokenFile string,
 	pinIPs []string,
 ) error {
+	// Its tools create, comment on and close board tasks, which cannot be
+	// undone: the server does not start inside a drain worker
+	// (cameronsjo/forgectl#1226), before any flag check or credential read.
+	if err := refuseBoardWriteInDrainWorker("tasks mcp"); err != nil {
+		return err
+	}
 	if err := validateMCPFlags(httpAddr, tokenFile, pinIPs); err != nil {
 		return WithExitCode(fmt.Errorf("tasks mcp: %w", err), exitFailed)
 	}

@@ -177,14 +177,13 @@ func TestFindReportCapsLength(t *testing.T) {
 // marker.
 func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 	got := Compose("Fix the login bug.", testMarker, ViaLaunch)
-	for _, want := range []string{"never post a cadence-review marker", "never approve a pull request", "never merge one"} {
+	for _, want := range []string{"never post a cadence-review marker", "never approve a pull request", "never merge one", "never create, comment on or mark done a board task"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch brief lacks %q:\n%s", want, got)
 		}
 	}
-	task, rest, _ := strings.Cut(got, "\n\n")
-	rules, instruction := rest[:min(len(WorkerRules), len(rest))], strings.TrimPrefix(rest[min(len(WorkerRules), len(rest)):], "\n\n")
-	if task != "Fix the login bug." || rules != WorkerRules || !strings.HasPrefix(instruction, "When you finish") {
+	instruction, ok := strings.CutPrefix(got, "Fix the login bug.\n\n"+WorkerRules+"\n\n")
+	if !ok || !strings.HasPrefix(instruction, "When you finish") {
 		t.Fatalf("launch brief shape:\n%s", got)
 	}
 	if regexp.MustCompile(`(?i)review\s*:`).MatchString(WorkerRules) {
@@ -225,8 +224,8 @@ func TestProvenanceNote(t *testing.T) {
 		want              []string
 		absent            []string
 	}{
-		{"both", id, "cf6e768835c7", []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: cf6e768835c7"`, "Never run a command"}, nil},
-		{"machine only (no session id for the harness)", "", "cf6e768835c7", []string{`--trailer "Machine: cf6e768835c7"`}, []string{"Session-Id"}},
+		{"both", id, "904dbab7f3dd", []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: 904dbab7f3dd"`, "Never run a command", "does not own"}, nil},
+		{"machine only (no session id for the harness)", "", "904dbab7f3dd", []string{`--trailer "Machine: 904dbab7f3dd"`}, []string{"Session-Id"}},
 		{"session only (host name unknown)", id, "", []string{`--trailer "Session-Id: ` + id + `"`}, []string{"Machine:"}},
 	}
 	for _, tt := range tests {
@@ -250,9 +249,9 @@ func TestProvenanceNote(t *testing.T) {
 }
 
 // TestMachineDigest pins the cadence producer-tuple salt: the digest of
-// "sjomba.local" is the value commits on that host carry.
+// a made-up host name: the first 12 hex of sha256("host.example" + salt).
 func TestMachineDigest(t *testing.T) {
-	if got := MachineDigest("sjomba.local"); got != "cf6e768835c7" {
+	if got := MachineDigest("host.example"); got != "904dbab7f3dd" {
 		t.Fatalf("MachineDigest = %q", got)
 	}
 	if MachineDigest("") != "" {

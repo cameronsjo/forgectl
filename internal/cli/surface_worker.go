@@ -435,7 +435,8 @@ func checkProfileHarness(lc config.LaunchConfig, worktree string, spec workerSpe
 // the worker floor, the worker settings and the environment allowlist
 // (launch.BuildInvocation), and gives a claude worker its session id. The
 // harness is known only once the profile resolves, so a claude worker is
-// built a second time with the id.
+// built a second time with the id, and a worker with a prompt is built again
+// with the provenance note (worker.ProvenanceNote) after it.
 func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID func() (string, error), warn io.Writer) (launch.BuiltInvocation, error) {
 	req.Worker = true
 	req.Prompt = prompt

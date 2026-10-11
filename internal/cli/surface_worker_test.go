@@ -445,7 +445,7 @@ func TestInProcessLaunchRefusesBeforeTouchingAnything(t *testing.T) {
 func TestBuildWorkerInvocationAddsProvenance(t *testing.T) {
 	saved := workerHostname
 	t.Cleanup(func() { workerHostname = saved })
-	workerHostname = func() (string, error) { return "sjomba.local", nil }
+	workerHostname = func() (string, error) { return "host.example", nil }
 	cwd, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -466,7 +466,7 @@ func TestBuildWorkerInvocationAddsProvenance(t *testing.T) {
 			prompt = a
 		}
 	}
-	for _, want := range []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: cf6e768835c7"`} {
+	for _, want := range []string{`--trailer "Session-Id: ` + id + `"`, `--trailer "Machine: 904dbab7f3dd"`} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt lacks %q: %q (args %q)", want, prompt, built.Invocation.Args)
 		}
