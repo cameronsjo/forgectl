@@ -2,6 +2,7 @@ package drain
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -273,6 +274,21 @@ type UsageLine struct {
 	Name     string  `json:"name"`
 	LaunchID string  `json:"launch_id"`
 	CostUSD  float64 `json:"costUsd"`
+}
+
+// MaxUsageLineUSD is the largest cost a reader accepts for one row. No real
+// session comes near it; a larger value is a damaged or forged line, and
+// summing it could overflow to +Inf, which JSON cannot carry.
+const MaxUsageLineUSD = 1e6
+
+// Valid reports whether the line has a real UTC day, a name, and a finite
+// cost from 0 to MaxUsageLineUSD.
+func (u UsageLine) Valid() bool {
+	if u.Name == "" || math.IsNaN(u.CostUSD) || u.CostUSD < 0 || u.CostUSD > MaxUsageLineUSD {
+		return false
+	}
+	t, err := time.Parse(worker.UTCDayLayout, u.Day)
+	return err == nil && t.Format(worker.UTCDayLayout) == u.Day
 }
 
 // UsageLines is one line per priced row, oldest day first, then by name.

@@ -193,6 +193,10 @@ Exit 0: the run finished, whatever it skipped. Exit 1: the answer was not `yes`,
 
 Exit 0: pruned or previewed. Exit 1: the state could not be read or written (the queue, the drain files, the status cache or the ledger directory). Exit 2: a usage error only, such as `--older-than` under `1h`.
 
+## Usage
+
+`surface usage [--days N] [--json]` sums what the drain's workers cost by UTC day over the last N days, counting today (default 30, at most 365). It reads `usage-daily.jsonl` and the queue rows with a `cost_usd` not yet pruned, counts each row once by `(name, launch_id)` (the file line wins when a row is in both), and leaves out rows that were never priced, so the total is a floor. `--json` prints `{days, total_usd, by_day:[{day, usd, rows}], skipped}`; `skipped` counts file lines that did not parse or are not valid (no name, a bad day, a cost outside 0 to 1,000,000), and lines or rows dated after today. `total_usd` rounds the raw sum, so it can differ by a cent from the sum of the rounded days. Exit 0: summed. Exit 1: the queue or usage file could not be read. Exit 2: a `--days` out of range.
+
 The drain runs prune with the default cutoff once each UTC day, at the end of the first tick of the day. It records the day in `drain-prune-day` beside `drain.json` before it runs, so neither a restart nor a failed prune runs it again that day; a `drain-prune-day` that cannot be read is one `error` event, and the prune runs and rewrites it with today. The daily prune is capped at 30 s, so it cannot hold a tick long enough for `drain status` to call the drain stale at the default interval, and herdr is read once per prune (one readiness check and one workspace listing), not once per row. A failure is one `error` event and never stops the drain; each removed row is a `state` event with state `pruned`.
 
 ### usage-daily.jsonl

@@ -87,7 +87,11 @@ its merge-audit lines; merge-machine prints this machine's policy value:
 prune removes old closed, failed and expired queue rows and closed ledger
 rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 
-  forgectl surface prune --dry-run`,
+  forgectl surface prune --dry-run
+
+usage sums what the drain's workers cost by UTC day:
+
+  forgectl surface usage --days 7`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -107,6 +111,7 @@ rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 	cmd.AddCommand(newSurfaceAuditCmd(deps))
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	cmd.AddCommand(newSurfacePruneCmd(deps))
+	cmd.AddCommand(newSurfaceUsageCmd(deps))
 	return cmd
 }
 
