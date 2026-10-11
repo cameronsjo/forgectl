@@ -205,12 +205,26 @@ pairs can still use native `notify_when_idle`.
 - Hub and spoke by default: a worker may message the coordinator and the coordinator
   any worker; worker-to-worker needs `[surface] peer_messages = true`.
 - Body cap 32 KiB; per-pair cap 10 a minute; identical repeat dropped within 30 s.
-- C0/C1 controls and bidi overrides stripped; the marker inside a body is
-  neutralised so a body cannot forge a second header.
+- The body is NFKC-normalised, C0/C1 controls and invisible runes (bidi,
+  zero-width, soft hyphen, line separators, the tag block) are stripped, and
+  anything that reads as the opening or closing marker in any case or dash is
+  neutralised, so a body cannot forge a header or close the message early. An
+  end marker closes every message.
 - Names are `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`; Codex thread ids are checked before
   they reach argv, and every value goes in `--flag=value` form so none can start a flag.
 - The rendered header says the text is not from the operator, and the Claude receiver
   already treats peer messages as non-consent.
+- **The guardrails are advisory between processes of one user.** Every worker
+  runs as the operator: it can set its own `FORGECTL_WORKER`, write the
+  mailbox, and post to a sibling's inbox socket directly (Claude workers
+  accept unauthenticated peer frames under `accept`; the pi socket has no
+  auth). forgectl refuses the careless cases: a worker that names itself the
+  coordinator or drops its name (`FORGECTL_LEDGER` or `FORGECTL_DRAIN_WORKER`
+  without `FORGECTL_WORKER`), and a worker reading anyone's inbox but its own.
+  New surfaces do not inherit the launcher's `CLAUDE_CODE_MESSAGING_SOCKET` or
+  token. Security review on #674, 2026-10-11.
+- Known exposures kept: a Codex body sits on `codex queue`'s argv for up to its
+  15 s timeout, and the lock off Unix is in-process only.
 
 ### Launch-time wiring (extends #536 T1 and T5)
 

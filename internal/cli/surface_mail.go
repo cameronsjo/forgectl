@@ -304,6 +304,19 @@ func runSurfaceInbox(cmd *cobra.Command, deps module.Deps, getenv func(string) s
 	if err != nil {
 		return mailError(err)
 	}
+	// A worker reads only its own messages. Like SelfName's refusals this is
+	// a courtesy, not a boundary: the mailbox is a file the worker's user
+	// owns.
+	if getenv(mail.EnvWorker) != "" || getenv(mail.EnvDrainWorker) != "" {
+		self, err := sess.self()
+		if err != nil {
+			return mailError(err)
+		}
+		if all || (name != "" && name != self) {
+			return mailUsage(errors.New("a worker reads only its own messages: run inbox with no name"))
+		}
+		name = self
+	}
 	if !all && name == "" {
 		if name, err = sess.self(); err != nil {
 			return mailError(err)

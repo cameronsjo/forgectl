@@ -165,7 +165,7 @@ func TestSurfaceSendBodySources(t *testing.T) {
 	if _, errOut, code := runSurface(t, "from stdin\n", "send", "pi-2", "-"); code != 0 {
 		t.Fatalf("stdin: exit %d, %s", code, errOut)
 	}
-	if len(ad.texts) != 2 || !strings.HasSuffix(ad.texts[0], "from a file\n") || !strings.HasSuffix(ad.texts[1], "from stdin\n") {
+	if len(ad.texts) != 2 || !strings.HasSuffix(ad.texts[0], "from a file\n"+mail.EndMarker) || !strings.HasSuffix(ad.texts[1], "from stdin\n"+mail.EndMarker) {
 		t.Fatalf("delivered %q", ad.texts)
 	}
 	if _, _, code := runSurface(t, "", "send", "pi-1", "@"+filepath.Join(t.TempDir(), "absent")); code != exitUsage {
@@ -197,7 +197,7 @@ func TestSurfaceSendFlushesFirst(t *testing.T) {
 	if len(entries) != 2 || entries[0].Status != mail.StatusSent || entries[0].Attempts != 2 {
 		t.Fatalf("entries %+v, want the queued one retried and sent", entries)
 	}
-	if len(ad.texts) != 3 || !strings.HasSuffix(ad.texts[1], "first") {
+	if len(ad.texts) != 3 || !strings.HasSuffix(ad.texts[1], "first\n"+mail.EndMarker) {
 		t.Fatalf("delivery order %q, want the retry before the new send", ad.texts)
 	}
 }
@@ -268,7 +268,7 @@ func TestSurfaceWatchAndEvent(t *testing.T) {
 func TestSurfaceEventHarnesses(t *testing.T) {
 	svc, _ := useMailLedger(t)
 
-	t.Setenv(mail.EnvWorker, "coord")
+	// The coordinator's own hooks: no FORGECTL_WORKER, so it resolves as coord.
 	out, errOut, code := runSurface(t, `{"hook_event_name":"UserPromptSubmit","session_id":"s"}`, "event", "--harness", "claude")
 	if code != 0 || out != "" {
 		t.Fatalf("claude UserPromptSubmit: exit %d, stdout %q, stderr %q; want exit 0 and no stdout", code, out, errOut)
@@ -349,6 +349,20 @@ func TestSurfaceInbox(t *testing.T) {
 	}
 	if _, _, code := runSurface(t, "", "inbox", "pi-1", "--all"); code != exitUsage {
 		t.Fatalf("a name with --all: exit %d, want usage", code)
+	}
+}
+
+// A worker reads only its own messages, whatever name or flag it passes.
+func TestSurfaceInboxWorkerSeesOnlyItsOwn(t *testing.T) {
+	useMailLedger(t)
+	t.Setenv(mail.EnvWorker, "pi-1")
+	for _, args := range [][]string{{"inbox", "--all"}, {"inbox", "pi-2"}, {"inbox", "coord"}} {
+		if _, _, code := runSurface(t, "", args...); code != exitUsage {
+			t.Errorf("%q from pi-1: exit %d, want %d", args, code, exitUsage)
+		}
+	}
+	if _, errOut, code := runSurface(t, "", "inbox", "pi-1"); code != 0 {
+		t.Fatalf("own inbox: exit %d, %s", code, errOut)
 	}
 }
 

@@ -13,6 +13,10 @@ const (
 	EnvLedger = "FORGECTL_LEDGER"
 	EnvWorker = "FORGECTL_WORKER"
 	EnvInbox  = "FORGECTL_INBOX"
+	// EnvDrainWorker is launch.DrainWorkerEnv, which forgectl sets on every
+	// worker it launches. Repeated here so mail does not import launch; a
+	// cli test pins the two together.
+	EnvDrainWorker = "FORGECTL_DRAIN_WORKER"
 	// envClaudeSocket is exported by Claude Code to its hooks and Bash commands.
 	envClaudeSocket = "CLAUDE_CODE_MESSAGING_SOCKET"
 )
@@ -45,19 +49,35 @@ func LedgerDir(stateDir string, getenv func(string) string) (string, error) {
 // SelfName is the caller's name in the roster: FORGECTL_WORKER for a worker,
 // else the roster's coordinator entry.
 //
-// A process with FORGECTL_LEDGER but no FORGECTL_WORKER is refused rather than
-// taken for the coordinator: the coordinator finds its ledger from its inbox
-// socket and never carries FORGECTL_LEDGER, so the only process that has one
-// is a launched worker, and unsetting its name must not make it the hub.
+// Only the coordinator may resolve as the coordinator. A process with
+// FORGECTL_LEDGER or FORGECTL_DRAIN_WORKER but no FORGECTL_WORKER is refused:
+// the coordinator finds its ledger from its inbox socket and carries neither,
+// so only a launched worker has them, and unsetting its name must not make it
+// the hub. A FORGECTL_WORKER that names the coordinator is refused for the
+// same reason.
+//
+// These are courtesy refusals, not a boundary: every worker runs as the
+// operator, can edit its own environment and can write the mailbox directly.
+// They stop a worker passing as the hub by accident or by a careless prompt,
+// not one set on it.
 func SelfName(r Roster, getenv func(string) string) (string, error) {
 	if name := getenv(EnvWorker); name != "" {
 		if err := ValidateName(name); err != nil {
 			return "", fmt.Errorf("%s: %w", EnvWorker, err)
 		}
+		w, err := r.Get(name)
+		if err != nil && !errors.Is(err, ErrUnknownWorker) {
+			return "", err
+		}
+		if err == nil && w.Coordinator {
+			return "", fmt.Errorf("%w: %s names the coordinator; a worker cannot send as it", ErrNoSelf, EnvWorker)
+		}
 		return name, nil
 	}
-	if getenv(EnvLedger) != "" {
-		return "", fmt.Errorf("%w: %s is set but %s is not; a worker forgectl launched carries both", ErrNoSelf, EnvLedger, EnvWorker)
+	for _, key := range []string{EnvLedger, EnvDrainWorker} {
+		if getenv(key) != "" {
+			return "", fmt.Errorf("%w: %s is set but %s is not; a worker forgectl launched carries both", ErrNoSelf, key, EnvWorker)
+		}
 	}
 	workers, err := r.List()
 	if err != nil {

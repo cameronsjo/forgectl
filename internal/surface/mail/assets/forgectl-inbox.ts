@@ -20,7 +20,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, unlinkSync } from "node:fs";
+import { chmodSync, lstatSync, unlinkSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
 
@@ -130,7 +130,16 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   });
 
   // A socket file left by a crashed run would make listen fail with EADDRINUSE.
-  if (existsSync(socketPath)) {
+  // Only a socket is removed: if FORGECTL_INBOX names anything else, the
+  // extension stays off rather than delete it.
+  let existing;
+  try {
+    existing = lstatSync(socketPath);
+  } catch {
+    existing = undefined;
+  }
+  if (existing) {
+    if (!existing.isSocket()) return;
     try {
       unlinkSync(socketPath);
     } catch {

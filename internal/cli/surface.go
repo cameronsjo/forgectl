@@ -370,6 +370,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// claudeMessagingEnv is the inbox Claude Code exports to its own children.
+var claudeMessagingEnv = []string{"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
+
 // herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
 // runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
 // launcher and the new pane share.
@@ -449,11 +452,15 @@ func validPaneIdentity(v string) bool {
 // state, and receive anything addressed to "its" pane, on the launcher's pane.
 // For a herdr launch, which marks its invocation (markHerdrPane), the
 // trampoline puts back the new pane's own values (paneIdentityEnv).
+//
+// Claude Code's messaging socket and token go too: they are the launcher
+// session's inbox, so a Codex or pi agent in the new surface would otherwise
+// find the launcher's mail ledger and `surface send` as the coordinator.
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || slices.Contains(herdrPaneIdentityEnv, key) {
+		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || slices.Contains(herdrPaneIdentityEnv, key) {
 			continue
 		}
 		out = append(out, entry)

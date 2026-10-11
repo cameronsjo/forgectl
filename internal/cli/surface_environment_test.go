@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
 
 // TestSurfaceLaunchEnvironment_StripsOnlyTheClaudeChildMarker pins Cameron's
@@ -61,6 +63,28 @@ func TestSurfaceLaunchEnvironment_StripsTheLaunchersHerdrPane(t *testing.T) {
 	want := []string{"PATH=/usr/bin:/bin", "HERDR_SOCKET_PATH=/tmp/herdr.sock", "HERDR_ENV=1"}
 	if got := surfaceLaunchEnvironment(base); !slices.Equal(got, want) {
 		t.Fatalf("surface environment = %q, want %q", got, want)
+	}
+}
+
+// The launcher's Claude inbox must not reach the new surface, or a Codex or
+// pi agent there resolves the launcher's mail ledger and sends as the
+// coordinator (security review on #674).
+func TestSurfaceLaunchEnvironment_StripsTheLaunchersInbox(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin:/bin",
+		"CLAUDE_CODE_MESSAGING_SOCKET=/tmp/claude/inbox.sock",
+		"CLAUDE_CODE_MESSAGING_TOKEN=secret",
+	}
+	want := []string{"PATH=/usr/bin:/bin"}
+	if got := surfaceLaunchEnvironment(base); !slices.Equal(got, want) {
+		t.Fatalf("surface environment = %q, want %q", got, want)
+	}
+}
+
+// mail repeats launch.DrainWorkerEnv rather than import launch.
+func TestMailDrainWorkerEnvMatchesLaunch(t *testing.T) {
+	if mail.EnvDrainWorker != launch.DrainWorkerEnv {
+		t.Fatalf("mail.EnvDrainWorker = %q, launch.DrainWorkerEnv = %q", mail.EnvDrainWorker, launch.DrainWorkerEnv)
 	}
 }
 

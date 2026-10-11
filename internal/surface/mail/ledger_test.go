@@ -50,6 +50,14 @@ func TestSelfName(t *testing.T) {
 	if got, err := SelfName(r, env(map[string]string{EnvLedger: "/state/mail/x"})); !errors.Is(err, ErrNoSelf) {
 		t.Fatalf("ledger without a worker name = %q, %v; want ErrNoSelf", got, err)
 	}
+	// Nor does a drain worker that inherited the coordinator's inbox socket.
+	if got, err := SelfName(r, env(map[string]string{EnvDrainWorker: "1", envClaudeSocket: "/tmp/coord.sock"})); !errors.Is(err, ErrNoSelf) {
+		t.Fatalf("drain worker without a name = %q, %v; want ErrNoSelf", got, err)
+	}
+	// Nor can it name itself the coordinator.
+	if got, err := SelfName(r, env(map[string]string{EnvWorker: "coord"})); !errors.Is(err, ErrNoSelf) {
+		t.Fatalf("FORGECTL_WORKER=coord = %q, %v; want ErrNoSelf", got, err)
+	}
 	// Nor can it send as forgectl's own notices.
 	if _, err := SelfName(r, env(map[string]string{EnvWorker: SystemSender})); !errors.Is(err, ErrBadName) {
 		t.Fatalf("FORGECTL_WORKER=forgectl: err = %v, want ErrBadName", err)
