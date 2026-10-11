@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.0](https://github.com/cameronsjo/forgectl/compare/v0.42.0...v0.43.0) (2026-10-11)
+
+
+### Features
+
+* **surface:** plain-command worker briefs with provenance values; board writes refuse in drain workers ([#1227](https://github.com/cameronsjo/forgectl/issues/1227)) ([cd84079](https://github.com/cameronsjo/forgectl/commit/cd8407939b0a54e9beb2638a46b9bf0f673980d7))
+
 ## [0.42.0](https://github.com/cameronsjo/forgectl/compare/v0.41.1...v0.42.0) (2026-10-11)
 
 
