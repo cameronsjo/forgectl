@@ -57,6 +57,20 @@ const redactedPlaceholder = "(redacted)"
 // map under [theme]", so it cannot widen to cover a future sensitive map.
 const themeColorsKey = "theme.colors"
 
+// surfaceProfilesKey is the second exempt map leaf. A [surface.profiles]
+// entry holds one field, config_dir: a path, not a secret, and the whole point
+// of reading it back is to confirm which Claude config directory each named
+// worker profile runs under (forgectl#1238). Scoped to this exact dotted key
+// for the same reason as themeColorsKey.
+const surfaceProfilesKey = "surface.profiles"
+
+// valueExemptMaps maps each exempt map leaf to the renderer that shows its
+// values. Any map leaf not listed here keeps leafValue's keys-only policy.
+var valueExemptMaps = map[string]func(reflect.Value) (string, any){
+	themeColorsKey:     themeColorsValue,
+	surfaceProfilesKey: surfaceProfilesValue,
+}
+
 // configEntry is one leaf of config.Config as rendered by the walk: a dotted
 // key, its value, and whether the config file actually set it.
 type configEntry struct {
@@ -210,11 +224,12 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			continue
 		}
 		display, value := leafValue(fv)
-		if key == themeColorsKey && fv.Kind() == reflect.Map {
-			// The narrow exemption: render the actual colours instead of
+		render, exempt := valueExemptMaps[key]
+		if exempt && fv.Kind() == reflect.Map {
+			// The narrow exemption: render the actual values instead of
 			// leafValue's keys-only rendering, and never mark this leaf
 			// Redacted below — nothing was withheld.
-			display, value = themeColorsValue(fv)
+			display, value = render(fv)
 		}
 		entry := configEntry{
 			Key:     key,
@@ -229,7 +244,7 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			entry.Value = redactedPlaceholder
 			entry.display = redactedPlaceholder
 			entry.Redacted = true
-		case key != themeColorsKey && fv.Kind() == reflect.Map && fv.Len() > 0:
+		case !exempt && fv.Kind() == reflect.Map && fv.Len() > 0:
 			// leafValue already dropped the values; say so, so a reader is
 			// never left thinking the key set is the whole content.
 			entry.Redacted = true
@@ -319,6 +334,37 @@ func themeColorsValue(v reflect.Value) (display string, value any) {
 		c := colors[key]
 		entries = append(entries, themeColorEntry{Role: key, Dark: c.Dark, Light: c.Light})
 		parts = append(parts, fmt.Sprintf("%s(dark=%s light=%s)", key, c.Dark, c.Light))
+	}
+	return "{" + strings.Join(parts, " ") + "}", entries
+}
+
+// surfaceProfileEntry is one [surface.profiles] entry in --json.
+type surfaceProfileEntry struct {
+	Name      string `json:"name"`
+	ConfigDir string `json:"config_dir"`
+}
+
+// surfaceProfilesValue renders the [surface.profiles] map's names and
+// config_dir values — see surfaceProfilesKey for why it is exempt. Like
+// themeColorsValue, any other shape falls back to an empty rendering.
+func surfaceProfilesValue(v reflect.Value) (display string, value any) {
+	profiles, ok := v.Interface().(map[string]config.SurfaceProfile)
+	if !ok || len(profiles) == 0 {
+		return "{}", []surfaceProfileEntry{}
+	}
+
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	entries := make([]surfaceProfileEntry, 0, len(names))
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		dir := profiles[name].ConfigDir
+		entries = append(entries, surfaceProfileEntry{Name: name, ConfigDir: dir})
+		parts = append(parts, fmt.Sprintf("%s(config_dir=%s)", name, dir))
 	}
 	return "{" + strings.Join(parts, " ") + "}", entries
 }

@@ -94,6 +94,7 @@ config_dir = "~/.claude-work"   # absolute, or starting with "~/"
 - A queue row stores the profile's name, never its path. The drain resolves the name from the config file when it launches the row, so a changed `config_dir` applies to rows already queued. A name the config no longer defines fails that launch as a launch-config error, which pauses claiming until the next `drain start`.
 - That pause stops the whole drain, rows with no profile included, so removing a profile while rows still name it holds every queued row until you dequeue those rows and run `drain start` again.
 - A profile applies to claude workers only, and sets only `CLAUDE_CONFIG_DIR`; it adds nothing else to the worker's environment.
+- `forgectl config` shows each profile's name and `config_dir` (in `--json`, `surface.profiles` is a list of `{name, config_dir}`), so you can check which accounts workers run under without a launch.
 
 ## Theme
 
