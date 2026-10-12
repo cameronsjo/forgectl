@@ -371,9 +371,10 @@ func TestDrainSlotsMissingLaunchesWithOneNote(t *testing.T) {
 	}
 }
 
-// TestDrainSlotsBrokenToolDoesNotBlock: another exit code or a timeout
-// launches as if the tool were missing, with one error event per condition.
-func TestDrainSlotsBrokenToolDoesNotBlock(t *testing.T) {
+// TestDrainSlotsUnansweredCheckHolds: a check that cannot answer (another
+// exit code, a timeout, a run that fails to start) holds the row as exit 1
+// does, with one slots-held event per condition: the cap fails closed.
+func TestDrainSlotsUnansweredCheckHolds(t *testing.T) {
 	for name, check := range map[string]drain.SlotsCheck{
 		"exit 2":  {Exit: 2, Reason: "usage: claude-slots check N"},
 		"timeout": {Exit: -1, TimedOut: true},
@@ -385,18 +386,47 @@ func TestDrainSlotsBrokenToolDoesNotBlock(t *testing.T) {
 			enqueueAt(t, q, "a", "/repo/a", drainT0)
 			enqueueAt(t, q, "b", "/repo/b", drainT0.Add(time.Minute))
 			d.tick(t.Context())
-			enqueueAt(t, q, "c", "/repo/c", drainT0.Add(2*time.Minute))
 			d.tick(t.Context())
-			if strings.Join(f.launched, ",") != "a,b,c" {
-				t.Fatalf("launched %v, want a,b,c", f.launched)
+			if len(f.launched) != 0 {
+				t.Fatalf("launched %v; want none while the check cannot answer", f.launched)
 			}
-			if errs := eventsOfKind(f, drain.EventError); len(errs) != 1 || !strings.Contains(errs[0].Error, "claude-slots") {
-				t.Fatalf("error events %+v; want one for the condition", errs)
+			for _, name := range []string{"a", "b"} {
+				if r := rowNamed(t, q, name); r.State != worker.QueueQueued || r.Attempts != 0 || r.LaunchID != "" {
+					t.Fatalf("row %s %+v; want queued, no attempt, no launch id", name, r)
+				}
 			}
-			if n := len(eventsOfKind(f, drain.EventNote)); n != 0 {
-				t.Fatalf("%d notes; the tool was found", n)
+			held := eventsOfKind(f, drain.EventSlotsHeld)
+			if len(held) != 1 || !strings.Contains(held[0].Error, "holding the row") {
+				t.Fatalf("slots-held events %+v; want one for the condition", held)
+			}
+			if n := len(eventsOfKind(f, drain.EventError)) + len(eventsOfKind(f, drain.EventNote)); n != 0 {
+				t.Fatalf("%d error or note events; want only the slots-held one", n)
 			}
 		})
+	}
+}
+
+// TestDrainSlotsSlowToolHoldsTheRow runs a claude-slots stand-in that sleeps
+// past the time cap (never the real tool): the drain holds the claude row
+// rather than launching it without the cap (forgectl#1230).
+func TestDrainSlotsSlowToolHoldsTheRow(t *testing.T) {
+	old := claudeSlotsTimeout
+	claudeSlotsTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { claudeSlotsTimeout = old })
+	tool := fakeSlotsTool(t, "exec sleep 30")
+	f, d, q := newFakeDrain(t)
+	d.io.slots = func(ctx context.Context, need int) drain.SlotsCheck { return runClaudeSlots(ctx, tool, need) }
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	d.tick(t.Context())
+	if len(f.launched) != 0 {
+		t.Fatalf("launched %v after a timed-out check; want the row held", f.launched)
+	}
+	if r := rowNamed(t, q, "a"); r.State != worker.QueueQueued || r.Attempts != 0 || !strings.Contains(r.LastError, "did not finish in time") {
+		t.Fatalf("row a %+v; want queued, no attempt, last_error naming the timeout", r)
+	}
+	held := eventsOfKind(f, drain.EventSlotsHeld)
+	if len(held) != 1 || !strings.Contains(held[0].Error, "did not finish in time") {
+		t.Fatalf("slots-held events %+v; want one naming the timeout", held)
 	}
 }
 

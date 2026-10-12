@@ -24,15 +24,15 @@ func TestDecideSlots(t *testing.T) {
 		"held again":                {check: SlotsCheck{Exit: 1, Reason: "3 of 3 sessions live"}, prev: "held", hold: true, cond: "held", reasonIn: "3 of 3"},
 		"names the asked count":     {check: SlotsCheck{Need: 3, Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "claude-slots check 3 exited 1"},
 		"held with no output":       {check: SlotsCheck{Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "no reason given"},
-		"odd exit launches":         {check: SlotsCheck{Exit: 2, Reason: "usage"}, cond: "exit 2", emit: true, kind: EventError, errHas: "exited 2"},
-		"odd exit again is quiet":   {check: SlotsCheck{Exit: 2}, prev: "exit 2", cond: "exit 2"},
-		"another odd exit is new":   {check: SlotsCheck{Exit: 3}, prev: "exit 2", cond: "exit 3", emit: true, kind: EventError, errHas: "exited 3"},
-		"signal (no exit code)":     {check: SlotsCheck{Exit: -1}, cond: "exit -1", emit: true, kind: EventError},
-		"timeout launches":          {check: SlotsCheck{Exit: -1, TimedOut: true}, cond: "timeout", emit: true, kind: EventError, errHas: "did not finish in time"},
-		"timeout again is quiet":    {check: SlotsCheck{Exit: -1, TimedOut: true}, prev: "timeout", cond: "timeout"},
-		"run failure launches":      {check: SlotsCheck{Exit: -1, Err: "permission denied"}, cond: "run failed", emit: true, kind: EventError, errHas: "permission denied"},
+		"odd exit holds":            {check: SlotsCheck{Exit: 2, Reason: "usage"}, hold: true, cond: "exit 2", emit: true, kind: EventSlotsHeld, errHas: "exited 2", reasonIn: "exited 2"},
+		"odd exit again is quiet":   {check: SlotsCheck{Exit: 2}, prev: "exit 2", hold: true, cond: "exit 2"},
+		"another odd exit is new":   {check: SlotsCheck{Exit: 3}, prev: "exit 2", hold: true, cond: "exit 3", emit: true, kind: EventSlotsHeld, errHas: "exited 3"},
+		"signal (no exit code)":     {check: SlotsCheck{Exit: -1}, hold: true, cond: "exit -1", emit: true, kind: EventSlotsHeld},
+		"timeout holds":             {check: SlotsCheck{Exit: -1, TimedOut: true}, hold: true, cond: "timeout", emit: true, kind: EventSlotsHeld, errHas: "check 1 did not finish in time; holding the row", reasonIn: "did not finish in time"},
+		"timeout again is quiet":    {check: SlotsCheck{Exit: -1, TimedOut: true}, prev: "timeout", hold: true, cond: "timeout"},
+		"run failure holds":         {check: SlotsCheck{Exit: -1, Err: "permission denied"}, hold: true, cond: "run failed", emit: true, kind: EventSlotsHeld, errHas: "permission denied"},
 		"hold after timeout is new": {check: SlotsCheck{Exit: 1}, prev: "timeout", hold: true, cond: "held", emit: true, kind: EventSlotsHeld},
-		"timeout after hold is new": {check: SlotsCheck{TimedOut: true, Exit: -1}, prev: "held", cond: "timeout", emit: true, kind: EventError},
+		"timeout after hold is new": {check: SlotsCheck{TimedOut: true, Exit: -1}, prev: "held", hold: true, cond: "timeout", emit: true, kind: EventSlotsHeld},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

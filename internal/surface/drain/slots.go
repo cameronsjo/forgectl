@@ -10,9 +10,12 @@ import (
 // check N`, the machine's cap on live Claude sessions, where N counts this
 // launch and every one the tick already made: a session launched moments ago
 // may not be registered yet, so the Nth launch of a tick asks for N slots.
-// Exit 0 launches, exit 1 holds the row, and anything else (another exit code, a timeout, a run
-// that fails to start) launches as if the tool were missing, so a broken
-// tool never wedges the queue.
+// Exit 0 launches; anything else holds the row. A check that cannot answer (a
+// timeout, another exit code, a run that fails to start) holds too: a timeout
+// comes most often from the overload the cap guards against, so the gate
+// fails closed. Holding is reversible: the row stays queued with no attempt
+// counted, and codex and pi rows still launch. Only a claude-slots missing at
+// drain start launches without the cap.
 
 // SlotsCheck is the result of one `claude-slots check N` run.
 type SlotsCheck struct {
@@ -53,9 +56,8 @@ type SlotsDecision struct {
 const NoSlotsNote = "claude-slots not found; launching without the session cap"
 
 // DecideSlots reads one check against the condition the previous check left
-// (prev): exit 0 launches; exit 1 holds; anything else launches without the
-// cap. An event is due only when the check enters a condition other than
-// free that differs from prev.
+// (prev): exit 0 launches; every other result holds. An event is due only
+// when the check enters a condition other than free that differs from prev.
 //
 // A stopped check holds the row and leaves the condition as it was, with no
 // event: the drain is shutting down, not judging the cap.
@@ -69,22 +71,32 @@ func DecideSlots(c SlotsCheck, prev string) SlotsDecision {
 	}
 	call := fmt.Sprintf("claude-slots check %d", max(c.Need, 1))
 	var d SlotsDecision
+	var what string
 	switch {
 	case c.TimedOut:
 		d.Cond = "timeout"
-		d.Event = Event{Kind: EventError, Error: call + " did not finish in time; launching without the session cap"}
+		what = call + " did not finish in time"
 	case c.Err != "":
 		d.Cond = "run failed"
-		d.Event = Event{Kind: EventError, Error: call + " could not run: " + c.Err + "; launching without the session cap"}
+		what = call + " could not run: " + c.Err
 	case c.Exit == 0:
 		return SlotsDecision{}
 	case c.Exit == 1:
-		d.Hold, d.Cond = true, "held"
-		d.Reason = "waiting for a claude session slot: " + reason
-		d.Event = Event{Kind: EventSlotsHeld, State: string(worker.QueueQueued), Error: call + " exited 1: " + reason}
+		d.Cond = "held"
+		what = call + " exited 1: " + reason
 	default:
 		d.Cond = fmt.Sprintf("exit %d", c.Exit)
-		d.Event = Event{Kind: EventError, Error: fmt.Sprintf("%s exited %d, expected 0 or 1: %s; launching without the session cap", call, c.Exit, reason)}
+		what = fmt.Sprintf("%s exited %d, expected 0 or 1: %s", call, c.Exit, reason)
+	}
+	d.Hold = true
+	if d.Cond == "held" {
+		d.Reason = "waiting for a claude session slot: " + reason
+	} else {
+		d.Reason = "held: the session cap could not be checked: " + what
+	}
+	d.Event = Event{Kind: EventSlotsHeld, State: string(worker.QueueQueued), Error: what}
+	if d.Cond != "held" {
+		d.Event.Error += "; holding the row, not launching without the session cap"
 	}
 	d.Emit = d.Cond != prev
 	return d

@@ -1089,8 +1089,8 @@ func probeWorker(ctx context.Context, herdr screenReader, table *ready.Table, se
 // drainHerdrTimeout bounds the pre-claim herdr readiness check.
 const drainHerdrTimeout = 15 * time.Second
 
-// claudeSlotsTimeout caps one claude-slots check; a slower one launches
-// without the cap. Tests shorten it.
+// claudeSlotsTimeout caps one claude-slots check; a slower one holds the
+// row, as exit 1 does. Tests shorten it.
 var claudeSlotsTimeout = 5 * time.Second
 
 // maxClaudeSlotsOutput bounds what a check's output is read into.
