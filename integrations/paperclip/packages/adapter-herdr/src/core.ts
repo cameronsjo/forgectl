@@ -33,16 +33,29 @@ export interface AdapterConfig {
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const SESSION_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
-export function parseConfig(raw: Record<string, unknown>): AdapterConfig {
-  const repo = raw["repo"];
-  // An absolute path, so it can never be read as a flag in forgectl's argv
-  // and the worktree check can resolve it.
-  if (typeof repo !== "string" || !path.isAbsolute(repo)) {
-    throw new Error(`adapterConfig.repo must be an absolute path; got ${JSON.stringify(repo)}`);
+/**
+ * Settings only the operator may choose. A worker can PATCH its own agent's
+ * adapterConfig through Paperclip's API, so anything that decides what the
+ * server executes, where panes open, or which repos are reachable comes from
+ * the Paperclip server's environment instead.
+ */
+const OPERATOR_ONLY = ["forgectlPath", "herdrSession", "callbackPort"] as const;
+
+export function parseConfig(raw: Record<string, unknown>, env: Record<string, string | undefined> = process.env): AdapterConfig {
+  for (const k of OPERATOR_ONLY) {
+    // Paperclip merges adapterConfig updates, so null is the only way to clear a key.
+    if (raw[k] !== undefined && raw[k] !== null) throw new Error(`adapterConfig.${k} is not accepted: an agent can edit its own adapterConfig, so set it in the Paperclip server's environment (see integrations/paperclip/README.md)`);
   }
-  const herdrSession = typeof raw["herdrSession"] === "string" ? raw["herdrSession"] : "paperclip";
+  const allowed = (env["FORGECTL_PAPERCLIP_REPOS"] ?? "").split(":").filter((r) => r.length > 0);
+  if (allowed.length === 0) throw new Error("FORGECTL_PAPERCLIP_REPOS is not set on the Paperclip server; no repo is allowed");
+  for (const r of allowed) if (!path.isAbsolute(r)) throw new Error(`FORGECTL_PAPERCLIP_REPOS entries must be absolute paths; got ${JSON.stringify(r)}`);
+  const repo = raw["repo"];
+  if (typeof repo !== "string" || !allowed.map((r) => path.resolve(r)).includes(path.resolve(repo))) {
+    throw new Error(`adapterConfig.repo must be one of FORGECTL_PAPERCLIP_REPOS; got ${JSON.stringify(repo)}`);
+  }
+  const herdrSession = env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip";
   if (!SESSION_RE.test(herdrSession)) {
-    throw new Error(`adapterConfig.herdrSession must match ${SESSION_RE}; got ${JSON.stringify(herdrSession)}`);
+    throw new Error(`FORGECTL_PAPERCLIP_HERDR_SESSION must match ${SESSION_RE}; got ${JSON.stringify(herdrSession)}`);
   }
   const harnessRaw = raw["harness"] ?? "claude";
   if (!HARNESSES.includes(harnessRaw as Harness)) {
@@ -56,20 +69,19 @@ export function parseConfig(raw: Record<string, unknown>): AdapterConfig {
   if (harness !== "claude" && profile !== "main") {
     throw new Error(`adapterConfig.profile selects a Claude account and applies only to harness claude; got profile ${JSON.stringify(profile)} with harness ${harness}`);
   }
-  const callbackPort = typeof raw["callbackPort"] === "number" ? raw["callbackPort"] : 3199;
+  const callbackPort = Number(env["FORGECTL_PAPERCLIP_CALLBACK_PORT"] || 3199);
   if (!Number.isInteger(callbackPort) || callbackPort < 1024 || callbackPort > 65535) {
-    throw new Error(`adapterConfig.callbackPort must be an integer in 1024-65535; got ${callbackPort}`);
+    throw new Error(`FORGECTL_PAPERCLIP_CALLBACK_PORT must be an integer in 1024-65535; got ${JSON.stringify(env["FORGECTL_PAPERCLIP_CALLBACK_PORT"])}`);
   }
   const turnTimeoutSec = raw["turnTimeoutSec"] ?? 1800;
   if (typeof turnTimeoutSec !== "number" || !Number.isInteger(turnTimeoutSec) || turnTimeoutSec < 30 || turnTimeoutSec > 86_400) {
     throw new Error(`adapterConfig.turnTimeoutSec must be an integer in 30-86400; got ${JSON.stringify(turnTimeoutSec)}`);
   }
-  // Either the forgectl on PATH or an absolute path the operator chose.
-  const forgectlPath = raw["forgectlPath"] ?? "forgectl";
-  if (typeof forgectlPath !== "string" || (forgectlPath !== "forgectl" && !path.isAbsolute(forgectlPath))) {
-    throw new Error(`adapterConfig.forgectlPath must be "forgectl" or an absolute path; got ${JSON.stringify(forgectlPath)}`);
+  const forgectlPath = env["FORGECTL_PAPERCLIP_FORGECTL"] || "forgectl";
+  if (forgectlPath !== "forgectl" && !path.isAbsolute(forgectlPath)) {
+    throw new Error(`FORGECTL_PAPERCLIP_FORGECTL must be an absolute path; got ${JSON.stringify(forgectlPath)}`);
   }
-  return { repo, harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath };
+  return { repo: path.resolve(repo), harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath };
 }
 
 /** Session state Paperclip persists between runs for one agent + task. */

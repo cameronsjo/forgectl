@@ -10,7 +10,6 @@
 // recorded, and accepts a Stop callback only for the worker's own session.
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type {
   AdapterEnvironmentTestContext,
@@ -220,8 +219,8 @@ async function runTurn(
 }
 
 async function testEnvironment(_ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
-  const cfg = parseConfig({ repo: os.homedir() });
-  const r = await runForgectl(cfg, ["--version"], 10_000);
+  const forgectlPath = process.env["FORGECTL_PAPERCLIP_FORGECTL"] || "forgectl";
+  const r = await runForgectl({ forgectlPath, herdrSession: process.env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip" } as AdapterConfig, ["--version"], 10_000);
   return {
     adapterType: ADAPTER_TYPE,
     status: r.code === 0 ? "pass" : "fail",
@@ -244,6 +243,6 @@ export function createServerAdapter(): ServerAdapterModule {
       getDisplayId: (params) => decodeSession(params)?.workerName ?? null,
     },
     agentConfigurationDoc:
-      "repo (absolute path, required), harness (claude or codex; default claude), profile (claude only; default main), herdrSession (default paperclip), callbackPort (default 3199), turnTimeoutSec (30-86400; default 1800), forgectlPath (\"forgectl\" or an absolute path).",
+      "repo (required; one of the server's FORGECTL_PAPERCLIP_REPOS), harness (claude or codex; default claude), profile (claude only; default main), turnTimeoutSec (30-86400; default 1800). forgectl path, herdr session and callback port are operator-only server env vars.",
   };
 }

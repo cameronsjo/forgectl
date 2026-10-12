@@ -27,7 +27,18 @@ Register it in `$PAPERCLIP_HOME/adapter-plugins.json`:
 [{"packageName": "@forgectl/paperclip-adapter-herdr", "localPath": "<abs path>/integrations/paperclip/packages/adapter-herdr", "type": "herdr_forgectl", "installedAt": "2026-10-12T00:00:00.000Z"}]
 ```
 
-Agent `adapterConfig`: `repo` (absolute path, required), `harness` (`claude` or `codex`), `profile` (a `[surface.profiles]` name, claude only), `herdrSession` (default `paperclip`), `callbackPort` (default `3199`), `turnTimeoutSec` (30-86400, default `1800`), `forgectlPath` (`forgectl` or an absolute path). pi agents use Paperclip's built-in `pi_local` adapter, because forgectl refuses pi as a worker.
+Agent `adapterConfig` holds only per-agent choices: `repo` (required; must be one of `FORGECTL_PAPERCLIP_REPOS`), `harness` (`claude` or `codex`), `profile` (a `[surface.profiles]` name, claude only), `turnTimeoutSec` (30-86400, default `1800`). pi agents use Paperclip's built-in `pi_local` adapter, because forgectl refuses pi as a worker.
+
+An agent can edit its own `adapterConfig` through Paperclip's API, so anything that decides what the server executes or where panes open is set in the Paperclip server's environment, and the adapter refuses it in `adapterConfig`:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `FORGECTL_PAPERCLIP_REPOS` | `:`-separated absolute repo roots agents may use | required; unset means no repo is allowed |
+| `FORGECTL_PAPERCLIP_FORGECTL` | absolute path of the forgectl binary | `forgectl` on `PATH` |
+| `FORGECTL_PAPERCLIP_HERDR_SESSION` | herdr session for every pane | `paperclip` |
+| `FORGECTL_PAPERCLIP_CALLBACK_PORT` | loopback port for the Stop-hook listener | `3199` |
+
+Under Paperclip's `local_trusted` mode any local process, a worker included, is the instance admin, so these controls bound mistakes, not a hostile worker. Run `authenticated` mode before relying on them.
 
 ## Worker repo settings
 

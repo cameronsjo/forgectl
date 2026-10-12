@@ -59,13 +59,29 @@ test("sumTranscriptUsage counts each message once", () => {
   assert.deepEqual(u, { inputTokens: 30, outputTokens: 10, cachedInputTokens: 200, model: "claude-opus-5-5" });
 });
 
-test("parseConfig validates repo, timeout and forgectlPath", () => {
-  assert.throws(() => parseConfig({ repo: "relative/repo" }), /absolute path/);
-  assert.throws(() => parseConfig({ repo: "--json" }), /absolute path/);
-  assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: 0 }), /30-86400/);
-  assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: Number.NaN }), /30-86400/);
-  assert.throws(() => parseConfig({ repo: "/r", forgectlPath: "bin/forgectl" }), /absolute path/);
-  assert.equal(parseConfig({ repo: "/r", forgectlPath: "/opt/f" }).forgectlPath, "/opt/f");
+const OP = { FORGECTL_PAPERCLIP_REPOS: "/r:/other" };
+
+test("parseConfig takes repo only from the operator allowlist", () => {
+  assert.equal(parseConfig({ repo: "/r" }, OP).repo, "/r");
+  assert.throws(() => parseConfig({ repo: "/elsewhere" }, OP), /one of FORGECTL_PAPERCLIP_REPOS/);
+  assert.throws(() => parseConfig({ repo: "--json" }, OP), /one of FORGECTL_PAPERCLIP_REPOS/);
+  assert.throws(() => parseConfig({ repo: "/r" }, {}), /FORGECTL_PAPERCLIP_REPOS is not set/);
+  assert.throws(() => parseConfig({ repo: "/r" }, { FORGECTL_PAPERCLIP_REPOS: "rel/repo" }), /absolute paths/);
+});
+
+test("parseConfig refuses operator-only keys in adapterConfig, which an agent can edit", () => {
+  for (const k of ["forgectlPath", "herdrSession", "callbackPort"]) {
+    assert.throws(() => parseConfig({ repo: "/r", [k]: "x" }, OP), /not accepted/);
+  }
+  assert.equal(parseConfig({ repo: "/r", forgectlPath: null, herdrSession: null, callbackPort: null }, OP).repo, "/r");
+  const cfg = parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_FORGECTL: "/opt/f", FORGECTL_PAPERCLIP_HERDR_SESSION: "pc", FORGECTL_PAPERCLIP_CALLBACK_PORT: "4100" });
+  assert.deepEqual([cfg.forgectlPath, cfg.herdrSession, cfg.callbackPort], ["/opt/f", "pc", 4100]);
+  assert.throws(() => parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_FORGECTL: "bin/forgectl" }), /absolute path/);
+});
+
+test("parseConfig bounds the turn timeout", () => {
+  assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: 0 }, OP), /30-86400/);
+  assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: Number.NaN }, OP), /30-86400/);
 });
 
 test("workerNameFor keeps keys that slug alike apart, and successors stay with their key", () => {
@@ -83,11 +99,11 @@ test("extractIssue drops an identifier that is not a plain token", () => {
 });
 
 test("parseConfig accepts claude and codex, refuses pi and a profile on codex", () => {
-  assert.equal(parseConfig({ repo: "/r" }).harness, "claude");
-  assert.equal(parseConfig({ repo: "/r", harness: "codex" }).harness, "codex");
-  assert.throws(() => parseConfig({ repo: "/r", harness: "pi" }), /harness must be one of/);
-  assert.throws(() => parseConfig({ repo: "/r", harness: "codex", profile: "alt" }), /applies only to harness claude/);
-  assert.equal(parseConfig({ repo: "/r", profile: "alt" }).profile, "alt");
+  assert.equal(parseConfig({ repo: "/r" }, OP).harness, "claude");
+  assert.equal(parseConfig({ repo: "/r", harness: "codex" }, OP).harness, "codex");
+  assert.throws(() => parseConfig({ repo: "/r", harness: "pi" }, OP), /harness must be one of/);
+  assert.throws(() => parseConfig({ repo: "/r", harness: "codex", profile: "alt" }, OP), /applies only to harness claude/);
+  assert.equal(parseConfig({ repo: "/r", profile: "alt" }, OP).profile, "alt");
 });
 
 test("planTurn picks a free name when a closed ledger row holds the base name", () => {
