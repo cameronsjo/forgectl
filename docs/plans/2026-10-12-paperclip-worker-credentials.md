@@ -1,6 +1,6 @@
 ---
-status: in-flight
-next: "T4: Opus security review of the adapter file set and the Paperclip auth paths, fold findings, then flip PR #1246 to ready."
+status: done
+next: "Done: T1-T4. Remaining P1 items are tracked in forgectl#1244."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -25,7 +25,7 @@ Use Paperclip's run-scoped agent JWT, not a long-lived key and not a forgectl en
 
 - The adapter declares `supportsLocalAgentJwt: true`. Paperclip then mints a JWT per run and passes it as `ctx.authToken` (Paperclip `v2026.1005.0`: `packages/adapter-utils/src/types.ts` `AdapterExecutionContext.authToken`; minted only when the run takes the legacy, non-native runtime path, which `herdr_forgectl` does). The token expires in 48 h, is bound to its run id, and loses write access when the run is cancelled (`server/src/middleware/auth.ts` around lines 374-401, per the posture review).
 - Per turn, the adapter writes `~/.local/state/forgectl-paperclip/turns/<claude-session>.report` (0700 script, `O_EXCL|O_NOFOLLOW`, inside the existing private state dir) that embeds `PAPERCLIP_API_URL`, the issue id, the run id and the JWT, and takes two arguments: a status (`in_review` only) and a one-line comment. It calls `PATCH /api/issues/:id` with `Authorization: Bearer` and `X-Paperclip-Run-Id`, then `POST /api/issues/:id/comments`, with `curl --proto =http --max-redirs 0` to the loopback API.
-- The brief names the script's absolute path and the exact command. The worker never sees the token: the transcript shows only the path and the arguments.
+- The brief names the script's absolute path and the exact command. The script never prints the token and passes it to curl through a file descriptor, but the worker can read the file (T4 review, I1).
 - The script is removed in the adapter's `finally`, with the other turn files. A crash leaves at most a token that expires within 48 h.
 
 The worker runs as the operator (ADR-0010), so it can read the script. The token is scoped to this agent and this run, and expires; that is the boundary claimed, and only under Paperclip's `authenticated` mode. Under `local_trusted` (the spike) any local process is Paperclip's instance admin, so no per-worker credential adds a boundary there; this plan makes status reporting work in both modes and claims containment in neither.
@@ -75,7 +75,7 @@ Driver: opus. A credential path; implementation and review stay on Opus (Usage P
 - [x] **T1: adapter run JWT and report script.** Set `supportsLocalAgentJwt: true`. When `ctx.authToken` is absent, run as today and log that status reporting is off. Otherwise write the report script per Design, remove it in `finally`. Tests: script mode 0700 and refuses a planted link; refuses a status other than `in_review`, an oversized or multi-line comment; token absent from the brief and from every log line (checked by planting a canary token).
 - [x] **T2: brief ends at in_review.** The brief tells the worker to finish with the exact report command and never to set `done`. README documents the flow and the `authenticated`-mode caveat.
 - [x] **T3: live check against the baseline.** On the spike: positive control first, without T1 (the P0 runs above show `issue_disposition_repair` wakes). With T1: the issue is `in_review`; the issue activity log shows the actor as this agent with this turn's run id; `GET /api/agents/:id/wakeup-requests` (or the run list filtered by `wakeReason`) shows no `issue_disposition_repair` for the issue within 90 s (three heartbeats); a canary search of the ledger, the transcript and the run log finds no token.
-- [ ] **T4: security review before activation.** An Opus security review of the adapter file set (`integrations/paperclip/packages/adapter-herdr/src/*.ts`, the report script template, the Stop hook) and the Paperclip auth paths it relies on (`middleware/auth.ts`, `services/authorization.ts`, the issues routes).
+- [x] **T4: security review before activation.** An Opus security review of the adapter file set (`integrations/paperclip/packages/adapter-herdr/src/*.ts`, the report script template, the Stop hook) and the Paperclip auth paths it relies on (`middleware/auth.ts`, `services/authorization.ts`, the issues routes).
 
 ## Related
 
@@ -86,6 +86,7 @@ Driver: opus. A credential path; implementation and review stay on Opus (Usage P
 
 - T1: Paperclip refuses an agent's `in_review` without a review path and allows one assignee per issue, so the report script also sets `assigneeUserId` to an operator-chosen reviewer (`FORGECTL_PAPERCLIP_REVIEWER_USER_ID`) and clears `assigneeAgentId`. Without a reviewer configured it comments only. Found live: the first T3 run got HTTP 422 "Issue can only have one assignee".
 - T3: a successful handoff ends the agent's run as `cancelled` with `issue_reassigned`; that is Paperclip cancelling an agent's run when its issue is reassigned, not a failed turn.
+- T4 (Opus security review, 0 Critical, 2 Important, 3 Nit): the worker can read the run JWT, whose standard scope reaches any visible issue in the company; the design's "never sees the token" wording was wrong and is corrected in code comments, README and here. A token stays write-capable until expiry unless the run ends `cancelled`; the README now recommends `PAPERCLIP_AGENT_JWT_TTL_SECONDS` near the turn timeout. Nits fixed: the bearer header goes to curl through a file descriptor (no argv), the script is named by run id, and the summary must be printable ASCII.
 
 ## Learnings
 

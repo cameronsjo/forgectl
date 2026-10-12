@@ -117,7 +117,9 @@ test("the report script refuses bad input, sends two authenticated calls, and ne
   const dir = tmp();
   const bin = tmp();
   const log = path.join(bin, "curl.log");
-  writeFileSync(path.join(bin, "curl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nprintf 201\n`);
+  const hdr = path.join(bin, "headers.log");
+  // Logs argv, and separately the content of any @file header (how the script passes the bearer token).
+  writeFileSync(path.join(bin, "curl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nfor a in "$@"; do [[ "$a" == @* ]] && cat "\${a#@}" >> ${JSON.stringify(hdr)}; done\nprintf 201\n`);
   chmodSync(path.join(bin, "curl"), 0o755);
   const write = (reviewerUserId: string | null): string => {
     const f = path.join(dir, `r-${reviewerUserId ?? "none"}.sh`);
@@ -137,13 +139,16 @@ test("the report script refuses bad input, sends two authenticated calls, and ne
   assert.equal(run(f, ["done", "x"]).code, 2);
   assert.equal(run(f, ["in_review", "two\nlines"]).code, 2);
   assert.equal(run(f, ["in_review", ""]).code, 2);
+  assert.equal(run(f, ["in_review", "looks fine\u202Etxt.exe"]).code, 2, "bidi override refused");
   assert.equal(existsSync(log), false, "no request before the input checks pass");
   const ok = run(f, ["in_review", "Added X on branch b, commit abc123"]);
   assert.equal(ok.code, 0, ok.out);
   assert.ok(!ok.out.includes(token), "the token never reaches stdout or stderr");
   const calls = readFileSync(log, "utf8").trim().split("\n");
   assert.equal(calls.length, 2);
-  assert.match(calls[0] ?? "", /-X POST .*Authorization: Bearer canary\.TOKEN.*X-Paperclip-Run-Id: 0f1e2d3c.*\/api\/issues\/issue-1\/comments/);
+  assert.ok(!readFileSync(log, "utf8").includes(token), "no curl argv carries the token");
+  assert.match(calls[0] ?? "", /-X POST .*-H @\/dev\/fd\/[0-9]+ .*X-Paperclip-Run-Id: 0f1e2d3c.*\/api\/issues\/issue-1\/comments/);
+  assert.equal(readFileSync(hdr, "utf8").trim().split("\n").filter((l) => l === `Authorization: Bearer ${token}`).length, 2, "both calls send the bearer header");
   assert.match(calls[1] ?? "", /-X PATCH .*"status":"in_review".*"assigneeUserId":"local-board".*"assigneeAgentId":null/);
   writeFileSync(log, "");
   assert.equal(run(write(null), ["in_review", "summary"]).code, 0);

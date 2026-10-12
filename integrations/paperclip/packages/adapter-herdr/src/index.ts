@@ -145,12 +145,14 @@ async function runTurn(
   try {
     // Status reporting: Paperclip mints a run-scoped JWT (supportsLocalAgentJwt)
     // that the report script carries, so the worker can comment and hand the
-    // issue to review without ever seeing the token.
+    // issue to review. The script never prints the token, but the worker can
+    // read the file; see the README for what the token can do.
     const issueId = wakeIssueId(ctx.context);
     let reportCommand: string | null = null;
     if (ctx.authToken && issueId) {
+      // Named by run id: two concurrent turns for one worker never share a script.
       const script = await writeReportScript(
-        worker.session_id ?? worker.name,
+        ctx.runId,
         reportScript({ apiUrl: cfg.apiUrl, issueId, runId: ctx.runId, token: ctx.authToken, reviewerUserId: cfg.reviewerUserId }),
       );
       written.push(script);
