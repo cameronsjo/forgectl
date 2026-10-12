@@ -46,9 +46,9 @@ main() {
     local tmp; tmp=$(mktemp)
     jq --argjson p "$PORT" --argjson g "$PG_PORT" '.server.port = $p | .server.bind = "loopback" | .server.host = "127.0.0.1" | .database.embeddedPostgresPort = $g' "$INST/config.json" > "$tmp"
     install -m 0600 "$tmp" "$INST/config.json"; rm -f "$tmp"
-    command grep -q '^PAPERCLIP_AGENT_JWT_TTL_SECONDS=' "$INST/.env" || printf 'PAPERCLIP_AGENT_JWT_TTL_SECONDS=7200\n' >> "$INST/.env"
+    env_add PAPERCLIP_AGENT_JWT_TTL_SECONDS 7200
     # The adapter registry is shared by every instance; only this one's env names the operator file.
-    command grep -q '^FORGECTL_PAPERCLIP_CONFIG=' "$INST/.env" || printf 'FORGECTL_PAPERCLIP_CONFIG=%s\n' "$OPCONF" >> "$INST/.env"
+    env_add FORGECTL_PAPERCLIP_CONFIG "$OPCONF"
   fi
 
   step "3/6 adapter bundle -> $ADAPTER_DIR"
@@ -56,7 +56,6 @@ main() {
   run mkdir -p "$ADAPTER_DIR/dist"
   run install -m 0644 "$PKG/package.json" "$ADAPTER_DIR/package.json"
   run install -m 0644 "$PKG/dist/index.js" "$ADAPTER_DIR/dist/index.js"
-
   step "4/6 register herdr_forgectl in $HOME_DIR/adapter-plugins.json"
   local reg="$HOME_DIR/adapter-plugins.json" cur='[]' rt
   if ((!dry)); then
@@ -64,7 +63,6 @@ main() {
     jq --arg d "$ADAPTER_DIR" --arg t "$(date -u +%FT%TZ)" '[.[] | select(.type != "herdr_forgectl")] + [{packageName: "@forgectl/paperclip-adapter-herdr", localPath: $d, type: "herdr_forgectl", installedAt: $t, version: "0.0.0"}]' <<<"$cur" > "$rt"
     chmod 0600 "$rt"; mv "$rt" "$reg"
   else echo "would upsert the herdr_forgectl entry"; fi
-
   step "5/6 operator settings $OPCONF"
   if [[ -f "$OPCONF" ]]; then echo "exists; edit it by hand to change settings"
   elif ((dry)); then echo "would write repos=$repos forgectl=$fc api=http://127.0.0.1:$PORT"
@@ -80,6 +78,8 @@ main() {
   echo "UI and API: http://127.0.0.1:$PORT  (herdr session 'paperclip' must be running: herdr --session paperclip server)"
 }
 
+# Append KEY=VALUE to the instance .env once, starting a new line if the file lacks a final newline.
+env_add() { command grep -q "^$1=" "$INST/.env" && return 0; [[ -z "$(tail -c1 "$INST/.env")" ]] || echo >> "$INST/.env"; printf '%s=%s\n' "$1" "$2" >> "$INST/.env"; }
 # First start creates the database, secrets and .env; stop it once healthy so the service owns later starts.
 onboard() {
   local log; log=$(mktemp)

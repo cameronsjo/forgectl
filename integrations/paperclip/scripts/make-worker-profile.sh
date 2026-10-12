@@ -47,6 +47,7 @@ main() {
     exit 1
   fi
   if [[ ! -e "$settings" || $refresh -eq 1 ]]; then
+    [[ -f "$src/settings.json" ]] || { echo "$src/settings.json not found; nothing to derive the worker settings from" >&2; exit 1; }
     local mods_json
     mods_json=$(printf '%s\n' "${MODS[@]}" | jq -R . | jq -sc .)
     local tmp
