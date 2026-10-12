@@ -15,9 +15,9 @@ const RUN = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b";
 
 test("writeBrief writes outside every worktree, 0600, and will not write through a planted link", async () => {
   const state = tmp();
-  process.env["XDG_STATE_HOME"] = state;
+  process.env["HOME"] = state;
   const f = await writeBrief(RUN, "brief");
-  assert.ok(f.startsWith(path.join(state, "forgectl-paperclip", "briefs")), f);
+  assert.ok(f.startsWith(path.join(state, ".local", "state", "forgectl-paperclip", "briefs")), f);
   assert.equal(statSync(f).mode & 0o777, 0o600);
   assert.equal(statSync(path.dirname(f)).mode & 0o777, 0o700);
   await removeTurnFiles([f]);
@@ -31,19 +31,27 @@ test("writeBrief writes outside every worktree, 0600, and will not write through
   await assert.rejects(writeBrief("../escape", "x"), /refusing brief/);
 });
 
+test("a symlinked component below the state base is refused", async () => {
+  const state = tmp();
+  process.env["HOME"] = state;
+  mkdirSync(path.join(state, ".local", "state"), { recursive: true });
+  symlinkSync(tmp(), path.join(state, ".local", "state", "forgectl-paperclip"));
+  await assert.rejects(writeBrief(RUN, "brief"), /resolves through a symlink/);
+});
+
 test("the state dir must be private", async () => {
   const state = tmp();
-  process.env["XDG_STATE_HOME"] = state;
-  mkdirSync(path.join(state, "forgectl-paperclip", "briefs"), { recursive: true, mode: 0o755 });
-  chmodSync(path.join(state, "forgectl-paperclip", "briefs"), 0o755);
+  process.env["HOME"] = state;
+  mkdirSync(path.join(state, ".local", "state", "forgectl-paperclip", "briefs"), { recursive: true, mode: 0o755 });
+  chmodSync(path.join(state, ".local", "state", "forgectl-paperclip", "briefs"), 0o755);
   await assert.rejects(writeBrief(RUN, "brief"), /must be a 0700 directory/);
 });
 
 test("writeTurnFile keeps the token outside the worktree, mode 0600, keyed by session", async () => {
   const state = tmp();
-  process.env["XDG_STATE_HOME"] = state;
+  process.env["HOME"] = state;
   const f = await writeTurnFile("4de34e23-c46c-4ab2-86bb-b4837be5ea89", { runId: RUN, token: "a".repeat(64), callbackUrl: "http://127.0.0.1:3199/stop" });
-  assert.ok(f.startsWith(path.join(state, "forgectl-paperclip", "turns")));
+  assert.ok(f.startsWith(path.join(state, ".local", "state", "forgectl-paperclip", "turns")));
   assert.equal(statSync(f).mode & 0o777, 0o600);
   await assert.rejects(writeTurnFile("../escape", { runId: RUN, token: "a", callbackUrl: "x" }), /refusing turn file/);
 });
@@ -91,11 +99,11 @@ test("the Stop hook never calls curl for a tampered callback URL", () => {
   writeFileSync(path.join(bin, "curl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\n`);
   chmodSync(path.join(bin, "curl"), 0o755);
   const session = "4de34e23-c46c-4ab2-86bb-b4837be5ea89";
-  const turns = path.join(state, "forgectl-paperclip", "turns");
+  const turns = path.join(state, ".local", "state", "forgectl-paperclip", "turns");
   mkdirSync(turns, { recursive: true });
   const run = (url: string): void => {
     writeFileSync(path.join(turns, `${session}.json`), JSON.stringify({ runId: RUN, token: "d".repeat(64), callbackUrl: url }));
-    execFileSync("bash", [hook], { input: JSON.stringify({ session_id: session }), env: { PATH: `${bin}:/usr/bin:/bin:/opt/homebrew/bin`, HOME: state, XDG_STATE_HOME: state } });
+    execFileSync("bash", [hook], { input: JSON.stringify({ session_id: session }), env: { PATH: `${bin}:/usr/bin:/bin:/opt/homebrew/bin`, HOME: state } });
   };
   run("http://127.0.0.1:1@attacker.example/stop");
   assert.equal(existsSync(log), false, "no request for a userinfo URL");

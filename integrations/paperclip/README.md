@@ -7,11 +7,11 @@ A pnpm workspace, outside the Go build, that connects [Paperclip](https://github
 `packages/adapter-herdr` is a Paperclip server adapter. Each `execute()` is one turn in a long-lived herdr worker:
 
 1. No live worker for the agent and task: `forgectl surface launch <repo> --surface herdr --worktree paperclip/<name> --name <name> --harness <claude|codex> [--profile <p>]`, then `surface ready`.
-2. Write the brief to `${XDG_STATE_HOME:-~/.local/state}/forgectl-paperclip/briefs/<run>.md` (0600 in a 0700 dir; issue text fenced with a per-turn nonce) and `surface brief` the worker to read that absolute path. Nothing is written into the worker's worktree, which the worker can write and race.
-3. The turn ends on the worker's Claude Code `Stop` hook (claude), or on `surface wait` plus the brief's REPORT line (codex). The hook reads a turn file the adapter keeps outside every worktree, `${XDG_STATE_HOME:-~/.local/state}/forgectl-paperclip/turns/<claude session id>.json`, and POSTs the run id and a one-time token to `http://127.0.0.1:<port>/stop`. The adapter accepts it only for the worker's own session. A dialog that appears meanwhile fails the run as `worker_blocked`.
+2. Write the brief to `~/.local/state/forgectl-paperclip/briefs/<run>.md` (0600 in a 0700 dir; issue text fenced with a per-turn nonce) and `surface brief` the worker to read that absolute path. Nothing is written into the worker's worktree. The state dir is outside the worktree, not out of the worker's reach: an unsandboxed worker runs as the operator and can write it.
+3. The turn ends on the worker's Claude Code `Stop` hook (claude), or on `surface wait` plus the brief's REPORT line (codex). The hook reads a turn file the adapter keeps outside every worktree, `~/.local/state/forgectl-paperclip/turns/<claude session id>.json`, and POSTs the run id and a one-time token to `http://127.0.0.1:<port>/stop`. The adapter accepts it only for the worker's own session. A dialog that appears meanwhile fails the run as `worker_blocked`.
 4. `surface read --report` becomes the run summary; Claude usage is summed from the transcript path forgectl recorded, capped at 32 MiB per turn. The turn files are removed on every exit.
 
-The worker runs as the operator and can read the turn file during its turn, so the token proves the callback came from a local process during this turn, not that it came from the hook. That is accepted for a loopback, single-operator setup.
+The worker runs as the operator and can read the turn file during its turn, so the token proves the callback came from a local process during this turn, not that it came from the hook. That is accepted for a loopback, single-operator setup. `XDG_STATE_HOME` is not used, because forgectl does not pass it to workers and the hook could not follow it.
 
 Build and test:
 

@@ -2,17 +2,25 @@
 // own worktree and reads untrusted issue text, so nothing the adapter trusts
 // lives there and the adapter writes nothing there.
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rm, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm, type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 const ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 const WRITE_NEW = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 
-/** Where turn files live: outside every worktree, mode 0700. */
+/**
+ * Where turn files live: outside every worktree, under $HOME/.local/state.
+ * XDG_STATE_HOME is ignored on purpose: forgectl does not pass it to workers,
+ * so the Stop hook could not follow it there.
+ */
+export function stateBase(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env["HOME"] && path.isAbsolute(env["HOME"]) ? env["HOME"] : os.homedir();
+  return path.join(home, ".local", "state");
+}
+
 export function turnStateDir(env: NodeJS.ProcessEnv = process.env): string {
-  const base = env["XDG_STATE_HOME"] && path.isAbsolute(env["XDG_STATE_HOME"]) ? env["XDG_STATE_HOME"] : path.join(os.homedir(), ".local", "state");
-  return path.join(base, "forgectl-paperclip", "turns");
+  return path.join(stateBase(env), "forgectl-paperclip", "turns");
 }
 
 async function writeNew(file: string, content: string): Promise<void> {
@@ -30,9 +38,16 @@ async function writeNew(file: string, content: string): Promise<void> {
  * callback URL, keyed by the Claude session id forgectl assigned the worker.
  * Returns the path to remove when the turn ends.
  */
-/** Create (or check) a private directory: a real directory, owned by this user, mode 0700. */
+/**
+ * Create (or check) a private directory under the state base: every component
+ * below the base must be a real directory (no symlink), and the leaf must be
+ * owned by this user with mode 0700.
+ */
 async function privateDir(dir: string): Promise<string> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
+  const base = stateBase();
+  const expected = path.join(await realpath(base), path.relative(base, dir));
+  if ((await realpath(dir)) !== expected) throw new Error(`${dir} resolves through a symlink below ${base}; refusing to use it`);
   const st = await lstat(dir);
   const uid = process.getuid?.() ?? st.uid;
   if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid || (st.mode & 0o077) !== 0) {
@@ -58,7 +73,7 @@ export async function writeTurnFile(sessionId: string, turn: { runId: string; to
  */
 export async function writeBrief(runId: string, content: string): Promise<string> {
   if (!ID_RE.test(runId)) throw new Error(`refusing brief for run id ${JSON.stringify(runId)}: not [A-Za-z0-9-]{1,64}`);
-  const dir = await privateDir(path.join(path.dirname(turnStateDir()), "briefs"));
+  const dir = await privateDir(path.join(stateBase(), "forgectl-paperclip", "briefs"));
   const file = path.join(dir, `${runId}.md`);
   await rm(file, { force: true });
   await writeNew(file, content);

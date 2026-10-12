@@ -3,7 +3,8 @@
 #
 # The adapter writes a turn file outside every worktree, keyed by the Claude
 # session id forgectl gave the worker:
-#   ${XDG_STATE_HOME:-~/.local/state}/forgectl-paperclip/turns/<session_id>.json
+#   $HOME/.local/state/forgectl-paperclip/turns/<session_id>.json
+# (XDG_STATE_HOME is not used: forgectl does not pass it to workers.)
 # holding {"runId", "token", "callbackUrl"}. When the turn ends, this hook
 # POSTs the run id, token and session id to the adapter's loopback listener.
 # A session with no turn file (any ordinary session) does nothing.
@@ -15,8 +16,8 @@ payload=$(cat)
 session=$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null) || exit 0
 [[ "$session" =~ ^[A-Za-z0-9-]{1,64}$ ]] || exit 0
 
-state=${XDG_STATE_HOME:-$HOME/.local/state}
-# A relative state dir would resolve inside the worktree, which the worker writes.
+state="${HOME:-}/.local/state"
+# A relative HOME would resolve inside the worktree, which the worker writes.
 [[ "$state" == /* ]] || exit 0
 turn="$state/forgectl-paperclip/turns/$session.json"
 # A plain file only: never follow a link into some other file.
