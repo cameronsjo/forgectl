@@ -216,6 +216,31 @@ func Compose(text, marker, via string) string {
 // markdown emphasis the harness may not have rendered.
 const reportPrefix = `^[ \t]*(?:[⏺•●][ \t]*)?[*_` + "`" + `]*`
 
+// reportLead matches the part of a report line before its text column: the
+// indentation and the optional assistant-message bullet.
+var reportLead = regexp.MustCompile(`^[ \t]*(?:[⏺•●][ \t]*)?`)
+
+// continuesReport reports whether l is a wrapped continuation of a report
+// line whose text starts at column col. A harness wraps a message onto lines
+// indented to exactly that column, and prose holds no box-drawing or block
+// glyphs, so a line indented any other way, or one drawing a banner, a rule
+// or a box, belongs to another region of the screen (forgectl#1237).
+func continuesReport(l string, col int) bool {
+	if col == 0 || strings.TrimSpace(l) == "" {
+		return false
+	}
+	indent := len(l) - len(strings.TrimLeft(l, " \t"))
+	if indent != col {
+		return false
+	}
+	for _, r := range l {
+		if r >= 0x2500 && r <= 0x259F {
+			return false
+		}
+	}
+	return true
+}
+
 // FindReport returns the worker's report for marker from a screen, and
 // whether one was found.
 //
@@ -223,7 +248,8 @@ const reportPrefix = `^[ \t]*(?:[⏺•●][ \t]*)?[*_` + "`" + `]*`
 // line that names the marker and is not itself a report line; the brief's
 // instruction names the marker, so the brief can never supply its own
 // report. Of the report lines after it, the last wins. A report wrapped onto
-// following indented lines is joined back into one line.
+// following lines indented to its text column is joined back into one line;
+// the report ends at the first line that is not such a continuation.
 func FindReport(screen, marker string) (string, bool) {
 	if !validMarker(marker) {
 		return "", false
@@ -247,8 +273,9 @@ func FindReport(screen, marker string) (string, bool) {
 		return "", false
 	}
 	parts := []string{strings.TrimSpace(first)}
+	col := utf8.RuneCountInString(reportLead.FindString(lines[found]))
 	for _, l := range lines[found+1:] {
-		if l == "" || (l[0] != ' ' && l[0] != '\t') || strings.TrimSpace(l) == "" {
+		if !continuesReport(l, col) {
 			break
 		}
 		parts = append(parts, strings.TrimSpace(l))
