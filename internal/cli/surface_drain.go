@@ -88,8 +88,9 @@ needs-you too. The drain never types into a pane or answers a prompt.
 
 Before each claude launch the drain runs claude-slots check N (found on PATH
 at start, 5 s cap), where N is 1 plus the launches this tick already made: exit
-1 puts the row back to queued and waits; a missing or failing claude-slots
-launches without the session cap. A row's --profile is
+0 launches; any other result, a timeout included, puts the row back to queued
+and waits. Only a claude-slots missing at start launches without the session
+cap. A row's --profile is
 resolved from the config file at launch; an unknown name pauses claiming.
 
   forgectl surface drain start
