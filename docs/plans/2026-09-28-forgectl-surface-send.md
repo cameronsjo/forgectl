@@ -117,8 +117,10 @@ Inputs for T5 and T6 the spikes found:
   that needs its own answer should go `--priority later`.
 - `sent` means the harness took the message, not that the model read it. A
   held Claude message and a Codex worker that has quit both read `sent`.
-- After `/new` in Codex the worker's thread changes and its notifies are then
-  ignored as another thread's. Not measured; T5 should check it.
+- After `/new` in Codex the roster keeps the abandoned thread: sends go there
+  and the worker's later turns never mark it idle, so a `/new` means
+  re-registering the worker. Measured on codex-cli 0.162.1 (2026-10-12); T5
+  owns it.
 
 ## Design
 
@@ -250,7 +252,7 @@ pairs can still use native `notify_when_idle`.
 - [x] T3: `go build`, `go vet` (also `GOOS=windows`), `go test ./internal/surface/mail/...`; fix what the compiler finds. It compiled and passed as written; the fixes were gofmt and lint.
 - [x] S1: Claude on 2.1.289: passed; the frame no longer carries `session_id`. See Live spikes.
 - [x] S2: Codex 0.160.0: delivery passed; the title-generation and other-thread notifies are now ignored.
-- [x] S3: pi 1.0.4: passed after the idle-race fix (mode on every send, idle at `agent_settled`). Re-run the type-check and the gap repro against the fixed extension.
+- [x] S3: pi 1.0.4: passed after the idle-race fix (mode on every send, idle at `agent_settled`). Re-run on 2026-10-12: type-check clean against the real package (1.0.4, 1.1.0) and a send in the gap delivers.
 - [x] Seams: `mail.Runner` is the `Run` method of `internal/exec.Runner`, so the production and fake runners plug in unchanged; the Codex adapter masks `--message=` so a body never reaches the runner's debug log or a failure's text. `FileRoster` stands in for the #536 T1 ledger until it lands.
 - [x] T4: `surface send`, `inbox`, `flush` and `event` in `internal/cli/surface_mail.go`. `send` flushes first. `ready`, `wait` and `list` landed with #536 but do not flush yet: until T5 writes the mail roster, a flush from them would only create an empty mail ledger in every Claude session that runs them. `event` exits 0 or 1, never 2, because exit 2 from a Claude Code hook blocks the stop or erases the prompt, and it prints nothing without `--json` because a `UserPromptSubmit` hook's stdout joins the prompt. No pane adapter is wired, and `[surface] peer_messages` is not read yet (the default policy applies); both belong with T5. The mail ledger lives under `<state>/forgectl/mail/<hash>`, beside the worker ledger's `<state>/forgectl/surface/`, which pins its directory and owns every entry in it.
 - [ ] T5: launch wiring in `surface launch` once #536 T1 lands.
