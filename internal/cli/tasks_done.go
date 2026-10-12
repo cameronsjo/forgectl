@@ -105,7 +105,9 @@ EXIT CODES
      before retrying), a missing write credential, and a bad argument
   2  the instance could not be reached
   3  the server rejected the credential, on the first read or on the update
-  4  the host is not one a keychain credential may be sent to`,
+  4  the host is not one a keychain credential may be sent to, or the call
+     runs inside a drain worker (FORGECTL_DRAIN_WORKER set): a worker never
+     closes a board task`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -136,6 +138,12 @@ EXIT CODES
 // elsewhere. readTasksKeychainToken applies the rule again before the read; by
 // then it cannot refuse, so it records nothing twice.
 func runTasksDone(cmd *cobra.Command, deps module.Deps, in tasksDoneInput) error {
+	// Before everything, the host rule included: a drain worker must not close
+	// a board task, which cannot be undone (cameronsjo/forgectl#1226). Exit 4,
+	// refused (ADR-0015): the same call from the same worker never passes.
+	if err := refuseBoardWriteInDrainWorker("tasks done"); err != nil {
+		return jsonFailure(cmd, err, in.asJSON, jsonCodeFailed)
+	}
 	ctx := cmd.Context()
 
 	if err := tasks.CheckAllowedHost(in.host, deps.Cfg.Tasks.AllowedHosts); err != nil {

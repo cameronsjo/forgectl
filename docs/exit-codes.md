@@ -8,7 +8,7 @@ One table for every forgectl verb ([ADR-0015](adr/0015-exit-code-table.md), [#10
 | 1 | `failed` | The verb ran and the result did not hold: a failed step, drift, a partial result, a refusal that carries its reason, a degraded `--strict` report. The default for an error with no class. | Read the output. Re-run once if it names a transient cause; otherwise stop and report. |
 | 2 | `usage` | Nothing was attempted, and the caller or operator can fix it: a bad flag or argument, an unknown verb, a malformed name, something absent or unconfigured (no terminal, no herdr pane, no backend on `PATH`), a config that does not parse. | Stop. Fix the call or setup. Do not retry it unchanged. |
 | 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | Stop. Escalate to whoever owns the credential. |
-| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal and `surface send` between two workers while `peer_messages` is off. | Stop. Escalate. |
+| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal, `tasks done` and `tasks mcp` inside a drain worker, and `surface send` between two workers while `peer_messages` is off. | Stop. Escalate. |
 | 5 | `unreachable` | Reserved. No verb emits it. | |
 | 6 | `not_found` | Reserved. No verb emits it. | |
 

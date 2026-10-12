@@ -959,6 +959,8 @@ func TestTasksDone_Closer(t *testing.T) {
 // TestTasksSources_ReadNoEnvironmentVariable: the tasks commands take their
 // inputs from flags, the config file and the keychain. An environment variable
 // read here would be a second, unreviewed input to a credentialed write path.
+// The drain-worker refusal (refuseBoardWriteInDrainWorker) reads its marker
+// outside these files: it can only stop a write, never feed one.
 func TestTasksSources_ReadNoEnvironmentVariable(t *testing.T) {
 	for _, file := range []string{"tasks.go", "tasks_done.go", "tasks_mcp.go"} {
 		src, err := os.ReadFile(file) //nolint:gosec // G304: a literal file name in this package's directory
