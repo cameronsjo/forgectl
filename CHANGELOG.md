@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.1](https://github.com/cameronsjo/forgectl/compare/v0.44.0...v0.44.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **surface:** see Claude Code's auto-mode dialog and placeholder, and Codex 0.162's composer, in surface ready ([15601ce](https://github.com/cameronsjo/forgectl/commit/15601cef10b095259bdcef8c621ad9ad2c40a15e))
+
 ## [0.44.0](https://github.com/cameronsjo/forgectl/compare/v0.43.1...v0.44.0) (2026-10-12)
 
 
