@@ -44,8 +44,15 @@ func checkDay(day string) error {
 
 // MaxDrainEventsBytes is the size at which the events file is renamed to
 // .1, replacing the previous .1. It is the read cap every file in the
-// surface directory shares, so a reader always reads a whole file.
+// surface directory shares except usage-daily.jsonl, so a reader always
+// reads a whole file.
 const MaxDrainEventsBytes = maxLedgerBytes
+
+// MaxUsageBytes is usage-daily.jsonl's own read cap. The file is never
+// rotated, so it outgrows the shared 1 MiB cap after about 10,000 pruned
+// rows; 16 MiB, like merge-audit.jsonl, holds about 160,000 (forgectl#1221).
+// A larger file is still ErrLedgerUnreadable, never read in part.
+const MaxUsageBytes = 16 << 20
 
 // ErrDrainLocked reports a drain lock another process holds.
 var ErrDrainLocked = errors.New("worker: another surface drain holds drain.lock")

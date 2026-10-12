@@ -157,9 +157,10 @@ func appendAt(dir int, name string, data []byte) error {
 	return nil
 }
 
-// ReadUsage returns usage-daily.jsonl, or nil when there is none.
+// ReadUsage returns usage-daily.jsonl, or nil when there is none. It reads
+// up to MaxUsageBytes, not the shared cap.
 func (d DrainFiles) ReadUsage() ([]byte, error) {
-	return d.read(usageDailyName)
+	return d.readMax(usageDailyName, MaxUsageBytes)
 }
 
 // ReadPruneDay returns the UTC day the drain last ran its daily prune, or
@@ -190,6 +191,11 @@ func (d DrainFiles) WritePruneDay(day string) error {
 }
 
 func (d DrainFiles) read(name string) ([]byte, error) {
+	return d.readMax(name, maxLedgerBytes)
+}
+
+// readMax is read with its own size cap.
+func (d DrainFiles) readMax(name string, limit int) ([]byte, error) {
 	dir, err := d.pin(false)
 	if errors.Is(err, privdir.ErrAbsent) {
 		return nil, nil
@@ -198,5 +204,5 @@ func (d DrainFiles) read(name string) ([]byte, error) {
 		return nil, fmt.Errorf("worker: drain directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // read-only descriptor
-	return readAt(dir, name)
+	return readAtMax(dir, name, limit)
 }
