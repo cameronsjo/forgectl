@@ -106,8 +106,10 @@ prompt_first = false
 # The composer (continuation rows indented two spaces), an optional blank
 # row, the model/context footer, then up to 3 indented or empty rows. A long
 # branch or path cuts the model row off before "Context N% left" (Codex 0.162.1
-# in a worker worktree), so the shortcuts row under it also marks the footer.
-prompt = '(?m)^› (?P<input>.*(?:\n  .*)*?)\n\n?(?P<footer>(?:  \S.*· Context \d+% left.*|  \S+ (?:minimal|low|medium|high|xhigh) · .*\n  ← for agents · .*)(?:\n(?:\s.*)?){0,3})\z'
+# in a worker worktree), so a model row shaped `<model> <effort> · …` also
+# marks the footer. Typing hides the shortcuts row under it, so that row is
+# not required.
+prompt = '(?m)^› (?P<input>.*(?:\n  .*)*?)\n\n?(?P<footer>(?:  \S.*· Context \d+% left.*|  \S+ (?:minimal|low|medium|high|xhigh) · .*)(?:\n(?:\s.*)?){0,3})\z'
 # An empty composer shows a placeholder. It is reported as no input.
 placeholder = '^Ask Codex to do anything$'  # captured; Codex rotates others, which read as typed input (the safe direction)
 

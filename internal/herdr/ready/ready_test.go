@@ -74,6 +74,9 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		// model line off before "Context N% left"; the shortcuts row under it
 		// still marks the footer (forgectl#1242).
 		{"codex-ready-long-branch", "codex", StateReady, "", ""},
+		// Typing hides the shortcuts row, so the model row alone marks the
+		// footer; this is the read-back of a real typed brief.
+		{"codex-typed-long-branch", "codex", StateReady, "", "Read .paperclip/brief-5f1ca350-2015-4a42-bc26-f6765f69782f.md and do what it asks. When you finish, end your final message with one line made of: the word REPORT, a space, the code 51056b2def1b, a colon, then a one-line summary of what you did and where it is (branch, commit, PR)."},
 		// Claude Code 2.1.289 after a first auto-mode turn, with interactive
 		// mods drawing above the box: ready, nothing typed.
 		{"claude-after-first-auto-turn", "claude", StateReady, "", ""},
