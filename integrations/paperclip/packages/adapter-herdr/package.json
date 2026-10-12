@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && esbuild src/index.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json --outDir dist-test && node --test dist-test/*.test.js"
+    "test": "tsc -p tsconfig.json --outDir dist-test && node --test --test-timeout=60000 dist-test/*.test.js"
   },
   "devDependencies": {
     "@paperclipai/adapter-utils": "2026.1005.0",

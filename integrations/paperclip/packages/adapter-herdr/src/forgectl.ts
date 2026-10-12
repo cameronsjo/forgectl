@@ -25,8 +25,13 @@ export function runForgectl(cfg: AdapterConfig, args: string[], timeoutMs: numbe
       args,
       { env: forgectlEnv(process.env, cfg.herdrSession), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
-        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+        if (!err) return resolve({ code: 0, stdout: String(stdout), stderr: String(stderr) });
+        const e = err as { code?: unknown; killed?: boolean; signal?: string | null };
+        if (e.killed) {
+          // execFile's timeout: keep it apart from a real non-zero exit.
+          return resolve({ code: 124, stdout: String(stdout), stderr: `${String(stderr)}\nforgectl ${args[0] ?? ""} ${args[1] ?? ""} timed out after ${timeoutMs} ms (signal ${e.signal ?? "unknown"})` });
+        }
+        resolve({ code: typeof e.code === "number" ? e.code : 1, stdout: String(stdout), stderr: `${String(stderr)}${typeof e.code === "string" ? `\n${e.code}` : ""}` });
       },
     );
   });

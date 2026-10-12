@@ -1,13 +1,16 @@
 // Pure decisions for the herdr adapter. Nothing here touches the network,
 // the filesystem, or a child process.
 
+import { createHash } from "node:crypto";
+import path from "node:path";
+
 export const ADAPTER_TYPE = "herdr_forgectl" as const;
 
 export const HARNESSES = ["claude", "codex"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 export interface AdapterConfig {
-  /** Repository the worker is launched from (path or forgectl project name). */
+  /** Absolute path of the repository the worker is launched from. */
   repo: string;
   /**
    * Harness forgectl starts in the pane. claude ends a turn on its Stop hook;
@@ -32,8 +35,10 @@ const SESSION_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 export function parseConfig(raw: Record<string, unknown>): AdapterConfig {
   const repo = raw["repo"];
-  if (typeof repo !== "string" || repo.length === 0) {
-    throw new Error(`adapterConfig.repo must be a non-empty string; got ${JSON.stringify(repo)}`);
+  // An absolute path, so it can never be read as a flag in forgectl's argv
+  // and the worktree check can resolve it.
+  if (typeof repo !== "string" || !path.isAbsolute(repo)) {
+    throw new Error(`adapterConfig.repo must be an absolute path; got ${JSON.stringify(repo)}`);
   }
   const herdrSession = typeof raw["herdrSession"] === "string" ? raw["herdrSession"] : "paperclip";
   if (!SESSION_RE.test(herdrSession)) {
@@ -55,8 +60,15 @@ export function parseConfig(raw: Record<string, unknown>): AdapterConfig {
   if (!Number.isInteger(callbackPort) || callbackPort < 1024 || callbackPort > 65535) {
     throw new Error(`adapterConfig.callbackPort must be an integer in 1024-65535; got ${callbackPort}`);
   }
-  const turnTimeoutSec = typeof raw["turnTimeoutSec"] === "number" ? raw["turnTimeoutSec"] : 1800;
-  const forgectlPath = typeof raw["forgectlPath"] === "string" ? raw["forgectlPath"] : "forgectl";
+  const turnTimeoutSec = raw["turnTimeoutSec"] ?? 1800;
+  if (typeof turnTimeoutSec !== "number" || !Number.isInteger(turnTimeoutSec) || turnTimeoutSec < 30 || turnTimeoutSec > 86_400) {
+    throw new Error(`adapterConfig.turnTimeoutSec must be an integer in 30-86400; got ${JSON.stringify(turnTimeoutSec)}`);
+  }
+  // Either the forgectl on PATH or an absolute path the operator chose.
+  const forgectlPath = raw["forgectlPath"] ?? "forgectl";
+  if (typeof forgectlPath !== "string" || (forgectlPath !== "forgectl" && !path.isAbsolute(forgectlPath))) {
+    throw new Error(`adapterConfig.forgectlPath must be "forgectl" or an absolute path; got ${JSON.stringify(forgectlPath)}`);
+  }
   return { repo, harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath };
 }
 
@@ -101,9 +113,12 @@ export function decodeSession(raw: unknown): WorkerSession | null {
 /** A worker name is stable per agent + task key, so a restarted server finds the same pane. */
 export function workerNameFor(agentId: string, taskKey: string | null): string {
   const slug = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const agent = slug(agentId).slice(0, 12) || "agent";
-  const task = slug(taskKey ?? "default").slice(0, 24) || "default";
-  return `pc-${agent}-${task}`.slice(0, 48).replace(/-+$/, "");
+  const agent = slug(agentId).slice(0, 8).replace(/-+$/, "") || "agent";
+  const task = slug(taskKey ?? "default").slice(0, 16).replace(/-+$/, "") || "default";
+  // The slugs are for reading; the hash keeps two keys that slug or truncate
+  // alike (issue-5 and issue-5-2) from naming the same worker.
+  const hash = createHash("sha256").update(`${agentId}\0${taskKey ?? ""}`).digest("hex").slice(0, 8);
+  return `pc-${agent}-${task}-${hash}`;
 }
 
 /** One row of `forgectl surface list --json`. Only the fields the adapter reads. */
@@ -125,8 +140,8 @@ export type TurnPlan =
 
 /**
  * Decide whether this turn launches a new pane or briefs a live one.
- * `reattached` is true when the session came from Paperclip's store, i.e. a
- * previous server process launched the worker.
+ * `reattached` is true when the worker was found through the session
+ * Paperclip stored for this agent and task, rather than by name.
  */
 export function planTurn(session: WorkerSession | null, fallbackName: string, workers: ListedWorker[]): TurnPlan {
   const live = (w: ListedWorker): boolean => w.stage === "launched" && !w.orphan && w.state !== "gone";
@@ -200,7 +215,10 @@ export function extractIssue(context: Record<string, unknown>): IssueView | null
   for (const c of candidates) {
     if (c && typeof c === "object") {
       const o = c as Record<string, unknown>;
-      return { identifier: str(o["identifier"]) ?? str(o["id"]), title: str(o["title"]), description: str(o["description"]) };
+      // The identifier sits outside the untrusted fence, so it must be a plain token.
+      const ident = str(o["identifier"]) ?? str(o["id"]);
+      const identifier = ident && /^[A-Za-z0-9._:-]{1,64}$/.test(ident) ? ident : null;
+      return { identifier, title: str(o["title"]), description: str(o["description"]) };
     }
   }
   return null;

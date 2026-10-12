@@ -65,6 +65,8 @@ export async function ensureListener(port: number): Promise<void> {
     });
   });
   s.requestTimeout = 10_000;
+  // The host process (Paperclip) keeps running on its own; the listener should not hold it open.
+  s.unref();
   await new Promise<void>((resolve, reject) => {
     s.once("error", reject);
     s.listen(port, "127.0.0.1", () => resolve());
@@ -73,16 +75,36 @@ export async function ensureListener(port: number): Promise<void> {
   state.boundPort = port;
 }
 
-/** Resolves with the hook's payload, or null when the turn times out or is cancelled. */
-export function awaitStop(runId: string, token: string, timeoutMs: number, signal?: AbortSignal): Promise<StopCallback | null> {
-  return new Promise((resolve) => {
-    const done = (v: StopCallback | null): void => {
+export type StopOutcome =
+  | { kind: "stop"; cb: StopCallback }
+  | { kind: "timeout" }
+  | { kind: "cancelled" };
+
+export interface StopWait {
+  result: Promise<StopOutcome>;
+  /** Resolves the wait as cancelled and frees its timer and pending entry; safe to call twice. */
+  cancel: () => void;
+}
+
+/** Waits for the worker's Stop hook, a timeout, or the run's abort signal, whichever comes first. */
+export function awaitStop(runId: string, token: string, timeoutMs: number, signal?: AbortSignal): StopWait {
+  let settle: (v: StopOutcome) => void = () => undefined;
+  const result = new Promise<StopOutcome>((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => done({ kind: "timeout" }), timeoutMs);
+    const onAbort = (): void => done({ kind: "cancelled" });
+    function done(v: StopOutcome): void {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
-      pending.delete(runId);
+      signal?.removeEventListener("abort", onAbort);
+      if (pending.get(runId)?.token === token) pending.delete(runId);
       resolve(v);
-    };
-    const timer = setTimeout(() => done(null), timeoutMs);
-    signal?.addEventListener("abort", () => done(null), { once: true });
-    pending.set(runId, { token, resolve: (cb) => done(cb) });
+    }
+    settle = done;
+    if (signal?.aborted) return done({ kind: "cancelled" });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    pending.set(runId, { token, resolve: (cb) => done({ kind: "stop", cb }) });
   });
+  return { result, cancel: () => settle({ kind: "cancelled" }) };
 }

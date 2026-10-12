@@ -134,7 +134,7 @@ Recorded, not patched around:
 ## Unknowns
 
 - **Two worktree owners.** Paperclip's execution workspace and forgectl's worker worktree both claim the agent's cwd; the adapter uses forgectl's (forgectl#1244).
-- **Stop-hook authenticity.** A local process that can read `.paperclip/turn.json` during a turn can forge a done signal; the file is deleted after each turn (forgectl#1244).
+- **Stop-hook authenticity.** Polish's security review found the first design kept the token, callback URL and turn state in the worktree the worker writes. The adapter now keeps them in a 0700 state dir outside every worktree, writes the brief without following links, validates every field in the hook, accepts a callback only for the worker's own session, and reads usage only from forgectl's transcript path. A same-user process can still read the turn file during a turn; that is accepted for a loopback, single-operator setup.
 - **Hermes endpoint.** Tracked privately with P4 (forgectl#1245).
 
 ## P1 plan (what is left)
