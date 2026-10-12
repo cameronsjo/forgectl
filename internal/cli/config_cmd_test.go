@@ -418,6 +418,24 @@ func TestConfig_SurfaceProfilesShowConfigDir(t *testing.T) {
 	}
 }
 
+// TestConfig_SurfaceProfilesUnsetIsEmptyList pins the fallback in
+// surfaceProfilesValue: with no [surface.profiles] table, --json carries an
+// empty list, never null, so a reader can range over it without a nil check.
+func TestConfig_SurfaceProfilesUnsetIsEmptyList(t *testing.T) {
+	doc := runConfigJSON(t, "")
+	e := findEntry(t, doc, "surface.profiles")
+	if e.Redacted || e.Set {
+		t.Errorf("surface.profiles redacted=%v set=%v, want both false", e.Redacted, e.Set)
+	}
+	got, err := json.Marshal(e.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "[]" {
+		t.Errorf("unset surface.profiles value = %s, want []", got)
+	}
+}
+
 // TestConfig_EveryBindableFieldIsTagged extends configStructSections' fatal
 // from top-level sections to every field at every depth.
 //
