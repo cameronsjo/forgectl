@@ -72,6 +72,29 @@ export async function brief(cfg: AdapterConfig, name: string, text: string): Pro
   return { ...parseJson(r, "surface brief"), code: r.code };
 }
 
+/**
+ * Polls the worker until it shows a blocking dialog (permission prompt, plan
+ * approval, trust) and resolves with forgectl's name for it. Resolves null
+ * once `stop` aborts. forgectl never answers a dialog, and neither does this.
+ */
+export async function watchForBlocking(cfg: AdapterConfig, name: string, stop: AbortSignal, intervalMs = 15_000): Promise<string | null> {
+  while (!stop.aborted) {
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, intervalMs);
+      stop.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+    if (stop.aborted) return null;
+    const r = await runForgectl(cfg, ["surface", "ready", name, "--repo", cfg.repo, "--timeout", "1s", "--json"], 20_000);
+    try {
+      const v = JSON.parse(r.stdout) as Record<string, unknown>;
+      if (typeof v["blocking"] === "string" && v["blocking"] !== "") return v["blocking"];
+    } catch {
+      // An unreadable screen is not a verdict; keep waiting for the Stop hook.
+    }
+  }
+  return null;
+}
+
 /** Waits for a codex turn to settle; the caller still requires the REPORT line before calling it done. */
 export async function waitSettled(cfg: AdapterConfig, name: string, timeoutSec: number): Promise<Record<string, unknown> & { code: number }> {
   const r = await runForgectl(cfg, ["surface", "wait", name, "--repo", cfg.repo, "--timeout", `${timeoutSec}s`, "--json"], (timeoutSec + 30) * 1000);

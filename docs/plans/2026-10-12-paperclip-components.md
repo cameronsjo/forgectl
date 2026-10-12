@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Cameron reviews the ledger, the P0 results and the dispatch-rule amendment draft; P1 waits on his go."
+next: "Fix or file gap 11 (second brief fails read-back), then rerun P0 check 3; trust ~/.claude-alt and codex for the scratch repo and run eng-alt and eng-codex."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -88,7 +88,21 @@ Verdict counts: **use as is 12, extend 4, borrow 7, skip 5** (28 rows).
 
 ## P0 spike results
 
-Filled in below from the live run.
+Setup: Paperclip `2026.1005.0` on `127.0.0.1:3100` (`local_trusted`, `PAPERCLIP_HOME=/tmp/pc-scratch/home`), `herdr --session paperclip`, scratch repo `~/Projects/_scratch/paperclip-spike` (local only, trusted once by Cameron for Claude main). Workers run `[launch.worker] permission_mode = "auto"` (Cameron, 2026-10-12).
+
+| Exit check | Result | Evidence |
+|---|---|---|
+| Stop hook arrives, run ends `succeeded` | `PASS` | Run `be98b238` (`PAP-14`, assignment wake): launch, brief, Stop hook, `succeeded` in 20 s; Claude committed `WELCOME.md` as `64db7aa`. Run `a25d2d89` (no issue) repeated it in pane `w9:p1`. |
+| Usage recorded on the run | `PASS` | Run `be98b238` `usageJson`: 67,001 input, 873 output, 250,044 cached, model `claude-opus-5-5`, summed from the transcript lines the turn appended. |
+| Pane survives a Paperclip restart and is reattached | `FAIL` | The pane survived: `w9:p1` stayed live while the server went from pid `95158` to `22946`, and run `a13b402d` found it (`Reusing live pane`). The turn then failed: `forgectl surface brief` refused at read-back. A direct `forgectl surface brief` on the same idle pane fails the same way, so the cause is a second brief into a Claude worker after a completed turn, not the restart. Paperclip also returned no stored `sessionParams` for an issue-free wake, so the pane was found by its stable name, not by Paperclip's session store. |
+| Two agents race for one issue, exactly one wins | `PASS` | `/tmp/pc-scratch/race.sh`, six trials: every trial one 200 and one 409 `Issue checkout conflict`; each agent won at least once. Run ids must be real `heartbeat_runs` rows (`issues_checkout_run_id_heartbeat_runs_id_fk`). |
+
+Seam findings from the runs:
+
+- **Second brief never reaches the input box.** After a completed turn, typed text does not appear in Claude Code's input, the screen shows only the startup banner, and `surface brief` refuses at read-back with "the text sits unsent", while `surface ready` reports `input: null`. Repro: launch a worker, brief it once, wait for the turn to end, brief again. Not yet filed.
+- **The placeholder reads as typed text.** A fresh Claude worker shows `Try "refactor <filepath>"` in its input; `surface ready` reports it as `input`, and `surface brief` refuses. `promptSuggestionEnabled: false` in the repo's `.claude/settings.json` clears it (prediction tested: `input: null` on a fresh worker).
+- **Permission prompts stall `acceptEdits` workers** and the adapter waited for the timeout. The adapter now polls `surface ready` and fails the run as `worker_blocked` the moment a dialog shows.
+- **Every turn triggers a disposition-repair wake.** A run that ends without the issue's status changing gets an `issue_disposition_repair` wake right away. The worker cannot set status because it has no Paperclip credentials (gap 1), so each successful turn is followed by a repair turn, and a failed repair parks the issue as `blocked`.
 
 ## forgectl gaps
 
@@ -104,6 +118,9 @@ Recorded, not patched around:
 8. **pi is refused as a worker.** `surface launch --worktree --harness pi` is refused by the worker posture rule, so pi agents run through Paperclip's headless `pi_local`, not a pane.
 9. **`forgectl config --json` omits `[surface.profiles]`.** The `alt` profile resolves at launch (`--profile alt` passes `--dry-run`), but the effective-config print does not show it.
 10. **No done signal for codex.** forgectl's `surface wait` reads herdr state and the REPORT line; codex has one global `notify` slot (taken by Computer Use here) and no per-repo hook, so a codex turn has no harness-side done signal and no usage.
+11. **Second brief after a completed Claude turn fails read-back** (see P0 results). This blocks every multi-turn pane.
+12. **`surface ready` reads Claude Code's dim placeholder as typed input.** The check reads plain screen text, so a suggestion and real input look alike.
+13. **`surface read --report` includes rows after the REPORT line** (the startup banner showed up in run `a25d2d89`'s summary).
 
 ## P1 findings (2026-10-12)
 

@@ -27,7 +27,7 @@ import {
   type ListedWorker,
   type WorkerSession,
 } from "./core.js";
-import { brief, launchWorker, listWorkers, readReport, runForgectl, waitReady, waitSettled } from "./forgectl.js";
+import { brief, launchWorker, listWorkers, readReport, runForgectl, waitReady, waitSettled, watchForBlocking } from "./forgectl.js";
 
 function failure(message: string, code: string, session: WorkerSession | null): AdapterExecutionResult {
   return {
@@ -108,6 +108,13 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
     worker = plan.worker;
     ctx.onDispatch?.();
     await log(`${plan.reattached ? "Reattached to" : "Reusing"} live pane. Worker: ${worker.name}, Pane: ${worker.pane_id}`);
+    // The Stop hook fires before the harness redraws its prompt, so a brief sent
+    // right after the previous turn can fail read-back. Wait for the prompt first.
+    const ready = await waitReady(cfg, worker.name);
+    if (ready.code !== 0) {
+      const blocked = typeof ready["blocking"] === "string" && ready["blocking"] !== "";
+      return failure(`worker ${worker.name} is not at its prompt: ${String(ready["reason"] ?? ready["blocking"] ?? "unknown")}`, blocked ? "worker_blocked" : "not_ready", sessionFromWorker(cfg, worker));
+    }
   }
 
   const session = sessionFromWorker(cfg, worker);
@@ -141,7 +148,17 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
   let claudeSessionId = session.claudeSessionId;
   let transcript = worker.transcript;
   if (stop) {
-    const cb = await stop;
+    const watchDone = new AbortController();
+    const outcome = await Promise.race([
+      stop.then((cb) => ({ kind: "stop" as const, cb })),
+      watchForBlocking(cfg, worker.name, watchDone.signal).then((blocking) => ({ kind: "blocked" as const, blocking })),
+    ]);
+    watchDone.abort();
+    if (outcome.kind === "blocked") {
+      // The pane stays open at its dialog; the next wake reattaches once a person answers it.
+      return failure(`worker ${worker.name} is waiting at a ${outcome.blocking ?? "dialog"}; answer it in the pane (herdr --session ${cfg.herdrSession})`, "worker_blocked", session);
+    }
+    const cb = outcome.cb;
     if (!cb) {
       return { ...failure(`no Stop hook within ${cfg.turnTimeoutSec}s`, "turn_timeout", session), timedOut: true };
     }
