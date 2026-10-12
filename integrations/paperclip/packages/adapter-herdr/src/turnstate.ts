@@ -124,3 +124,30 @@ export async function writeReportScript(sessionId: string, content: string): Pro
   await writeNew(file, content, 0o700);
   return file;
 }
+
+/**
+ * Read the operator config file: FORGECTL_PAPERCLIP_CONFIG, else
+ * ~/.config/forgectl/paperclip.json. Absent means none. A file that exists
+ * must be a regular file owned by this user and not readable or writable by
+ * group or others; otherwise it is refused.
+ */
+export async function readOperatorConfig(env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
+  const file = env["FORGECTL_PAPERCLIP_CONFIG"] || path.join(os.homedir(), ".config", "forgectl", "paperclip.json");
+  let st;
+  try {
+    st = await lstat(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw err;
+  }
+  const uid = process.getuid?.() ?? st.uid;
+  if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0) {
+    throw new Error(`operator config ${file} must be a regular file owned by uid ${uid} with mode 0600`);
+  }
+  const fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return JSON.parse(await fh.readFile("utf8"));
+  } finally {
+    await fh.close();
+  }
+}

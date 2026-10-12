@@ -24,7 +24,9 @@ import {
   composeBrief,
   decodeSession,
   extractIssue,
+  mergeOperatorConfig,
   operatorForgectlPath,
+  operatorSearchPath,
   parseConfig,
   planTurn,
   reportScript,
@@ -37,7 +39,7 @@ import {
   type WorkerSession,
 } from "./core.js";
 import { brief, launchWorker, listWorkers, readReport, runForgectl, waitReady, waitSettled, watchForBlocking } from "./forgectl.js";
-import { readAppended, removeTurnFiles, sizeOf, writeBrief, writeReportScript, writeTurnFile } from "./turnstate.js";
+import { readAppended, readOperatorConfig, removeTurnFiles, sizeOf, writeBrief, writeReportScript, writeTurnFile } from "./turnstate.js";
 
 type Log = (msg: string) => Promise<void>;
 
@@ -74,7 +76,7 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
   const log: Log = (msg) => ctx.onLog("stdout", `[herdr-forgectl] ${msg}\n`);
   let cfg: AdapterConfig;
   try {
-    cfg = parseConfig(ctx.config);
+    cfg = parseConfig(ctx.config, mergeOperatorConfig(await readOperatorConfig(), process.env));
   } catch (err) {
     return failure((err as Error).message, "invalid_config", null);
   }
@@ -241,12 +243,14 @@ async function runTurn(
 
 async function testEnvironment(_ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
   let forgectlPath: string;
+  let env: Record<string, string | undefined>;
   try {
-    forgectlPath = operatorForgectlPath();
+    env = mergeOperatorConfig(await readOperatorConfig(), process.env);
+    forgectlPath = operatorForgectlPath(env);
   } catch (err) {
     return { adapterType: ADAPTER_TYPE, status: "fail", checks: [{ code: "forgectl_path", level: "error", message: (err as Error).message }], testedAt: new Date().toISOString() };
   }
-  const r = await runForgectl({ forgectlPath, herdrSession: process.env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip" } as AdapterConfig, ["--version"], 10_000);
+  const r = await runForgectl({ forgectlPath, herdrSession: env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip", searchPath: operatorSearchPath(env) } as AdapterConfig, ["--version"], 10_000);
   return {
     adapterType: ADAPTER_TYPE,
     status: r.code === 0 ? "pass" : "fail",
