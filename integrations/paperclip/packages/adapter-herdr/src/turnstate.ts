@@ -1,8 +1,8 @@
 // Every filesystem write the adapter makes. The worker can write inside its
 // own worktree and reads untrusted issue text, so nothing the adapter trusts
-// lives there, and nothing it writes there follows a link the worker planted.
+// lives there and the adapter writes nothing there.
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rm, rmdir, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, rm, type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -30,12 +30,20 @@ async function writeNew(file: string, content: string): Promise<void> {
  * callback URL, keyed by the Claude session id forgectl assigned the worker.
  * Returns the path to remove when the turn ends.
  */
-export async function writeTurnFile(sessionId: string, turn: { runId: string; token: string; callbackUrl: string }): Promise<string> {
-  if (!ID_RE.test(sessionId)) throw new Error(`refusing turn file for session id ${JSON.stringify(sessionId)}: not [A-Za-z0-9-]{1,64}`);
-  const dir = turnStateDir();
+/** Create (or check) a private directory: a real directory, owned by this user, mode 0700. */
+async function privateDir(dir: string): Promise<string> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const st = await lstat(dir);
-  if (!st.isDirectory() || (st.mode & 0o077) !== 0) throw new Error(`turn state dir ${dir} must be a 0700 directory (mode ${(st.mode & 0o777).toString(8)})`);
+  const uid = process.getuid?.() ?? st.uid;
+  if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid || (st.mode & 0o077) !== 0) {
+    throw new Error(`${dir} must be a 0700 directory owned by uid ${uid} (mode ${(st.mode & 0o777).toString(8)}, uid ${st.uid})`);
+  }
+  return dir;
+}
+
+export async function writeTurnFile(sessionId: string, turn: { runId: string; token: string; callbackUrl: string }): Promise<string> {
+  if (!ID_RE.test(sessionId)) throw new Error(`refusing turn file for session id ${JSON.stringify(sessionId)}: not [A-Za-z0-9-]{1,64}`);
+  const dir = await privateDir(turnStateDir());
   const file = path.join(dir, `${sessionId}.json`);
   await rm(file, { force: true });
   await writeNew(file, JSON.stringify(turn));
@@ -43,40 +51,35 @@ export async function writeTurnFile(sessionId: string, turn: { runId: string; to
 }
 
 /**
- * Write the brief into `<worktree>/.paperclip/` without following a symlink at
- * either level: `.paperclip` must be a real directory inside the worktree, and
- * the brief is created exclusively with O_NOFOLLOW. Returns the paths to remove.
+ * Write the brief into the private state dir, never into the worktree: the
+ * worker can write its worktree and swap a directory for a symlink between any
+ * check and the open, and Node has no openat to close that race. The worker is
+ * briefed with the absolute path. Returns the file to remove.
  */
-export async function writeBrief(worktree: string, runId: string, content: string): Promise<{ rel: string; file: string; dir: string }> {
+export async function writeBrief(runId: string, content: string): Promise<string> {
   if (!ID_RE.test(runId)) throw new Error(`refusing brief for run id ${JSON.stringify(runId)}: not [A-Za-z0-9-]{1,64}`);
-  const dir = path.join(await realpath(worktree), ".paperclip");
-  try {
-    await mkdir(dir, { mode: 0o700 });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  const st = await lstat(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a plain directory; refusing to write the brief through it`);
-  if ((await realpath(dir)) !== dir) throw new Error(`${dir} resolves outside the worktree; refusing to write the brief through it`);
-  const rel = `.paperclip/brief-${runId}.md`;
-  const file = path.join(dir, `brief-${runId}.md`);
+  const dir = await privateDir(path.join(path.dirname(turnStateDir()), "briefs"));
+  const file = path.join(dir, `${runId}.md`);
+  await rm(file, { force: true });
   await writeNew(file, content);
-  return { rel, file, dir };
+  return file;
 }
 
-/** Remove turn files. Unlink never follows a link; rmdir only removes an empty real directory. */
-export async function removeTurnFiles(files: string[], briefDir: string | null): Promise<void> {
+/** Remove turn files. Unlink never follows a link. */
+export async function removeTurnFiles(files: string[]): Promise<void> {
   for (const f of files) await rm(f, { force: true });
-  if (briefDir) await rmdir(briefDir).catch(() => undefined);
 }
 
 /** Read the bytes a turn appended to forgectl's transcript, capped so a huge file cannot exhaust memory. */
 export async function readAppended(file: string, offset: number, maxBytes = 32 << 20): Promise<string[]> {
   const st = await lstat(file);
   if (!st.isFile()) throw new Error(`transcript ${file} is not a regular file`);
-  const fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // O_NONBLOCK: a FIFO swapped in after the lstat cannot hang the open.
+  const fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const { size } = await fh.stat();
+    const opened = await fh.stat();
+    if (!opened.isFile()) throw new Error(`transcript ${file} is not a regular file`);
+    const { size } = opened;
     const start = Math.min(Math.max(0, offset), size);
     const len = Math.min(size - start, maxBytes);
     const buf = Buffer.alloc(len);

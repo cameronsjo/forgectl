@@ -13,30 +13,30 @@ import { readAppended, removeTurnFiles, writeBrief, writeTurnFile } from "./turn
 const tmp = (): string => mkdtempSync(path.join(os.tmpdir(), "pcb-"));
 const RUN = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b";
 
-test("writeBrief refuses a .paperclip that is a symlink out of the worktree", async () => {
-  const wt = tmp();
-  const outside = tmp();
-  symlinkSync(outside, path.join(wt, ".paperclip"));
-  await assert.rejects(writeBrief(wt, RUN, "brief"), /not a plain directory/);
-  assert.equal(existsSync(path.join(outside, `brief-${RUN}.md`)), false, "nothing was written through the link");
-});
-
-test("writeBrief will not write through a planted brief symlink", async () => {
-  const wt = tmp();
+test("writeBrief writes outside every worktree, 0600, and will not write through a planted link", async () => {
+  const state = tmp();
+  process.env["XDG_STATE_HOME"] = state;
+  const f = await writeBrief(RUN, "brief");
+  assert.ok(f.startsWith(path.join(state, "forgectl-paperclip", "briefs")), f);
+  assert.equal(statSync(f).mode & 0o777, 0o600);
+  assert.equal(statSync(path.dirname(f)).mode & 0o777, 0o700);
+  await removeTurnFiles([f]);
+  assert.equal(existsSync(f), false);
+  // A link planted where the brief will go is replaced, never written through.
   const victim = path.join(tmp(), "victim.txt");
   writeFileSync(victim, "keep");
-  mkdirSync(path.join(wt, ".paperclip"));
-  symlinkSync(victim, path.join(wt, ".paperclip", `brief-${RUN}.md`));
-  await assert.rejects(writeBrief(wt, RUN, "brief"));
+  symlinkSync(victim, f);
+  await writeBrief(RUN, "brief");
   assert.equal(readFileSync(victim, "utf8"), "keep");
+  await assert.rejects(writeBrief("../escape", "x"), /refusing brief/);
 });
 
-test("writeBrief writes 0600 and removeTurnFiles cleans up the empty directory", async () => {
-  const wt = tmp();
-  const b = await writeBrief(wt, RUN, "brief");
-  assert.equal(statSync(b.file).mode & 0o777, 0o600);
-  await removeTurnFiles([b.file], b.dir);
-  assert.equal(existsSync(b.dir), false);
+test("the state dir must be private", async () => {
+  const state = tmp();
+  process.env["XDG_STATE_HOME"] = state;
+  mkdirSync(path.join(state, "forgectl-paperclip", "briefs"), { recursive: true, mode: 0o755 });
+  chmodSync(path.join(state, "forgectl-paperclip", "briefs"), 0o755);
+  await assert.rejects(writeBrief(RUN, "brief"), /must be a 0700 directory/);
 });
 
 test("writeTurnFile keeps the token outside the worktree, mode 0600, keyed by session", async () => {

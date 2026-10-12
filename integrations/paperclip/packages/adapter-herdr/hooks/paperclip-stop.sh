@@ -16,6 +16,8 @@ session=$(jq -r '.session_id // empty' <<<"$payload" 2>/dev/null) || exit 0
 [[ "$session" =~ ^[A-Za-z0-9-]{1,64}$ ]] || exit 0
 
 state=${XDG_STATE_HOME:-$HOME/.local/state}
+# A relative state dir would resolve inside the worktree, which the worker writes.
+[[ "$state" == /* ]] || exit 0
 turn="$state/forgectl-paperclip/turns/$session.json"
 # A plain file only: never follow a link into some other file.
 [[ -f "$turn" && ! -L "$turn" ]] || exit 0

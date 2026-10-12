@@ -4,9 +4,9 @@
 // started, briefed and read.
 //
 // Trust boundary: the worker runs as the operator, can write anywhere in its
-// worktree, and reads untrusted issue text. The adapter therefore keeps the
-// turn's token and callback outside the worktree, writes into the worktree
-// without following links, reads usage only from the transcript path forgectl
+// worktree, and reads untrusted issue text. The adapter therefore writes
+// nothing into the worktree (the turn's token, callback and brief live in a
+// private state dir), reads usage only from the transcript path forgectl
 // recorded, and accepts a Stop callback only for the worker's own session.
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
@@ -51,7 +51,7 @@ function failure(message: string, code: string, session: WorkerSession | null): 
   };
 }
 
-/** forgectl puts worker worktrees under <repo>/.claude/worktrees/; refuse to write anywhere else. */
+/** forgectl puts worker worktrees under <repo>/.claude/worktrees/; refuse a worker whose row says otherwise. */
 async function checkedWorktree(cfg: AdapterConfig, w: ListedWorker): Promise<string> {
   if (!w.worktree) throw new Error(`worker ${w.name} has no worktree in forgectl surface list --json`);
   const root = path.join(await realpath(cfg.repo), ".claude", "worktrees") + path.sep;
@@ -110,13 +110,14 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
       return failure(`worker ${worker.name} is not at its prompt: ${verdictReason(ready)}`, isBlocked(ready) ? "worker_blocked" : "not_ready", known);
     }
 
-    let worktree: string;
+    // The adapter writes nothing into the worktree, but a worker whose ledger row
+    // points outside <repo>/.claude/worktrees/ is not one forgectl launched for this repo.
     try {
-      worktree = await checkedWorktree(cfg, worker);
+      await checkedWorktree(cfg, worker);
     } catch (err) {
       return failure((err as Error).message, "worktree_rejected", known);
     }
-    return await runTurn(ctx, cfg, worker, known, plan.kind === "brief" && plan.reattached, worktree, log);
+    return await runTurn(ctx, cfg, worker, known, plan.kind === "brief" && plan.reattached, log);
   } catch (err) {
     // Anything unexpected still returns a coded result that keeps the session, so the next wake can find the pane.
     await log(`Encountered ${(err as Error).name} while running the turn: ${(err as Error).message}`);
@@ -130,7 +131,6 @@ async function runTurn(
   worker: ListedWorker,
   session: WorkerSession,
   reattached: boolean,
-  worktree: string,
   log: Log,
 ): Promise<AdapterExecutionResult> {
   if (cfg.harness === "claude" && !worker.session_id) {
@@ -139,19 +139,17 @@ async function runTurn(
   const token = randomBytes(32).toString("hex");
   const nonce = randomBytes(12).toString("hex");
   const written: string[] = [];
-  let briefDir: string | null = null;
   let stop: StopWait | null = null;
   try {
-    const b = await writeBrief(worktree, ctx.runId, composeBrief(ctx.runId, ctx.agent.name, extractIssue(ctx.context), nonce));
-    written.push(b.file);
-    briefDir = b.dir;
+    const briefFile = await writeBrief(ctx.runId, composeBrief(ctx.runId, ctx.agent.name, extractIssue(ctx.context), nonce));
+    written.push(briefFile);
     if (cfg.harness === "claude" && worker.session_id) {
       written.push(await writeTurnFile(worker.session_id, { runId: ctx.runId, token, callbackUrl: `http://127.0.0.1:${cfg.callbackPort}/stop` }));
       stop = awaitStop(ctx.runId, token, cfg.turnTimeoutSec * 1000, ctx.signal);
     }
     const offset = await sizeOf(worker.transcript);
 
-    const sent = await brief(cfg, worker.name, `Read ${b.rel} and do what it asks.`);
+    const sent = await brief(cfg, worker.name, `Read ${briefFile} and do what it asks.`);
     if (sent.code !== 0) return failure(`forgectl surface brief refused: ${verdictReason(sent)}`, "brief_refused", session);
     await log(`Brief sent. Marker: ${String(sent["marker"] ?? "")}; waiting for the ${stop ? "Stop hook" : "turn to settle"}`);
 
@@ -217,7 +215,7 @@ async function runTurn(
     };
   } finally {
     stop?.cancel();
-    await removeTurnFiles(written, briefDir);
+    await removeTurnFiles(written);
   }
 }
 
