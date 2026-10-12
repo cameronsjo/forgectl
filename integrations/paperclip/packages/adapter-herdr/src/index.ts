@@ -242,15 +242,21 @@ async function runTurn(
 }
 
 async function testEnvironment(_ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
-  let forgectlPath: string;
   let env: Record<string, string | undefined>;
   try {
     env = mergeOperatorConfig(await readOperatorConfig(), process.env);
+  } catch (err) {
+    return { adapterType: ADAPTER_TYPE, status: "fail", checks: [{ code: "operator_config", level: "error", message: (err as Error).message }], testedAt: new Date().toISOString() };
+  }
+  let forgectlPath: string;
+  let searchPath: string | null;
+  try {
     forgectlPath = operatorForgectlPath(env);
+    searchPath = operatorSearchPath(env);
   } catch (err) {
     return { adapterType: ADAPTER_TYPE, status: "fail", checks: [{ code: "forgectl_path", level: "error", message: (err as Error).message }], testedAt: new Date().toISOString() };
   }
-  const r = await runForgectl({ forgectlPath, herdrSession: env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip", searchPath: operatorSearchPath(env) } as AdapterConfig, ["--version"], 10_000);
+  const r = await runForgectl({ forgectlPath, herdrSession: env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip", searchPath } as AdapterConfig, ["--version"], 10_000);
   return {
     adapterType: ADAPTER_TYPE,
     status: r.code === 0 ? "pass" : "fail",

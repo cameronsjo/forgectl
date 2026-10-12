@@ -18,11 +18,18 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 template="$here/../instructions/in-review.md"
 marker='<!-- forgectl-paperclip:in-review-rule -->'
 
-auth=()
-[[ -n "${PAPERCLIP_BOARD_TOKEN:-}" ]] && auth=(-H @<(printf 'Authorization: Bearer %s\n' "$PAPERCLIP_BOARD_TOKEN"))
+# A process substitution's descriptor closes once the command that opened it
+# ends, so each call opens its own. The token never reaches argv.
+api_curl() {
+  if [[ -n "${PAPERCLIP_BOARD_TOKEN:-}" ]]; then
+    command curl -fsS -H @<(printf 'Authorization: Bearer %s\n' "$PAPERCLIP_BOARD_TOKEN") "$@"
+  else
+    command curl -fsS "$@"
+  fi
+}
 
 url="$api/api/agents/$agent/instructions-bundle/file?path=AGENTS.md"
-file=$(command curl -fsS ${auth[@]+"${auth[@]}"} "$url")
+file=$(api_curl "$url")
 current=$(jq -r '.content // ""' <<<"$file")
 # The PUT is optimistic: it must name the version it read.
 base=$(jq -r '.contentHash // empty' <<<"$file")
@@ -33,6 +40,6 @@ fi
 
 rule=$(sed "s/{{REVIEWER_USER_ID}}/$reviewer/" "$template")
 body=$(jq -cn --arg c "$current"$'\n\n'"$rule" --arg h "$base" '{path: "AGENTS.md", content: $c, baseHash: (if $h == "" then null else $h end)}')
-command curl -fsS -o /dev/null -X PUT ${auth[@]+"${auth[@]}"} -H 'Content-Type: application/json' \
+api_curl -o /dev/null -X PUT -H 'Content-Type: application/json' \
   --data "$body" "$api/api/agents/$agent/instructions-bundle/file"
 echo "agent $agent: rule appended (reviewer $reviewer)"

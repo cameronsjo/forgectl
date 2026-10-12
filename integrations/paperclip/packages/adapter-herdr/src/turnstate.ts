@@ -126,26 +126,33 @@ export async function writeReportScript(sessionId: string, content: string): Pro
 }
 
 /**
- * Read the operator config file: FORGECTL_PAPERCLIP_CONFIG, else
- * ~/.config/forgectl/paperclip.json. Absent means none. A file that exists
- * must be a regular file owned by this user and not readable or writable by
- * group or others; otherwise it is refused.
+ * Read the operator config file named by FORGECTL_PAPERCLIP_CONFIG; unset or
+ * absent means none. There is no default path: the adapter registry is shared
+ * by every Paperclip instance under one PAPERCLIP_HOME, so each instance names
+ * its own file in its environment (install-service.sh puts it in the
+ * instance's .env). The opened file must be a regular file owned by this user
+ * with no group or other access. The checks run on the opened descriptor, and
+ * O_NONBLOCK keeps a FIFO from hanging the open.
  */
 export async function readOperatorConfig(env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
-  const file = env["FORGECTL_PAPERCLIP_CONFIG"] || path.join(os.homedir(), ".config", "forgectl", "paperclip.json");
-  let st;
+  const file = env["FORGECTL_PAPERCLIP_CONFIG"];
+  if (!file) return {};
+  if (!path.isAbsolute(file)) throw new Error(`FORGECTL_PAPERCLIP_CONFIG must be an absolute path; got ${JSON.stringify(file)}`);
+  let fh;
   try {
-    st = await lstat(file);
+    fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return {};
+    if (code === "ELOOP") throw new Error(`operator config ${file} must be a regular file, not a symlink`);
     throw err;
   }
-  const uid = process.getuid?.() ?? st.uid;
-  if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0) {
-    throw new Error(`operator config ${file} must be a regular file owned by uid ${uid} with mode 0600`);
-  }
-  const fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
+    const st = await fh.stat();
+    const uid = process.getuid?.() ?? st.uid;
+    if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0) {
+      throw new Error(`operator config ${file} must be a regular file owned by uid ${uid} with mode 0600`);
+    }
     return JSON.parse(await fh.readFile("utf8"));
   } finally {
     await fh.close();

@@ -170,4 +170,8 @@ test("the operator config file must be a private regular file; absent means none
   const link = path.join(dir, "link.json");
   symlinkSync(file, link);
   await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: link }), /regular file/);
+  execFileSync("mkfifo", [path.join(dir, "fifo.json")]);
+  await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: path.join(dir, "fifo.json") }), /regular file/);
+  assert.deepEqual(await readOperatorConfig({}), {});
+  await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: "rel.json" }), /absolute path/);
 });

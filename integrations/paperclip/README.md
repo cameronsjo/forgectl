@@ -29,7 +29,7 @@ pnpm --filter @forgectl/paperclip-adapter-herdr test
 
 Agent `adapterConfig` holds only per-agent choices: `repo` (required; must be one of `FORGECTL_PAPERCLIP_REPOS`), `harness` (`claude` or `codex`), `profile` (a `[surface.profiles]` name, claude only), `turnTimeoutSec` (30-86400, default `1800`). pi agents use Paperclip's built-in `pi_local` adapter, because forgectl refuses pi as a worker.
 
-An agent can edit its own `adapterConfig` through Paperclip's API, so anything that decides what the server executes or where panes open is an operator setting, and the adapter refuses it in `adapterConfig`. Operator settings come from the Paperclip server's environment or from a JSON file of the same keys (string values only), `FORGECTL_PAPERCLIP_CONFIG` or `~/.config/forgectl/paperclip.json`. The file must be a regular file owned by the server's user with no group or other access; any other key, or a non-string value, fails the run. The environment wins over the file.
+An agent can edit its own `adapterConfig` through Paperclip's API, so anything that decides what the server executes or where panes open is an operator setting, and the adapter refuses it in `adapterConfig`. Operator settings come from the Paperclip server's environment, or from a JSON file of the same keys (string values only) named by `FORGECTL_PAPERCLIP_CONFIG`. There is no default file: `adapter-plugins.json` lives in `PAPERCLIP_HOME` and is shared by every instance there, so only an instance whose environment names a file (or sets the keys) can run this adapter; the others refuse every run. The file must be a regular file owned by the server's user with no group or other access; any other key, or a non-string value, fails the run. The environment wins over the file. The file is read on every run, so a worker running as the operator could rewrite it; like the rest of this section, that bounds mistakes, not a hostile worker.
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -70,7 +70,7 @@ plus `.claude/hooks/paperclip-stop.sh` (copy `packages/adapter-herdr/hooks/paper
 2. Onboards the instance once (loopback, `local_trusted`), stops that first server when healthy, pins the ports and adds `PAPERCLIP_AGENT_JWT_TTL_SECONDS=7200` to the instance `.env`.
 3. Builds the adapter and copies the bundle to `~/.local/share/forgectl-paperclip/adapter-herdr`, so no checkout has to stay in place.
 4. Registers `herdr_forgectl` in `~/.paperclip/adapter-plugins.json`.
-5. Writes the operator settings file (0600) once, with absolute `forgectl`, the herdr session, the API URL and a `FORGECTL_PAPERCLIP_PATH` that finds `herdr`; edit it by hand afterwards.
+5. Writes the operator settings file `~/.config/forgectl/paperclip-forgectl.json` (0600) once, names it in the instance `.env` as `FORGECTL_PAPERCLIP_CONFIG`, with absolute `forgectl`, the herdr session, the API URL and a `FORGECTL_PAPERCLIP_PATH` that finds `herdr`; edit it by hand afterwards.
 6. `paperclipai service install --instance forgectl`.
 
 The herdr session must be running: `herdr --session paperclip server`. Nothing restarts it after a reboot yet. Remove the service with `paperclipai service uninstall --instance forgectl`.

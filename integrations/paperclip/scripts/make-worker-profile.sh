@@ -54,6 +54,8 @@ main() {
     jq --argjson mods "$mods_json" '
       .enabledPlugins = ((.enabledPlugins // {}) | with_entries(
         if (.key | split("@")[0]) as $p | $mods | index($p) then .value = false else . end))
+      # Mods install from workbench; pin them off even when the user file never named them.
+      | .enabledPlugins += ($mods | map({key: (. + "@workbench"), value: false}) | from_entries)
       | .promptSuggestionEnabled = false
       | .skillOverrides = ((.skillOverrides // {}) + {"auto-mode-setup": "off"})
     ' "$src/settings.json" > "$tmp"
@@ -71,8 +73,8 @@ main() {
     echo "$settings exists; pass --refresh to rebuild it"
   fi
 
-  if [[ -f "$fconf" ]] && command grep -q "^\[surface\.profiles\.$name\]" "$fconf"; then
-    echo "forgectl profile $name already registered"
+  if [[ -f "$fconf" ]] && command grep -Eq "surface\.profiles\.\"?$name\"?([] .=]|$)|profiles *= *\{" "$fconf"; then
+    echo "forgectl profile $name, or an inline profiles table, is already in $fconf; add the profile by hand if missing"
   elif ((dry)); then
     echo "would append [surface.profiles.$name] config_dir = \"~/.claude-$name\" to $fconf"
   else
