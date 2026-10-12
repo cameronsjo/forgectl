@@ -3,7 +3,7 @@
 // heartbeat decides when a turn runs; forgectl decides how the pane is
 // started, briefed and read.
 import { randomBytes } from "node:crypto";
-import { mkdir, open, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   AdapterEnvironmentTestContext,
@@ -137,6 +137,26 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
     { mode: 0o600 },
   );
 
+  // The turn files are ignored by git but still make `surface close` keep the
+  // worktree, and turn.json holds this turn's callback token; remove both on
+  // every exit.
+  try {
+    return await runTurn(ctx, cfg, worker, session, plan.kind === "brief" && plan.reattached, token, briefRel, log);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function runTurn(
+  ctx: AdapterExecutionContext,
+  cfg: AdapterConfig,
+  worker: ListedWorker,
+  session: WorkerSession,
+  reattached: boolean,
+  token: string,
+  briefRel: string,
+  log: (msg: string) => Promise<void>,
+): Promise<AdapterExecutionResult> {
   const offset = await fileSize(worker.transcript);
   const stop = cfg.harness === "claude" ? awaitStop(ctx.runId, token, cfg.turnTimeoutSec * 1000, ctx.signal) : null;
   const sent = await brief(cfg, worker.name, `Read ${briefRel} and do what it asks.`);
@@ -197,7 +217,7 @@ async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionRe
     sessionParams: { ...session, claudeSessionId },
     sessionDisplayId: worker.name,
     summary: typeof report["report"] === "string" ? report["report"] : null,
-    resultJson: { worker: worker.name, pane: worker.pane_id, report: report["report"] ?? null, reportFound: report["found"] ?? false, reattached: plan.kind === "brief" && plan.reattached },
+    resultJson: { worker: worker.name, pane: worker.pane_id, report: report["report"] ?? null, reportFound: report["found"] ?? false, reattached },
   };
 }
 

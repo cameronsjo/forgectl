@@ -129,12 +129,36 @@ export type TurnPlan =
  * previous server process launched the worker.
  */
 export function planTurn(session: WorkerSession | null, fallbackName: string, workers: ListedWorker[]): TurnPlan {
+  const live = (w: ListedWorker): boolean => w.stage === "launched" && !w.orphan && w.state !== "gone";
   const name = session?.workerName ?? fallbackName;
   const row = workers.find((w) => w.name === name);
-  if (row && row.stage === "launched" && !row.orphan && row.state !== "gone") {
+  if (row && live(row)) {
     return { kind: "brief", worker: row, reattached: session !== null };
   }
-  return { kind: "launch", workerName: name };
+  // Without a stored session (Paperclip keeps none for an issue-free wake),
+  // a live worker under this base name or a `<base>-N` successor is this
+  // agent's pane; take the highest suffix, the most recent launch.
+  const family = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-(\\d+))?$`);
+  const suffix = (w: ListedWorker): number => Number(family.exec(w.name)?.[1] ?? 1);
+  const sibling = workers.filter((w) => live(w) && family.test(w.name)).sort((a, b) => suffix(b) - suffix(a))[0];
+  if (sibling) return { kind: "brief", worker: sibling, reattached: session !== null };
+  return { kind: "launch", workerName: freeWorkerName(name, workers) };
+}
+
+/**
+ * forgectl keeps closed ledger rows until `surface prune`, and refuses a
+ * launch whose name any row still holds. Reuse the base name when it is free,
+ * else the first free `<base>-N`, trimmed to forgectl's 48-character limit.
+ */
+export function freeWorkerName(base: string, workers: ListedWorker[]): string {
+  const taken = new Set(workers.map((w) => w.name));
+  if (!taken.has(base)) return base;
+  for (let n = 2; n < 1000; n++) {
+    const suffix = `-${n}`;
+    const candidate = base.slice(0, 48 - suffix.length).replace(/-+$/, "") + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new Error(`no free worker name for ${base}: 998 suffixes are taken; run forgectl surface prune`);
 }
 
 export function sessionFromWorker(cfg: AdapterConfig, w: ListedWorker): WorkerSession {

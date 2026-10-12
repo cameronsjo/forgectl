@@ -9,9 +9,18 @@ interface Pending {
   resolve: (cb: StopCallback) => void;
 }
 
-const pending = new Map<string, Pending>();
-let server: Server | null = null;
-let boundPort: number | null = null;
+// Paperclip's adapter reload imports this module again, which would start a
+// second listener on the same port. The listener and its pending turns live on
+// globalThis so every copy of the module shares them.
+interface ListenerState {
+  pending: Map<string, Pending>;
+  server: Server | null;
+  boundPort: number | null;
+}
+const STATE_KEY = Symbol.for("forgectl.paperclip.adapter-herdr.listener");
+const holder = globalThis as unknown as Record<symbol, ListenerState | undefined>;
+const state: ListenerState = (holder[STATE_KEY] ??= { pending: new Map(), server: null, boundPort: null });
+const pending = state.pending;
 
 const MAX_BODY = 16 * 1024;
 
@@ -22,8 +31,8 @@ function tokensMatch(a: string, b: string): boolean {
 }
 
 export async function ensureListener(port: number): Promise<void> {
-  if (server && boundPort === port) return;
-  if (server) throw new Error(`callback listener already bound to ${boundPort}; adapters on one server must share callbackPort, got ${port}`);
+  if (state.server && state.boundPort === port) return;
+  if (state.server) throw new Error(`callback listener already bound to ${state.boundPort}; adapters on one server must share callbackPort, got ${port}`);
   const s = createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/stop") {
       res.writeHead(404).end();
@@ -60,8 +69,8 @@ export async function ensureListener(port: number): Promise<void> {
     s.once("error", reject);
     s.listen(port, "127.0.0.1", () => resolve());
   });
-  server = s;
-  boundPort = port;
+  state.server = s;
+  state.boundPort = port;
 }
 
 /** Resolves with the hook's payload, or null when the turn times out or is cancelled. */

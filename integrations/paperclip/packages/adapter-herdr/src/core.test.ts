@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeBrief, decodeSession, parseConfig, fenceUntrusted, planTurn, sumTranscriptUsage, workerNameFor, type ListedWorker } from "./core.js";
+import { composeBrief, decodeSession, freeWorkerName, parseConfig, fenceUntrusted, planTurn, sumTranscriptUsage, workerNameFor, type ListedWorker } from "./core.js";
 
 const NONCE = "0123456789abcdef0123";
 
@@ -65,4 +65,26 @@ test("parseConfig accepts claude and codex, refuses pi and a profile on codex", 
   assert.throws(() => parseConfig({ repo: "/r", harness: "pi" }), /harness must be one of/);
   assert.throws(() => parseConfig({ repo: "/r", harness: "codex", profile: "alt" }), /applies only to harness claude/);
   assert.equal(parseConfig({ repo: "/r", profile: "alt" }).profile, "alt");
+});
+
+test("planTurn picks a free name when a closed ledger row holds the base name", () => {
+  const closed = row({ name: "pc-a-default", stage: "closed", state: "gone" });
+  assert.deepEqual(planTurn(null, "pc-a-default", [closed]), { kind: "launch", workerName: "pc-a-default-2" });
+  const both = [closed, row({ name: "pc-a-default-2", stage: "closed", state: "gone" })];
+  assert.deepEqual(planTurn(null, "pc-a-default", both), { kind: "launch", workerName: "pc-a-default-3" });
+  const long = "pc-" + "x".repeat(45);
+  const name = freeWorkerName(long, [row({ name: long })]);
+  assert.ok(name.length <= 48 && name.endsWith("-2"), name);
+});
+
+test("planTurn briefs the newest live successor when the base name is closed", () => {
+  const workers = [
+    row({ name: "pc-a-default", stage: "closed", state: "gone" }),
+    row({ name: "pc-a-default-2", pane_id: "p2" }),
+    row({ name: "pc-a-default-3", pane_id: "p3" }),
+    row({ name: "pc-a-default-x", pane_id: "px" }),
+  ];
+  const plan = planTurn(null, "pc-a-default", workers);
+  assert.equal(plan.kind, "brief");
+  assert.equal(plan.kind === "brief" && plan.worker.name, "pc-a-default-3");
 });

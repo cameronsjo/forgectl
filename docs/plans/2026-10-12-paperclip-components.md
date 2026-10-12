@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Cameron dismisses the auto-mode dialog on both Claude accounts; then rerun P0 check 3 and eng-alt. Codex waits on forgectl#1242."
+next: "Land forgectl#1243, then finish P1 per forgectl#1244; dispatch-rule amendment awaits approval (private tracker)."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -76,33 +76,28 @@ Status column: **observed** (code read doing it), **observed-live** (seen on the
 
 Verdict counts: **use as is 12, extend 4, borrow 7, skip 5** (28 rows).
 
-## What the estate already covers (step 1)
+## Estate overlaps and the dispatch rule
 
-`estate-discover` over "agent orchestrator, task board, GitHub issue sync, herdr dispatch" found no Paperclip page and five relevant cards. Overlaps with what the plan proposes to build:
-
-- **forgectl `surface` already has a work queue.** `surface enqueue|queue|drain` launches queued briefs as herdr workers, `surface intake gh` queues briefs from labeled GitHub issues (with label-author checks), and `surface status|merge|audit` carries a merge policy and audit chain. Paperclip's heartbeat would sit beside this drain, not replace it, until decision 1 is approved. The capability card (`wiki/capabilities/forgectl.md`, 2026-09-08) predates all of this and lists none of it.
-- **Agent Board already has leased claims** (`task claim|heartbeat|resolve`, conditional transaction, lease expiry). It solves the same race as Paperclip checkout, for a different object.
-- **Vikunja's lesson applies to P3.** Its 14-day gate failed because agents could add tasks and only Cameron could close them. Decision 3 (merge with `Closes #N` closes both sides; agents stop at `in_review`; agent-created issues land in `backlog`) answers that diagnosis directly. The P3 gate copies Vikunja's gate shape.
-- **`issue-labels` doctrine says vocabulary parity is not issue sync (ADR-0035).** The P3 plugin must write no labels to GitHub; Paperclip reads them.
-- **Hermes** has no recorded run-state or API surface. Whether it exposes the API server `hermes_gateway` needs is unknown.
+The owner's private notes were checked for existing parts before building (step 1). The findings, the stale-card update, and the dispatch-rule amendment that decision 1 needs are tracked privately in cameronsjo/the-estate#85; nothing here depends on them. The one public overlap: forgectl `surface` already has its own queue (`enqueue`, `drain`, `intake gh`, `merge`), so Paperclip's heartbeat runs beside the drain, not instead of it, until that amendment is approved.
 
 ## P0 spike results
 
-Setup: Paperclip `2026.1005.0` on `127.0.0.1:3100` (`local_trusted`, `PAPERCLIP_HOME=/tmp/pc-scratch/home`), `herdr --session paperclip`, scratch repo `~/Projects/_scratch/paperclip-spike` (local only, trusted once by Cameron for Claude main). Workers run `[launch.worker] permission_mode = "auto"` (Cameron, 2026-10-12).
+Setup: Paperclip `2026.1005.0` on `127.0.0.1:3100` (`local_trusted`, its own `PAPERCLIP_HOME`), a dedicated `herdr --session paperclip`, and a local-only scratch repo trusted once per harness account. Workers run `[launch.worker] permission_mode = "auto"`. The scratch repo's `.claude/settings.json` carries the `Stop` hook, `promptSuggestionEnabled: false`, `skillOverrides: {"auto-mode-setup": "off"}`, and `enabledPlugins` turning interactive mods off.
 
 | Exit check | Result | Evidence |
 |---|---|---|
-| Stop hook arrives, run ends `succeeded` | `PASS` | Run `be98b238` (`PAP-14`, assignment wake): launch, brief, Stop hook, `succeeded` in 20 s; Claude committed `WELCOME.md` as `64db7aa`. Run `a25d2d89` (no issue) repeated it in pane `w9:p1`. |
-| Usage recorded on the run | `PASS` | Run `be98b238` `usageJson`: 67,001 input, 873 output, 250,044 cached, model `claude-opus-5-5`, summed from the transcript lines the turn appended. |
-| Pane survives a Paperclip restart and is reattached | `FAIL` | The pane survived: `w9:p1` stayed live while the server went from pid `95158` to `22946`, and run `a13b402d` found it (`Reusing live pane`). The turn then failed: `forgectl surface brief` refused at read-back. A direct `forgectl surface brief` on the same idle pane fails the same way, so the cause is a second brief into a Claude worker after a completed turn, not the restart. Paperclip also returned no stored `sessionParams` for an issue-free wake, so the pane was found by its stable name, not by Paperclip's session store. |
-| Two agents race for one issue, exactly one wins | `PASS` | `/tmp/pc-scratch/race.sh`, six trials: every trial one 200 and one 409 `Issue checkout conflict`; each agent won at least once. Run ids must be real `heartbeat_runs` rows (`issues_checkout_run_id_heartbeat_runs_id_fk`). |
+| Stop hook arrives, run ends `succeeded` | `PASS` | Run `be98b238`: launch, brief, Stop hook, `succeeded` in 20 s; Claude committed `WELCOME.md` (`64db7aa`). |
+| Usage recorded on the run | `PASS` | Run `be98b238` `usageJson`: 67,001 input, 873 output, 250,044 cached, `claude-opus-5-5`, summed from the transcript lines the turn appended. |
+| Pane survives a Paperclip restart and is reattached | `PASS` | Runs `a91fd5ad` and `85ae785f`: both turns ran in pane `wF:p1`, Claude session `ef0d1420`, across a server restart (pid `52074` → `55093`); both `succeeded`, no turn files left behind. Needs #1243 (forgectl build from that branch). First attempt `FAIL`ed on the dialog in #1235. |
+| Two agents race for one issue, exactly one wins | `PASS` | Six trials of concurrent `POST /issues/:id/checkout`: each one 200 and one 409 `Issue checkout conflict`; each agent won at least once. Run ids must be real `heartbeat_runs` rows (`issues_checkout_run_id_heartbeat_runs_id_fk`). |
 
 Seam findings from the runs:
 
-- **Second brief never reaches the input box.** After a completed turn, typed text does not appear in Claude Code's input, the screen shows only the startup banner, and `surface brief` refuses at read-back with "the text sits unsent", while `surface ready` reports `input: null`. Repro: launch a worker, brief it once, wait for the turn to end, brief again. Not yet filed.
-- **The placeholder reads as typed text.** A fresh Claude worker shows `Try "refactor <filepath>"` in its input; `surface ready` reports it as `input`, and `surface brief` refuses. `promptSuggestionEnabled: false` in the repo's `.claude/settings.json` clears it (prediction tested: `input: null` on a fresh worker).
-- **Permission prompts stall `acceptEdits` workers** and the adapter waited for the timeout. The adapter now polls `surface ready` and fails the run as `worker_blocked` the moment a dialog shows.
-- **Every turn triggers a disposition-repair wake.** A run that ends without the issue's status changing gets an `issue_disposition_repair` wake right away. The worker cannot set status because it has no Paperclip credentials (gap 1), so each successful turn is followed by a repair turn, and a failed repair parks the issue as `blocked`.
+- **Second brief swallowed.** After a first turn in auto mode Claude Code drew "Teach auto mode about your environment?" above a visible input box; it takes every keystroke and `ready` missed it. Fixed in #1243 (forgectl#1235); worker repos turn it off with `skillOverrides`.
+- **Placeholder read as input.** A dim `Try "…"` example in an empty box. Fixed in #1243 (forgectl#1236).
+- **Permission prompts stall `acceptEdits` workers.** The adapter now polls `surface ready` and fails the run as `worker_blocked` as soon as a dialog shows; workers run in `auto`.
+- **Every turn triggers a disposition-repair wake.** The worker has no Paperclip credentials (gap 1), so it cannot set issue status; forgectl#1244.
+- **Hot reload and restarts.** Paperclip's reload re-imports only the entry module, so the adapter ships as one esbuild bundle and keeps its callback listener on `globalThis`. forgectl keeps closed ledger rows, so the adapter launches `<name>-N` when a closed row holds the name and briefs the newest live one otherwise.
 
 ## forgectl gaps
 
@@ -122,30 +117,33 @@ Recorded, not patched around:
 12. **`surface ready` reads Claude Code's dim placeholder as typed input.** The check reads plain screen text, so a suggestion and real input look alike.
 13. **`surface read --report` includes rows after the REPORT line** (the startup banner showed up in run `a25d2d89`'s summary).
 
-## P1 findings (2026-10-12)
+## P1 results (2026-10-12)
 
-- **Trust is per harness account and inherits from the repo root.** codex's dialog says so outright ("Trusting will apply to the repository root"). Each Claude config dir (`~/.claude`, `~/.claude-alt`) and codex keeps its own trust list, so a new repo needs one trust per account.
-- **Adapter hot reload is entry-file only.** `POST /api/adapters/:type/reload` cache-busts the entry module, and the stale `forgectl.js` stayed in Node's module cache ("does not provide an export named 'waitSettled'"). Ship the adapter as one bundled file, or restart the server.
-- **pi via `pi_local`: `PASS`.** Run `bbaf7a73` succeeded on `openai-codex/gpt-5.5` with usage 23,173 in / 809 out, and wrote `PI-HI.md`. Two misconfigurations came first: pi's default `homelab-gateway/local/Qwen3.8-27B…` was not on offer, and `homelab-gateway/azure/DeepSeek-V4-Flash` rejects the `reasoning.effort` pi sends even with `--thinking off`.
-- **Agents close their own issues.** pi set `PAP-11` to `done`. Decision 3 needs agents to stop at `in_review`, which takes an instruction-bundle or permission change.
-- **Failed runs park the issue.** Retries that exhaust leave the issue `blocked` until reconciled, so a misconfigured agent burns its issue; test fixes on a fresh issue.
+| Agent | Harness | Result | Evidence |
+|---|---|---|---|
+| `eng-a` | Claude, main account, pane | `PASS` | P0 runs above |
+| `eng-alt` | Claude, second account (`--profile alt`), pane | `PASS` | Run `c01b36ed`, 61,197 in / 1,393 out; commit `0ca5885` (`ALT-HELLO.md`) |
+| `eng-codex` | codex 0.162.1, pane | `PASS` | Run `3a77977b`; REPORT and commit `6e8ccb8` (`CODEX-OK.md`) checked in git. Needs #1243 (forgectl#1242) |
+| `eng-pi` | pi through Paperclip's `pi_local` | `PASS` | Run `bbaf7a73`, 23,173 in / 809 out, on an `openai-codex` model; wrote `PI-HI.md` |
+
+- **Trust is per harness account and inherits from the repo root.** codex says so in its dialog ("Trusting will apply to the repository root"). Each Claude config dir and codex keep separate trust lists.
+- **pi model choice matters.** pi's configured default local model was not offered by the gateway that day, and one hosted model rejects the `reasoning.effort` parameter pi always sends. An `openai-codex` model worked.
+- **Agents close their own issues.** pi set `PAP-11` to `done`; decision 3 needs `in_review` (forgectl#1244).
+- **Failed runs park the issue** as `blocked` until reconciled; test fixes on a fresh issue.
 
 ## Unknowns
 
-- **Two worktree owners.** Paperclip's execution workspace and forgectl's worker worktree both claim the agent's cwd. The spike ignores Paperclip's; P1 must pick one owner per adapter.
-- **Folder-trust inheritance.** All 247 worktree trust entries in `~/.claude.json` are `true`, and the repo roots are trusted. That is consistent with Claude Code inheriting trust from the repo root, but no source or test confirmed the rule.
-- **Hermes API.** Whether the NAS Hermes runs the API server `hermes_gateway` targets, and whether its egress policy allows replies to a Paperclip host.
-- **Stop-hook authenticity.** Any local process that can read the worktree's `turn.json` can forge a done signal. Acceptable on loopback for a spike; P1 should move the token out of the worktree.
+- **Two worktree owners.** Paperclip's execution workspace and forgectl's worker worktree both claim the agent's cwd; the adapter uses forgectl's (forgectl#1244).
+- **Stop-hook authenticity.** A local process that can read `.paperclip/turn.json` during a turn can forge a done signal; the file is deleted after each turn (forgectl#1244).
+- **Hermes endpoint.** Tracked privately with P4 (forgectl#1245).
 
-## Dispatch-rule amendment (draft, not applied)
+## P1 plan (what is left)
 
-Target: `the-estate` `wiki/capabilities/delivery-automation.md` § Available interfaces. Not edited; for Cameron's approval.
-
-> forgectl owns how approved work becomes a running agent: starting, briefing, waiting on, and reading a pane (`forgectl surface`). For work tracked in Paperclip, Paperclip's heartbeat decides **what** runs and **when** (wakeups, checkout, concurrency), and calls forgectl through the `herdr_forgectl` adapter for **how**. For everything else, forgectl's own queue and drain decide both. This amends the 2026-09-12 rule that dispatch lives in forgectl (Cameron, 2026-10-12, pending approval).
-
-## P1 proposal
-
-See the session report; recorded here once approved.
+1. Land #1243 and release it, then drop the adapter's `forgectlPath` override.
+2. Worker credentials and an `in_review` instruction bundle, ending the repair-wake loop (forgectl#1239 item 1, forgectl#1244).
+3. A curated worker profile instead of per-repo `enabledPlugins` (forgectl#1239 item 6).
+4. Run Paperclip with `paperclipai service install`, pinned to one version.
+5. Then P2-P5 (forgectl#1245).
 
 ## Filed forgectl issues (2026-10-12)
 
@@ -159,9 +157,7 @@ See the session report; recorded here once approved.
 | cameronsjo/forgectl#1240 | 6: folder-trust preflight |
 | cameronsjo/forgectl#1241 | 5, 10: usage without GitHub; codex turn-done and usage |
 | cameronsjo/forgectl#1242 | `ready` never sees the codex 0.162 prompt, so codex workers cannot be briefed |
+| cameronsjo/forgectl#1244 | Rest of P1: worker credentials, worktree owner, curated profile, pinned service |
+| cameronsjo/forgectl#1245 | P2-P5 roadmap |
 
-## P1 runs after trust (2026-10-12)
-
-- `eng-alt` (claude, `--profile alt`): launched under `~/.claude-alt`, then the "Teach auto mode" dialog (#1235) took the first brief. Run `94b86db0`, `brief_refused`.
-- `eng-codex` (codex worker): pane at its prompt, `surface ready` never passes (#1242). Run `cf16210a`, `not_ready`.
-- The scratch repo now disables every interactive mod (`sploot`, `c3`, `atelier`, `board`, `verbs`, `guard-toast`, `herdr-bridge`) through project `enabledPlugins`. Cameron wants curated plugin sets per worker as the general form (#1239 item 6).
+Fixes for #1235, #1236 and #1242 are in cameronsjo/forgectl#1243 (draft).

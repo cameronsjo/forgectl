@@ -5,12 +5,13 @@
 # turn: {"runId", "callbackUrl", "token"}. When the turn ends, this hook POSTs
 # the run id, the Claude session id and the transcript path back to the
 # adapter's loopback listener. It never blocks the turn: every failure exits 0.
+# No -e or pipefail: a Stop hook that fails would surface in the worker's turn; every failure path exits 0 instead.
 set -u
 
 payload=$(cat)
 dir=${CLAUDE_PROJECT_DIR:-$(pwd)}
 turn="$dir/.paperclip/turn.json"
-[ -f "$turn" ] || exit 0
+[[ -f "$turn" ]] || exit 0
 
 url=$(jq -r '.callbackUrl // empty' "$turn" 2>/dev/null) || exit 0
 case "$url" in
