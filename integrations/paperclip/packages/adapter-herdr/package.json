@@ -1,0 +1,21 @@
+{
+  "name": "@forgectl/paperclip-adapter-herdr",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Paperclip server adapter that runs each agent turn in a long-lived herdr pane through forgectl surface.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test dist/*.test.js"
+  },
+  "devDependencies": {
+    "@paperclipai/adapter-utils": "2026.1005.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
