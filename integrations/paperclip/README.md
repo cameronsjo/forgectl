@@ -11,6 +11,8 @@ A pnpm workspace, outside the Go build, that connects [Paperclip](https://github
 3. The turn ends on the worker's Claude Code `Stop` hook (claude), or on `surface wait` plus the brief's REPORT line (codex). The hook reads a turn file the adapter keeps outside every worktree, `~/.local/state/forgectl-paperclip/turns/<claude session id>.json`, and POSTs the run id and a one-time token to `http://127.0.0.1:<port>/stop`. The adapter accepts it only for the worker's own session. A dialog that appears meanwhile fails the run as `worker_blocked`.
 4. `surface read --report` becomes the run summary; Claude usage is summed from the transcript path forgectl recorded, capped at 32 MiB per turn. The turn files are removed on every exit.
 
+**Status reporting.** The adapter sets `supportsLocalAgentJwt`, so Paperclip mints a run-scoped JWT per turn. It goes only into a 0700 report script in the state dir (`turns/<session>.report.sh`), removed when the turn ends; the brief names the script and the exact command. The worker runs `bash <script> in_review "<summary>"`: the script comments, then moves the issue to `in_review` assigned to `FORGECTL_PAPERCLIP_REVIEWER_USER_ID` (Paperclip refuses an agent's `in_review` without a review path, and an issue has one assignee). Paperclip cancels the agent's run when its issue is reassigned, so a successful handoff shows as a cancelled run with `issue_reassigned`.
+
 The worker runs as the operator and can read the turn file during its turn, so the token proves the callback came from a local process during this turn, not that it came from the hook. That is accepted for a loopback, single-operator setup. `XDG_STATE_HOME` is not used, because forgectl does not pass it to workers and the hook could not follow it.
 
 Build and test:
@@ -37,6 +39,8 @@ An agent can edit its own `adapterConfig` through Paperclip's API, so anything t
 | `FORGECTL_PAPERCLIP_FORGECTL` | absolute path of the forgectl binary | `forgectl` on `PATH` |
 | `FORGECTL_PAPERCLIP_HERDR_SESSION` | herdr session for every pane | `paperclip` |
 | `FORGECTL_PAPERCLIP_CALLBACK_PORT` | loopback port for the Stop-hook listener | `3199` |
+| `FORGECTL_PAPERCLIP_API_URL` | loopback Paperclip API the report script calls | `http://127.0.0.1:3100` |
+| `FORGECTL_PAPERCLIP_REVIEWER_USER_ID` | Paperclip user an agent hands its issue to at `in_review` | unset: the agent comments only |
 | `FORGECTL_PAPERCLIP_PROFILES` | `:`-separated `[surface.profiles]` names agents may pick besides `main` | unset: any configured profile |
 
 Under Paperclip's `local_trusted` mode any local process, a worker included, is the instance admin, so these controls bound mistakes, not a hostile worker. Run `authenticated` mode before relying on them.

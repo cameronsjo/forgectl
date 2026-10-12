@@ -23,6 +23,7 @@ Being built now.
 - [atelier P2: queue and drain (forgectl T8)](2026-10-06-atelier-p2-queue-and-drain.md)
 - [atelier P3: intake from GitHub labels (forgectl T9)](2026-10-09-atelier-p3-github-intake.md)
 - [Paperclip components: what to run, extend, borrow, or skip](2026-10-12-paperclip-components.md)
+- [Paperclip worker credentials: let pane workers report status](2026-10-12-paperclip-worker-credentials.md)
 
 ## Proposed
 
@@ -32,7 +33,6 @@ Written, not started.
 - [forgectl `y` — shell-history half of #26 (scoped plan)](2026-07-28-y-shell-history.md)
 - [forgectl docs reader — Roadmap (2026-09-04)](2026-09-04-docs-reader-roadmap.md)
 - [atelier inbox: one needs-you list (forgectl T11)](2026-10-11-atelier-inbox.md)
-- [Paperclip worker credentials: let pane workers report status](2026-10-12-paperclip-worker-credentials.md)
 
 ## Done
 

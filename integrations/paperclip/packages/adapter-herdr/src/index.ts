@@ -27,7 +27,9 @@ import {
   operatorForgectlPath,
   parseConfig,
   planTurn,
+  reportScript,
   sessionFromWorker,
+  wakeIssueId,
   sumTranscriptUsage,
   workerNameFor,
   type AdapterConfig,
@@ -35,7 +37,7 @@ import {
   type WorkerSession,
 } from "./core.js";
 import { brief, launchWorker, listWorkers, readReport, runForgectl, waitReady, waitSettled, watchForBlocking } from "./forgectl.js";
-import { readAppended, removeTurnFiles, sizeOf, writeBrief, writeTurnFile } from "./turnstate.js";
+import { readAppended, removeTurnFiles, sizeOf, writeBrief, writeReportScript, writeTurnFile } from "./turnstate.js";
 
 type Log = (msg: string) => Promise<void>;
 
@@ -141,7 +143,23 @@ async function runTurn(
   const written: string[] = [];
   let stop: StopWait | null = null;
   try {
-    const briefFile = await writeBrief(ctx.runId, composeBrief(ctx.runId, ctx.agent.name, extractIssue(ctx.context), nonce));
+    // Status reporting: Paperclip mints a run-scoped JWT (supportsLocalAgentJwt)
+    // that the report script carries, so the worker can comment and hand the
+    // issue to review without ever seeing the token.
+    const issueId = wakeIssueId(ctx.context);
+    let reportCommand: string | null = null;
+    if (ctx.authToken && issueId) {
+      const script = await writeReportScript(
+        worker.session_id ?? worker.name,
+        reportScript({ apiUrl: cfg.apiUrl, issueId, runId: ctx.runId, token: ctx.authToken, reviewerUserId: cfg.reviewerUserId }),
+      );
+      written.push(script);
+      reportCommand = `bash ${script}`;
+      await log(`Status reporting on for issue ${issueId}${cfg.reviewerUserId ? "" : " (no reviewer configured: comment only)"}`);
+    } else {
+      await log(`Status reporting off: ${ctx.authToken ? "no issue on this wake" : "Paperclip minted no run token"}`);
+    }
+    const briefFile = await writeBrief(ctx.runId, composeBrief(ctx.runId, ctx.agent.name, extractIssue(ctx.context), nonce, reportCommand));
     written.push(briefFile);
     if (cfg.harness === "claude" && worker.session_id) {
       written.push(await writeTurnFile(worker.session_id, { runId: ctx.runId, token, callbackUrl: `http://127.0.0.1:${cfg.callbackPort}/stop` }));
@@ -240,6 +258,7 @@ export function createServerAdapter(): ServerAdapterModule {
     type: ADAPTER_TYPE,
     execute,
     testEnvironment,
+    supportsLocalAgentJwt: true,
     sessionCodec: {
       deserialize: (raw) => {
         const s = decodeSession(raw);

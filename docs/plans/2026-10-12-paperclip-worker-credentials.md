@@ -1,6 +1,6 @@
 ---
-status: proposed
-next: "T1 (adapter: run JWT + per-turn report helper) → T2 (brief and instructions end at in_review) → T3 (live check against the P0 repair-wake baseline) → T4 (security review of the file set) on PR #1246's branch."
+status: in-flight
+next: "T4: Opus security review of the adapter file set and the Paperclip auth paths, fold findings, then flip PR #1246 to ready."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -72,12 +72,21 @@ Driver: opus. A credential path; implementation and review stay on Opus (Usage P
 
 ## Tasks
 
-- [ ] **T1: adapter run JWT and report script.** Set `supportsLocalAgentJwt: true`. When `ctx.authToken` is absent, run as today and log that status reporting is off. Otherwise write the report script per Design, remove it in `finally`. Tests: script mode 0700 and refuses a planted link; refuses a status other than `in_review`, an oversized or multi-line comment; token absent from the brief and from every log line (checked by planting a canary token).
-- [ ] **T2: brief ends at in_review.** The brief tells the worker to finish with the exact report command and never to set `done`. README documents the flow and the `authenticated`-mode caveat.
-- [ ] **T3: live check against the baseline.** On the spike: positive control first, without T1 (the P0 runs above show `issue_disposition_repair` wakes). With T1: the issue is `in_review`; the issue activity log shows the actor as this agent with this turn's run id; `GET /api/agents/:id/wakeup-requests` (or the run list filtered by `wakeReason`) shows no `issue_disposition_repair` for the issue within 90 s (three heartbeats); a canary search of the ledger, the transcript and the run log finds no token.
+- [x] **T1: adapter run JWT and report script.** Set `supportsLocalAgentJwt: true`. When `ctx.authToken` is absent, run as today and log that status reporting is off. Otherwise write the report script per Design, remove it in `finally`. Tests: script mode 0700 and refuses a planted link; refuses a status other than `in_review`, an oversized or multi-line comment; token absent from the brief and from every log line (checked by planting a canary token).
+- [x] **T2: brief ends at in_review.** The brief tells the worker to finish with the exact report command and never to set `done`. README documents the flow and the `authenticated`-mode caveat.
+- [x] **T3: live check against the baseline.** On the spike: positive control first, without T1 (the P0 runs above show `issue_disposition_repair` wakes). With T1: the issue is `in_review`; the issue activity log shows the actor as this agent with this turn's run id; `GET /api/agents/:id/wakeup-requests` (or the run list filtered by `wakeReason`) shows no `issue_disposition_repair` for the issue within 90 s (three heartbeats); a canary search of the ledger, the transcript and the run log finds no token.
 - [ ] **T4: security review before activation.** An Opus security review of the adapter file set (`integrations/paperclip/packages/adapter-herdr/src/*.ts`, the report script template, the Stop hook) and the Paperclip auth paths it relies on (`middleware/auth.ts`, `services/authorization.ts`, the issues routes).
 
 ## Related
 
 - forgectl#1244 (rest of P1), forgectl#1239 (env passing, now not needed here), ADR-0010
 - PR #1246 (adapter), `integrations/paperclip/README.md`
+
+## Deviations
+
+- T1: Paperclip refuses an agent's `in_review` without a review path and allows one assignee per issue, so the report script also sets `assigneeUserId` to an operator-chosen reviewer (`FORGECTL_PAPERCLIP_REVIEWER_USER_ID`) and clears `assigneeAgentId`. Without a reviewer configured it comments only. Found live: the first T3 run got HTTP 422 "Issue can only have one assignee".
+- T3: a successful handoff ends the agent's run as `cancelled` with `issue_reassigned`; that is Paperclip cancelling an agent's run when its issue is reassigned, not a failed turn.
+
+## Learnings
+
+- T3 evidence (spike, 2026-10-12): `PAP-23` ended `in_review`, assigned to `local-board`, with the comment and the update recorded as the agent under run `7f347b0d`; no `issue_disposition_repair` or other automation run followed; a JWT-shaped canary search of the run log, the forgectl ledger and the worker transcript found nothing, with a positive control matching.

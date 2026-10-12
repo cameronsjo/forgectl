@@ -23,10 +23,10 @@ export function turnStateDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(stateBase(env), "forgectl-paperclip", "turns");
 }
 
-async function writeNew(file: string, content: string): Promise<void> {
+async function writeNew(file: string, content: string, mode = 0o600): Promise<void> {
   let fh: FileHandle | null = null;
   try {
-    fh = await open(file, WRITE_NEW, 0o600);
+    fh = await open(file, WRITE_NEW, mode);
     await fh.writeFile(content, "utf8");
   } finally {
     await fh?.close();
@@ -113,4 +113,14 @@ export async function sizeOf(file: string | null): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/** Write this turn's report script (0700, exclusive, no link followed) next to its turn file. */
+export async function writeReportScript(sessionId: string, content: string): Promise<string> {
+  if (!ID_RE.test(sessionId)) throw new Error(`refusing report script for session id ${JSON.stringify(sessionId)}: not [A-Za-z0-9-]{1,64}`);
+  const dir = await privateDir(turnStateDir());
+  const file = path.join(dir, `${sessionId}.report.sh`);
+  await rm(file, { force: true });
+  await writeNew(file, content, 0o700);
+  return file;
 }

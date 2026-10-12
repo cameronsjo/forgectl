@@ -86,6 +86,13 @@ test("an operator profile allowlist limits which Claude accounts an agent can pi
   assert.throws(() => parseConfig({ repo: "/r", profile: "work" }, env), /not in FORGECTL_PAPERCLIP_PROFILES/);
 });
 
+test("parseConfig keeps the API on loopback and the reviewer a plain id", () => {
+  assert.equal(parseConfig({ repo: "/r" }, OP).apiUrl, "http://127.0.0.1:3100");
+  assert.throws(() => parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_API_URL: "http://evil.example:3100" }), /127\.0\.0\.1/);
+  assert.throws(() => parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_REVIEWER_USER_ID: "a b" }), /must match/);
+  assert.equal(parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_REVIEWER_USER_ID: "local-board" }).reviewerUserId, "local-board");
+});
+
 test("parseConfig bounds the turn timeout", () => {
   assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: 0 }, OP), /30-86400/);
   assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: Number.NaN }, OP), /30-86400/);

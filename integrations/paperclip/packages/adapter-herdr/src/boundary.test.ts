@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitStop, ensureListener } from "./callback.js";
 import { readAppended, removeTurnFiles, writeBrief, writeTurnFile } from "./turnstate.js";
+import { composeBrief, reportScript } from "./core.js";
 
 const tmp = (): string => mkdtempSync(path.join(os.tmpdir(), "pcb-"));
 const RUN = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b";
@@ -109,4 +110,44 @@ test("the Stop hook never calls curl for a tampered callback URL", () => {
   assert.equal(existsSync(log), false, "no request for a userinfo URL");
   run("http://127.0.0.1:3199/stop");
   assert.match(readFileSync(log, "utf8"), /http:\/\/127\.0\.0\.1:3199\/stop/);
+});
+
+test("the report script refuses bad input, sends two authenticated calls, and never prints the token", () => {
+  const token = "canary.TOKEN-0f1e2d3c4b5a";
+  const dir = tmp();
+  const bin = tmp();
+  const log = path.join(bin, "curl.log");
+  writeFileSync(path.join(bin, "curl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nprintf 201\n`);
+  chmodSync(path.join(bin, "curl"), 0o755);
+  const write = (reviewerUserId: string | null): string => {
+    const f = path.join(dir, `r-${reviewerUserId ?? "none"}.sh`);
+    writeFileSync(f, reportScript({ apiUrl: "http://127.0.0.1:3100", issueId: "issue-1", runId: RUN, token, reviewerUserId }), { mode: 0o700 });
+    return f;
+  };
+  const env = { PATH: `${bin}:/usr/bin:/bin:/opt/homebrew/bin`, HOME: dir };
+  const run = (f: string, args: string[]): { code: number; out: string } => {
+    try {
+      return { code: 0, out: execFileSync("bash", [f, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) };
+    } catch (e) {
+      const err = e as { status: number; stdout: string; stderr: string };
+      return { code: err.status, out: `${err.stdout}${err.stderr}` };
+    }
+  };
+  const f = write("local-board");
+  assert.equal(run(f, ["done", "x"]).code, 2);
+  assert.equal(run(f, ["in_review", "two\nlines"]).code, 2);
+  assert.equal(run(f, ["in_review", ""]).code, 2);
+  assert.equal(existsSync(log), false, "no request before the input checks pass");
+  const ok = run(f, ["in_review", "Added X on branch b, commit abc123"]);
+  assert.equal(ok.code, 0, ok.out);
+  assert.ok(!ok.out.includes(token), "the token never reaches stdout or stderr");
+  const calls = readFileSync(log, "utf8").trim().split("\n");
+  assert.equal(calls.length, 2);
+  assert.match(calls[0] ?? "", /-X POST .*Authorization: Bearer canary\.TOKEN.*X-Paperclip-Run-Id: 0f1e2d3c.*\/api\/issues\/issue-1\/comments/);
+  assert.match(calls[1] ?? "", /-X PATCH .*"status":"in_review".*"assigneeUserId":"local-board".*"assigneeAgentId":null/);
+  writeFileSync(log, "");
+  assert.equal(run(write(null), ["in_review", "summary"]).code, 0);
+  assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, "comment only without a reviewer");
+  const brief = composeBrief(RUN, "eng", { identifier: "PAP-1", title: "t", description: "d" }, "0123456789abcdef0123", `bash ${f}`);
+  assert.ok(brief.includes(f) && !brief.includes(token));
 });
