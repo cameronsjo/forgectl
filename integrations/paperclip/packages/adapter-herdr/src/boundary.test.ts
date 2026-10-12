@@ -157,11 +157,11 @@ test("the report script refuses bad input, sends two authenticated calls, and ne
   assert.ok(brief.includes(f) && !brief.includes(token));
 });
 
-test("the operator config file must be a private regular file; absent means none", async () => {
+test("the operator config file must be a private regular file; unset means none, missing is an error", async () => {
   const dir = tmp();
   const file = path.join(dir, "paperclip.json");
   const env = { FORGECTL_PAPERCLIP_CONFIG: file };
-  assert.deepEqual(await readOperatorConfig(env), {});
+  await assert.rejects(readOperatorConfig(env), /does not exist/);
   writeFileSync(file, JSON.stringify({ FORGECTL_PAPERCLIP_REPOS: "/r" }), { mode: 0o600 });
   assert.deepEqual(await readOperatorConfig(env), { FORGECTL_PAPERCLIP_REPOS: "/r" });
   chmodSync(file, 0o644);

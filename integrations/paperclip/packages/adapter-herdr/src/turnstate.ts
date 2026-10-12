@@ -34,11 +34,6 @@ async function writeNew(file: string, content: string, mode = 0o600): Promise<vo
 }
 
 /**
- * Write the turn file the worker's Stop hook reads: run id, one-time token and
- * callback URL, keyed by the Claude session id forgectl assigned the worker.
- * Returns the path to remove when the turn ends.
- */
-/**
  * Create (or check) a private directory under the state base: every component
  * below the base must be a real directory (no symlink), and the leaf must be
  * owned by this user with mode 0700.
@@ -56,6 +51,11 @@ async function privateDir(dir: string): Promise<string> {
   return dir;
 }
 
+/**
+ * Write the turn file the worker's Stop hook reads: run id, one-time token and
+ * callback URL, keyed by the Claude session id forgectl assigned the worker.
+ * Returns the path to remove when the turn ends.
+ */
 export async function writeTurnFile(sessionId: string, turn: { runId: string; token: string; callbackUrl: string }): Promise<string> {
   if (!ID_RE.test(sessionId)) throw new Error(`refusing turn file for session id ${JSON.stringify(sessionId)}: not [A-Za-z0-9-]{1,64}`);
   const dir = await privateDir(turnStateDir());
@@ -126,8 +126,8 @@ export async function writeReportScript(sessionId: string, content: string): Pro
 }
 
 /**
- * Read the operator config file named by FORGECTL_PAPERCLIP_CONFIG; unset or
- * absent means none. There is no default path: the adapter registry is shared
+ * Read the operator config file named by FORGECTL_PAPERCLIP_CONFIG; unset means
+ * none, and a named file that is missing is an error. There is no default path: the adapter registry is shared
  * by every Paperclip instance under one PAPERCLIP_HOME, so each instance names
  * its own file in its environment (install-service.sh puts it in the
  * instance's .env). The opened file must be a regular file owned by this user
@@ -143,7 +143,7 @@ export async function readOperatorConfig(env: NodeJS.ProcessEnv = process.env): 
     fh = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return {};
+    if (code === "ENOENT") throw new Error(`FORGECTL_PAPERCLIP_CONFIG names ${file}, which does not exist`);
     if (code === "ELOOP") throw new Error(`operator config ${file} must be a regular file, not a symlink`);
     throw err;
   }

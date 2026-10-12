@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run Paperclip as a pinned launchd/systemd service (instance "forgectl") with
 # the herdr_forgectl adapter registered. Leaves every other Paperclip instance
-# alone. Safe to re-run: each step skips what is already in place.
+# alone. Safe to re-run; it never overwrites the operator settings file.
 # Usage: install-service.sh --repos /abs/repo[:/abs/repo...] [--reviewer USER_ID] [--dry-run]
 # Env:   PAPERCLIP_HOME (default ~/.paperclip)
 set -euo pipefail
