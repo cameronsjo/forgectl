@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Fix or file gap 11 (second brief fails read-back), then rerun P0 check 3; trust ~/.claude-alt and codex for the scratch repo and run eng-alt and eng-codex."
+next: "Cameron dismisses the auto-mode dialog on both Claude accounts; then rerun P0 check 3 and eng-alt. Codex waits on forgectl#1242."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -146,3 +146,22 @@ Target: `the-estate` `wiki/capabilities/delivery-automation.md` § Available int
 ## P1 proposal
 
 See the session report; recorded here once approved.
+
+## Filed forgectl issues (2026-10-12)
+
+| Issue | Gap |
+|---|---|
+| cameronsjo/forgectl#1235 | 11: the "Teach auto mode about your environment?" dialog swallows every later brief; `ready` misses it |
+| cameronsjo/forgectl#1236 | 12: `ready` reads the placeholder suggestion as typed input |
+| cameronsjo/forgectl#1237 | 13: `read --report` includes rows after the REPORT line |
+| cameronsjo/forgectl#1238 | 9: `config --json` omits `[surface.profiles]` |
+| cameronsjo/forgectl#1239 | 1-4, plus a curated plugin set per worker: hooks for an external scheduler |
+| cameronsjo/forgectl#1240 | 6: folder-trust preflight |
+| cameronsjo/forgectl#1241 | 5, 10: usage without GitHub; codex turn-done and usage |
+| cameronsjo/forgectl#1242 | `ready` never sees the codex 0.162 prompt, so codex workers cannot be briefed |
+
+## P1 runs after trust (2026-10-12)
+
+- `eng-alt` (claude, `--profile alt`): launched under `~/.claude-alt`, then the "Teach auto mode" dialog (#1235) took the first brief. Run `94b86db0`, `brief_refused`.
+- `eng-codex` (codex worker): pane at its prompt, `surface ready` never passes (#1242). Run `cf16210a`, `not_ready`.
+- The scratch repo now disables every interactive mod (`sploot`, `c3`, `atelier`, `board`, `verbs`, `guard-toast`, `herdr-bridge`) through project `enabledPlugins`. Cameron wants curated plugin sets per worker as the general form (#1239 item 6).
