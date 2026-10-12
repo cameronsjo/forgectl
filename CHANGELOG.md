@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.1](https://github.com/cameronsjo/forgectl/compare/v0.43.0...v0.43.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **surface:** hold a claude row when the claude-slots check cannot answer ([#1231](https://github.com/cameronsjo/forgectl/issues/1231)) ([2cda821](https://github.com/cameronsjo/forgectl/commit/2cda821752dd449384ba529c71dcad812cc23ad1))
+
 ## [0.43.0](https://github.com/cameronsjo/forgectl/compare/v0.42.0...v0.43.0) (2026-10-11)
 
 
