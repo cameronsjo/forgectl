@@ -70,6 +70,16 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		{"shell-idle", "codex", StateNotReady, "", ""},
 		// The placeholder in an empty composer is not input.
 		{"codex-ready", "codex", StateReady, "", ""},
+		// Codex 0.162.1 in a worker worktree: the long branch name cuts the
+		// model line off before "Context N% left"; the shortcuts row under it
+		// still marks the footer (forgectl#1242).
+		{"codex-ready-long-branch", "codex", StateReady, "", ""},
+		// Typing hides the shortcuts row, so the model row alone marks the
+		// footer; this is the read-back of a real typed brief.
+		{"codex-typed-long-branch", "codex", StateReady, "", "Read .paperclip/brief-5f1ca350-2015-4a42-bc26-f6765f69782f.md and do what it asks. When you finish, end your final message with one line made of: the word REPORT, a space, the code 51056b2def1b, a colon, then a one-line summary of what you did and where it is (branch, commit, PR)."},
+		// Claude Code 2.1.289 after a first auto-mode turn, with interactive
+		// mods drawing above the box: ready, nothing typed.
+		{"claude-after-first-auto-turn", "claude", StateReady, "", ""},
 		{"codex-typed-unsent", "codex", StateReady, "", "Run exactly this shell command once and nothing else: mkdir -p /tmp/fxcap/codex-made"},
 		// The turn failed on a model error and Codex is back at its composer.
 		{"codex-model-error", "codex", StateReady, "", ""},
@@ -175,6 +185,55 @@ func TestEvaluate_OverlayWithTheBoxVisibleIsBlocked(t *testing.T) {
 	v := tab.Evaluate("claude", s)
 	if v.State != StateBlocked || v.Blocking != "session feedback survey" {
 		t.Fatalf("verdict %+v, want blocked by the survey", v)
+	}
+}
+
+// claudeBoxStart returns the offset of the rule line above Claude's input box.
+func claudeBoxStart(t *testing.T, text string) int {
+	t.Helper()
+	i := strings.LastIndex(text, "\n❯")
+	if i < 0 {
+		t.Fatal("fixture has no Claude input box")
+	}
+	box := strings.LastIndex(text[:i], "\n")
+	if box < 0 {
+		t.Fatal("fixture has no rule line above the input box")
+	}
+	return box
+}
+
+// The auto-mode setup dialog is drawn above Claude's input box with the box
+// still showing, and it takes every keystroke, so a typed brief vanishes
+// (forgectl#1235). The rows were read from a live worker pane on 2026-10-12
+// and are spliced into a captured screen.
+func TestEvaluate_AutoModeSetupDialogIsBlocked(t *testing.T) {
+	s := fixture(t, "claude-after-first-auto-turn")
+	box := claudeBoxStart(t, s.Text)
+	s.Text = s.Text[:box] + "\n" + strings.Repeat("─", 119) +
+		"\n  Teach auto mode about your environment?" +
+		"\n  Auto mode works better when it knows your environment. Takes about a minute." +
+		"\n  ❯ 1. Yes\n    2. Not now\n    3. Don't show again\n  Enter to confirm · Esc to cancel" +
+		s.Text[box:]
+	v := defaultTable(t).Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "auto-mode setup dialog" {
+		t.Fatalf("verdict %+v, want blocked by the auto-mode setup dialog", v)
+	}
+}
+
+// Claude Code sometimes shows a dim example prompt in an empty box. The screen
+// text cannot tell it from typed input, so it is matched by its shape
+// (forgectl#1236). The row was read from a live worker pane on 2026-10-12;
+// Claude Code puts a no-break space after the prompt mark.
+func TestEvaluate_ClaudePlaceholderIsNotInput(t *testing.T) {
+	s := fixture(t, "claude-after-first-auto-turn")
+	i := strings.LastIndex(s.Text, "\n❯\n")
+	if i < 0 {
+		t.Fatal("fixture has no empty Claude input box")
+	}
+	s.Text = s.Text[:i] + "\n❯ Try \"refactor <filepath>\"\n" + s.Text[i+len("\n❯\n"):]
+	v := defaultTable(t).Evaluate("claude", s)
+	if v.State != StateReady || v.Input != "" {
+		t.Fatalf("verdict %+v, want ready with no input", v)
 	}
 }
 
