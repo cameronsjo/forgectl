@@ -577,7 +577,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// Same layering BuildInvocation does: removals hit the inherited snapshot
 	// only, so a profile Env entry naming a removed variable still lands.
 	env := launch.MergeEnv(
-		launch.StripEnv(os.Environ(), unset),
+		launch.StripEnv(withoutClaudeInbox(os.Environ()), unset),
 		launch.MergeMaps(injected, profile.Env),
 	)
 	_, _ = fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeName(s), termsafe.QuotePath(s.Cwd))

@@ -221,8 +221,9 @@ pairs can still use native `notify_when_idle`.
   auth). forgectl refuses the careless cases: a worker that names itself the
   coordinator or drops its name (`FORGECTL_LEDGER` or `FORGECTL_DRAIN_WORKER`
   without `FORGECTL_WORKER`), and a worker reading anyone's inbox but its own.
-  New surfaces do not inherit the launcher's `CLAUDE_CODE_MESSAGING_SOCKET` or
-  token. Security review on #674, 2026-10-11.
+  New surfaces, `forgectl launch` and `forgectl resume` do not pass on the
+  launcher's `CLAUDE_CODE_MESSAGING_SOCKET` or token. Security review on #674,
+  2026-10-11; `launch` and `resume` from its re-review.
 - Known exposures kept: a Codex body sits on `codex queue`'s argv for up to its
   15 s timeout, and the lock off Unix is in-process only.
 

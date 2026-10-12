@@ -378,6 +378,13 @@ const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 // claudeMessagingEnv is the inbox Claude Code exports to its own children.
 var claudeMessagingEnv = []string{"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
 
+// withoutClaudeInbox drops the inbox of the Claude session forgectl was run
+// from. A harness started with it would resolve as that session in surface
+// send (mail.LedgerDir keys the coordinator on its socket).
+func withoutClaudeInbox(env []string) []string {
+	return launch.StripEnv(env, claudeMessagingEnv)
+}
+
 // herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
 // runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
 // launcher and the new pane share.
