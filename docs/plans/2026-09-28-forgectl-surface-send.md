@@ -177,7 +177,7 @@ Reply with: forgectl surface send coordinator "<text>"
 
 | Harness | Resolve | State | Deliver | Priority |
 |---|---|---|---|---|
-| claude | registry entry whose `cwd` is the worktree and whose socket answers; named for the worker (one only) | registry `status` | NDJSON frame on the inbox socket, `session_id` stamped, no auth line (the worker sets `crossSessionInbound: "accept"`) | now / next / later pass through |
+| claude | registry entry whose `cwd` is the worktree and whose socket answers; named for the worker (one only) | registry `status` | NDJSON frame on the inbox socket, no `session_id` and no auth line (the worker sets `crossSessionInbound: "accept"`) | now / next / later pass through |
 | codex | `thread_id` in the roster, learned from notify | last event | `codex queue --thread=<id> --message=<text>` | all queue as follow-up in v1 |
 | pi | socket path set at launch | ask the extension | forgectl pi extension: every send names a mode; idle steers (starts a turn), busy steers (`later` is followUp) | `now` is `next` |
 | pane | pane id from the ledger | `surface ready` | paste only when ready | idle only |
@@ -195,7 +195,7 @@ the sender a notice from `forgectl`.
 ### Idle notices without a daemon
 
 Each harness's own turn-end hook calls `forgectl surface event`: Claude `Stop` and
-`UserPromptSubmit` hooks, Codex `notify`, pi `agent_start`/`agent_end` in the
+`UserPromptSubmit` hooks, Codex `notify`, pi `agent_start`/`agent_settled` in the
 extension. The event updates the worker's state, records a Codex thread id, sends a
 one-shot notice to anyone who asked with `--watch`, and flushes. Claude-to-Claude
 pairs can still use native `notify_when_idle`.
