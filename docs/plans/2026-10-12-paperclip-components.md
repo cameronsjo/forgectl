@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Land forgectl#1243, then finish P1 per forgectl#1244; dispatch-rule amendment awaits approval (private tracker)."
+next: "Release 0.44.1 per forgectl#1247, then execute docs/plans/2026-10-12-paperclip-worker-credentials.md (T1-T4), then the rest of forgectl#1244."
 branch: feat/paperclip-p0-spike
 date: 2026-10-12
 updated: 2026-10-12
@@ -140,7 +140,7 @@ Recorded, not patched around:
 ## P1 plan (what is left)
 
 1. Land #1243 and release it, then drop the adapter's `forgectlPath` override.
-2. Worker credentials and an `in_review` instruction bundle, ending the repair-wake loop (forgectl#1239 item 1, forgectl#1244).
+2. Worker status reporting through a per-turn run JWT, ending the repair-wake loop: [`2026-10-12-paperclip-worker-credentials.md`](2026-10-12-paperclip-worker-credentials.md) (forgectl#1244). Operator-only adapter settings moved to the server environment first (`87f0ef0f`).
 3. A curated worker profile instead of per-repo `enabledPlugins` (forgectl#1239 item 6).
 4. Run Paperclip with `paperclipai service install`, pinned to one version.
 5. Then P2-P5 (forgectl#1245).

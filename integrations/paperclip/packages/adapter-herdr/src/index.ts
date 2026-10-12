@@ -24,6 +24,7 @@ import {
   composeBrief,
   decodeSession,
   extractIssue,
+  operatorForgectlPath,
   parseConfig,
   planTurn,
   sessionFromWorker,
@@ -219,7 +220,12 @@ async function runTurn(
 }
 
 async function testEnvironment(_ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
-  const forgectlPath = process.env["FORGECTL_PAPERCLIP_FORGECTL"] || "forgectl";
+  let forgectlPath: string;
+  try {
+    forgectlPath = operatorForgectlPath();
+  } catch (err) {
+    return { adapterType: ADAPTER_TYPE, status: "fail", checks: [{ code: "forgectl_path", level: "error", message: (err as Error).message }], testedAt: new Date().toISOString() };
+  }
   const r = await runForgectl({ forgectlPath, herdrSession: process.env["FORGECTL_PAPERCLIP_HERDR_SESSION"] || "paperclip" } as AdapterConfig, ["--version"], 10_000);
   return {
     adapterType: ADAPTER_TYPE,

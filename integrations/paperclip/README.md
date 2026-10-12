@@ -37,6 +37,7 @@ An agent can edit its own `adapterConfig` through Paperclip's API, so anything t
 | `FORGECTL_PAPERCLIP_FORGECTL` | absolute path of the forgectl binary | `forgectl` on `PATH` |
 | `FORGECTL_PAPERCLIP_HERDR_SESSION` | herdr session for every pane | `paperclip` |
 | `FORGECTL_PAPERCLIP_CALLBACK_PORT` | loopback port for the Stop-hook listener | `3199` |
+| `FORGECTL_PAPERCLIP_PROFILES` | `:`-separated `[surface.profiles]` names agents may pick besides `main` | unset: any configured profile |
 
 Under Paperclip's `local_trusted` mode any local process, a worker included, is the instance admin, so these controls bound mistakes, not a hostile worker. Run `authenticated` mode before relying on them.
 

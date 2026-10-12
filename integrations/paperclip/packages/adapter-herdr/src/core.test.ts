@@ -79,6 +79,13 @@ test("parseConfig refuses operator-only keys in adapterConfig, which an agent ca
   assert.throws(() => parseConfig({ repo: "/r" }, { ...OP, FORGECTL_PAPERCLIP_FORGECTL: "bin/forgectl" }), /absolute path/);
 });
 
+test("an operator profile allowlist limits which Claude accounts an agent can pick", () => {
+  const env = { ...OP, FORGECTL_PAPERCLIP_PROFILES: "alt" };
+  assert.equal(parseConfig({ repo: "/r", profile: "alt" }, env).profile, "alt");
+  assert.equal(parseConfig({ repo: "/r" }, env).profile, "main");
+  assert.throws(() => parseConfig({ repo: "/r", profile: "work" }, env), /not in FORGECTL_PAPERCLIP_PROFILES/);
+});
+
 test("parseConfig bounds the turn timeout", () => {
   assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: 0 }, OP), /30-86400/);
   assert.throws(() => parseConfig({ repo: "/r", turnTimeoutSec: Number.NaN }, OP), /30-86400/);

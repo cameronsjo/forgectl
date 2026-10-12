@@ -32,6 +32,7 @@ Written, not started.
 - [forgectl `y` — shell-history half of #26 (scoped plan)](2026-07-28-y-shell-history.md)
 - [forgectl docs reader — Roadmap (2026-09-04)](2026-09-04-docs-reader-roadmap.md)
 - [atelier inbox: one needs-you list (forgectl T11)](2026-10-11-atelier-inbox.md)
+- [Paperclip worker credentials: let pane workers report status](2026-10-12-paperclip-worker-credentials.md)
 
 ## Done
 

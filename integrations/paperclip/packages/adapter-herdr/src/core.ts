@@ -41,6 +41,13 @@ const SESSION_RE = /^[A-Za-z0-9._-]{1,64}$/;
  */
 const OPERATOR_ONLY = ["forgectlPath", "herdrSession", "callbackPort"] as const;
 
+/** The forgectl binary the operator chose: "forgectl" on PATH, or an absolute path. */
+export function operatorForgectlPath(env: Record<string, string | undefined> = process.env): string {
+  const p = env["FORGECTL_PAPERCLIP_FORGECTL"] || "forgectl";
+  if (p !== "forgectl" && !path.isAbsolute(p)) throw new Error(`FORGECTL_PAPERCLIP_FORGECTL must be an absolute path; got ${JSON.stringify(p)}`);
+  return p;
+}
+
 export function parseConfig(raw: Record<string, unknown>, env: Record<string, string | undefined> = process.env): AdapterConfig {
   for (const k of OPERATOR_ONLY) {
     // Paperclip merges adapterConfig updates, so null is the only way to clear a key.
@@ -77,10 +84,11 @@ export function parseConfig(raw: Record<string, unknown>, env: Record<string, st
   if (typeof turnTimeoutSec !== "number" || !Number.isInteger(turnTimeoutSec) || turnTimeoutSec < 30 || turnTimeoutSec > 86_400) {
     throw new Error(`adapterConfig.turnTimeoutSec must be an integer in 30-86400; got ${JSON.stringify(turnTimeoutSec)}`);
   }
-  const forgectlPath = env["FORGECTL_PAPERCLIP_FORGECTL"] || "forgectl";
-  if (forgectlPath !== "forgectl" && !path.isAbsolute(forgectlPath)) {
-    throw new Error(`FORGECTL_PAPERCLIP_FORGECTL must be an absolute path; got ${JSON.stringify(forgectlPath)}`);
+  const profiles = (env["FORGECTL_PAPERCLIP_PROFILES"] ?? "").split(":").filter((p) => p.length > 0);
+  if (profiles.length > 0 && profile !== "main" && !profiles.includes(profile)) {
+    throw new Error(`adapterConfig.profile ${JSON.stringify(profile)} is not in FORGECTL_PAPERCLIP_PROFILES`);
   }
+  const forgectlPath = operatorForgectlPath(env);
   return { repo: path.resolve(repo), harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath };
 }
 
