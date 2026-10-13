@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.45.0](https://github.com/cameronsjo/forgectl/compare/v0.44.1...v0.45.0) (2026-10-13)
+
+
+### Features
+
+* **paperclip:** finish P1 — pinned service, worker profile, pi in_review ([#1258](https://github.com/cameronsjo/forgectl/issues/1258)) ([6fe6fa0](https://github.com/cameronsjo/forgectl/commit/6fe6fa0cc5bee9962bb04437941eb77b18e7ede6))
+* **paperclip:** herdr adapter for Paperclip agents (P0 + P1) ([#1246](https://github.com/cameronsjo/forgectl/issues/1246)) ([eb5ea4a](https://github.com/cameronsjo/forgectl/commit/eb5ea4a93c298db09f2838bb015480f145511962))
+
+
+### Bug Fixes
+
+* **config:** forgectl config shows each [surface.profiles] entry's config_dir ([9a4ceef](https://github.com/cameronsjo/forgectl/commit/9a4ceefa8f5408bd85d278a67baab6b51391a67b))
+* **surface:** end a report at the last wrapped line of its message ([#1251](https://github.com/cameronsjo/forgectl/issues/1251)) ([d7692e7](https://github.com/cameronsjo/forgectl/commit/d7692e724f1cd13ec20e037504844a4d2f466294)), closes [#1237](https://github.com/cameronsjo/forgectl/issues/1237)
+* **surface:** read usage-daily.jsonl up to 16 MiB ([#1252](https://github.com/cameronsjo/forgectl/issues/1252)) ([04b9baf](https://github.com/cameronsjo/forgectl/commit/04b9baf7f5ca43429bac24960102134ee5e485b4)), closes [#1221](https://github.com/cameronsjo/forgectl/issues/1221)
+
 ## [0.44.1](https://github.com/cameronsjo/forgectl/compare/v0.44.0...v0.44.1) (2026-10-12)
 
 
