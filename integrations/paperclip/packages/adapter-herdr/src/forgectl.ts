@@ -12,8 +12,9 @@ export interface ForgectlResult {
 /** herdr handles of the process that started Paperclip; a worker must not inherit them. */
 const INHERITED_HERDR_KEYS = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"] as const;
 
-export function forgectlEnv(base: NodeJS.ProcessEnv, herdrSession: string): NodeJS.ProcessEnv {
+export function forgectlEnv(base: NodeJS.ProcessEnv, herdrSession: string, searchPath: string | null = null): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base, HERDR_SESSION: herdrSession };
+  if (searchPath !== null) env["PATH"] = searchPath;
   for (const k of INHERITED_HERDR_KEYS) delete env[k];
   return env;
 }
@@ -23,7 +24,7 @@ export function runForgectl(cfg: AdapterConfig, args: string[], timeoutMs: numbe
     execFile(
       cfg.forgectlPath,
       args,
-      { env: forgectlEnv(process.env, cfg.herdrSession), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+      { env: forgectlEnv(process.env, cfg.herdrSession, cfg.searchPath), timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (!err) return resolve({ code: 0, stdout: String(stdout), stderr: String(stderr) });
         const e = err as { code?: unknown; killed?: boolean; signal?: string | null };

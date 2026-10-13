@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitStop, ensureListener } from "./callback.js";
-import { readAppended, removeTurnFiles, writeBrief, writeTurnFile } from "./turnstate.js";
+import { readAppended, readOperatorConfig, removeTurnFiles, writeBrief, writeTurnFile } from "./turnstate.js";
 import { composeBrief, reportScript } from "./core.js";
 
 const tmp = (): string => mkdtempSync(path.join(os.tmpdir(), "pcb-"));
@@ -155,4 +155,23 @@ test("the report script refuses bad input, sends two authenticated calls, and ne
   assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, "comment only without a reviewer");
   const brief = composeBrief(RUN, "eng", { identifier: "PAP-1", title: "t", description: "d" }, "0123456789abcdef0123", `bash ${f}`);
   assert.ok(brief.includes(f) && !brief.includes(token));
+});
+
+test("the operator config file must be a private regular file; unset means none, missing is an error", async () => {
+  const dir = tmp();
+  const file = path.join(dir, "paperclip.json");
+  const env = { FORGECTL_PAPERCLIP_CONFIG: file };
+  await assert.rejects(readOperatorConfig(env), /does not exist/);
+  writeFileSync(file, JSON.stringify({ FORGECTL_PAPERCLIP_REPOS: "/r" }), { mode: 0o600 });
+  assert.deepEqual(await readOperatorConfig(env), { FORGECTL_PAPERCLIP_REPOS: "/r" });
+  chmodSync(file, 0o644);
+  await assert.rejects(readOperatorConfig(env), /mode 0600/);
+  chmodSync(file, 0o600);
+  const link = path.join(dir, "link.json");
+  symlinkSync(file, link);
+  await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: link }), /regular file/);
+  execFileSync("mkfifo", [path.join(dir, "fifo.json")]);
+  await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: path.join(dir, "fifo.json") }), /regular file/);
+  assert.deepEqual(await readOperatorConfig({}), {});
+  await assert.rejects(readOperatorConfig({ FORGECTL_PAPERCLIP_CONFIG: "rel.json" }), /absolute path/);
 });

@@ -1,7 +1,7 @@
 ---
 status: in-flight
-next: "Release 0.44.1 per forgectl#1247, then execute docs/plans/2026-10-12-paperclip-worker-credentials.md (T1-T4), then the rest of forgectl#1244."
-branch: feat/paperclip-p0-spike
+next: "P1 is done (forgectl#1244). Next: P2-P5 per forgectl#1245."
+branch: feat/paperclip-p1-close
 date: 2026-10-12
 updated: 2026-10-12
 source_plan: "Paperclip analysis artifact (claude.ai, 2026-10-12); this session's step 1-3 brief"
@@ -133,17 +133,19 @@ Recorded, not patched around:
 
 ## Unknowns
 
-- **Two worktree owners.** Paperclip's execution workspace and forgectl's worker worktree both claim the agent's cwd; the adapter uses forgectl's (forgectl#1244).
+- **Two worktree owners: decided.** forgectl owns every worker worktree. A Paperclip project whose workspace strategy creates git worktrees must not be attached to `herdr_forgectl` agents (README § Worktrees).
+- **Agent-written `sessionParams`: not possible.** Only the heartbeat persists them, from the adapter's result. The three API routes that touch them (`runtime-state`, `task-sessions`, `runtime-state/reset-session` in `server/src/routes/agents.ts`) call `assertBoard`, and none writes params. The adapter still validates them on read.
 - **Stop-hook authenticity.** Polish's security review found the first design kept the token, callback URL and turn state in the worktree the worker writes. The adapter now keeps them in a 0700 state dir outside every worktree, writes the brief without following links, validates every field in the hook, accepts a callback only for the worker's own session, and reads usage only from forgectl's transcript path. A same-user process can still read the turn file during a turn; that is accepted for a loopback, single-operator setup.
 - **Hermes endpoint.** Tracked privately with P4 (forgectl#1245).
 
-## P1 plan (what is left)
+## P1 plan (done 2026-10-12)
 
-1. Land #1243 and release it, then drop the adapter's `forgectlPath` override.
-2. Worker status reporting through a per-turn run JWT, ending the repair-wake loop: [`2026-10-12-paperclip-worker-credentials.md`](2026-10-12-paperclip-worker-credentials.md) (forgectl#1244). Operator-only adapter settings moved to the server environment first (`87f0ef0f`).
-3. A curated worker profile instead of per-repo `enabledPlugins` (forgectl#1239 item 6).
-4. Run Paperclip with `paperclipai service install`, pinned to one version.
-5. Then P2-P5 (forgectl#1245).
+1. [x] Land #1243 and release it (forgectl v0.44.1).
+2. [x] Worker status reporting through a per-turn run JWT: [`2026-10-12-paperclip-worker-credentials.md`](2026-10-12-paperclip-worker-credentials.md). Live: `PAP-23`, `PAP-24` ended `in_review` with no repair wake.
+3. [x] pi agents end at `in_review`: `scripts/apply-in-review-rule.sh` appends an operator rule to the agent's `AGENTS.md`. Live: `PAP-25` `in_review`, assigned to `local-board`.
+4. [x] A curated worker profile: `scripts/make-worker-profile.sh` builds `~/.claude-worker` (mods off) and registers `[surface.profiles.worker]`. Login and trust are Cameron's steps.
+5. [x] Paperclip as a pinned service: `scripts/install-service.sh` (instance `forgectl`, port 3110, `2026.1005.0`). Operator settings moved to a 0600 file; `FORGECTL_PAPERCLIP_PATH` lets forgectl find `herdr` under launchd. Live: `FOR-1` ran under the service, commit `e05d2d7`, `in_review` for `local-board`.
+6. [ ] P2-P5 (forgectl#1245).
 
 ## Filed forgectl issues (2026-10-12)
 

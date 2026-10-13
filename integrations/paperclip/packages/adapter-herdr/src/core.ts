@@ -32,6 +32,8 @@ export interface AdapterConfig {
   apiUrl: string;
   /** Human reviewer an agent hands its issue to when it moves it to in_review (Paperclip requires a review path). */
   reviewerUserId: string | null;
+  /** PATH for the forgectl child; null keeps the server's own. A launchd service has no shell PATH, so forgectl cannot find herdr without it. */
+  searchPath: string | null;
 }
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
@@ -45,6 +47,14 @@ const ID_TOKEN_RE = /^[A-Za-z0-9_-]{1,64}$/;
  * the Paperclip server's environment instead.
  */
 const OPERATOR_ONLY = ["forgectlPath", "herdrSession", "callbackPort"] as const;
+
+/** The PATH the operator chose for forgectl, or null: absolute directories only, so no entry resolves against the server's cwd. */
+export function operatorSearchPath(env: Record<string, string | undefined> = process.env): string | null {
+  const p = env["FORGECTL_PAPERCLIP_PATH"] || null;
+  if (p === null) return null;
+  for (const d of p.split(":")) if (!path.isAbsolute(d)) throw new Error(`FORGECTL_PAPERCLIP_PATH entries must be absolute directories; got ${JSON.stringify(d)}`);
+  return p;
+}
 
 /** The forgectl binary the operator chose: "forgectl" on PATH, or an absolute path. */
 export function operatorForgectlPath(env: Record<string, string | undefined> = process.env): string {
@@ -102,7 +112,7 @@ export function parseConfig(raw: Record<string, unknown>, env: Record<string, st
   if (reviewer !== null && !ID_TOKEN_RE.test(reviewer)) {
     throw new Error(`FORGECTL_PAPERCLIP_REVIEWER_USER_ID must match ${ID_TOKEN_RE}; got ${JSON.stringify(reviewer)}`);
   }
-  return { repo: path.resolve(repo), harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath, apiUrl, reviewerUserId: reviewer };
+  return { repo: path.resolve(repo), harness, herdrSession, profile, callbackPort, turnTimeoutSec, forgectlPath, apiUrl, reviewerUserId: reviewer, searchPath: operatorSearchPath(env) };
 }
 
 /** Session state Paperclip persists between runs for one agent + task. */
@@ -406,4 +416,35 @@ export function reportScript(i: ReportScriptInput): string {
     'fi',
     "",
   ].join("\n");
+}
+
+/** The operator settings the adapter reads; a config file may set only these. */
+export const OPERATOR_KEYS = [
+  "FORGECTL_PAPERCLIP_REPOS",
+  "FORGECTL_PAPERCLIP_FORGECTL",
+  "FORGECTL_PAPERCLIP_HERDR_SESSION",
+  "FORGECTL_PAPERCLIP_CALLBACK_PORT",
+  "FORGECTL_PAPERCLIP_PROFILES",
+  "FORGECTL_PAPERCLIP_API_URL",
+  "FORGECTL_PAPERCLIP_REVIEWER_USER_ID",
+  "FORGECTL_PAPERCLIP_PATH",
+] as const;
+
+/**
+ * Merge an operator config file's settings under the process environment
+ * (the environment wins). The file must be a JSON object of string values,
+ * keyed only by OPERATOR_KEYS; anything else is refused, not ignored.
+ */
+export function mergeOperatorConfig(fileJson: unknown, env: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (fileJson === null || typeof fileJson !== "object" || Array.isArray(fileJson)) {
+    throw new Error("operator config must be a JSON object");
+  }
+  const out: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(fileJson as Record<string, unknown>)) {
+    if (!(OPERATOR_KEYS as readonly string[]).includes(k)) throw new Error(`operator config key ${JSON.stringify(k)} is not one of ${OPERATOR_KEYS.join(", ")}`);
+    if (typeof v !== "string") throw new Error(`operator config ${k} must be a string`);
+    out[k] = v;
+  }
+  for (const k of OPERATOR_KEYS) if (env[k] !== undefined && env[k] !== "") out[k] = env[k];
+  return out;
 }

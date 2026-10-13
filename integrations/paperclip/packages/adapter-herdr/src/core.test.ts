@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeBrief, decodeSession, extractIssue, freeWorkerName, parseConfig, fenceUntrusted, planTurn, sumTranscriptUsage, workerNameFor, type ListedWorker } from "./core.js";
+import { composeBrief, decodeSession, extractIssue, freeWorkerName, mergeOperatorConfig, parseConfig, fenceUntrusted, planTurn, sumTranscriptUsage, workerNameFor, type ListedWorker } from "./core.js";
+import { forgectlEnv } from "./forgectl.js";
 
 const NONCE = "0123456789abcdef0123";
 
@@ -140,4 +141,22 @@ test("planTurn briefs the newest live successor when the base name is closed", (
   const plan = planTurn(null, "pc-a-default", workers);
   assert.equal(plan.kind, "brief");
   assert.equal(plan.kind === "brief" && plan.worker.name, "pc-a-default-3");
+});
+
+test("an operator config file fills settings the environment leaves unset, and only known keys", () => {
+  const merged = mergeOperatorConfig({ FORGECTL_PAPERCLIP_REPOS: "/r", FORGECTL_PAPERCLIP_HERDR_SESSION: "pc" }, { FORGECTL_PAPERCLIP_HERDR_SESSION: "env-wins" });
+  assert.equal(merged["FORGECTL_PAPERCLIP_REPOS"], "/r");
+  assert.equal(merged["FORGECTL_PAPERCLIP_HERDR_SESSION"], "env-wins");
+  assert.throws(() => mergeOperatorConfig({ PATH: "/evil" }, {}), /not one of/);
+  assert.throws(() => mergeOperatorConfig({ FORGECTL_PAPERCLIP_REPOS: 1 }, {}), /must be a string/);
+  assert.throws(() => mergeOperatorConfig([], {}), /JSON object/);
+});
+
+test("FORGECTL_PAPERCLIP_PATH sets the forgectl child's PATH and accepts only absolute directories", () => {
+  const base = { FORGECTL_PAPERCLIP_REPOS: "/r" };
+  assert.equal(parseConfig({ repo: "/r" }, base).searchPath, null);
+  assert.equal(parseConfig({ repo: "/r" }, { ...base, FORGECTL_PAPERCLIP_PATH: "/opt/homebrew/bin:/usr/bin" }).searchPath, "/opt/homebrew/bin:/usr/bin");
+  assert.throws(() => parseConfig({ repo: "/r" }, { ...base, FORGECTL_PAPERCLIP_PATH: "bin:/usr/bin" }), /absolute directories/);
+  assert.equal(forgectlEnv({ PATH: "/usr/bin" }, "pc", "/opt/homebrew/bin")["PATH"], "/opt/homebrew/bin");
+  assert.equal(forgectlEnv({ PATH: "/usr/bin" }, "pc", null)["PATH"], "/usr/bin");
 });
