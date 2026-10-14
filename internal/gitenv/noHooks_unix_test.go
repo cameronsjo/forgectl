@@ -17,10 +17,12 @@ import (
 // for them defines hooks a listing in the repository never sees. RunNoHooks
 // switches those off as well (#1079): an includeIf "onbranch:" on the branch
 // being added and an includeIf "gitdir:" on the new admin directory. Each
-// case first proves the hook fires through the hooks-directory pin and the
-// switches a plain listing yields. Needs git 2.54, the first to run
-// configured hooks.
-// Mutation: drop includedHookNames from RunNoHooks: the hook runs.
+// case first proves the hook fires through the hooks-directory pin alone.
+// Needs git 2.54, the first to run configured hooks.
+// Mutation: drop includedHookNames from RunNoHooks: on git 2.54 the hook
+// runs. git 2.55 also honours the event-wide hook.<event>.enabled=false
+// RunNoHooks passes, which stops it there too, so the mutation shows only on
+// 2.54.
 func TestRunNoHooksSwitchesOffConditionallyIncludedHooks(t *testing.T) {
 	gitenvtest.RequireGitVersion(t, 2, 54)
 	cases := map[string]struct {
@@ -50,9 +52,12 @@ func TestRunNoHooksSwitchesOffConditionallyIncludedHooks(t *testing.T) {
 			gitenvtest.Git(t, top, "commit", "-q", "--allow-empty", "-m", "control")
 			gitenvtest.Git(t, top, "config", "includeIf."+c.condition+".path", inc)
 
-			// The control: the switches a plain listing in top yields (none)
-			// leave the conditionally included hook live.
-			ctl := append(append(gitenv.NoHookArgs(nil), "-C", top), "worktree", "add", "-q", "-b", c.ctl, filepath.Join(tmp, c.ctl))
+			// The control: with the hooks directory pinned and no per-name
+			// switch, as a plain listing in top would leave it, the
+			// conditionally included hook runs. The event-wide switches are
+			// left out: git 2.55 honours them, which would stop the hook
+			// for a reason this test is not about.
+			ctl := []string{"-c", "core.hooksPath=/dev/null", "-C", top, "worktree", "add", "-q", "-b", c.ctl, filepath.Join(tmp, c.ctl)}
 			if _, err := gitenv.Run(t.Context(), exec.OSRunner{}, gitenv.Local, ctl...); err != nil {
 				t.Fatalf("control add: %v", err)
 			}
