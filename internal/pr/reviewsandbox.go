@@ -279,7 +279,14 @@ func sharedClaudeTmpDirs(workspace string) ([]string, error) {
 	if sandboxGOOS == "darwin" {
 		bases = append(bases, "/private/tmp")
 	}
-	ws := []string{filepath.Clean(workspace), resolvedOrSelf(workspace)}
+	// The workspace's resolved spelling, through its parent when it does not
+	// exist yet: on macOS /var/folders is /private/var/folders, and a link's
+	// target is always resolved.
+	resolvedWS := resolvedOrSelf(workspace)
+	if resolvedWS == filepath.Clean(workspace) {
+		resolvedWS = filepath.Join(resolvedOrSelf(filepath.Dir(filepath.Clean(workspace))), filepath.Base(workspace))
+	}
+	ws := []string{filepath.Clean(workspace), resolvedWS}
 	var out []string
 	for _, base := range bases {
 		dir := filepath.Join(base, name)

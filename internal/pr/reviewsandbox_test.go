@@ -302,6 +302,21 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 	if got, err := sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1")); err == nil || !strings.Contains(err.Error(), "is a link to") {
 		t.Errorf("with a shared dir linked to the workspace's parent: sharedClaudeTmpDirs = %v, %v, want a refusal naming the link", got, err)
 	}
+	// The same through a TMPDIR that is itself reached by a link, as macOS's
+	// /var/folders is /private/var/folders: the link's resolved target must
+	// still be matched against the workspace.
+	realRoot := t.TempDir()
+	viaLink := filepath.Join(t.TempDir(), "var")
+	if err := os.Symlink(realRoot, viaLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", viaLink)
+	if err := os.Symlink(viaLink, filepath.Join(realRoot, "claude-501")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sharedClaudeTmpDirs(filepath.Join(viaLink, "forgectl-workflow-1")); err == nil || !strings.Contains(err.Error(), "is a link to") {
+		t.Errorf("with a linked TMPDIR and a shared dir linked to it: sharedClaudeTmpDirs = %v, %v, want a refusal naming the link", got, err)
+	}
 	// A link pointing anywhere else stays denied.
 	elsewhere := t.TempDir()
 	other := t.TempDir()
