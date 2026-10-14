@@ -49,6 +49,9 @@ var tmuxModule = module.Manifest{
 // (forgectl#1100).
 var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use forgectl tmux ls or forgectl tmux tree for plain output")
 
+// errTmuxMenuDumbTerminal is the tmux menu's refusal under TERM=dumb (#1152).
+var errTmuxMenuDumbTerminal = tui.DumbTerminalError("the tmux menu", "forgectl tmux ls or forgectl tmux tree for plain output")
+
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
 func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
@@ -78,6 +81,9 @@ func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !isInteractiveTTY() {
 				return errTmuxMenuNeedsTerminal
+			}
+			if termIsDumb() {
+				return errTmuxMenuDumbTerminal
 			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
 			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)

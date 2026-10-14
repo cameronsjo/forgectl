@@ -54,6 +54,11 @@ type DeskOptions struct {
 	// ASCII draws the dashboard's marks, borders and bars in ASCII
 	// (--no-icons). The script viewer (v) is never changed.
 	ASCII bool
+	// NewerInstalled reports the version of a forgectl installed that is
+	// newer than this one, or "", for the line under the header (#1180). It
+	// runs every deskNewerEvery, off the frame. RunDesk sets the PATH check;
+	// nil checks nothing.
+	NewerInstalled func(ctx context.Context) string
 }
 
 const (
@@ -104,6 +109,9 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 	if opts.Runs == nil {
 		opts.Runs = runview.NewDeskSource(d)
 	}
+	if opts.NewerInstalled == nil {
+		opts.NewerInstalled = installedNewer(opts.Version)
+	}
 	_, err := tea.NewProgram(newDeskModel(ctx, d, opts), tea.WithContext(ctx)).Run()
 	return err
 }
@@ -130,6 +138,9 @@ type deskPager struct {
 	title  string
 	lines  []string
 	offset int
+	// keys marks a key list (?): v and l, which close the script and log
+	// pagers, leave it open, since in the run view l and h step the replay.
+	keys bool
 }
 
 type deskModel struct {
@@ -277,6 +288,9 @@ type (
 
 func (m deskModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.scanCmd(), m.tick()}
+	if c := m.newerCmd(0); c != nil {
+		cmds = append(cmds, c)
+	}
 	env := theme.Env{
 		StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
 		StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
@@ -357,6 +371,9 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.scanCmd())
 		}
 		return m, tea.Batch(cmds...)
+	case deskNewerMsg:
+		m.frame.Newer = t.version
+		return m, m.newerCmd(deskNewerEvery)
 	case deskScanMsg:
 		m.scanning = false
 		if t.err != nil {
@@ -633,7 +650,7 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "?":
 		// The key list, from the table the footer is drawn from (#1108).
-		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
+		m.pager = &deskPager{title: "keys", lines: deskKeyLines(), keys: true}
 		return m, nil
 	}
 	return m, nil
@@ -1096,9 +1113,16 @@ func (m *deskModel) pagerKey(key string) {
 	page := max(m.height-2, 1)
 	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
-	case "q", "esc", "v", "l", "?":
+	case "q", "esc", "?":
 		m.pager = nil
 		return
+	case "v", "l":
+		// v and l close the pagers they open. A key list (?) stays open:
+		// in the run view, under its keys list, l and h step the replay.
+		if !p.keys {
+			m.pager = nil
+			return
+		}
 	case "j", "down":
 		p.offset++
 	case "k", "up":
@@ -1238,7 +1262,7 @@ func (m deskModel) pagerView(width, height int) string {
 		lines = append(lines, "")
 	}
 	closeHint := "q close"
-	if p.title == "keys" {
+	if p.keys {
 		closeHint = "? or q close"
 	}
 	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+closeHint), width))

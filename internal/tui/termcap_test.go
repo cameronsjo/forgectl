@@ -40,3 +40,15 @@ func TestTUITextIsCapped(t *testing.T) {
 		}
 	}
 }
+
+func TestDumbTerminal(t *testing.T) {
+	for term, want := range map[string]bool{"dumb": true, "": false, "xterm-256color": false, "linux": false} {
+		if got := DumbTerminal(term); got != want {
+			t.Errorf("DumbTerminal(%q) = %v, want %v", term, got, want)
+		}
+	}
+	err := DumbTerminalError("desk: the dashboard", "desk --frame")
+	if !errors.Is(err, ErrDumbTerminal) || err.Error() != "desk: the dashboard: TERM=dumb cannot draw a full-screen view; use desk --frame" {
+		t.Errorf("DumbTerminalError = %v", err)
+	}
+}
