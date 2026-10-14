@@ -294,7 +294,7 @@ is not a manifest or was not found; 2 usage.`,
 			return runDeskPlan(cmd, deps, *dir, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the plan as one JSON object")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the plan as {"name","sha256","steps":[{"id","after","timeout","private"}],"waves","order","warnings"}`)
 	return cmd
 }
 

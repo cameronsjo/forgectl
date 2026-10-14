@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,7 +68,9 @@ func resolveDSN(flagDSN string, cfg config.SessionsConfig) string {
 func withConcordance(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Concordance) error) error {
 	resolved := resolveDSN(dsn, cfg)
 	if resolved == "" {
-		return fmt.Errorf("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
+		// Unconfigured, so exit 2 (docs/exit-codes.md): retrying cannot help,
+		// unlike a connection that failed (exit 1).
+		return WithExitCode(errors.New("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn"), exitUsage)
 	}
 	concordance, err := sessions.ConnectConcordance(cmd.Context(), resolved)
 	if err != nil {
@@ -354,7 +357,7 @@ NARRATIVE lookup, not a VCS touch history:
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one repo (exact)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum sessions to return")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"session_id","date","repo","model","committed","runbook_type","intent","link","key_decisions"}] to stdout (an empty list is []; empty fields are left out); notes go to stderr`)
 	return cmd
 }
 
@@ -395,7 +398,7 @@ Honest degradations:
 		},
 	}
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"session_id","repo","branch","model","machine","first_ts","last_ts","committed","artifacts":[{"type","title","path"}]} to stdout, or null when the repo has no session; empty fields are left out; notes go to stderr`)
 	return cmd
 }
 

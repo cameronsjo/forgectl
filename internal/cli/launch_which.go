@@ -29,7 +29,8 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+safeText(notice))
 			}
 			cfg.Launch = effLaunch
-			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
+			lc, source := resolveLaunchConfigSource(boundary, cfg, effFrom)
+			src := source.label()
 			profile, err := launch.Resolve(lc, cwd)
 			if err != nil {
 				return WithExitCode(termsafe.Error(err), exitUsage)
@@ -52,7 +53,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 				runDir = launch.SettingsRoot(cwd)
 			}
 			if asJSON {
-				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, runDir, src, injected)
+				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, runDir, source, injected)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			printLaunchProfile(out, th, profile, cwd, runDir, src, injected)
@@ -60,7 +61,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"directory":...,"run_directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
+		`emit {"directory":...,"run_directory":...,"config":...,"config_path":...,"config_note":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
 	return cmd
 }
 
@@ -75,8 +76,16 @@ type launchWhichJSON struct {
 	// repository's settings root for a claude launch from a subfolder,
 	// otherwise Directory. Present for the claude harness only, the one that
 	// can move (launch.SettingsRoot).
-	RunDirectory   string   `json:"run_directory,omitempty"`
-	Config         string   `json:"config"`
+	RunDirectory string `json:"run_directory,omitempty"`
+	// Config is the human source label: the path, then any note in
+	// parentheses. ConfigPath and ConfigNote carry the two apart.
+	Config string `json:"config"`
+	// ConfigPath is the file the profile was read from, or would be (a
+	// missing config.toml), usable as a path.
+	ConfigPath string `json:"config_path"`
+	// ConfigNote is "" for the file's own [launch] section, else why it is
+	// not: "legacy", "missing — built-in defaults", and the like.
+	ConfigNote     string   `json:"config_note"`
 	Matched        string   `json:"matched"`
 	Harness        string   `json:"harness"`
 	Model          string   `json:"model"`
@@ -96,7 +105,7 @@ type launchWhichJSON struct {
 // buildLaunchWhichJSON converts a resolved profile into the --json wire
 // shape. Slice fields are never nil so the encoder emits [] rather than null
 // for a profile with no env or no add-dir entries.
-func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, injected []string) launchWhichJSON {
+func buildLaunchWhichJSON(p launch.Profile, cwd, runDir string, src launchConfigSource, injected []string) launchWhichJSON {
 	envKeys := launch.SortedEnvKeys(p.Env)
 	if envKeys == nil {
 		envKeys = []string{}
@@ -111,7 +120,9 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, inject
 	return launchWhichJSON{
 		Directory:       cwd,
 		RunDirectory:    runDir,
-		Config:          confPath,
+		Config:          src.label(),
+		ConfigPath:      src.Path,
+		ConfigNote:      src.Note,
 		Matched:         p.Match,
 		Harness:         p.Harness,
 		Model:           p.Model,
@@ -127,10 +138,10 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, inject
 // writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
 // seam. Nothing is written before a marshal error, so a failing writer or
 // encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir, confPath string, injected []string) error {
+func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir string, src launchConfigSource, injected []string) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildLaunchWhichJSON(p, cwd, runDir, confPath, injected))
+	return enc.Encode(buildLaunchWhichJSON(p, cwd, runDir, src, injected))
 }
 
 func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, runDir, confPath string, injected []string) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/sessions"
@@ -695,5 +696,23 @@ func TestPrintLastSession_MissEscapesRepoOnce(t *testing.T) {
 	})
 	if want := `no sessions recorded for "a\x1bb"` + "\n"; stdout != want {
 		t.Errorf("miss line = %q, want %q", stdout, want)
+	}
+}
+
+// TestWithConcordance_NoDSNIsExit2 pins forgectl#1150: a missing DSN is
+// unconfigured (exit 2), not a failure a retry could fix (exit 1), and fn
+// never runs.
+func TestWithConcordance_NoDSNIsExit2(t *testing.T) {
+	t.Setenv("FORGECTL_SESSIONS_DSN", "")
+	ran := false
+	err := withConcordance(&cobra.Command{}, "", config.SessionsConfig{}, func(*sessions.Concordance) error {
+		ran = true
+		return nil
+	})
+	if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "no concordance DSN") {
+		t.Errorf("err = %v (exit %d); want the no-DSN error with exit %d", err, ExitCode(err), exitUsage)
+	}
+	if ran {
+		t.Error("fn ran with no DSN")
 	}
 }

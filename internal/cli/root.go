@@ -123,10 +123,10 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   meta.AppName,
 		Short: meta.Tagline,
-		Long: `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.
+		Long: `Two ways in: type a command (forgectl tmux ls), or run forgectl alone for a
+menu. Agents: state verbs take --json, menu --json lists all.
 
-Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`,
+Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused (docs/exit-codes.md).`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
 		RunE:    rootRun,

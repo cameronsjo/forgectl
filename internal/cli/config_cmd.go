@@ -182,7 +182,7 @@ func newConfigCmd(module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout (stable; the human rendering is not)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path","found","unrecognized","entries":[{"key","group","value","set"}],"host_resolved","launch_resolved","env_resolved":[{"key","value","source"}]} to stdout (stable; the human rendering is not); path_error, decode_error and validation_error appear when set`)
 	return cmd
 }
 

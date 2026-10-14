@@ -395,7 +395,7 @@ type deskShowJSON struct {
 	Counts      runShowCountJSON `json:"counts"`
 	Partial     bool             `json:"partial"`
 	Held        bool             `json:"held"`
-	Note        string           `json:"note,omitempty"`
+	Note        string           `json:"note"` // "" when the log read cleanly; always present, as --help lists it
 }
 
 type runStepJSON struct {

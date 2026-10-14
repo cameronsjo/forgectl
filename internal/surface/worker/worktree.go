@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 
@@ -47,8 +49,15 @@ var worktreeDirs = []string{".claude", "worktrees"}
 // main checkout, so it keeps the worktree's own top.
 func RepoTop(ctx context.Context, run GitRunner, dir string) (string, error) {
 	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--show-toplevel")
+	if errors.Is(err, osexec.ErrNotFound) {
+		return "", fmt.Errorf("worker: git is not installed: %w", err)
+	}
 	if err != nil {
-		return "", fmt.Errorf("worker: %s is not inside a git checkout: %w", dir, err)
+		// git's own message carries the whole git command line, which names
+		// no fix; the raw error goes to the log and the caller gets the
+		// next step (forgectl#1095).
+		slog.Debug("git rev-parse --show-toplevel failed.", "dir", dir, "error", err)
+		return "", fmt.Errorf("worker: %s is not inside a git checkout; run from inside the repository, or pass --repo with its path or project name", dir)
 	}
 	top := strings.TrimSpace(out)
 	common, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")

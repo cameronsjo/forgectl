@@ -85,7 +85,7 @@ Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable report to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"checks":[{"name","state","detail","hint"}],"healthy"} to stdout; detail and hint are left out when empty`)
 	return cmd
 }
 

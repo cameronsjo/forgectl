@@ -45,6 +45,8 @@ Setup failures raised before any verb starts (an unresolvable `$HOME`, a relativ
 | Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` (not `resume snapshot`, which exits 0, and not `tasks` or `env check`, which stay at 1) | 1 | 2 |
 | `resume` flag and argument errors (not `resume snapshot`) | 1 | 2 |
 
+`sessions search`, `why` and `last` with no concordance DSN configured exit 2 (unconfigured), where a DSN that cannot be reached stays 1. `review` with a malformed `--repo` or an unknown `--kind` exits 2 with `usage_error`.
+
 `desk show a/b --json` and `tasks show abc --json` now report `code: "usage_error"` instead of `failed`. Their exit status is unchanged by the code string (2 and 1).
 
 A script that tests `$? -eq 1` for "bad call" breaks. A script that tests non-zero is unaffected.

@@ -152,7 +152,7 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	}
 	row, ok := findRow(rows, opts.Name)
 	if !ok {
-		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger", opts.Name), exitUsage)
+		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger; forgectl surface list shows the workers", opts.Name), exitUsage)
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), closeTimeout)
 	defer cancel()

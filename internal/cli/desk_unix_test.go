@@ -903,13 +903,18 @@ func TestDeskReadVerbsNeverCreateADesk(t *testing.T) {
 	}
 
 	// A directory that exists but is not a desk is not chmodded either.
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil { //nolint:gosec // G302: a test dir whose group bit proves status did not narrow it to 0700
 		t.Fatal(err)
 	}
 	_, _, err = deskRun(t, deskDeps(), "status")
 	wantExit(t, err, 0)
-	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o755 {
-		t.Errorf("status changed a non-desk directory: %v %v", fi.Mode(), err)
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o750 {
+		t.Errorf("status changed a non-desk directory's mode to %v", fi.Mode())
 	}
 	if desk.Exists(dir) {
 		t.Error("status made the directory a desk")

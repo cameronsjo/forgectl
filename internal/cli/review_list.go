@@ -46,7 +46,7 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 		// Under --json they go inside the one failure object, so stderr stays a
 		// single JSON value; for a human they print as lines above the error.
 		if asJSON {
-			return reviewFailure(err, notes)
+			return failureWithNotes(err, notes)
 		}
 		renderDegradationNotes(cmd, notes)
 		return err
@@ -81,11 +81,11 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	return nil
 }
 
-// reviewFailure is the all-sources-failed error with the per-source notes
+// failureWithNotes is an all-sources-failed error with the per-source notes
 // folded into its text, so the cause and its fix travel in the --json failure
 // object's error field. The notes are categorical (ghfail): they never carry a
 // subprocess's own output.
-func reviewFailure(err error, notes []string) error {
+func failureWithNotes(err error, notes []string) error {
 	if len(notes) == 0 {
 		return err
 	}
