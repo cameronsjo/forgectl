@@ -375,6 +375,9 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 	if o.live && !deskHasTerminal() && (!logOnStdin || !deskStdoutHasTerminal()) {
 		return WithExitCode(tui.ErrRunWatchNeedsTerminal, deskExitUsage)
 	}
+	if o.live && termIsDumb() {
+		return WithExitCode(tui.DumbTerminalError("desk show --live", "desk show without --live for one printed view"), deskExitUsage)
+	}
 	// A signal must stop a --follow-cmd command, not leave it running in
 	// its own session: the context ends, and the deferred close stops it.
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)

@@ -356,10 +356,27 @@ func (s ProbeState) Conclusive() bool { return s == ProbePresent || s == ProbeGo
 type ProbeResult struct {
 	state ProbeState
 	cause StartCause
+	// restored marks a present object held by a server other than the one
+	// the reference was taken on, at the same endpoint: a restart (whatever
+	// ran in it is gone) or a live handoff (it may still be running).
+	restored bool
 }
 
 // NewProbePresent reports a confirmed existing object.
 func NewProbePresent() ProbeResult { return ProbeResult{state: ProbePresent} }
+
+// NewProbePresentRestored reports a confirmed existing object that a new
+// server incarnation at the same endpoint holds. The object is ours. After a
+// restart the process the reference started in it is gone; after a live
+// handoff, which carries panes across, it may still be running. Which one
+// cannot be told from here.
+func NewProbePresentRestored() ProbeResult {
+	return ProbeResult{state: ProbePresent, restored: true}
+}
+
+// Restored reports a present object a new server incarnation holds (a
+// restart or a live handoff).
+func (r ProbeResult) Restored() bool { return r.restored }
 
 // NewProbeGone reports a confirmed absent object.
 func NewProbeGone() ProbeResult { return ProbeResult{state: ProbeGone} }

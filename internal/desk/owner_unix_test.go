@@ -241,8 +241,9 @@ func lostClaim(t *testing.T, d *Desk) string {
 }
 
 // holdLock holds name's owner lock shared, as ownerAlive's probe does, from
-// another open file, and lets go after hold. It returns once the lock is held.
-func holdLock(t *testing.T, d *Desk, name string, hold time.Duration) {
+// another open file. It returns once the lock is held, with a func that lets
+// it go; cleanup lets it go too.
+func holdLock(t *testing.T, d *Desk, name string) (letGo func()) {
 	t.Helper()
 	f, err := d.openLock(name)
 	if err != nil {
@@ -251,8 +252,24 @@ func holdLock(t *testing.T, d *Desk, name string, hold time.Duration) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_SH); err != nil {
 		t.Fatal(err)
 	}
-	time.AfterFunc(hold, func() { _ = f.Close() })
 	t.Cleanup(func() { _ = f.Close() })
+	return func() { _ = f.Close() }
+}
+
+// letGoAfterFirstTry holds name's lock through the first try of the settled
+// retry and lets it go in the pause after it, so the retry finds it held once
+// and free on the next try, whatever the host's timing.
+func letGoAfterFirstTry(t *testing.T, d *Desk, name string) (pauses *int) {
+	t.Helper()
+	letGo := holdLock(t, d, name)
+	pauses = new(int)
+	saved := ownerLockPause
+	t.Cleanup(func() { ownerLockPause = saved })
+	ownerLockPause = func() {
+		*pauses++
+		letGo()
+	}
+	return pauses
 }
 
 // A probe holding the lock for a moment does not make Skip refuse: Skip
@@ -260,9 +277,12 @@ func holdLock(t *testing.T, d *Desk, name string, hold time.Duration) {
 func TestSkipWaitsOutABriefProbe(t *testing.T) {
 	d := openDesk(t)
 	name := lostClaim(t, d)
-	holdLock(t, d, name, 30*time.Millisecond)
+	pauses := letGoAfterFirstTry(t, d, name)
 	if err := d.Skip(name, SkipLost); err != nil {
-		t.Fatalf("Skip refused behind a 30ms probe: %v", err)
+		t.Fatalf("Skip refused behind a brief probe: %v", err)
+	}
+	if *pauses == 0 {
+		t.Fatal("Skip never found the lock held; the test does not reach the retry")
 	}
 	if got := skipReason(t, d, name); got != SkipLost {
 		t.Fatalf("skip reason %q, want %q", got, SkipLost)
@@ -272,18 +292,24 @@ func TestSkipWaitsOutABriefProbe(t *testing.T) {
 func TestReleaseWaitsOutABriefProbe(t *testing.T) {
 	d := openDesk(t)
 	name := claimOne(t, d)
-	holdLock(t, d, name, 30*time.Millisecond)
+	pauses := letGoAfterFirstTry(t, d, name)
 	if err := d.Release(name, SkipLaunchFailed); err != nil {
-		t.Fatalf("Release refused behind a 30ms probe: %v", err)
+		t.Fatalf("Release refused behind a brief probe: %v", err)
+	}
+	if *pauses == 0 {
+		t.Fatal("Release never found the lock held; the test does not reach the retry")
 	}
 }
 
 // A lock held for the whole retry window is a live owner: Skip and Release
-// still refuse.
+// still refuse. The lock is held until both have answered: a timed hold
+// could run out between Skip's window and Release's on a loaded host, and
+// Release would then rightly find the lock free (forgectl#1083).
 func TestALockHeldThroughoutStillRefuses(t *testing.T) {
 	d := openDesk(t)
 	name := lostClaim(t, d)
-	holdLock(t, d, name, time.Duration(ownerLockTries+5)*ownerLockWait)
+	letGo := holdLock(t, d, name)
+	defer letGo()
 	if err := d.Skip(name, SkipLost); err == nil || !strings.Contains(err.Error(), "holds the lock") {
 		t.Fatalf("Skip behind a held lock = %v, want a refusal", err)
 	}

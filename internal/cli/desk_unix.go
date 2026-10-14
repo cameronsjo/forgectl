@@ -27,6 +27,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
+// errDeskDumbTerminal is the dashboard's refusal under TERM=dumb (#1152).
+var errDeskDumbTerminal = tui.DumbTerminalError("desk: the dashboard", "desk --frame for one frame, or desk status")
+
 // Unix-only seams: whether the process has a terminal on stdin and stdout
 // (for the dashboard), on stdin alone (for `add -`), and on stdout alone
 // (for `show --log - --live`, which reads its keys from the terminal).
@@ -79,6 +82,9 @@ func openDeskDirFor(cmd *cobra.Command, deps module.Deps, flag string) (*desk.De
 func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, frame bool) error {
 	if !frame && !deskHasTerminal() {
 		return WithExitCode(tui.ErrDeskNeedsTerminal, deskExitUsage)
+	}
+	if !frame && termIsDumb() {
+		return WithExitCode(errDeskDumbTerminal, deskExitUsage)
 	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {

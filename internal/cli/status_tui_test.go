@@ -318,3 +318,17 @@ func TestDeferHubVerb_ACommandNeverExecutedPrintsTheInvocation(t *testing.T) {
 		t.Errorf("stderr = %q, want the invocation", stderr.String())
 	}
 }
+
+// TERM=dumb cannot draw the cockpit: --tui refuses without opening it and
+// names plain status (#1152).
+func TestStatusTUI_DumbTerminalRefuses(t *testing.T) {
+	stubTermIsDumb(t, true)
+	rec := &cockpitRecorder{stdinTTY: true, stdoutTTY: true}
+	_, _, err := runStatusTUI(t, okStatusSources(), rec, "--tui")
+	if rec.opened != 0 {
+		t.Fatalf("the cockpit opened %d time(s) under TERM=dumb", rec.opened)
+	}
+	if !errors.Is(err, tui.ErrDumbTerminal) || ExitCode(err) == 0 || !strings.Contains(err.Error(), "plain status") {
+		t.Errorf("err = %v, want the TERM=dumb refusal naming plain status", err)
+	}
+}

@@ -446,3 +446,18 @@ func TestDeskShow_FollowCmdIsNamedByItsFirstWord(t *testing.T) {
 		t.Errorf("the run should be named printf, with no argument shown:\n%s", out)
 	}
 }
+
+// TERM=dumb cannot draw the live view: --live refuses with a usage exit and
+// points at the printed view (#1152).
+func TestDeskShow_LiveRefusesOnADumbTerminal(t *testing.T) {
+	newDeskDir(t)
+	prev := deskHasTerminal
+	deskHasTerminal = func() bool { return true }
+	t.Cleanup(func() { deskHasTerminal = prev })
+	stubTermIsDumb(t, true)
+	_, _, err := deskRun(t, deskDeps(), "show", "01-x", "--live")
+	wantExit(t, err, deskExitUsage)
+	if err == nil || !strings.Contains(err.Error(), "TERM=dumb") || !strings.Contains(err.Error(), "without --live") {
+		t.Errorf("err = %v, want the TERM=dumb refusal naming the printed view", err)
+	}
+}

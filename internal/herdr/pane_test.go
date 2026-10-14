@@ -280,3 +280,33 @@ func TestPanePlaceRefusals(t *testing.T) {
 		})
 	}
 }
+
+// TestPaneVerbsScrubTheirFreeTextFromStderr: herdr's stderr is quoted in a
+// failure only with the verb's free-text operands scrubbed.
+func TestPaneVerbsScrubTheirFreeTextFromStderr(t *testing.T) {
+	const command = "deploy --token=hunter2 now"
+	const message = "forgectl desk: 1 waiting: 01-rotate-keys"
+	run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		echo := "unexpected argument: " + command + "\nunknown option: " + message + "\n"
+		return exec.SensitiveResult{ExitCode: 2, Stderr: exec.BoundedOutputForTest([]byte(echo), exec.OutputComplete)},
+			exec.SensitiveErrorForTest(exec.KindHerdrPaneRun, exec.OutcomeExit)
+	}}
+	for name, err := range map[string]error{
+		"pane run":     PaneRun(t.Context(), run, testHerdrPath, "w1:p3", command),
+		"report-agent": PaneReportBlocked(t.Context(), run, testHerdrPath, "w1:p3", message),
+	} {
+		if err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "herdr said:") {
+			t.Errorf("%s: err = %q, want herdr's stderr quoted", name, msg)
+		}
+		if name == "pane run" && strings.Contains(msg, "hunter2") {
+			t.Errorf("%s: err = %q carries the command", name, msg)
+		}
+		if name == "report-agent" && strings.Contains(msg, "rotate-keys") {
+			t.Errorf("%s: err = %q carries the message", name, msg)
+		}
+	}
+}

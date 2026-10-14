@@ -49,6 +49,23 @@ func TestGitDirtyRunsNoFilterDriver(t *testing.T) {
 	}
 }
 
+// clean's dirty check refreshes a stat-dirty entry, which rewrites the index
+// and would fire the post-index-change hook the repository selects; the hook
+// does not run (#1079).
+// Mutation: drop gitenv's hook pin from RunUnfiltered: the canary runs.
+func TestGitDirtyRunsNoHook(t *testing.T) {
+	gitenvtest.NewHookCanary(t).AssertLive(t)
+	canary := gitenvtest.NewHookCanary(t)
+
+	dirty, err := gitDirty(context.Background(), exec.OSRunner{}, canary.Dir)
+	if canary.Ran(t) {
+		t.Fatal("clean's dirty check ran a hook the repository selects")
+	}
+	if err != nil || dirty {
+		t.Errorf("gitDirty = %v, %v; want a clean tree: the file matches its blob", dirty, err)
+	}
+}
+
 // #1005: a project whose HEAD is a FIFO, on which git itself blocks, is
 // skipped at once as unknown, not reported dirty and never reclaimed.
 // Mutations: drop gitenv's HEAD mode check (git blocks until the deadline,

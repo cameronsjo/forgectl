@@ -44,6 +44,10 @@ type DeskFrameOptions struct {
 	// item's record), by name, for the focus panel. Pending items carry their
 	// own bytes in the snapshot.
 	Records map[string][]byte
+	// Newer is the version of a forgectl installed on PATH that is newer
+	// than the one drawing the frame. When set, a line under the header says
+	// so and how to restart (#1180); "" draws no such line.
+	Newer string
 }
 
 // RenderDeskFrame draws one frame of the desk at width x height as of now,
@@ -283,13 +287,21 @@ func (f deskFrame) layout() ([]string, bool) {
 	rows := deskRows(f.snap, f.now)
 	cursor := min(max(f.cursor, 0), max(len(rows)-1, 0))
 
-	header := f.header(st, width)
+	// A narrow window draws only the header, the too-small line and the
+	// footer, each at the width it really has, so none of them is cut by the
+	// terminal instead (#1152).
+	headW := width
+	if f.narrow() {
+		headW = f.width
+	}
+	header := f.header(st, headW)
+	notice := f.notice(st, headW)
 	footer := f.footerLines(st, width)
 	focusMin := f.focusPanel(st, width, rows, cursor, 0)
 	if f.height <= 0 {
 		// No height to spend: the frame is as tall as it needs, so it breathes.
 		f.roomy = true
-		head := f.headerRoomy(st, width)
+		head := append(f.headerRoomy(st, width), notice...)
 		top := []string{cut(f.summary(st), width)}
 		if width >= deskWideMin {
 			top = f.tiles(st, width)
@@ -301,7 +313,7 @@ func (f deskFrame) layout() ([]string, bool) {
 		return lines, f.essentialShown(lines, focusAt, focusMin, rows, cursor)
 	}
 
-	avail := f.height - 1 - len(footer)
+	avail := f.height - 1 - len(notice) - len(footer)
 	need := deskQueueMin + len(focusMin)
 	var top []string
 	haveTiles := false
@@ -313,7 +325,7 @@ func (f deskFrame) layout() ([]string, bool) {
 		top = []string{cut(f.summary(st), width)}
 	}
 	if avail-len(top) < need || f.narrow() {
-		return f.tooSmall(st, header, footer, rows, cursor), false
+		return f.tooSmall(st, append([]string{header}, notice...), footer, rows, cursor), false
 	}
 	avail -= len(top)
 
@@ -353,10 +365,10 @@ func (f deskFrame) layout() ([]string, bool) {
 	}
 	lower := f.lowerPanel(st, width, max(avail-len(queue)-len(focus), 0))
 
-	focusAt := 1 + len(top) + len(queue)
-	sections := slices.Concat([]string{header}, top, queue, focus, lower)
+	focusAt := 1 + len(notice) + len(top) + len(queue)
+	sections := slices.Concat([]string{header}, notice, top, queue, focus, lower)
 	if roomy {
-		head := f.headerRoomy(st, width)
+		head := append(f.headerRoomy(st, width), notice...)
 		sections = stack(head, top, queue, focus, lower)
 		focusAt = len(stack(head, top, queue)) + 1
 	}
@@ -448,7 +460,11 @@ func (f deskFrame) essentialShown(lines []string, start int, focusMin []string, 
 // fits, and the footer. A narrow window asks for the minimum width; past it,
 // the rows asked for are measured at the current width, where what and why
 // wrap as drawn. The key hints leave out y and a, which cannot run here.
-func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, rows []queueRow, cursor int) []string {
+//
+// A window narrower than deskMinWidth gets no queue panel: its borders are
+// drawn deskMinWidth wide, so the terminal would cut or wrap every row into
+// a garbled dashboard under the line asking for more columns (#1152).
+func (f deskFrame) tooSmall(st theme.Styles, head, footer []string, rows []queueRow, cursor int) []string {
 	width := max(f.width, deskMinWidth)
 	visible := width
 	if f.narrow() {
@@ -461,7 +477,7 @@ func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, row
 	case f.narrow():
 		text = fmt.Sprintf("too small: needs %d columns", deskMinWidth)
 	default:
-		need := 1 + deskQueueMin + len(f.focusPanel(st, width, rows, cursor, 0)) + 1
+		need := len(head) + deskQueueMin + len(f.focusPanel(st, width, rows, cursor, 0)) + 1
 		text = fmt.Sprintf("too small to show the sha256 · make the window %d rows tall to run items", need)
 		if ansi.StringWidth(text) > visible {
 			text = fmt.Sprintf("too small: make it %d rows tall", need)
@@ -470,8 +486,12 @@ func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, row
 	if f.footer == "" {
 		footer = []string{cut(f.hints(st, visible, false), visible)}
 	}
-	lines := []string{header, cut(st.Warn.Render(text), visible)}
-	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
+	lines := make([]string, 0, len(head)+1)
+	for _, h := range head {
+		lines = append(lines, cut(h, visible))
+	}
+	lines = append(lines, cut(st.Warn.Render(text), visible))
+	if room := f.height - len(lines) - len(footer); room >= deskQueueMin && !f.narrow() {
 		lines = append(lines, f.queuePanel(st, width, rows, cursor, room-2)...)
 	}
 	return append(fitHeight(lines, f.height-len(footer)), footer...)
@@ -586,6 +606,17 @@ func (f deskFrame) headerRoomy(st theme.Styles, width int) []string {
 	}
 	stats := strings.Join(parts, st.Dim.Render(" · "))
 	return []string{cut(title, width), cut(stats, width)}
+}
+
+// notice is the line under the header that says a newer forgectl is
+// installed than the one running (#1180), or nothing. The running desk keeps
+// its old code until it is restarted, so fixes in the new one look missing.
+func (f deskFrame) notice(st theme.Styles, width int) []string {
+	if f.opts.Newer == "" {
+		return nil
+	}
+	text := "newer forgectl installed (" + deskText(f.opts.Newer) + ") · q then forgectl desk to restart"
+	return []string{cut(" "+st.Warn.Render(text), width)}
 }
 
 // uptime is a compact duration: 12m, 4h37m, 3d4h.
@@ -1533,6 +1564,27 @@ func deskKeyLines() []string {
 		lines = append(lines, fmt.Sprintf("%-4s %s", b.key, b.help))
 	}
 	return lines
+}
+
+// DeskKeysHelp is the dashboard's keys for `desk --help`, from deskBindings:
+// the table the footer and the ? screen are drawn from, so --help cannot
+// drift from them (#1159). Each key starts an indented line, and its text
+// wraps under itself within width columns.
+func DeskKeysHelp(width int) string {
+	const indent = "  "
+	var out []string
+	for _, b := range deskBindings {
+		head := indent + fmt.Sprintf("%-4s ", b.key)
+		pad := strings.Repeat(" ", len(head))
+		for i, l := range strings.Split(ansi.Wordwrap(b.help, max(width-len(head), 20), ""), "\n") {
+			if i == 0 {
+				out = append(out, head+l)
+				continue
+			}
+			out = append(out, pad+l)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // runningCount is how many runs are going now: running items that are not

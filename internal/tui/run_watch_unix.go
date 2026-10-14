@@ -120,6 +120,12 @@ func (w runWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskRunPlayMsg:
 		next, cmd = w.m.playStep(t)
 	case tea.KeyPressMsg:
+		if t.String() != "ctrl+c" && w.m.pager != nil {
+			// The run view's ? key list is open: its keys scroll and close
+			// it, and q returns to the run rather than quitting (#1158).
+			w.m.pagerKey(t.String())
+			return w, nil
+		}
 		switch t.String() {
 		case "ctrl+c":
 			return w, tea.Quit
@@ -143,7 +149,10 @@ func (w runWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (w runWatchModel) View() tea.View {
 	v := tea.NewView("")
-	if w.m.rv != nil {
+	switch {
+	case w.m.pager != nil:
+		v = tea.NewView(w.m.pagerView(w.m.screenWidth(), w.m.screenHeight()))
+	case w.m.rv != nil:
 		v = tea.NewView(asciiFrame(w.m.rv.render(w.m.styles(), w.m.screenWidth(), w.m.screenHeight()), w.m.opts.ASCII))
 	}
 	v.AltScreen = true
