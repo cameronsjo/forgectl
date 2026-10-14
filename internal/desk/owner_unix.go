@@ -116,7 +116,9 @@ func (d *Desk) tryLockOwnerSettled(name string) (l *ownerLock, held bool, err er
 }
 
 // ownerLockPause is the wait between tries. Tests replace it to let a held
-// lock go at a known try instead of racing a timer against this loop.
+// lock go at a known try instead of racing a timer against this loop. It is
+// an unsynchronised package variable, so a test that swaps it must not call
+// t.Parallel.
 var ownerLockPause = func() { time.Sleep(ownerLockWait) }
 
 // release drops the lock, removing the lock file first (while still holding
