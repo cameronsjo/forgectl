@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -240,9 +241,22 @@ func headerLine(line string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// splitAfter reads an AFTER value: item names separated by commas or spaces.
+// MaxAfter caps the names an AFTER line may give; an item over it is refused.
+const MaxAfter = 16
+
+// splitAfter reads an AFTER value: item names separated by commas or spaces,
+// each kept once, in order.
 func splitAfter(value string) []string {
-	return strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	var out []string
+	for _, n := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
 }
 
 // insertHeaders returns body with header lines for h's what, why, tty and
@@ -280,12 +294,16 @@ func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
 		if have.After != nil {
 			return nil, errors.New("desk: the file already has a '# AFTER:' line; drop --after or the line")
 		}
-		for _, n := range h.After {
+		after := splitAfter(strings.Join(h.After, ","))
+		if len(after) > MaxAfter {
+			return nil, fmt.Errorf("desk: --after names %d items; at most %d are allowed", len(after), MaxAfter)
+		}
+		for _, n := range after {
 			if !ValidName(n) {
 				return nil, fmt.Errorf("desk: --after %q is not an item name (NN-name)", describe(n))
 			}
 		}
-		lines = append(lines, "# AFTER: "+strings.Join(h.After, ","))
+		lines = append(lines, "# AFTER: "+strings.Join(after, ","))
 	}
 	if (have.What == "" && what == "") || (have.Why == "" && why == "") {
 		return nil, errors.New("desk: an item needs both WHAT and WHY (flags or '# WHAT:'/'# WHY:' lines)")
@@ -377,6 +395,10 @@ type State string
 const (
 	StateWaiting State = "waiting"
 	StateRefused State = "refused" // pending, but not a regular file with one link, or too large
+	// StateHeld is pending and well-formed, but not claimable yet: an item
+	// its AFTER line names has not finished with exit 0, or a run of the same
+	// name is in running/. It becomes waiting on its own; Item.Hold says why.
+	StateHeld    State = "held"
 	StateRunning State = "running"
 	StateLost    State = "lost" // running, owner dead, no RUN-END
 	StateDone    State = "done"
@@ -402,6 +424,8 @@ type Item struct {
 	Legacy bool
 	// Refusal says why a refused item cannot run.
 	Refusal string
+	// Hold says why a held item cannot run yet.
+	Hold string
 	// ExitCode is a done item's rc: from meta, or for a legacy item the log's
 	// last line, EXIT=<rc>. nil means no exit was recorded.
 	ExitCode *int

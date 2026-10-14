@@ -211,10 +211,12 @@ stderr.
 --tty marks a script that needs the terminal (a password prompt, sudo); it runs
 in the dashboard's own pane. A batch cannot be a TTY item.
 
---after NAME (repeatable, or comma-separated) orders items: it adds an
-"# AFTER:" line, and the item shows as refused ("waits on NAME") and cannot be
-run until each named item has finished with exit 0. A run that failed keeps it
-waiting; skip it, or queue a new item, to go on.
+--after NAME (repeatable, or comma-separated; at most 16) orders items: it
+adds an "# AFTER:" line, and the item shows as held ("waits on NAME") and
+cannot be run until each named item has finished with exit 0. A run that
+failed keeps it held; skip it, or queue a new item, to go on. A name the desk
+does not know (a typo, or an item already skipped) holds it for ever, so add
+warns when NAME is not waiting, running or done.
 
 Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the
@@ -274,6 +276,9 @@ func checkAddFlags(file string, o deskAddOpts) error {
 	}
 	if err := checkFlagText("--why", o.why); err != nil {
 		return err
+	}
+	if len(o.after) > desk.MaxAfter {
+		return deskUsage("desk add: --after names %d items; at most %d are allowed", len(o.after), desk.MaxAfter)
 	}
 	for _, a := range o.after {
 		if !desk.ValidName(a) {
@@ -367,8 +372,8 @@ It waits while the item is still pending, which can be for as long as the
 operator takes to approve it, and reads no input.
 
 From a script or an agent, pass --deadline S: the watch stops after S seconds
-with exit 75 and a resume= line. Without a terminal on stdin and stdout and
-with no --deadline, it stops after ` + strconv.Itoa(deskWatchDefaultDeadline) + ` seconds the same way; --deadline 0 waits
+with exit 75 and a resume= line. With no terminal on stdin and no
+--deadline, it stops after ` + strconv.Itoa(deskWatchDefaultDeadline) + ` seconds the same way; --deadline 0 waits
 for the run with no limit.
 
 Exit codes:
@@ -397,7 +402,7 @@ watch printed.`,
 			return runDeskWatch(cmd, deps, *dir, args[0], deadline, skip)
 		},
 	}
-	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run; unset: "+strconv.Itoa(deskWatchDefaultDeadline)+" without a terminal)")
+	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run; unset: "+strconv.Itoa(deskWatchDefaultDeadline)+" when stdin is not a terminal)")
 	cmd.Flags().IntVar(&skip, "skip", 0, "leave out the first N event lines (a previous watch's resume point)")
 	return cmd
 }

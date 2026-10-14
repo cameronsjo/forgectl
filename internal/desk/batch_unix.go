@@ -270,18 +270,21 @@ func (b *Batch) launch(s Step) error {
 		return err
 	}
 	// A step starts where an approved script does: in the home directory,
-	// with [ChildEnv], plus the step's own variables.
+	// with [ChildEnv], plus the step's own variables. A failure here ends
+	// the step as a failed start (127), the same path as cmd.Start failing.
 	cmd := exec.Command("/bin/bash", "-c", s.Command) //nolint:gosec,noctx // G204: the approved manifest's command is the payload; the runner owns the step's lifetime through its process group, not a context
 	itemEnvErr := ApplyItemEnv(cmd)
-	cmd.Env = append(cmd.Env, "STEP_OUT="+outPath, "RUN_BATCH_DIR="+b.opts.Dir, "RUN_STEP_ID="+s.ID)
-	anc := make([]string, 0, len(b.m.Ancestors[s.ID]))
-	for a := range b.m.Ancestors[s.ID] {
-		anc = append(anc, a)
-	}
-	sort.Strings(anc)
-	for _, a := range anc {
-		for _, k := range b.outKeys[a] {
-			cmd.Env = append(cmd.Env, "OUT_"+a+"_"+k+"="+b.outputs[a][k])
+	if itemEnvErr == nil {
+		cmd.Env = append(cmd.Env, "STEP_OUT="+outPath, "RUN_BATCH_DIR="+b.opts.Dir, "RUN_STEP_ID="+s.ID)
+		anc := make([]string, 0, len(b.m.Ancestors[s.ID]))
+		for a := range b.m.Ancestors[s.ID] {
+			anc = append(anc, a)
+		}
+		sort.Strings(anc)
+		for _, a := range anc {
+			for _, k := range b.outKeys[a] {
+				cmd.Env = append(cmd.Env, "OUT_"+a+"_"+k+"="+b.outputs[a][k])
+			}
 		}
 	}
 	b.state[s.ID], b.t0[s.ID] = stepRunning, time.Now()
@@ -302,7 +305,6 @@ func (b *Batch) launch(s Step) error {
 	}
 	_ = w.Close() // the child holds the write end now; EOF comes when every holder exits
 	if startErr != nil {
-		_, _ = fmt.Fprintf(logF, "run-batch: could not start: %v\n", startErr)
 		_ = r.Close()
 		_ = logF.Close()
 		b.endStep(s, 127, stepFailed)

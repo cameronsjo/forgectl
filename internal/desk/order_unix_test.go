@@ -4,6 +4,8 @@ package desk
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +27,7 @@ func pendingItem(t *testing.T, s *Snapshot, name string) Item {
 }
 
 // A pending item queued under the name of an item still in running/ is
-// shown refused, and claiming it is refused before anything moves: the
+// shown held, and claiming it is refused before anything moves: the
 // claim's rename would replace the running item's record (forgectl#1157).
 func TestClaimRefusesANameARunHolds(t *testing.T) {
 	d := openDesk(t)
@@ -34,8 +36,8 @@ func TestClaimRefusesANameARunHolds(t *testing.T) {
 
 	dropPending(t, d, c.Name+".sh", "# WHAT: again\n# WHY: a test\necho second\n")
 	it := pendingItem(t, scan(t, d), c.Name)
-	if it.State != StateRefused || !strings.Contains(it.Refusal, "running") {
-		t.Fatalf("pending %s: state %s refusal %q, want refused because a run holds the name", c.Name, it.State, it.Refusal)
+	if it.State != StateHeld || !strings.Contains(it.Hold, "running") {
+		t.Fatalf("pending %s: state %s hold %q, want held because a run holds the name", c.Name, it.State, it.Hold)
 	}
 	if _, err := d.Claim(c.Name, queuedSHA(t, d, c.Name)); !errors.Is(err, ErrRefused) {
 		t.Fatalf("Claim = %v, want ErrRefused", err)
@@ -64,7 +66,7 @@ func addAfter(t *testing.T, d *Desk, file, body string, after ...string) Added {
 }
 
 // An item with an AFTER line waits until the item it names has finished
-// with exit 0: refused while that one waits, runs, or failed, and claimable
+// with exit 0: held while that one waits, runs, or failed, and claimable
 // once it succeeded (forgectl#1202).
 func TestAfterHoldsAnItemUntilItsPredecessorSucceeds(t *testing.T) {
 	for _, tc := range []struct {
@@ -80,8 +82,8 @@ func TestAfterHoldsAnItemUntilItsPredecessorSucceeds(t *testing.T) {
 		}
 
 		it := pendingItem(t, scan(t, d), verify.Name)
-		if it.State != StateRefused || !strings.Contains(it.Refusal, "has not run") || !slices.Equal(it.After, []string{enable.Name}) {
-			t.Fatalf("before %s ran: state %s refusal %q after %q", enable.Name, it.State, it.Refusal, it.After)
+		if it.State != StateHeld || !strings.Contains(it.Hold, "has not finished") || !slices.Equal(it.After, []string{enable.Name}) {
+			t.Fatalf("before %s ran: state %s hold %q after %q", enable.Name, it.State, it.Hold, it.After)
 		}
 		if _, err := d.Claim(verify.Name, verify.SHA256); !errors.Is(err, ErrRefused) {
 			t.Fatalf("Claim before %s ran = %v, want ErrRefused", enable.Name, err)
@@ -94,8 +96,8 @@ func TestAfterHoldsAnItemUntilItsPredecessorSucceeds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if it := pendingItem(t, scan(t, d), verify.Name); it.State != StateRefused || !strings.Contains(it.Refusal, "still running") {
-			t.Fatalf("while %s runs: state %s refusal %q", enable.Name, it.State, it.Refusal)
+		if it := pendingItem(t, scan(t, d), verify.Name); it.State != StateHeld || !strings.Contains(it.Hold, "still running") {
+			t.Fatalf("while %s runs: state %s hold %q", enable.Name, it.State, it.Hold)
 		}
 		if err := run.Finish(tc.rc, "exit"); err != nil {
 			t.Fatal(err)
@@ -105,23 +107,31 @@ func TestAfterHoldsAnItemUntilItsPredecessorSucceeds(t *testing.T) {
 		_, err = d.Claim(verify.Name, verify.SHA256)
 		if tc.claimable {
 			if it.State != StateWaiting || err != nil {
-				t.Fatalf("after rc 0: state %s refusal %q, Claim = %v; want it waiting and claimable", it.State, it.Refusal, err)
+				t.Fatalf("after rc 0: state %s hold %q, Claim = %v; want it waiting and claimable", it.State, it.Hold, err)
 			}
 			continue
 		}
-		if it.State != StateRefused || !strings.Contains(it.Refusal, tc.reason) || !errors.Is(err, ErrRefused) {
-			t.Fatalf("after rc %d: state %s refusal %q, Claim = %v; want refused (%s)", tc.rc, it.State, it.Refusal, err, tc.reason)
+		if it.State != StateHeld || !strings.Contains(it.Hold, tc.reason) || !errors.Is(err, ErrRefused) {
+			t.Fatalf("after rc %d: state %s hold %q, Claim = %v; want held (%s)", tc.rc, it.State, it.Hold, err, tc.reason)
 		}
 	}
 }
 
-// A hand-dropped AFTER line that names no item, or the item itself, keeps
-// the item refused.
+// A hand-dropped AFTER line that can never be met (a bad name, the item
+// itself, too many names) makes the item refused, not held.
 func TestAfterLineThatCannotBeMetIsRefused(t *testing.T) {
 	d := openDesk(t)
 	dropPending(t, d, "01-x.sh", "# WHAT: x\n# WHY: y\n# AFTER: ../etc\necho x\n")
 	dropPending(t, d, "02-y.sh", "# WHAT: x\n# WHY: y\n# AFTER: 02-y\necho y\n")
+	var many []string
+	for i := range MaxAfter + 1 {
+		many = append(many, fmt.Sprintf("%02d-n", 50+i))
+	}
+	dropPending(t, d, "03-z.sh", "# WHAT: x\n# WHY: y\n# AFTER: "+strings.Join(many, ",")+"\necho z\n")
 	s := scan(t, d)
+	if it := pendingItem(t, s, "03-z"); it.State != StateRefused || !strings.Contains(it.Refusal, "at most") {
+		t.Errorf("03-z: state %s refusal %q", it.State, it.Refusal)
+	}
 	if it := pendingItem(t, s, "01-x"); it.State != StateRefused || !strings.Contains(it.Refusal, "not an item name") {
 		t.Errorf("01-x: state %s refusal %q", it.State, it.Refusal)
 	}
@@ -144,9 +154,98 @@ func TestAddWithRefusesABadAfter(t *testing.T) {
 }
 
 func TestParseHeadersReadsAfter(t *testing.T) {
-	h := ParseHeaders([]byte("# AFTER: 01-a, 02-b\n# AFTER: 03-c\n"))
+	h := ParseHeaders([]byte("# AFTER: 01-a, 02-b,01-a\n# AFTER: 03-c\n"))
 	if !slices.Equal(h.After, []string{"01-a", "02-b"}) {
-		t.Errorf("After = %q, want the first line's two names", h.After)
+		t.Errorf("After = %q, want the first line's two names, each once", h.After)
+	}
+}
+
+// An AFTER gate reads only the exit code the desk recorded in meta, never
+// the predecessor's own log: a run that printed EXIT=0 last, and never got
+// an exit_code (lost, then skipped), does not release the item after it.
+func TestAfterIgnoresAnExitLineInTheLog(t *testing.T) {
+	d := openDesk(t)
+	writeFile(t, d.LogPath("01-enable"), "output\nEXIT=0\n", 0o600)
+	dropPending(t, d, "02-verify.sh", "# WHAT: x\n# WHY: y\n# AFTER: 01-enable\necho v\n")
+	if it := pendingItem(t, scan(t, d), "02-verify"); it.State != StateHeld {
+		t.Fatalf("state %s hold %q; want held, the log's EXIT= line does not count", it.State, it.Hold)
+	}
+	if _, err := d.Claim("02-verify", queuedSHA(t, d, "02-verify")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("Claim = %v, want ErrRefused", err)
+	}
+}
+
+// renameNoReplace never replaces its target: a run's record in running/
+// survives a claim that lost the race with the name check (forgectl#1157).
+func TestRenameNoReplaceKeepsTheTarget(t *testing.T) {
+	d := openDesk(t)
+	src := filepath.Join(d.Path(), DirPending, "01-a.sh")
+	dst := filepath.Join(d.Path(), DirRunning, "01-a.sh")
+	writeFile(t, src, "new\n", 0o600)
+	writeFile(t, dst, "running record\n", 0o600)
+	if err := d.renameNoReplace(DirPending, DirRunning, "01-a.sh"); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("renameNoReplace over an existing target = %v, want fs.ErrExist", err)
+	}
+	if readFile(t, dst) != "running record\n" || readFile(t, src) != "new\n" {
+		t.Fatal("a refused rename changed a file")
+	}
+	if err := os.Remove(dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.renameNoReplace(DirPending, DirRunning, "01-a.sh"); err != nil {
+		t.Fatalf("renameNoReplace to a free name = %v", err)
+	}
+	if readFile(t, dst) != "new\n" {
+		t.Error("the moved file has other bytes")
+	}
+	if err := d.renameNoReplace(DirPending, DirRunning, "01-a.sh"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("renameNoReplace of a missing source = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// The portable fallback refuses an existing target too.
+func TestLinkUnlinkKeepsTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a"), "a\n", 0o600)
+	writeFile(t, filepath.Join(dir, "b"), "b\n", 0o600)
+	f, err := os.Open(dir) //nolint:gosec // G304: a directory under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test
+	fd := int(f.Fd())
+	if err := linkUnlink(fd, "a", fd, "b"); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("linkUnlink over b = %v, want fs.ErrExist", err)
+	}
+	if err := linkUnlink(fd, "a", fd, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a still exists after the move: %v", err)
+	}
+	if readFile(t, filepath.Join(dir, "c")) != "a\n" {
+		t.Error("c does not hold a's bytes")
+	}
+}
+
+// A run of the same name that reaches running/ between Claim's check and
+// its rename is not replaced: the claim is refused and the item stays
+// pending, unclaimed.
+func TestClaimRefusesWhenARunArrivesAfterTheCheck(t *testing.T) {
+	d := openDesk(t)
+	a := addScript(t, d, "a.sh", "echo a\n")
+	scan(t, d)
+	record := filepath.Join(d.Path(), DirRunning, a.Name+".sh")
+	afterClaimChecks = func() { writeFile(t, record, "another run\n", 0o600) }
+	t.Cleanup(func() { afterClaimChecks = func() {} })
+	if _, err := d.Claim(a.Name, a.SHA256); !errors.Is(err, ErrRefused) {
+		t.Fatalf("Claim = %v, want ErrRefused", err)
+	}
+	if readFile(t, record) != "another run\n" {
+		t.Error("the running record was replaced")
+	}
+	if m, ok, err := d.readMeta(DirPending, a.Name); err != nil || !ok || m.ClaimedAt != nil {
+		t.Errorf("pending meta %+v ok=%v err=%v; want it back unclaimed", m, ok, err)
 	}
 }
 

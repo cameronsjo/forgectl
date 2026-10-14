@@ -234,6 +234,11 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	for _, f := range signalFailures {
 		warnings = append(warnings, "operator signal failed: "+f)
 	}
+	for _, n := range a.After {
+		if !d.Known(n) {
+			warnings = append(warnings, "--after "+n+" names no item waiting, running or done; "+a.Name+" stays held until one of that name finishes with exit 0")
+		}
+	}
 	signal := deskSignalState(signalNow, len(signalFailures), sig.enabled())
 	if signal == deskSignalSent {
 		// Recorded only when a signal went out and none failed, so a failed one
@@ -415,6 +420,7 @@ type deskItemJSON struct {
 	SkippedBy       string     `json:"skipped_by"`
 	SkippedAt       *time.Time `json:"skipped_at"`
 	Refusal         string     `json:"refusal"`
+	Hold            string     `json:"hold"`
 	PID             int        `json:"pid"`
 }
 
@@ -460,7 +466,7 @@ func itemView(it desk.Item, now time.Time) deskItemJSON {
 		Name: it.Name, Kind: string(it.Kind), State: string(it.State), Legacy: it.Legacy,
 		What: it.What, Why: it.Why, TTY: it.TTY, After: it.After, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
-		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, PID: it.Meta.PID,
+		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, Hold: it.Hold, PID: it.Meta.PID,
 	}
 	if v.After == nil {
 		v.After = []string{}
@@ -479,7 +485,7 @@ func itemView(it desk.Item, now time.Time) deskItemJSON {
 	}
 	var since *time.Time
 	switch it.State {
-	case desk.StateWaiting, desk.StateRefused:
+	case desk.StateWaiting, desk.StateHeld, desk.StateRefused:
 		since = v.AddedAt
 	case desk.StateRunning, desk.StateLost:
 		since = v.StartedAt
@@ -598,10 +604,14 @@ func statusLine(v deskItemJSON, full bool) string {
 	if v.State == string(desk.StateLost) {
 		parts = append(parts, "(clear it: forgectl desk skip "+v.Name+" --reason ...)")
 	}
-	if len(v.After) > 0 && (v.State == string(desk.StateWaiting) || v.State == string(desk.StateRefused)) {
+	pending := v.State == string(desk.StateWaiting) || v.State == string(desk.StateHeld)
+	if len(v.After) > 0 && (pending || v.State == string(desk.StateRefused)) {
 		parts = append(parts, "after="+termsafe.SafeLineMax(strings.Join(v.After, ","), deskQuoteMax))
 	}
-	if v.What != "" && (v.State == string(desk.StateWaiting) || v.State == string(desk.StateRunning)) {
+	if v.Hold != "" {
+		parts = append(parts, "held="+strconv.Quote(termsafe.SafeLineMax(v.Hold, deskQuoteMax)))
+	}
+	if v.What != "" && (pending || v.State == string(desk.StateRunning)) {
 		what := termsafe.SafeLineMax(v.What, deskWhatCols)
 		if full {
 			what = safeText(v.What)
@@ -643,7 +653,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
 	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: d.EventsPath(name)}
-	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
+	if it.State != desk.StateWaiting && it.State != desk.StateHeld && it.State != desk.StateRefused {
 		if data, _, err := d.Record(name); err == nil {
 			res.Record = &deskRecordDigest{SHA256: desk.SHA256Hex(data), Bytes: len(data)}
 		}
@@ -695,7 +705,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.Stale {
 		kv("stale", "true")
 	}
-	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skipped_by", v.SkippedBy}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}} {
+	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skipped_by", v.SkippedBy}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}, {"hold", v.Hold}} {
 		if f.v != "" {
 			kv(f.k, safeText(f.v))
 		}
@@ -773,10 +783,11 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 	defer d.Close() //nolint:errcheck // read side
 	name = resolveDeskName(d, name)
 	if deadline == deskWatchDeadlineUnset {
-		// No --deadline: wait for the run at a terminal, but never without
-		// bound for a caller that has none (forgectl#1094).
+		// No --deadline: wait for the run when stdin is a terminal (a person
+		// at it, even with stdout piped to tee), but never without bound for
+		// a caller with no terminal on stdin (forgectl#1094).
 		deadline = 0
-		if !deskHasTerminal() {
+		if !deskStdinIsTerminal() {
 			deadline = deskWatchDefaultDeadline
 		}
 	}

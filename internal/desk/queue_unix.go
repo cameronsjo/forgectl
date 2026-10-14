@@ -67,9 +67,7 @@ func (d *Desk) Scan() (*Snapshot, error) {
 			continue
 		}
 		if it.State == StateWaiting {
-			if why := d.blocked(name, it.After, inRunning[name]); why != "" {
-				it.State, it.Refusal = StateRefused, why
-			}
+			d.hold(&it, inRunning[name])
 		}
 		snap.Pending = append(snap.Pending, it)
 	}
@@ -113,63 +111,86 @@ func (d *Desk) Scan() (*Snapshot, error) {
 	return snap, nil
 }
 
-// blocked says why a waiting item cannot be claimed yet, or "" when it can:
-// its name is held by a run in running/ (claiming it would rename over that
-// run's record), or an item it runs after (its "# AFTER:" line) has not
-// finished with exit 0. Both clear on their own, so the item stays in
-// pending/ and is only shown as refused until then.
-func (d *Desk) blocked(name string, after []string, running bool) string {
-	if running {
-		return "an item of this name is running; it waits until that run ends"
+// Known reports whether the desk has an item called name that an AFTER line
+// can wait on: one in pending/ or running/, or a run in done/. A name it
+// does not know (a typo, a skipped item) holds an item for ever.
+func (d *Desk) Known(name string) bool {
+	if !ValidName(name) {
+		return false
 	}
-	return d.unmetAfter(name, after)
+	for _, sub := range [...]string{DirPending, DirRunning} {
+		if _, err := d.findKind(sub, name); err == nil {
+			return true
+		}
+	}
+	return d.exists(path.Join(DirDone, name+extLog))
+}
+
+// holdRunning is the hold on a waiting item whose name a run in running/
+// holds: claiming it would rename over that run's record.
+const holdRunning = "an item of this name is running; it waits until that run ends"
+
+// hold sets a waiting item's state when it cannot be claimed yet: held (it
+// clears on its own) while its name is held by a run in running/, or while
+// an item its "# AFTER:" line names has not finished with exit 0; refused
+// when the AFTER line itself can never be met. Either way it stays in
+// pending/.
+func (d *Desk) hold(it *Item, running bool) {
+	if running {
+		it.State, it.Hold = StateHeld, holdRunning
+		return
+	}
+	why, permanent := d.unmetAfter(it.Name, it.After)
+	switch {
+	case why == "":
+	case permanent:
+		it.State, it.Refusal = StateRefused, why
+	default:
+		it.State, it.Hold = StateHeld, why
+	}
 }
 
 // unmetAfter checks an item's AFTER names, in order, and says which one is
-// not yet done with exit 0, or "" when all are.
-func (d *Desk) unmetAfter(name string, after []string) string {
+// not yet done with exit 0, or "" when all are. permanent is set for an AFTER
+// line that can never be met (a bad name, the item itself, too many names).
+func (d *Desk) unmetAfter(name string, after []string) (why string, permanent bool) {
+	if len(after) > MaxAfter {
+		return fmt.Sprintf("its AFTER line names %d items; at most %d are allowed", len(after), MaxAfter), true
+	}
 	for _, a := range after {
 		if !ValidName(a) {
-			return "its AFTER line names " + strconv.Quote(describe(a)) + ", which is not an item name"
+			return "its AFTER line names " + strconv.Quote(describe(a)) + ", which is not an item name", true
 		}
 		if a == name {
-			return "its AFTER line names the item itself"
+			return "its AFTER line names the item itself", true
 		}
+	}
+	for _, a := range after {
 		if _, err := d.findKind(DirRunning, a); err == nil {
-			return "waits on " + a + ", which is still running"
+			return "waits on " + a + ", which is still running", false
 		}
 		rc, ok := d.doneExit(a)
 		switch {
 		case !ok:
-			return "waits on " + a + ", which has not run"
+			return "waits on " + a + ", which has not finished", false
 		case rc != 0:
-			return "waits on " + a + ", which finished with exit " + strconv.Itoa(rc) + ", not 0"
+			return "waits on " + a + ", which finished with exit " + strconv.Itoa(rc) + ", not 0", false
 		}
 	}
-	return ""
+	return "", false
 }
 
-// doneExit returns the exit code of the finished run called name: from its
-// meta in done/, or for a legacy item the log's EXIT= line. ok is false when
-// done/ holds no finished run of that name.
+// doneExit returns the exit code the desk recorded for the finished run
+// called name: meta.exit_code in done/, written by the run's owner. ok is
+// false when there is none. The log's EXIT= line is never read here: the
+// script writes the log, so a run could print the line that releases the
+// items after it.
 func (d *Desk) doneExit(name string) (rc int, ok bool) {
 	meta, found, err := d.readMeta(DirDone, name)
-	if err == nil && found && meta.ExitCode != nil {
-		return *meta.ExitCode, true
-	}
-	if found {
+	if err != nil || !found || meta.ExitCode == nil {
 		return 0, false
 	}
-	line, err := d.lastLine(path.Join(DirDone, name+extLog))
-	if err != nil {
-		return 0, false
-	}
-	m := exitLineRe.FindStringSubmatch(line)
-	if m == nil {
-		return 0, false
-	}
-	rc, _ = strconv.Atoi(m[1])
-	return rc, true
+	return *meta.ExitCode, true
 }
 
 func newItem(name string, kind Kind, state State) Item {

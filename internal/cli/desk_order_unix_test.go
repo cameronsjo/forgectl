@@ -32,7 +32,7 @@ func TestDeskAdd_AfterHoldsTheItem(t *testing.T) {
 
 	out, _, err = deskRun(t, deskDeps(), "status")
 	wantExit(t, err, 0)
-	if !strings.Contains(out, "refused  "+a.Name) || !strings.Contains(out, "after="+enable) || !strings.Contains(out, "waits on "+enable) {
+	if !strings.Contains(out, "held     "+a.Name) || !strings.Contains(out, "after="+enable) || !strings.Contains(out, `held="waits on `+enable) {
 		t.Errorf("status before %s ran:\n%s", enable, out)
 	}
 	out, _, err = deskRun(t, deskDeps(), "status", "--json")
@@ -62,6 +62,18 @@ func TestDeskAdd_AfterHoldsTheItem(t *testing.T) {
 
 	_, _, err = deskRun(t, deskDeps(), "add", writeTemp(t, "x.sh", "true\n"), "--what", "x", "--why", "y", "--after", "enable")
 	wantExit(t, err, deskExitUsage)
+
+	// A name the desk does not know holds the item for ever: add warns.
+	_, errOut, err := deskRun(t, deskDeps(), "add", writeTemp(t, "y.sh", "true\n"), "--what", "y", "--why", "y", "--after", "99-typo")
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "warning: --after 99-typo names no item") {
+		t.Errorf("add --after 99-typo stderr %q lacks the warning", errOut)
+	}
+	_, errOut, err = deskRun(t, deskDeps(), "add", writeTemp(t, "z.sh", "true\n"), "--what", "z", "--why", "z", "--after", enable)
+	wantExit(t, err, 0)
+	if strings.Contains(errOut, "warning: --after") {
+		t.Errorf("add --after a done item warned: %q", errOut)
+	}
 }
 
 // The status line cuts WHAT at deskWhatCols; --full prints it whole.
@@ -83,15 +95,20 @@ func TestDeskStatus_FullPrintsTheWholeWhat(t *testing.T) {
 	}
 }
 
-// With no --deadline and no terminal, watch stops on its own with exit 75
+// With no --deadline and no terminal on stdin, watch stops on its own with exit 75
 // and a resume= line that carries the deadline it used (forgectl#1094); at
 // a terminal, or with --deadline 0, there is no default bound.
 func TestDeskWatch_DefaultDeadlineWithoutATerminal(t *testing.T) {
 	fastWatch(t)
 	newDeskDir(t)
-	prevTTY, prevDeadline := deskHasTerminal, deskWatchDefaultDeadline
-	t.Cleanup(func() { deskHasTerminal, deskWatchDefaultDeadline = prevTTY, prevDeadline })
+	prevTTY, prevStdin, prevDeadline := deskHasTerminal, deskStdinIsTerminal, deskWatchDefaultDeadline
+	t.Cleanup(func() {
+		deskHasTerminal, deskStdinIsTerminal, deskWatchDefaultDeadline = prevTTY, prevStdin, prevDeadline
+	})
+	// stdout is never a terminal here (deskHasTerminal false); only stdin
+	// decides.
 	deskHasTerminal = func() bool { return false }
+	deskStdinIsTerminal = func() bool { return false }
 	deskWatchDefaultDeadline = 1
 
 	name, _ := queueItem(t, "wait.sh", "true\n")
@@ -105,14 +122,15 @@ func TestDeskWatch_DefaultDeadlineWithoutATerminal(t *testing.T) {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 
-	// --deadline 0 given explicitly, or a terminal: no default bound, so the
+	// --deadline 0 given explicitly, or a terminal on stdin with stdout piped
+	// (desk watch X | tee log): no default bound, so the
 	// watch is still waiting when the caller's own 2s context ends it, and
 	// it reports an interruption (130), not the deadline (75).
 	for _, tc := range []struct {
 		tty  bool
 		args []string
 	}{{false, []string{"--deadline", "0"}}, {true, nil}} {
-		deskHasTerminal = func() bool { return tc.tty }
+		deskStdinIsTerminal = func() bool { return tc.tty }
 		for _, k := range []string{"HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID"} {
 			t.Setenv(k, "")
 		}
@@ -125,5 +143,23 @@ func TestDeskWatch_DefaultDeadlineWithoutATerminal(t *testing.T) {
 		err := cmd.ExecuteContext(ctx)
 		cancel()
 		wantExit(t, err, deskExitInterrupted)
+	}
+}
+
+// A batch held by --after can still be previewed with `desk plan`.
+func TestDeskPlan_PreviewsAHeldBatch(t *testing.T) {
+	newDeskDir(t)
+	enable, _ := queueItem(t, "enable.sh", "true\n")
+	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "roll.manifest", "a -- true\nb after=a -- true\n"),
+		"--what", "roll", "--why", "a test", "--after", enable, "--json")
+	wantExit(t, err, 0)
+	var a deskAddJSON
+	if err := json.Unmarshal([]byte(out), &a); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = deskRun(t, deskDeps(), "plan", a.Name)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "a") {
+		t.Errorf("plan of the held batch printed %q", out)
 	}
 }

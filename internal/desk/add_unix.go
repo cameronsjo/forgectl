@@ -35,6 +35,8 @@ type Added struct {
 	// Warnings are a batch manifest's planner warnings (see Manifest.Lint),
 	// which do not stop it from being queued. nil for a script.
 	Warnings []string
+	// After is the item's AFTER names, from --after or the file's own line.
+	After []string
 }
 
 // Add enqueues the file at src. The kind comes from its extension (.sh or
@@ -156,7 +158,7 @@ func (d *Desk) AddWith(src string, h Headers, unique bool) (Added, bool, error) 
 			return Added{}, false, err
 		}
 		if found {
-			return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, true, nil
+			return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings, After: HeadersFor(kind, body).After}, true, nil
 		}
 	}
 	tmp, err := d.writeTemp(DirPending, "add", body)
@@ -199,7 +201,7 @@ func (d *Desk) AddWith(src string, h Headers, unique bool) (Added, bool, error) 
 			return Added{}, false, fmt.Errorf("desk: queue %s: %w", name, err)
 		}
 		afterLink(name + kind.Ext())
-		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, false, nil
+		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings, After: HeadersFor(kind, body).After}, false, nil
 	}
 	return Added{}, false, errors.New("desk: no free item number; is something else writing pending/?")
 }

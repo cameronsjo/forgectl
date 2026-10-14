@@ -735,7 +735,7 @@ func (m deskModel) askSkip() (tea.Model, tea.Cmd) {
 	if !ok || m.busy {
 		return m, nil
 	}
-	if r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowLost {
+	if r.kind != rowWaiting && r.kind != rowHeld && r.kind != rowRefused && r.kind != rowLost {
 		m.message = m.styles().Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; there is nothing to skip"))
 		return m, nil
 	}
@@ -1013,7 +1013,7 @@ func (m deskModel) log() tea.Cmd {
 func (m deskModel) logOf(r queueRow, ok bool) tea.Cmd {
 	name := ""
 	if ok {
-		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged ||
+		if r.kind == rowWaiting || r.kind == rowHeld || r.kind == rowRefused || r.kind == rowChanged ||
 			(r.kind == rowSkipped && r.item.Meta.SkipReason != desk.SkipLost) {
 			// No run, so no log: say so rather than open another item's log as
 			// this one's (#1106).
@@ -1303,6 +1303,16 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 		_ = os.Remove(rcPath)
 		return nil, errors.Join(fmt.Errorf("desk: %s is a %s, not a TTY script; it does not run in the terminal", itemLabel(c.Name), c.Kind), d.Release(c.Name, desk.SkipLaunchFailed))
 	}
+	// A TTY item starts where a detached one does: in the home directory,
+	// with the operator's environment minus bash's startup hooks. It is
+	// settled before the run begins, so a missing home releases the claim
+	// (launch-failed) rather than recording a run. Only Dir and Env are read
+	// from itemEnv: script(1) is not chosen until the log exists.
+	itemEnv := &osexec.Cmd{}
+	if err := desk.ApplyItemEnv(itemEnv); err != nil {
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
+	}
 	run, err := d.BeginRun(c.Name, os.Getpid())
 	if err != nil {
 		// The claim has no owner: end it in skipped/ rather than leave it
@@ -1325,15 +1335,7 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 	}
 	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
-	// A TTY item starts where a detached one does: in the home directory,
-	// with the operator's environment minus bash's startup hooks.
-	if err := desk.ApplyItemEnv(cmd); err != nil {
-		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", err)
-		_ = logF.Close()
-		_ = os.Remove(rcPath)
-		return nil, errors.Join(err, run.Finish(2, "internal"))
-	}
-	cmd.Env = ttyEnv(cmd.Env)
+	cmd.Dir, cmd.Env = itemEnv.Dir, ttyEnv(itemEnv.Env)
 	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 

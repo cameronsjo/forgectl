@@ -113,36 +113,62 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	if wantSHA != meta.SHA256 {
 		return nil, fmt.Errorf("%w: %s: the hash on screen is not the hash it was queued with", ErrChanged, describe(name))
 	}
-	// The claim's rename replaces whatever running/ holds under the name, so
-	// a run already there would lose its record (forgectl#1157). Either kind
-	// counts: a same-named run of the other kind shares its log and events.
-	// Nothing has been written yet, so the item stays waiting.
+	// running/ may already hold an item of this name, whose record a claim
+	// must not replace (forgectl#1157). Either kind counts: a same-named run
+	// of the other kind shares its log and events. Nothing has been written
+	// yet, so the item stays waiting. The renames below refuse an existing
+	// target too, which closes the window after this check.
 	if _, err := d.findKind(DirRunning, name); err == nil {
-		return nil, fmt.Errorf("%w: %s: an item of this name is running; it waits until that run ends", ErrRefused, describe(name))
+		return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning)
 	}
 	// An item that runs after others waits for each to finish with exit 0.
-	// The pending bytes are read here only for their AFTER line: when they
-	// hash to the queued hash they are the bytes the claim verifies below, so
-	// their AFTER line is the one approved.
-	if data, _, err := d.readItem(DirPending, name+kind.Ext()); err == nil && SHA256Hex(data) == meta.SHA256 {
-		if why := d.unmetAfter(name, HeadersFor(kind, data).After); why != "" {
-			return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), why)
-		}
+	// The pending bytes are read here for their AFTER line, and must be the
+	// queued bytes: anything else refuses, so the gate never fails open.
+	file := name + kind.Ext()
+	pendingData, _, err := d.readItem(DirPending, file)
+	var pr *refusal
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil, ErrClaimed
+	case errors.As(err, &pr):
+		// As a refusal found after the rename always was: the item goes to
+		// skipped/ and nothing runs it.
+		meta.SkipReason = "refused: " + pr.reason
+		defer d.leftPending(meta)
+		return nil, errors.Join(err, d.writeMeta(DirPending, name, meta), d.move(name, kind, DirPending, DirSkipped))
+	case err != nil:
+		return nil, fmt.Errorf("%w: %s: %w", ErrRefused, describe(name), err)
 	}
+	if sum := SHA256Hex(pendingData); sum != meta.SHA256 {
+		if err := d.skipChanged(DirPending, name, kind, meta, sum); err != nil {
+			return nil, err
+		}
+		d.leftPending(meta)
+		return nil, fmt.Errorf("%w: %s", ErrChanged, describe(name))
+	}
+	if why, _ := d.unmetAfter(name, HeadersFor(kind, pendingData).After); why != "" {
+		return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), why)
+	}
+
+	afterClaimChecks()
 
 	// claimed_at goes into the meta before the rename, so the moment the item
 	// is in running/ its meta (once it follows) says when the claim began. A
 	// running item whose meta has not followed yet is a claim in progress.
+	unclaimed := meta
 	claimed := d.now().UTC()
 	meta.ClaimedAt = &claimed
 	if err := d.writeMeta(DirPending, name, meta); err != nil {
 		return nil, err
 	}
 
-	file := name + kind.Ext()
-	if err := d.root.Rename(path.Join(DirPending, file), path.Join(DirRunning, file)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	if err := d.renameNoReplace(DirPending, DirRunning, file); err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			return nil, ErrClaimed
+		case errors.Is(err, fs.ErrExist):
+			// A run of this name reached running/ after the check above.
+			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning), d.writeMeta(DirPending, name, unclaimed))
 		}
 		return nil, fmt.Errorf("desk: claim %s: %w", describe(name), err)
 	}
@@ -150,6 +176,13 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	// refused), so the signal raised for it is done.
 	defer d.leftPending(meta)
 	if err := claimMeta(d, name); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// running/ holds another item's meta under this name: that item
+			// is the one Release would act on, so put this one back in
+			// pending/ instead, unclaimed, and leave the other alone.
+			back := d.renameNoReplace(DirRunning, DirPending, file)
+			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning), back, d.writeMeta(DirPending, name, unclaimed))
+		}
 		// The item is in running/ and nothing will own it: without its meta it
 		// would read as a claim in progress for ever. Give running/ the meta
 		// this claim already holds and release the item, so it ends in
@@ -201,8 +234,12 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 // claimMeta moves a claimed item's meta into running/. Tests replace it to
 // fail that step.
 var claimMeta = func(d *Desk, name string) error {
-	return d.root.Rename(metaName(DirPending, name), metaName(DirRunning, name))
+	return d.renameNoReplace(DirPending, DirRunning, name+extMeta)
 }
+
+// afterClaimChecks runs between Claim's checks and its renames. Tests
+// replace it to land a same-named run in that window.
+var afterClaimChecks = func() {}
 
 // beforeRunStart runs after BeginRun has written the owner's pid and before
 // it writes RUN-START. Tests replace it to fail that step.
