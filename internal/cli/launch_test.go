@@ -48,9 +48,42 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Review workspaces, and the private temp and settings dirs a Claude
+	// dispatch makes beside each (forgectl#907), land under the OS temp root,
+	// and many tests here dispatch without tearing down. Give the package a
+	// temp root of its own, removed after the run, so none of them leaks into
+	// the real one.
+	tmp, err := shortTempRoot()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		panic("create temp root: " + err.Error())
+	}
+	if err := os.Setenv("TMPDIR", tmp); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("set TMPDIR: " + err.Error())
+	}
+
 	code := m.Run()
 	_ = os.RemoveAll(dir)
+	// The settings dir is left 0500, which RemoveAll cannot empty unless
+	// run as root.
+	unsealTree(tmp)
+	_ = os.RemoveAll(tmp)
 	os.Exit(code)
+}
+
+// shortTempRoot makes the package's temp root directly in a short system temp
+// dir. The drain tests bind Unix sockets under TMPDIR, and macOS's per-user
+// /var/folders/.../T/ already uses half of the 104-byte sun_path there, so on
+// macOS the root goes under /private/tmp: /tmp itself is a symlink to it, and
+// the drain refuses a symlinked TMPDIR.
+func shortTempRoot() (string, error) {
+	base := ""
+	if runtime.GOOS == "darwin" {
+		base = "/private/tmp"
+	}
+	return os.MkdirTemp(base, "fc-")
 }
 
 // stubSandboxDeps writes no-op bwrap and socat executables into a directory

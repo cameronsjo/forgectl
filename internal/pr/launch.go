@@ -684,19 +684,23 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// shared dir becomes read-only to the reviewer's Bash (measured on Claude
 	// Code 2.1.296). The dir outlives this call with the review and goes with
 	// the workspace (teardownWorkspace); a refusal before the window opens
-	// removes it, and the settings dir below, here.
+	// removes it, and the settings dir below, here. That removal names only
+	// the dirs this call made, never an entry it merely found under a
+	// matching name.
 	tmpDir, err := createReviewTmpDir(sess.Workspace)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
+	made := []string{tmpDir}
 	windowOpening := false
 	defer func() {
 		if windowOpening {
 			return
 		}
-		if rerr := removeReviewTmpDir(sess.Workspace); rerr != nil {
-			slog.Warn("Failed to remove the review's private temp and settings dirs after a refused dispatch.",
-				"dir", tmpDir, "error", rerr)
+		for _, dir := range made {
+			if rerr := removeReviewSibling(dir); rerr != nil {
+				slog.Warn("Failed to remove a review dir after a refused dispatch.", "dir", dir, "error", rerr)
+			}
 		}
 	}()
 	// The same pin turns on Claude Code's subprocess environment scrub, so
@@ -717,10 +721,11 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// writable root leaves no copy to ask about: with it, no settings copy
 	// appeared, and the reviewer's writes, replace and unlink of the file
 	// all failed.
-	settingsPath, err := writeReviewSettings(sess.Workspace, settingsJSON)
+	settingsPath, settingsDir, err := writeReviewSettings(sess.Workspace, settingsJSON)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
+	made = append(made, settingsDir)
 	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsPath, windowEnv, relocUnset); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}

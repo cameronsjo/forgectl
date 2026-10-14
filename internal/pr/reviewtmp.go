@@ -44,25 +44,23 @@ var reviewTmpEnvKeys = []string{"TMPDIR", "CLAUDE_CODE_TMPDIR"}
 // grant, since there is nobody to ask.
 const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 
-// reviewTmpDirFor is the private temp directory of the review of workspace:
-// a sibling of the workspace, named from the workspace's own random suffix.
-// It is derived, not recorded, so every path that removes a workspace can find
-// it again from the breadcrumb's workspace field alone. A workspace whose name
-// lacks the sandbox prefix has none.
+// A review's private temp dir and its settings dir are siblings of its
+// workspace, named prefix + the workspace's own random suffix + "-" + a fresh
+// random part os.MkdirTemp picks (reviewSiblingName). The workspace suffix
+// lets every teardown path find them again from the breadcrumb's workspace
+// field alone; the fresh part means nobody who can see the workspace's name
+// in a shared temp dir can predict theirs and make it first.
 //
-// It derives from the workspace path as spelled, unresolved, on purpose. That
-// is the string the dispatch created the dir from and the one every teardown
-// path holds, and it is the string sandbox.Teardown removes (it resolves only
-// to check the prefix). A symlinked workspace therefore finds the dir beside
-// the link, where it was made. removeReviewTmpDir refuses anything at that
-// path but a real directory, so the derived name never leads it through a
-// link.
+// Teardown matches by name, so it can meet an entry someone else made under a
+// matching name. It removes only a real directory the operator owns, opened
+// without following a symlink (openOwnReviewSibling); anything else under a
+// matching name is left alone. A symlinked workspace finds its siblings
+// beside the link, where they were made: the name derives from the workspace
+// path as spelled, unresolved, which is the string the dispatch made them
+// from, every teardown path holds, and sandbox.Teardown removes.
 //
-// The sibling sits outside the workspace on purpose. The sandbox denies
-// writes to the whole workspace, and a deny there outranks any grant below it.
-func reviewTmpDirFor(workspace string) (string, error) {
-	return reviewSiblingDir(workspace, reviewTmpPrefix)
-}
+// They sit outside the workspace on purpose. The sandbox denies writes to the
+// whole workspace, and a deny there outranks any grant below it.
 
 // reviewSettingsPrefix names the directory that holds the reviewer's settings
 // file, a second sibling of the workspace. It is NOT inside the private temp
@@ -73,24 +71,109 @@ func reviewTmpDirFor(workspace string) (string, error) {
 // own settings.
 const reviewSettingsPrefix = "forgectl-rset-"
 
-// reviewSettingsDirFor is the directory of workspace's settings file, derived
-// the way reviewTmpDirFor is.
-func reviewSettingsDirFor(workspace string) (string, error) {
-	return reviewSiblingDir(workspace, reviewSettingsPrefix)
+// reviewSiblingPrefixes are the prefixes of every sibling a review makes, with
+// what each holds, in the order teardown removes them.
+var reviewSiblingPrefixes = []struct{ prefix, what string }{
+	{reviewTmpPrefix, "private temp dir"},
+	{reviewSettingsPrefix, "settings dir"},
 }
 
-// reviewSiblingDir is workspace's sibling named prefix plus the workspace's
-// own random suffix.
-func reviewSiblingDir(workspace, prefix string) (string, error) {
+// reviewSiblingName returns the directory workspace's siblings are made in and
+// the name prefix they carry for prefix: prefix + the workspace's random
+// suffix + "-". The trailing "-" keeps workspace 12's siblings from matching
+// workspace 123's.
+func reviewSiblingName(workspace, prefix string) (parent, name string, err error) {
 	if workspace == "" || !filepath.IsAbs(workspace) {
-		return "", errors.New("the review workspace path is not absolute")
+		return "", "", errors.New("the review workspace path is not absolute")
 	}
 	clean := filepath.Clean(workspace)
 	suffix, ok := strings.CutPrefix(filepath.Base(clean), sandbox.WorkspacePrefix)
 	if !ok || suffix == "" {
-		return "", fmt.Errorf("the review workspace %q does not carry the sandbox prefix", clean)
+		return "", "", fmt.Errorf("the review workspace %q does not carry the sandbox prefix", clean)
 	}
-	return filepath.Join(filepath.Dir(clean), prefix+suffix), nil
+	return filepath.Dir(clean), prefix + suffix + "-", nil
+}
+
+// errForeignReviewSibling marks an entry under a review sibling's name that
+// is not a directory the operator owns, and so is not one forgectl made.
+var errForeignReviewSibling = errors.New("not a directory forgectl made")
+
+// openOwnReviewSibling opens dir, which must be a real directory owned by the
+// operator, without following a symlink, and checks the open reached the
+// entry Lstat saw (os.SameFile). Every chmod of a sibling goes through the
+// returned handle, so a symlink swapped in after the check is never followed.
+func openOwnReviewSibling(dir string) (*os.File, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || !ownedByOperator(info) {
+		return nil, fmt.Errorf("%q: %w", dir, errForeignReviewSibling)
+	}
+	f, err := openDirNoFollow(dir)
+	if err != nil {
+		return nil, err
+	}
+	reached, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !os.SameFile(info, reached) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%q: %w", dir, errDirRootMoved)
+	}
+	return f, nil
+}
+
+// makeReviewSibling makes a new sibling of workspace for prefix, 0700, and
+// returns it open (openOwnReviewSibling) with its path.
+func makeReviewSibling(workspace, prefix string) (*os.File, string, error) {
+	parent, name, err := reviewSiblingName(workspace, prefix)
+	if err != nil {
+		return nil, "", err
+	}
+	dir, err := os.MkdirTemp(parent, name+"*")
+	if err != nil {
+		return nil, "", err
+	}
+	f, err := openOwnReviewSibling(dir)
+	if err != nil {
+		_ = os.Remove(dir)
+		return nil, "", err
+	}
+	// MkdirTemp's 0700 is filtered by the umask, which can only remove bits,
+	// so this is a no-op unless something unusual is in play, and then it is
+	// the fix.
+	if err := f.Chmod(0o700); err != nil {
+		_ = f.Close()
+		_ = os.Remove(dir)
+		return nil, "", err
+	}
+	return f, dir, nil
+}
+
+// removeReviewSibling removes dir, a sibling this operator made. The settings
+// dir is left 0500, so it is made writable again first, through a handle
+// openOwnReviewSibling vouched for. A missing dir is not an error; one that is
+// not a directory the operator owns is refused with errForeignReviewSibling
+// and left alone.
+func removeReviewSibling(dir string) error {
+	f, err := openOwnReviewSibling(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = f.Chmod(0o700)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
 }
 
 // reviewTmpGOOS is the platform checkReviewTmpDirLength judges, a seam for
@@ -129,68 +212,65 @@ func checkReviewTmpDirLength(dir string) error {
 	return nil
 }
 
-// createReviewTmpDir makes workspace's private temp directory, 0700, and
-// returns it. It refuses one that already exists: a review is dispatched once
-// per prepared workspace, so an existing directory is something this review
-// did not make, and reusing it would hand the reviewer whatever is in it.
+// createReviewTmpDir makes workspace's private temp directory, 0700, under a
+// name nobody could have made first (reviewSiblingName), and returns it.
 func createReviewTmpDir(workspace string) (string, error) {
-	dir, err := reviewTmpDirFor(workspace)
+	f, dir, err := makeReviewSibling(workspace, reviewTmpPrefix)
 	if err != nil {
-		return "", fmt.Errorf("refusing to make the review's private temp dir: %w", err)
+		return "", fmt.Errorf("make the review's private temp dir: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = removeReviewSibling(dir)
+		return "", fmt.Errorf("make the review's private temp dir: %w", err)
 	}
 	if err := checkReviewTmpDirLength(dir); err != nil {
 		slog.Warn("The review's sandboxed commands will likely fail to start.", "error", err)
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return "", fmt.Errorf("make the review's private temp dir: %w", err)
-	}
-	// Mkdir's mode is filtered by the umask; a umask can only remove bits, so
-	// this is a no-op unless something unusual is in play, and then it is the
-	// fix.
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs its search bit; 0700 is owner-only
-		_ = os.Remove(dir)
-		return "", fmt.Errorf("restrict the review's private temp dir: %w", err)
-	}
 	return dir, nil
 }
 
-// removeReviewTmpDir removes workspace's private temp directory, if there is
-// one. A missing directory is not an error (a review that never launched, or
-// one made before forgectl#907). It refuses anything at that path that is not
-// a real directory, rather than following a symlink out of it.
+// removeReviewTmpDir removes workspace's private temp and settings dirs, every
+// sibling under their names that is a directory the operator owns. None is
+// not an error (a review that never launched, or one made before
+// forgectl#907). An entry under a matching name that is a symlink, another
+// user's, or not a directory is not forgectl's: it is left alone, with a
+// warning for another user's and an error for the rest.
 func removeReviewTmpDir(workspace string) error {
-	return errors.Join(
-		removeReviewSibling(workspace, reviewTmpPrefix, "private temp dir"),
-		removeReviewSibling(workspace, reviewSettingsPrefix, "settings dir"),
-	)
-}
-
-// removeReviewSibling removes one of workspace's sibling dirs. The settings
-// dir is left 0500, so it is made writable again first; nothing is chmodded
-// before Lstat has shown a real directory there.
-func removeReviewSibling(workspace, prefix, what string) error {
-	dir, err := reviewSiblingDir(workspace, prefix)
-	if err != nil {
-		// No prefix, no sibling: nothing of ours to remove.
-		return nil
+	var errs []error
+	for _, sib := range reviewSiblingPrefixes {
+		parent, name, err := reviewSiblingName(workspace, sib.prefix)
+		if err != nil {
+			// No prefix, no siblings: nothing of ours to remove.
+			return nil
+		}
+		entries, err := os.ReadDir(parent)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("list the review's %s: %w", sib.what, err)
+		}
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), name) {
+				continue
+			}
+			dir := filepath.Join(parent, e.Name())
+			err := removeReviewSibling(dir)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, errForeignReviewSibling) {
+				if info, lerr := os.Lstat(dir); lerr == nil && !ownedByOperator(info) {
+					slog.Warn("Leaving an entry under a review sibling's name that another user owns.", "path", dir)
+					continue
+				}
+				errs = append(errs, fmt.Errorf("refusing to remove %q: it is not a directory forgectl made", dir))
+				continue
+			}
+			errs = append(errs, fmt.Errorf("remove the review's %s: %w", sib.what, err))
+		}
 	}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect the review's %s: %w", what, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("refusing to remove %q: it is not a directory", dir)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs its search bit; 0700 is owner-only
-		return fmt.Errorf("remove the review's %s: %w", what, err)
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove the review's %s: %w", what, err)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // workspaceTeardown is sandbox.Teardown, a seam so a test can stage a
@@ -240,33 +320,39 @@ func pinReviewClaudeEnv(env []string, dir string) []string {
 const reviewSettingsFile = "review-settings.json"
 
 // writeReviewSettings writes doc as workspace's settings file and returns its
-// path: a new 0700 settings dir (refused if one exists), the file 0400 in it,
-// then the dir 0500, so neither the file nor the dir's entries can change
-// without a chmod first. removeReviewTmpDir removes it with the temp dir.
-func writeReviewSettings(workspace, doc string) (string, error) {
-	dir, err := reviewSettingsDirFor(workspace)
+// path and its dir: a new 0700 settings dir (makeReviewSibling), the file
+// 0400 in it, then the dir 0500 through the handle the dir was opened with,
+// so neither the file nor the dir's entries can change without a chmod first.
+// removeReviewTmpDir removes it with the temp dir.
+func writeReviewSettings(workspace, doc string) (path, dir string, err error) {
+	d, dir, err := makeReviewSibling(workspace, reviewSettingsPrefix)
 	if err != nil {
-		return "", fmt.Errorf("refusing to write the reviewer's settings file: %w", err)
+		return "", "", fmt.Errorf("make the reviewer's settings dir: %w", err)
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return "", fmt.Errorf("make the reviewer's settings dir: %w", err)
-	}
-	path := filepath.Join(dir, reviewSettingsFile)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400) //nolint:gosec // G304: path is the settings dir forgectl just made, plus a constant name
+	defer func() {
+		if cerr := d.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("seal the reviewer's settings dir: %w", cerr)
+		}
+		if err != nil {
+			_ = removeReviewSibling(dir)
+		}
+	}()
+	path = filepath.Join(dir, reviewSettingsFile)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400) //nolint:gosec // G304: path is the 0700 settings dir forgectl just made, plus a constant name
 	if err != nil {
-		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+		return "", "", fmt.Errorf("write the reviewer's settings file: %w", err)
 	}
 	if _, err := f.WriteString(doc); err != nil {
 		_ = f.Close()
-		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+		return "", "", fmt.Errorf("write the reviewer's settings file: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+		return "", "", fmt.Errorf("write the reviewer's settings file: %w", err)
 	}
-	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: read and search for the owner only
-		return "", fmt.Errorf("seal the reviewer's settings dir: %w", err)
+	if err := d.Chmod(0o500); err != nil {
+		return "", "", fmt.Errorf("seal the reviewer's settings dir: %w", err)
 	}
-	return path, nil
+	return path, dir, nil
 }
 
 // pinEnv returns env with set applied and every unset variable removed: any

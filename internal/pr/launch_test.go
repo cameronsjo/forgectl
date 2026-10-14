@@ -435,10 +435,7 @@ func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 			envs = append(envs, args[i+1])
 		}
 	}
-	tmpDir, err := reviewTmpDirFor(sess.Workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tmpDir := onlyReviewSibling(t, sess.Workspace, reviewTmpPrefix)
 	want := append(append([]string{}, reviewGitEnv...), "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=",
 		"TMPDIR="+tmpDir, "CLAUDE_CODE_TMPDIR="+tmpDir, reviewEnvScrub)
 	relocSet, _ := reviewRelocationEnv()
