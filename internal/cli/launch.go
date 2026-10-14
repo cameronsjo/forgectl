@@ -90,9 +90,10 @@ func newLaunchCmd(deps module.Deps) *cobra.Command {
 	boundary := deps.LegacyBoundary
 	th := deps.Theme
 	cmd := &cobra.Command{
-		Use:     "launch [harness args…]",
-		Aliases: []string{"cl"},
-		Short:   "Per-project launcher for Claude Code, Codex CLI, or Pi",
+		Use:         "launch [harness args…]",
+		Annotations: map[string]string{rootHelpUseAnnotation: "launch [args…]"},
+		Aliases:     []string{"cl"},
+		Short:       "Per-project launcher for Claude Code, Codex CLI, or Pi",
 		Long: `launch resolves a per-project profile from your working directory,
 then execs the configured harness with that posture — no prompts.
 

@@ -45,7 +45,7 @@ func newUpdateCmd(deps module.Deps) *cobra.Command {
 func newUpdateCmdForClient(client *updatepkg.Client, cfg config.UpdateConfig, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Run weekly package-manager and OS maintenance as independently-scoped steps",
+		Short: "Weekly package-manager and OS maintenance in independent steps",
 		Long: `update runs the weekly maintenance roster — brew, softwareupdate
 (check-only, never installs), the go toolchain, and npm — as INDEPENDENTLY
 SCOPED steps: one step's failure is recorded on that step alone and never

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -9,11 +11,13 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
 // Every test below builds a real root over the full module registry — both
-// tiers are present in allModules() today (31 modules, 6 core), so this
+// tiers are present in allModules() (TestModules_CompletenessPins pins the
+// count), so this
 // exercises buildHub against real cobra Short/Use text rather than a
 // hand-rolled tree.
 
@@ -27,7 +31,7 @@ func TestBuildHub_FirstRunRow(t *testing.T) {
 	if got.Name != "init" {
 		t.Fatalf("entries[0].Name = %q, want %q", got.Name, "init")
 	}
-	wantShort := "first run: set up forgectl — creates config.toml (init)"
+	wantShort := "first run: set up forgectl — creates config.toml"
 	if got.Short != wantShort {
 		t.Errorf("entries[0].Short = %q, want %q", got.Short, wantShort)
 	}
@@ -340,5 +344,83 @@ func TestBuildHub_NestedGroupsCarryTheirLeaves(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("pr is missing group leaves %v", want)
+	}
+}
+
+// TestRootHelpGroupsFollowTheHub pins forgectl#1151: root help sorts each
+// module under the hub section that holds it (pinned, or its area), so the
+// two never disagree. Mutations that turn it red: set GroupID from the tier
+// again; drop the pinned check in rootHelpGroupID.
+func TestRootHelpGroupsFollowTheHub(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	sec := collectHubSections(root, true, nil)
+	want := map[string]string{}
+	for _, e := range sec.pinned {
+		want[e.Name] = pinnedGroupID
+	}
+	for _, g := range sec.groups {
+		for _, e := range g.entries {
+			want[e.Name] = g.title
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("the hub has no rows; the pin would pass vacuously")
+	}
+	for _, c := range hubModules(root) {
+		if c.GroupID != want[c.Name()] {
+			t.Errorf("%s: root help group %q, hub section %q", c.Name(), c.GroupID, want[c.Name()])
+		}
+	}
+}
+
+// rootHelpPage renders root help for args through execCommand, as a run does.
+func rootHelpPage(t *testing.T, root *cobra.Command, args ...string) string {
+	t.Helper()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	if err := execCommand(context.Background(), root, args, theme.Default()); err != nil {
+		t.Fatalf("execCommand(%v): %v", args, err)
+	}
+	return out.String()
+}
+
+// TestRootHelpLayoutFollowsTheHub pins forgectl#1151's root page: each group
+// lists its commands in the hub's order, not alphabetically, and review shows
+// its short root-help usage; the layout is undone afterwards, so review's own
+// page keeps its full usage line and root.Commands() sorts again. Mutations
+// that turn it red: drop the reorder in withRootHelpLayout; skip the Use swap;
+// skip restoring cobra.EnableCommandSorting.
+func TestRootHelpLayoutFollowsTheHub(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	page := rootHelpPage(t, root, "--help")
+	for _, g := range append([]struct {
+		title string
+		names []string
+	}{{"pinned", hubPinned}}, hubGroups...) {
+		last := -1
+		for _, name := range g.names {
+			i := strings.Index(page, "\n    "+name+" ")
+			if i < 0 {
+				t.Fatalf("root help lacks %s:\n%s", name, page)
+			}
+			if i < last {
+				t.Errorf("root help lists %s out of the hub's %s order:\n%s", name, g.title, page)
+			}
+			last = i
+		}
+	}
+	if !strings.Contains(page, "\n    review [command] [--flags]  ") || strings.Contains(page, "--kind issue|pr") {
+		t.Errorf("root help does not show review's short usage:\n%s", page)
+	}
+	if !cobra.EnableCommandSorting {
+		t.Error("cobra.EnableCommandSorting is still off after root help")
+	}
+	review, _, err := root.Find([]string{"review"})
+	if err != nil || !strings.Contains(review.Use, "--kind issue|pr") {
+		t.Errorf("review.Use = %q after root help, want the full usage (err %v)", review.Use, err)
+	}
+	if got := rootHelpPage(t, newRoot(module.Deps{Runner: &exec.FakeRunner{}}), "help", "review"); !strings.Contains(got, "--kind issue|pr") {
+		t.Errorf("help review lost the full usage line:\n%s", got)
 	}
 }

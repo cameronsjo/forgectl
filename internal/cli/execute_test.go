@@ -469,10 +469,13 @@ func TestUnknownCommandTailPointsToTheMenu(t *testing.T) {
 // TestRootLongNamesTheMenu pins root's Long text verbatim (Architecture).
 func TestRootLongNamesTheMenu(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
-	want := `Two ways in: type a command (forgectl tmux ls), or run forgectl alone for a
-menu. Agents: state verbs take --json, menu --json lists all.
+	want := `forgectl: your workbench from one command.
 
-Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused (docs/exit-codes.md).`
+Type a command (forgectl status) or run forgectl alone for the menu.
+New here? forgectl init, then forgectl doctor.
+Agents: state verbs take --json; forgectl menu --json <command> lists its
+verbs. Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused
+(docs/exit-codes.md).`
 	if root.Long != want {
 		t.Errorf("root.Long = %q, want %q", root.Long, want)
 	}

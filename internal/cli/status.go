@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -195,7 +197,7 @@ func defaultStatusSources(deps module.Deps) statusSources {
 			client := projects.New(deps.Runner)
 			found, err := client.Discover(ctx)
 			if err != nil {
-				return statusGitJSON{}, nil, err
+				return statusGitJSON{}, nil, withMissingFolderCause(client.ProjectsDir(), err)
 			}
 			return newStatusGit(client.ProjectsDir(), found), nil, nil
 		},
@@ -217,7 +219,7 @@ func defaultStatusSources(deps module.Deps) statusSources {
 			// construction, not by a literal someone could flip.
 			root, preview, err := client.Preview(ctx)
 			if err != nil {
-				return statusCleanJSON{}, nil, err
+				return statusCleanJSON{}, nil, withMissingFolderCause(client.Root(), err)
 			}
 			return newStatusClean(root, preview), nil, nil
 		},
@@ -244,7 +246,7 @@ func newStatusCmdWith(src statusSources, th theme.Theme, rt statusTUIRuntime) *c
 	)
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Read-only overview: local git state, PRs, reclaimable space, bench health",
+		Short: "Read-only overview: git state, PRs, reclaimable space, bench",
 		Long: `status composes four read paths that already ship into one overview:
 
   git    working-tree state of every local project (as projects discovery sees it)
@@ -393,6 +395,9 @@ type statusSectionView struct {
 	Notes    []string
 	HasData  bool
 	Headline string
+	// Cause is the section's categorical failure cause (status.Section.Cause),
+	// for the verdict line; never rendered.
+	Cause string
 	// Unset marks a section whose components are all not configured. It is
 	// not a failure, and it is not healthy either, so the line renderer
 	// draws the neutral skip glyph rather than ✓ (forgectl#1149).
@@ -427,6 +432,10 @@ func statusSectionViews(r statusReportJSON) [statusSectionCount]statusSectionVie
 		statusIdxClean: statusView(statusSectionLabels[statusIdxClean], r.Clean.State, r.Clean.Error, r.Clean.Notes, r.Clean.Data != nil),
 		statusIdxBench: statusView(statusSectionLabels[statusIdxBench], r.Bench.State, r.Bench.Error, r.Bench.Notes, r.Bench.Data != nil),
 	}
+	views[statusIdxGit].Cause = r.Git.Cause
+	views[statusIdxPRs].Cause = r.PRs.Cause
+	views[statusIdxClean].Cause = r.Clean.Cause
+	views[statusIdxBench].Cause = r.Bench.Cause
 	if r.Git.Data != nil {
 		views[statusIdxGit].Headline = statusGitHeadline(*r.Git.Data)
 	}
@@ -470,10 +479,128 @@ func renderStatus(out io.Writer, r statusReportJSON, marks theme.Marks) {
 // prs lists. A cap of 0 lists every row.
 func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, projectCap, prCap int) {
 	views := statusSectionViews(r)
+	_, _ = fmt.Fprintf(out, "%s\n\n", statusVerdict(views))
 	renderStatusSection(out, marks, views[statusIdxGit], func() { renderStatusGit(out, *r.Git.Data, projectCap) })
 	renderStatusSection(out, marks, views[statusIdxPRs], func() { renderStatusPRs(out, *r.PRs.Data, prCap) })
 	renderStatusSection(out, marks, views[statusIdxClean], func() {})
 	renderStatusSection(out, marks, views[statusIdxBench], func() { renderStatusBench(out, *r.Bench.Data, marks) })
+}
+
+// statusVerdict is the text view's first line (forgectl#1151): which sections
+// need the operator and why, so nobody reads all four to learn whether
+// anything does. A degraded or failed section needs them; a section that is
+// only not set up (Unset) does not. The count is of problems, one per cause:
+// sections with the same cause share one reason ("git, clean (no projects
+// folder)"), because a missing projects folder fails both and is one thing to
+// fix. Causes are matched on the sections' Cause field, never on their
+// capped error text.
+func statusVerdict(views [statusSectionCount]statusSectionView) string {
+	projectsMissing := ""
+	if v := views[statusIdxGit]; strings.HasPrefix(v.Cause, statusCauseMissingFolder) {
+		projectsMissing = v.Cause
+	}
+	var reasons []string
+	labels := map[string][]string{}
+	for _, v := range views {
+		if v.Unset || v.State == status.StateOK {
+			continue
+		}
+		r := statusReason(v, projectsMissing)
+		if _, seen := labels[r]; !seen {
+			reasons = append(reasons, r)
+		}
+		labels[r] = append(labels[r], v.Label)
+	}
+	if len(reasons) == 0 {
+		return "nothing needs you"
+	}
+	parts := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		parts = append(parts, strings.Join(labels[r], ", ")+" ("+r+")")
+	}
+	noun := "problems"
+	if len(reasons) == 1 {
+		noun = "problem"
+	}
+	return fmt.Sprintf("%d %s: %s", len(reasons), noun, strings.Join(parts, "; "))
+}
+
+// statusCauseMissingFolder prefixes a section's Cause when its source failed
+// because a folder it reads does not exist; the folder's absolute path
+// follows. The path is compared, never rendered.
+const statusCauseMissingFolder = "missing-folder:"
+
+// withMissingFolderCause tags err with statusCauseMissingFolder when dir, the
+// folder the source reads, does not exist. Any other err is returned as is.
+func withMissingFolderCause(dir string, err error) error {
+	if dir == "" {
+		return err
+	}
+	abs, absErr := filepath.Abs(dir)
+	if absErr != nil {
+		return err
+	}
+	if _, statErr := os.Stat(abs); !errors.Is(statErr, fs.ErrNotExist) {
+		return err
+	}
+	return status.WithCause(statusCauseMissingFolder+abs, err)
+}
+
+// statusVerdictReasonMaxRunes caps one reason in the verdict line; the
+// section's own line below carries the whole text.
+const statusVerdictReasonMaxRunes = 60
+
+// statusReason is a short cause for one section that needs the operator, from
+// its Cause (failed), its error, or its notes (degraded). projectsMissing is
+// the git section's missing-folder Cause, if any, so a scan of that same
+// folder reads as the same cause. Texts were escaped and capped by
+// status.Collect.
+func statusReason(v statusSectionView, projectsMissing string) string {
+	if v.State != status.StateDegraded {
+		switch e := v.Error; {
+		case projectsMissing != "" && v.Cause == projectsMissing:
+			return "no projects folder"
+		case strings.HasPrefix(v.Cause, statusCauseMissingFolder):
+			return "folder not found"
+		case strings.Contains(e, "timed out"):
+			return "timed out"
+		case e == "":
+			return "failed"
+		default:
+			return termsafe.SafeLineMax(e, statusVerdictReasonMaxRunes)
+		}
+	}
+	var out []string
+	for _, note := range v.Notes {
+		r := noteReason(note)
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return "degraded"
+	}
+	return termsafe.SafeLineMax(strings.Join(out, ", "), statusVerdictReasonMaxRunes)
+}
+
+// noteReason shortens a degradation note. A gh query note,
+// "<label>: query failed (<reason>; <fix>)", becomes its reason without the
+// fix; the generic "run forgectl doctor" reason becomes "query failed". Any
+// other note is kept up to its first ";".
+func noteReason(note string) string {
+	if _, rest, ok := strings.Cut(note, ": query failed ("); ok {
+		reason := strings.TrimSuffix(rest, ")")
+		reason, _, _ = strings.Cut(reason, ";")
+		if strings.HasPrefix(reason, "run forgectl doctor") {
+			return "query failed"
+		}
+		return reason
+	}
+	if strings.HasSuffix(note, ": query failed") {
+		return "query failed"
+	}
+	reason, _, _ := strings.Cut(note, ";")
+	return reason
 }
 
 // renderStatusSection prints a section's glyph, label and headline, then

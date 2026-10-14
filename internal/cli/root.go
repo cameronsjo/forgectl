@@ -6,6 +6,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,24 +18,45 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// everydayGroupID and moreGroupID are root help's two cobra groups
-// (ADR-0005 addendum): every module's GroupID follows its Tier directly, so
-// promoting/demoting a module's tier (modules_test.go's core-set pin) moves
-// its help placement for free.
-const (
-	everydayGroupID = "everyday"
-	moreGroupID     = "more"
-)
+// pinnedGroupID is root help's first cobra group: the hub's pinned commands
+// (hubPinned). Every other module goes under the hub area that holds it
+// (hubGroups), so root help and the menu sort commands the same way
+// (forgectl#1151). A module no area names goes under hubOtherGroup, as it
+// does on the hub.
+const pinnedGroupID = "pinned"
+
+// rootHelpGroupID is the root help group a module named name sits in.
+func rootHelpGroupID(name string) string {
+	if slices.Contains(hubPinned, name) {
+		return pinnedGroupID
+	}
+	for _, g := range hubGroups {
+		if slices.Contains(g.names, name) {
+			return g.title
+		}
+	}
+	return hubOtherGroup
+}
+
+// rootHelpGroups is root help's cobra groups, in the hub's order. fang skips
+// a group with no command in it.
+func rootHelpGroups() []*cobra.Group {
+	groups := []*cobra.Group{{ID: pinnedGroupID, Title: "Pinned:"}}
+	for _, g := range hubGroups {
+		groups = append(groups, &cobra.Group{ID: g.title, Title: strings.ToUpper(g.title[:1]) + g.title[1:] + ":"})
+	}
+	return append(groups, &cobra.Group{ID: hubOtherGroup, Title: "Other:"})
+}
 
 // hubOrderAnnotation and hubTierAnnotation are cobra Annotations keys
 // buildHub (hub.go) reads back off root's constructed children to classify
 // and order hub rows without calling allModules() itself — a
 // module.Manifest.New closure that did (tmux's hub row needs the hub) would
 // create a package initialization cycle back through tmuxModule's own var
-// initializer. Annotations, not root help's GroupID: buildHub needs the
-// tier and registry order regardless of whether root help's grouping ever
-// changes shape, and the two are deliberately kept independent so a change
-// to one cannot silently break the other.
+// initializer. Annotations, not root help's GroupID: root help's groups are
+// derived from the hub's own lists (rootHelpGroupID), while the tier is
+// ADR-0005's growth policy and no longer decides help placement, so the
+// hub reads tier and registry order from here.
 //
 // hubOrderAnnotation recovers each module's allModules() registry
 // position — cobra's own Commands() getter sorts alphabetically by
@@ -45,6 +67,84 @@ const (
 	hubTierCore        = "core"
 	hubTierExtension   = "extension"
 )
+
+// rootHelpUseAnnotation gives a command a shorter usage for root help's
+// command list only. fang pads that column to the widest usage, so one long
+// Use line (review's flag placeholders) widened every row. The command's own
+// Use, which its help page, the hub and `menu` read, is unchanged
+// (forgectl#1151). withRootHelpLayout applies it.
+const rootHelpUseAnnotation = "forgectl:root-help-use"
+
+// withRootHelpLayout runs fn, which renders root's own help page, with that
+// page laid out like the hub (forgectl#1151): each child carrying
+// rootHelpUseAnnotation shows its short Use, and root's children are listed
+// in rootHelpOrder rather than alphabetically. fang lists a group's commands
+// in root.Commands() order, which cobra sorts unless EnableCommandSorting is
+// off, so sorting is switched off and the children re-added in order for the
+// length of fn. Everything is restored after: every Use, and the setting, so
+// the next Commands() call sorts again.
+func withRootHelpLayout(root *cobra.Command, fn func()) {
+	type swap struct {
+		cmd *cobra.Command
+		use string
+	}
+	var swaps []swap
+	for _, c := range root.Commands() {
+		if short, ok := c.Annotations[rootHelpUseAnnotation]; ok {
+			swaps = append(swaps, swap{c, c.Use})
+			c.Use = short
+		}
+	}
+	prevSorting := cobra.EnableCommandSorting
+	ordered := rootHelpOrder(root)
+	root.RemoveCommand(ordered...)
+	cobra.EnableCommandSorting = false
+	root.AddCommand(ordered...)
+	// AddCommand recomputed root's commandsMaxUseLen from the short Uses, and
+	// it stays at that width after the Uses are restored. Only cobra's default
+	// usage template reads it (UsagePadding); fang renders its own help and
+	// nothing else in forgectl reads it.
+	defer func() {
+		cobra.EnableCommandSorting = prevSorting
+		for _, s := range swaps {
+			s.cmd.Use = s.use
+		}
+	}()
+	fn()
+}
+
+// rootHelpOrder is root's children in the hub's order: the pinned commands in
+// hubPinned order, then each area's commands in hubGroups order, then every
+// other child (version, menu, anything no area names) as cobra sorts them.
+func rootHelpOrder(root *cobra.Command) []*cobra.Command {
+	children := root.Commands()
+	byName := make(map[string]*cobra.Command, len(children))
+	for _, c := range children {
+		byName[c.Name()] = c
+	}
+	out := make([]*cobra.Command, 0, len(children))
+	placed := make(map[*cobra.Command]bool, len(children))
+	add := func(name string) {
+		if c, ok := byName[name]; ok && !placed[c] {
+			out = append(out, c)
+			placed[c] = true
+		}
+	}
+	for _, name := range hubPinned {
+		add(name)
+	}
+	for _, g := range hubGroups {
+		for _, name := range g.names {
+			add(name)
+		}
+	}
+	for _, c := range children {
+		if !placed[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // hubNoPickerAnnotation is set by a command whose positional argument goes
 // into another CLI's subcommand slot, so a typed value is never "just an
@@ -123,10 +223,13 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   meta.AppName,
 		Short: meta.Tagline,
-		Long: `Two ways in: type a command (forgectl tmux ls), or run forgectl alone for a
-menu. Agents: state verbs take --json, menu --json lists all.
+		Long: `forgectl: your workbench from one command.
 
-Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused (docs/exit-codes.md).`,
+Type a command (forgectl status) or run forgectl alone for the menu.
+New here? forgectl init, then forgectl doctor.
+Agents: state verbs take --json; forgectl menu --json <command> lists its
+verbs. Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused
+(docs/exit-codes.md).`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
 		RunE:    rootRun,
@@ -142,10 +245,7 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused (docs/exit-codes.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
 	addSkillFlags(root)
 
-	root.AddGroup(
-		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
-		&cobra.Group{ID: moreGroupID, Title: "More:"},
-	)
+	root.AddGroup(rootHelpGroups()...)
 
 	for i, m := range allModules() {
 		cmd := m.New(deps)
@@ -162,12 +262,13 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused (docs/exit-codes.
 		// aliases), and applyAliases overwrites with the same map, so this
 		// copy is the safety net for any constructor that doesn't.
 		applyAliases(cmd, m.SubAliases)
+		// The tier is recorded for the hub; help placement follows the hub's
+		// sections, not the tier (forgectl#1151).
 		tier := hubTierCore
-		cmd.GroupID = everydayGroupID
 		if m.Tier == module.TierExtension {
 			tier = hubTierExtension
-			cmd.GroupID = moreGroupID
 		}
+		cmd.GroupID = rootHelpGroupID(cmd.Name())
 		stampHubAnnotations(cmd, i, tier)
 		root.AddCommand(cmd)
 	}

@@ -102,7 +102,7 @@ func newDeskCmd(deps module.Deps) *cobra.Command {
 	var frame bool
 	cmd := &cobra.Command{
 		Use:   "desk",
-		Short: "Operator queue: scripts Claude stages for you to approve and run",
+		Short: "Operator queue: scripts Claude stages for you to approve",
 		Long: `desk is a queue of scripts Claude will not run itself. Claude stages an item
 with ` + "`desk add`" + `; you read it on the dashboard, check its short sha256
 against the one Claude reported, and press y to run it, or s to skip it. Each

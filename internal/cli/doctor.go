@@ -37,7 +37,7 @@ func newDoctorCmdForDeps(d doctor.Deps, th theme.Theme) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Check the whole workbench is wired: claude, tmux, ghostty, gh, config, the local bench, and forgectl itself",
+		Short: "Check the workbench: claude, tmux, gh, config, bench, forgectl",
 		Long: `doctor is forgectl's ecosystem health check. It orchestrates the checks
 each domain already knows how to make — it never reimplements one:
 
