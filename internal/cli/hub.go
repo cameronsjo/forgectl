@@ -178,7 +178,7 @@ func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) 
 }
 
 // hubInitShort is the first-run row's description.
-const hubInitShort = "first run: set up forgectl — creates config.toml (init)"
+const hubInitShort = "first run: set up forgectl — creates config.toml"
 
 // hubModules returns root's registered modules — both tiers — in registry
 // order. A command with no tier annotation (version, a hidden helper) is not

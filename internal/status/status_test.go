@@ -3,6 +3,7 @@ package status
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"runtime"
 	"strings"
@@ -278,5 +279,32 @@ func TestCollect_ASourceThatExitsItsGoroutineFailsAtOnce(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Collect blocked on a source that exited its goroutine")
+	}
+}
+
+// TestCollect_KeepsTheSourcesCause pins Section.Cause: a source's
+// WithCause error sets it on the failed section, the error text is
+// unchanged, Cause stays off the wire, and an error with no cause leaves it
+// empty. Mutation that turns it red: drop the errors.As in failed.
+func TestCollect_KeepsTheSourcesCause(t *testing.T) {
+	src := func(context.Context) (int, []string, error) {
+		return 0, nil, WithCause("missing-folder:/p", errors.New("boom"))
+	}
+	s := Collect(context.Background(), time.Second, Source[int](src))
+	if s.Cause != "missing-folder:/p" || s.Error != "boom" {
+		t.Errorf("section = %+v, want cause missing-folder:/p and error boom", s)
+	}
+	b, err := json.Marshal(s)
+	if err != nil || strings.Contains(string(b), "missing-folder") {
+		t.Errorf("Cause reached the wire: %s (err %v)", b, err)
+	}
+	plain := Collect(context.Background(), time.Second, Source[int](func(context.Context) (int, []string, error) {
+		return 0, nil, errors.New("boom")
+	}))
+	if plain.Cause != "" {
+		t.Errorf("an error with no cause set Cause %q", plain.Cause)
+	}
+	if WithCause("x", nil) != nil {
+		t.Error("WithCause(x, nil) is not nil")
 	}
 }

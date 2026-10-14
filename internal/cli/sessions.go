@@ -31,7 +31,7 @@ func newSessionsCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "sessions",
-		Short: "Sync local session ledgers into the operational concordance and query it",
+		Short: "Sync session ledgers into the concordance and query it",
 		Long: `sessions drains this machine's local JSONL write-ahead log
 (Cadence XDG state, with read-only legacy ~/.claude fallbacks) and the runbook markdown corpus
 into the cross-machine operational concordance — an
