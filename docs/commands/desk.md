@@ -116,7 +116,7 @@ desk timeline  ◌ 3 need you · ● 2 running · • 3 new                   19
 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 
-`--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
+`--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does, read-only, and on a directory that is not a desk prints a `note:` on stderr and a `not found` line, exit 0. The interactive dashboard is the desk's runner, the pane `desk layout` starts before anything is queued, so it still creates a missing desk.
 
 `--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
 
@@ -179,7 +179,9 @@ Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is
 
 ### `forgectl desk status [name]`
 
-Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir` and `taken`.
+Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir`, `taken` and `found`.
+
+`status`, `runs`, `show`, `watch`, `plan` and `--frame` only read. They open the desk read-only: nothing is created, migrated, moved, `chmod`ed or written, on a real desk or on any other directory (a project that happens to hold a `done/` folder keeps its modes and files). A path that cannot be checked (a file, a symlink, a directory you cannot read) is an error, not "not a desk". A directory that is not one (it holds none of `pending/`, `running/`, `done/`, `skipped/`, so a freshly made empty directory counts too) is not opened: `status` prints `note: desk not found at <path>` on stderr and the empty queue (`found: false` in JSON), exit 0, so a typo in `--dir` or `DESK_DIR` does not become a new desk the operator never sees. `status NAME`, `show NAME`, `watch` and `plan NAME` on such a directory exit 1 and name the path; `watch` does not wait for the desk to appear, so start it after `desk add`. `skip` refuses such a directory the same way before it would create one. `forgectl config` shows the `desk.dir` in use and which variable set it.
 
 A waiting or running item's line ends in `what="..."`, cut at 72 characters; `--full` prints it whole. `status NAME` and `--json` never cut it.
 
@@ -193,11 +195,11 @@ skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="supe
 
 A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. A pending item is `held` while an item its `# AFTER:` line names has not finished with exit 0; it stays in `pending/`, its line carries `held="<why>"`, and it becomes waiting on its own once that run succeeds. A pending item whose name a run already uses, in `running/` or `done/`, is `refused` (`another item already uses this name`) and stays refused while that name is in `running/` or `done/`: claiming it would replace that run's record, or its run would be skipped as name-reused. Skip it and queue it again. An `# AFTER:` line that can never be met (a name that is not an item name, the item itself, more than 16 names) also makes it `refused`. Every text field goes through the terminal-safe filter.
 
-With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, `after` (when set), the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
+With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, `after` (when set), the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` path and the `events` path (left out once the item has finished, been skipped or been refused when the file does not exist, as for an item that never ran), and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, events_exists, record, steps, summary}`; `events` is always the path, and `events_exists` says whether the file is there now; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
 Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `after` (the names its `# AFTER:` line gives, `[]` when none; past 16 names the list is cut at 17, and the item is refused), `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal`, `hold` (why a `held` item cannot run yet) and `pid`. `state` is one of `waiting`, `held`, `refused`, `running`, `lost`, `done` and `skipped`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
-Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
+Unlike the dashboard, `status` changes nothing it finds: a pending item whose bytes changed shows as `refused` until the dashboard or a run moves it to `skipped/`, and a hand-dropped item's hash is recorded by the first writing verb.
 
 Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 a usage error.
 
@@ -233,7 +235,9 @@ Every run with its progress, one line each: live runs first, then the most recen
 | `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
 | `--log FILE` | add a JSONL log as one more run (see `desk show`) |
 
-`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, reading the desk scans it.
+`runs` never creates a desk either: on a directory that is not one it prints a `note:` on stderr and lists only what `--log` names (`[]` with no `--log`), exit 0.
+
+`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, `runs` only reads the desk.
 
 Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
 

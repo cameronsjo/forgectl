@@ -312,8 +312,14 @@ func TestAggregate_NeverReturnsOrRendersARawSourceError(t *testing.T) {
 	if strings.Contains(joined, "abc123") || strings.Contains(joined, "\x1b") {
 		t.Errorf("aggregate leaked raw subprocess output: notes=%v err=%v", notes, err)
 	}
-	if len(notes) != 2 || notes[1] != "gitea: source failed" {
-		t.Fatalf("notes = %v, want the source's own note plus a categorical one", notes)
+	if len(notes) != 1 || notes[0] != "gitea(cameron): query failed" {
+		t.Fatalf("notes = %v, want the source's own note alone: it already says what failed", notes)
+	}
+
+	// A source that fails with no note of its own still gets the categorical one.
+	_, notes, err = Aggregate(context.Background(), fakeSource{name: "gitea", err: hostile})
+	if err == nil || len(notes) != 1 || notes[0] != "gitea: source failed" {
+		t.Fatalf("notes = %v (err %v), want the categorical note", notes, err)
 	}
 }
 

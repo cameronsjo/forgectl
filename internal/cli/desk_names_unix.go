@@ -71,7 +71,19 @@ func deskNotFound(verb, what, name, label string, known []string) error {
 	if len(known) > 0 {
 		msg += "; " + label + ": " + strings.Join(known, ", ")
 	}
+	// Name the verb that lists every valid name, so the next step is a
+	// command rather than a guess (forgectl#1095).
+	msg += "; " + deskListHint(verb)
 	return fmt.Errorf("%s", msg)
+}
+
+// deskListHint names the command that lists the names verb accepts: the runs
+// for desk show, the items for every other desk verb.
+func deskListHint(verb string) string {
+	if verb == "desk show" {
+		return "forgectl desk runs lists every run"
+	}
+	return "forgectl desk status lists every item"
 }
 
 // deskNotFoundListMax caps the waiting names a not-found error lists.

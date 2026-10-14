@@ -29,7 +29,11 @@ func newPrDashCmdForClient(client *pr.Client, reviewedPath string, th theme.Them
 		Short: "Dashboard: active reviews, PRs awaiting you, and your open PRs",
 		Long: `dash shows three sections: the clean-room reviews you have in flight
 locally, the open PRs whose review is requested of you, and your own open PRs.
-Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
+Rows you've marked reviewed are dimmed (new activity auto-un-dims them).
+
+When both gh queries fail, dash still shows the active reviews (and --json
+still writes the document) and then exits 1, so empty PR sections never read
+as an empty inbox; the notes on stderr say why.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dash, notes, err := client.Dash(cmd.Context())
@@ -40,9 +44,19 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			// document, and a degraded leg still shows as an empty array.
 			renderDegradationNotes(cmd, notes)
 
+			// Both gh sections failed: the document is still written (the
+			// local active reviews are real), then the exit is 1, so empty
+			// PR sections never read as an empty inbox (forgectl#1150).
+			var verdict error
+			if failedQueries(notes, "awaiting-you", "your-open") == 2 {
+				verdict = errEveryPRQueryFailed
+			}
 			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if asJSON {
-				return writePrDashJSON(cmd.OutOrStdout(), dash, store)
+				if err := writePrDashJSON(cmd.OutOrStdout(), dash, store); err != nil {
+					return err
+				}
+				return jsonVerdict(verdict, true)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			errOut := cmd.ErrOrStderr()
@@ -59,7 +73,10 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			_, _ = fmt.Fprintln(out)
 
 			_, _ = fmt.Fprintln(out, styles.Accent.Render("your open PRs"))
-			return renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted, failedQueries(notes, "your-open"), 1)
+			if err := renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted, failedQueries(notes, "your-open"), 1); err != nil {
+				return err
+			}
+			return verdict
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,

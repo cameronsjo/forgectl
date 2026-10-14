@@ -43,6 +43,9 @@ var supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
 // deliberately does not use internal/exec's process-group runner, which kills
 // the group when its context ends — the opposite of what is wanted here.
 func (d *Desk) Launch(c *Claimed) (int, error) {
+	if d.readOnly {
+		return 0, ErrReadOnly
+	}
 	if c == nil {
 		return 0, errors.New("desk: launch: no claimed item")
 	}
@@ -110,6 +113,9 @@ func RunSupervisor(dir, name, sha, kind string) int {
 }
 
 func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
+	if d.readOnly {
+		return 0, ErrReadOnly
+	}
 	// An approval always carries a full hash. Checked before anything is
 	// read, so a malformed one refuses without touching the item.
 	if !ValidSHA256(sha) {
@@ -185,6 +191,9 @@ func (d *Desk) doneTaken(name string) bool {
 // at the name, never has its target truncated. The caller writes the run's
 // output to it (a TTY run hands it to script(1) as /dev/fd/4).
 func (d *Desk) CreateLog(name string) (*os.File, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	if !ValidName(name) {
 		return nil, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
 	}
@@ -192,6 +201,9 @@ func (d *Desk) CreateLog(name string) (*os.File, error) {
 }
 
 func (d *Desk) createLog(name string) (*os.File, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	f, err := d.root.OpenFile(path.Join(DirDone, name+extLog), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("desk: create log for %s: %w", describe(name), err)

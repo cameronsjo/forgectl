@@ -33,18 +33,25 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	switch kind {
 	case "", string(review.KindIssue), string(review.KindPR):
 	default:
-		return fmt.Errorf("invalid --kind %q (want issue or pr)", kind)
+		return usageFailure(cmd, WithExitCode(fmt.Errorf("invalid --kind %q (want issue or pr)", kind), exitUsage), asJSON)
+	}
+	if err := checkReviewRepo(repo); err != nil {
+		return usageFailure(cmd, err, asJSON)
 	}
 
 	items, notes, err := review.Aggregate(cmd.Context(), srcs...)
-	// Notes render BEFORE the error return: an all-sources failure is exactly
-	// when the per-query notes matter most, and returning first meant the
-	// operator saw the aggregate error with no indication of which owner or
-	// which leg actually broke.
-	renderDegradationNotes(cmd, notes)
 	if err != nil {
+		// An all-sources failure is exactly when the per-query notes matter
+		// most: they carry each query's categorical cause and its fix (ghfail).
+		// Under --json they go inside the one failure object, so stderr stays a
+		// single JSON value; for a human they print as lines above the error.
+		if asJSON {
+			return failureWithNotes(err, notes)
+		}
+		renderDegradationNotes(cmd, notes)
 		return err
 	}
+	renderDegradationNotes(cmd, notes)
 
 	items = filterItems(items, kind, repo)
 	// An unresolvable store path degrades reads to an empty store (house
@@ -70,6 +77,31 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	}
 	if w.Truncated {
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+w.narrowHint(reviewNarrowFlags))
+	}
+	return nil
+}
+
+// failureWithNotes is an all-sources-failed error with the per-source notes
+// folded into its text, so the cause and its fix travel in the --json failure
+// object's error field. The notes are categorical (ghfail): they never carry a
+// subprocess's own output.
+func failureWithNotes(err error, notes []string) error {
+	if len(notes) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, strings.Join(notes, "; "))
+}
+
+// checkReviewRepo refuses a --repo that is not owner/name before any query
+// runs: a malformed value can match no row, so sending it to the network only
+// turns a typo into an empty or failed inventory.
+func checkReviewRepo(repo string) error {
+	if repo == "" {
+		return nil
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(name) {
+		return WithExitCode(fmt.Errorf("invalid --repo %s (want owner/name, e.g. --repo cameronsjo/forgectl)", safeLabel(repo)), exitUsage)
 	}
 	return nil
 }

@@ -298,13 +298,37 @@ func legacyShadowWarning(boundary *config.LegacyMigrationBoundary, cfg config.Co
 // ~/.config/claunch/claunch.conf (zero-migration grace); when neither exists it
 // returns the empty config and points at where `forgectl launch init` writes.
 func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Config, effectiveFrom string) (config.LaunchConfig, string) {
+	lc, src := resolveLaunchConfigSource(boundary, cfg, effectiveFrom)
+	return lc, src.label()
+}
+
+// launchConfigSource is where the [launch] profile came from: the file's path,
+// and a note when it is not simply that file's [launch] section ("legacy",
+// "missing — built-in defaults", ...). launch which --json reports the two
+// apart, so the path is usable as a path (forgectl#1095).
+type launchConfigSource struct {
+	Path string
+	Note string
+}
+
+// label is the human source label: the path, then the note in parentheses.
+func (s launchConfigSource) label() string {
+	if s.Note == "" {
+		return s.Path
+	}
+	return s.Path + " (" + s.Note + ")"
+}
+
+// resolveLaunchConfigSource is resolveLaunchConfig with the source split into
+// its path and note.
+func resolveLaunchConfigSource(boundary *config.LegacyMigrationBoundary, cfg config.Config, effectiveFrom string) (config.LaunchConfig, launchConfigSource) {
 	// A declined, skipped, or failed migration hands back a profile read from
 	// the legacy file. The caller has already assigned it into cfg.Launch, so
 	// HasLaunchSection below cannot tell it from a real [launch] section —
 	// crediting config.toml for it, and naming a path that need not even
 	// exist. The provenance settles it (#418 review).
 	if effectiveFrom != "" {
-		return cfg.Launch, effectiveFrom + " (legacy)"
+		return cfg.Launch, launchConfigSource{effectiveFrom, "legacy"}
 	}
 	path := ""
 	if boundary != nil {
@@ -313,7 +337,7 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 		path, _ = config.ConfigPath()
 	}
 	if cfg.HasLaunchSection() {
-		return cfg.Launch, path
+		return cfg.Launch, launchConfigSource{Path: path}
 	}
 	var legacy config.LaunchConfig
 	var err error
@@ -327,7 +351,7 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 	switch {
 	case err == nil:
 		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", termsafe.QuotePath(legacyPath))
-		return legacy, legacyPath + " (legacy)"
+		return legacy, launchConfigSource{legacyPath, "legacy"}
 	case !errors.Is(err, config.ErrNoLegacyLaunch):
 		// A malformed or unreadable legacy file shouldn't block normal launch —
 		// warn and fall through to config.toml (an absent file is silent).
@@ -338,14 +362,14 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 		// config.toml exists but declares no [launch] section (and there is no
 		// legacy claunch.conf). Distinguish this from a truly absent file so the
 		// label doesn't send the reader chasing a phantom missing-file problem (#57).
-		return cfg.Launch, path + " (no [launch] section — built-in defaults)"
+		return cfg.Launch, launchConfigSource{path, "no [launch] section — built-in defaults"}
 	case os.IsNotExist(err):
-		return cfg.Launch, path + " (missing — built-in defaults)"
+		return cfg.Launch, launchConfigSource{path, "missing — built-in defaults"}
 	default:
 		// A permission failure (or other stat error) is not the same as an
 		// absent file — surface it distinctly rather than let it masquerade
 		// as "missing" and send the reader chasing the wrong fix.
-		return cfg.Launch, path + " (unreadable: " + err.Error() + " — built-in defaults)"
+		return cfg.Launch, launchConfigSource{path, "unreadable: " + err.Error() + " — built-in defaults"}
 	}
 }
 

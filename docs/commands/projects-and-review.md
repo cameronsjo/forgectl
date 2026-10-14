@@ -25,6 +25,8 @@ forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
 
+`review` refuses a `--repo` that is not `owner/name` and a `--kind` other than `issue` or `pr` with exit 2 (`usage_error` under `--json`) before any query runs. When every source fails, it exits 1; under `--json` the per-source notes, each with its cause and fix (`gh is not signed in to github.com; run gh auth login`), go inside the one failure object's `error` rather than as note lines before it.
+
 When both stdin and stdout are terminals, these selectors keep their existing
 pickers. With either descriptor non-TTY, `projects`/`projects pick` emit one
 sanitized display identity per candidate on stdout and exit 1; narrow pick to a

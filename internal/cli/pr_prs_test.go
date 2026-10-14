@@ -297,3 +297,75 @@ func TestRenderPRTable_PartialFailureIsIncomplete(t *testing.T) {
 		t.Errorf("count line = %q, want %q", got, want)
 	}
 }
+
+// allPRQueriesFail is a runner whose every gh search fails as an unsigned gh.
+func allPRQueriesFail() *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return "", errors.New("gh: not authenticated")
+		}
+		return "", nil
+	}}
+}
+
+// TestPrsCmd_EveryQueryFailedExits1 pins forgectl#1150: when no gh query
+// answers, prs exits 1 instead of an empty list that reads as inbox zero.
+// Under --json stdout stays empty and the error carries the notes.
+func TestPrsCmd_EveryQueryFailedExits1(t *testing.T) {
+	client := pr.New(allPRQueriesFail())
+	cmd := newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 1 {
+		t.Fatalf("prs --json with every query failed: err %v (exit %d); want exit 1", err, ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "authored: query failed") || !strings.Contains(err.Error(), "review-requested: query failed") {
+		t.Errorf("error = %q; want each query's note", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("stdout %q stderr %q; want both empty (the contract writes the one object)", stdout.String(), stderr.String())
+	}
+
+	cmd = newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	stdout.Reset()
+	stderr.Reset()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.ExecuteContext(context.Background()); err == nil || ExitCode(err) != 1 {
+		t.Fatalf("prs with every query failed: err %v; want exit 1", err)
+	}
+	if !strings.Contains(stderr.String(), "note:") {
+		t.Errorf("human stderr %q lacks the notes", stderr.String())
+	}
+}
+
+// TestDashCmd_EveryQueryFailedExits1: dash still writes its document (the
+// local section is real) and then exits 1.
+func TestDashCmd_EveryQueryFailedExits1(t *testing.T) {
+	client := pr.New(allPRQueriesFail(), pr.WithSessionsDir(t.TempDir()))
+	for _, args := range [][]string{{"--json"}, nil} {
+		cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
+		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || ExitCode(err) != 1 {
+			t.Errorf("dash %v: err %v (exit %d); want exit 1", args, err, ExitCode(err))
+		}
+		if args != nil {
+			var doc prDashJSON
+			if jerr := json.Unmarshal(stdout.Bytes(), &doc); jerr != nil || doc.AwaitingYou == nil {
+				t.Errorf("dash --json document = %q (err %v); want it written", stdout.String(), jerr)
+			}
+		} else if !strings.Contains(stdout.String(), "active reviews") {
+			t.Errorf("dash stdout = %q; want the sections", stdout.String())
+		}
+	}
+}

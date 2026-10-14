@@ -88,6 +88,9 @@ func (c *Claimed) AttachScript(cmd *exec.Cmd) (release func(), err error) {
 // never an empty one or a prefix. An item whose file is not the kind it was
 // queued as is refused.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	if !ValidSHA256(wantSHA) {
 		return nil, fmt.Errorf("%w: %s: an approval names the full 64-hex-digit sha256", ErrRefused, describe(name))
 	}
@@ -277,6 +280,9 @@ type Run struct {
 // claiming ownership: the lock is dropped and a pid already written to meta
 // is cleared, so the item can be released.
 func (d *Desk) BeginRun(name string, pid int, fields ...string) (run *Run, err error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	lock, err := d.lockOwner(name)
 	if err != nil {
 		return nil, err
@@ -394,6 +400,9 @@ func (r *Run) Abandon(reason string) error {
 // appendExit appends EXIT=<rc> to done/<name>.log on a line of its own, even
 // when the output before it did not end in a newline.
 func (d *Desk) appendExit(name string, rc int) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	p := path.Join(DirDone, name+extLog)
 	f, err := d.root.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_APPEND, fileMode)
 	if err != nil {
@@ -421,6 +430,9 @@ func (d *Desk) appendExit(name string, rc int) error {
 // it and nothing runs it later. It refuses an item that has an owner: that
 // run ends through Finish, or as lost.
 func (d *Desk) Release(name, reason string) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return err
@@ -489,6 +501,9 @@ func (d *Desk) SkipNoted(name, note string) (string, error) {
 
 // skip is Skip with a note and an actor; it returns the reason recorded.
 func (d *Desk) skip(name, reason, note, by string) (string, error) {
+	if d.readOnly {
+		return "", ErrReadOnly
+	}
 	from := DirPending
 	var moved, staleMeta bool
 	var carried Meta
@@ -579,6 +594,9 @@ func (d *Desk) SkippedMeta(name string) (Meta, bool) {
 // Unskip returns an operator-skipped item to pending/. An item skipped
 // because it changed, was refused, or was lost cannot be re-armed.
 func (d *Desk) Unskip(name string) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	kind, err := d.findKind(DirSkipped, name)
 	if err != nil {
 		return err

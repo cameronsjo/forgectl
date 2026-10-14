@@ -84,6 +84,9 @@ func (d *Desk) Signalled(name string) bool {
 // was sent. An item with no meta is left alone, so a legacy item is never
 // given a partial one.
 func (d *Desk) MarkSignalled(name string) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	meta, ok, err := d.readMeta(DirPending, name)
 	if err != nil || !ok {
 		return err
