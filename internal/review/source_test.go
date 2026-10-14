@@ -110,7 +110,9 @@ func TestAggregate_NotesKeepSourceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
-	want := []string{"a: own note", "a: source failed", "b: own note"}
+	// a failed but gave a note of its own, so no "a: source failed" follows
+	// it (#1096).
+	want := []string{"a: own note", "b: own note"}
 	if !slices.Equal(notes, want) {
 		t.Errorf("notes = %q; want %q", notes, want)
 	}
