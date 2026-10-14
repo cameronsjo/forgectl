@@ -49,8 +49,10 @@ func Present(dir string) (bool, error) {
 
 // OpenReadOnly opens the desk at dir for reading. Unlike [Open] it creates
 // nothing, migrates nothing and changes no mode; Scan on it writes no meta and
-// moves no item (a changed item reads as refused), and every write method
-// returns ErrReadOnly. It refuses what Open refuses, with the checks made
+// moves no item (a changed item reads as refused), and every method that
+// writes (Add, Claim, Launch, BeginRun, Release, Skip, SkipNoted, Unskip,
+// MarkSignalled, CreateLog, Prune, and the owner lock, meta, temp-file and
+// move helpers under them) returns ErrReadOnly before touching the tree. It refuses what Open refuses, with the checks made
 // read-only (privdir.OpenChecked, checkProtocolDir), as [PrunePlanAt] does. A
 // directory that is absent or holds no protocol subdirectory is ErrNoDesk.
 func OpenReadOnly(dir string) (*Desk, error) {

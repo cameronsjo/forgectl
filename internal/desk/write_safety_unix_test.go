@@ -4,6 +4,8 @@ package desk
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -399,6 +401,16 @@ func TestBindRootRefusesADifferentDirectory(t *testing.T) {
 func TestOpenReadOnlyWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pending", "01-hand.sh"), "echo hi\n", 0o644)
+	writeFile(t, filepath.Join(dir, "running", "02-run.sh"), "echo run\n", 0o644)
+	writeFile(t, filepath.Join(dir, "skipped", "03-skip.sh"), "echo skip\n", 0o644)
+	writeFile(t, filepath.Join(dir, "done", "04-old.sh"), "echo old\n", 0o644)
+	writeFile(t, filepath.Join(dir, "done", "04-old.log"), "old\n", 0o644)
+	old := time.Now().Add(-365 * 24 * time.Hour)
+	for _, f := range []string{"04-old.sh", "04-old.log"} {
+		if err := os.Chtimes(filepath.Join(dir, "done", f), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a wide mode to see it left alone
 		t.Fatal(err)
 	}
@@ -422,8 +434,36 @@ func TestOpenReadOnlyWritesNothing(t *testing.T) {
 	if after := dirState(t, filepath.Join(dir, "pending")); after != beforePending {
 		t.Errorf("Scan wrote into pending/:\nbefore %s\nafter  %s", beforePending, after)
 	}
-	if err := d.Skip("01-hand", SkipOperator); !errors.Is(err, ErrReadOnly) {
-		t.Errorf("Skip through a read-only desk = %v; want ErrReadOnly", err)
+	// Every write method refuses before touching the tree: each is aimed at
+	// an item that exists where that method acts, so a missing guard would
+	// create, move, chmod or remove something treeState sees.
+	tree := treeState(t, dir)
+	sha := snap.Pending[0].Meta.SHA256
+	writes := map[string]func() error{
+		"Skip":          func() error { return d.Skip("01-hand", SkipOperator) },
+		"SkipNoted":     func() error { _, err := d.SkipNoted("01-hand", "note"); return err },
+		"Claim":         func() error { _, err := d.Claim("01-hand", sha); return err },
+		"Launch":        func() error { _, err := d.Launch(&Claimed{Name: "01-hand", Kind: KindScript, SHA256: sha}); return err },
+		"BeginRun":      func() error { _, err := d.BeginRun("02-run", 1); return err },
+		"Release":       func() error { return d.Release("02-run", "test") },
+		"Unskip":        func() error { return d.Unskip("03-skip") },
+		"CreateLog":     func() error { _, err := d.CreateLog("05-new"); return err },
+		"MarkSignalled": func() error { return d.MarkSignalled("01-hand") },
+		"Prune":         func() error { _, err := d.Prune(1); return err },
+		"Add": func() error {
+			_, err := d.Add(filepath.Join(dir, "pending", "01-hand.sh"), "w", "y", false)
+			return err
+		},
+		"openLock":   func() error { _, err := d.openLock("02-run"); return err },
+		"appendExit": func() error { return d.appendExit("04-old", 0) },
+	}
+	for name, write := range writes {
+		if err := write(); !errors.Is(err, ErrReadOnly) {
+			t.Errorf("%s through a read-only desk = %v; want ErrReadOnly", name, err)
+		}
+	}
+	if after := treeState(t, dir); after != tree {
+		t.Errorf("a write method changed the read-only desk:\nbefore %s\nafter  %s", tree, after)
 	}
 
 	if _, err := OpenReadOnly(filepath.Join(t.TempDir(), "absent")); !errors.Is(err, ErrNoDesk) {
@@ -434,4 +474,26 @@ func TestOpenReadOnlyWritesNothing(t *testing.T) {
 	if _, err := OpenReadOnly(file); err == nil || errors.Is(err, ErrNoDesk) {
 		t.Errorf("OpenReadOnly on a file = %v; want an error that is not ErrNoDesk", err)
 	}
+}
+
+// treeState is every path under dir with its mode, size and mtime, so a
+// create, remove, move, chmod or write anywhere in the tree changes it.
+func treeState(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(dir, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := e.Info()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %s %d %d\n", p, fi.Mode(), fi.Size(), fi.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }

@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,10 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
+
+// ErrNoDSN is a sync that needs the concordance but has no DSN configured.
+// The CLI maps it to a usage failure (exit 2), as every sessions verb does.
+var ErrNoDSN = errors.New("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn (or use --dry-run)")
 
 // SyncOptions parameterizes one ETL run. Zero-valued fields fall back to the
 // [sessions] config section, then to built-in defaults (Cadence state home,
@@ -186,7 +191,7 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 		return receipt, nil
 	}
 	if opts.DSN == "" {
-		return nil, fmt.Errorf("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn (or use --dry-run)")
+		return nil, ErrNoDSN
 	}
 
 	concordance, err := ConnectConcordance(ctx, opts.DSN)

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -718,5 +719,33 @@ func TestWithConcordance_NoDSNIsExit2(t *testing.T) {
 	var coded *jsonCodedError
 	if !chainAs(err, &coded) || coded.code != jsonCodeUsage {
 		t.Errorf("err = %#v; want it to carry the usage_error JSON code", err)
+	}
+}
+
+// TestSessionsSync_NoDSNIsUsageExit2 extends forgectl#1150 to sync, whose
+// no-DSN error comes from internal/sessions rather than withConcordance: it
+// must still be usage_error and exit 2, and --dry-run still needs no DSN.
+func TestSessionsSync_NoDSNIsUsageExit2(t *testing.T) {
+	t.Setenv("FORGECTL_SESSIONS_DSN", "")
+	dir := t.TempDir()
+	run := func(extra ...string) error {
+		cmd := newSessionsSyncCmd(config.Config{})
+		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(append([]string{"--json", "--metrics-dir", dir, "--runbooks-dir", dir,
+			"--syncthing-config", dir + "/absent.xml", "--machine", "test"}, extra...))
+		return cmd.Execute()
+	}
+	err := run()
+	if !errors.Is(err, sessions.ErrNoDSN) || ExitCode(err) != exitUsage {
+		t.Fatalf("err = %v (exit %d); want the no-DSN error with exit %d", err, ExitCode(err), exitUsage)
+	}
+	var coded *jsonCodedError
+	if !chainAs(err, &coded) || coded.code != jsonCodeUsage {
+		t.Errorf("err = %#v; want it to carry the usage_error JSON code", err)
+	}
+	if err := run("--dry-run"); err != nil {
+		t.Errorf("--dry-run with no DSN: %v; want success", err)
 	}
 }

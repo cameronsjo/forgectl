@@ -19,6 +19,9 @@ var exitLineRe = regexp.MustCompile(`^EXIT=(-?[0-9]{1,9})$`)
 // Scan reads the queue. It is not read-only, by design: it fixes the hash of
 // a hand-dropped pending item the first time it sees it, and moves a pending
 // item whose bytes changed since then to skipped/ (skip_reason "changed").
+// The exception is a desk from [OpenReadOnly]: there Scan writes nothing,
+// computes a missing hash in memory, and reports a changed item as refused
+// where it lies instead of moving it.
 func (d *Desk) Scan() (*Snapshot, error) {
 	now := d.now().UTC()
 	snap := &Snapshot{Dir: d.path, Taken: now}

@@ -125,6 +125,9 @@ the command exits non-zero — a skipped session is never silent.
 				return err
 			}
 			receipt, err := sessions.Sync(cmd.Context(), resolved)
+			if errors.Is(err, sessions.ErrNoDSN) {
+				return withJSONUsageCode(WithExitCode(err, exitUsage))
+			}
 			if err != nil {
 				return err
 			}

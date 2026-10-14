@@ -22,6 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/fang"
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -512,7 +515,8 @@ func (c *countingReviewSource) Items(context.Context) ([]review.Item, []string, 
 
 // TestReviewCmd_JSON_NotSignedInCarriesTheLoginFix is #1096 end to end: a gh
 // that is not signed in reaches the --json failure object as ghfail's fixed
-// text, with the fix, as one object on one line, and no trailing
+// text, with the fix, as one object on one line through the root's contract
+// and fang, and no trailing
 // "github: source failed" note repeats what the per-query notes said.
 func TestReviewCmd_JSON_NotSignedInCarriesTheLoginFix(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
@@ -524,17 +528,22 @@ func TestReviewCmd_JSON_NotSignedInCarriesTheLoginFix(t *testing.T) {
 		return "", nil
 	}}
 	src := review.NewGitHub(fake, []string{"cameronsjo"}, "github.com")
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
-	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	// Through a root carrying the real contract, under fang with the
+	// production options, exactly as the binary renders a --json failure.
+	root := &cobra.Command{Use: "forgectl"}
+	root.AddCommand(newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{}))
+	installJSONErrorContract(root)
 	var stdout, stderr bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--json"})
-	err := cmd.ExecuteContext(context.Background())
-	if err == nil {
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	argv := []string{"review", "--json"}
+	root.SetArgs(argv)
+	prev := jsonOSArgs
+	jsonOSArgs = func() []string { return argv }
+	t.Cleanup(func() { jsonOSArgs = prev })
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
 		t.Fatal("review with gh signed out succeeded")
 	}
-	_ = jsonFailure(cmd, err, true, jsonCodeFailed) // what the root's contract does with it
 
 	line := strings.TrimSuffix(stderr.String(), "\n")
 	if strings.Contains(line, "\n") {

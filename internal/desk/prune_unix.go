@@ -27,6 +27,9 @@ var protocolSuffixes = [...]string{extMeta, extManifest, extEvents, extScript, e
 // symlinks, dot files, or anything else; an item still in running/ keeps its
 // done/ files. Nothing in pending/ or running/ is touched.
 func (d *Desk) Prune(days int) (int, error) {
+	if d.readOnly {
+		return 0, ErrReadOnly
+	}
 	cands, err := d.pruneCandidates(days)
 	if err != nil {
 		return 0, err

@@ -412,6 +412,9 @@ func encodeMeta(m Meta) ([]byte, error) {
 
 // writeMeta replaces <sub>/<name>.meta.json atomically.
 func (d *Desk) writeMeta(sub, name string, m Meta) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	data, err := encodeMeta(m)
 	if err != nil {
 		return err
@@ -431,6 +434,9 @@ func (d *Desk) writeMeta(sub, name string, m Meta) error {
 // whole: a link(2) of a finished temp file, so no reader sees half a file and
 // two desks sighting the same item cannot overwrite each other.
 func (d *Desk) createMeta(sub, name string, m Meta) (created bool, err error) {
+	if d.readOnly {
+		return false, ErrReadOnly
+	}
 	data, err := encodeMeta(m)
 	if err != nil {
 		return false, err
