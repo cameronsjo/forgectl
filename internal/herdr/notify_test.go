@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -35,24 +36,29 @@ func TestNotificationShowBuildsTheCommand(t *testing.T) {
 		{
 			name: "body and sound",
 			n:    Notification{Title: "Claude needs you", Body: "2 waiting", Sound: SoundRequest},
-			want: notifyCmd(exec.MustFixed("--body"), exec.Opaque("2 waiting"),
-				exec.MustFixed("--sound"), exec.MustFixed("request"), exec.Opaque("Claude needs you")),
+			want: notifyCmd(exec.Opaque("Claude needs you"), exec.MustFixed("--body"), exec.Opaque("2 waiting"),
+				exec.MustFixed("--sound"), exec.MustFixed("request")),
 		},
 		{
 			name: "dash-leading text cannot read as a flag",
 			n:    Notification{Title: "--help", Body: "-rf", Sound: SoundDone},
-			want: notifyCmd(exec.MustFixed("--body"), exec.Opaque(" -rf"),
-				exec.MustFixed("--sound"), exec.MustFixed("done"), exec.Opaque(" --help")),
+			want: notifyCmd(exec.Opaque(" --help"), exec.MustFixed("--body"), exec.Opaque(" -rf"),
+				exec.MustFixed("--sound"), exec.MustFixed("done")),
+		},
+		{
+			name: "a bare help title is not read as herdr's help",
+			n:    Notification{Title: "help"},
+			want: notifyCmd(exec.Opaque(" help")),
 		},
 		{
 			name: "control characters are escaped, not passed",
 			n:    Notification{Title: "a\x1b]0;pwned\x07b\nc", Sound: SoundNone},
-			want: notifyCmd(exec.MustFixed("--sound"), exec.MustFixed("none"), exec.Opaque(`a\x1b]0;pwned\ab\nc`)),
+			want: notifyCmd(exec.Opaque(`a\x1b]0;pwned\ab\nc`), exec.MustFixed("--sound"), exec.MustFixed("none")),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &exec.FakeSensitiveRunner{}
-			if err := NotificationShow(t.Context(), run, testHerdrPath, tc.n); err != nil {
+			if _, err := NotificationShow(t.Context(), run, testHerdrPath, tc.n); err != nil {
 				t.Fatalf("NotificationShow: %v", err)
 			}
 			got, ok := run.Last()
@@ -78,7 +84,7 @@ func TestNotificationShowRefusesBeforeRunning(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &exec.FakeSensitiveRunner{}
-			if err := NotificationShow(t.Context(), run, tc.path, tc.n); err == nil {
+			if _, err := NotificationShow(t.Context(), run, tc.path, tc.n); err == nil {
 				t.Fatal("want an error")
 			}
 			if len(run.Calls()) != 0 {
@@ -119,7 +125,7 @@ func TestNotificationShowReadsHerdrRefusal(t *testing.T) {
 			run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
 				return tc.res, tc.err
 			}}
-			err := NotificationShow(context.Background(), run, testHerdrPath, Notification{Title: "x"})
+			_, err := NotificationShow(context.Background(), run, testHerdrPath, Notification{Title: "x"})
 			var he *Error
 			if !errors.As(err, &he) || he.Code != "server_not_running" {
 				t.Fatalf("err = %v, want herdr's server_not_running refusal", err)
@@ -134,12 +140,67 @@ func TestNotificationShowKeepsATruncatedStreamUnparsed(t *testing.T) {
 		return exec.SensitiveResult{ExitCode: exitFailure, Stderr: exec.BoundedOutputForTest(envelope, exec.OutputOverflowed)},
 			exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
 	}}
-	err := NotificationShow(t.Context(), run, testHerdrPath, Notification{Title: "x"})
+	_, err := NotificationShow(t.Context(), run, testHerdrPath, Notification{Title: "x"})
 	var he *Error
 	if errors.As(err, &he) {
 		t.Fatalf("a truncated stream was parsed as a refusal: %v", err)
 	}
 	if !errors.Is(err, exec.ErrNonzeroExit) {
 		t.Errorf("err = %v, want the seam's nonzero-exit error", err)
+	}
+}
+
+// TestNotificationShowReadsShownAndReason pins herdr's answer: shown, a
+// reason when it declined, and an exit-0 reply with no result read as shown.
+func TestNotificationShowReadsShownAndReason(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		want  NotificationResult
+	}{
+		{"shown", `{"id":"cli:notification:show","result":{"type":"notification_show","shown":true,"reason":"shown"}}`, NotificationResult{Shown: true}},
+		{"declined", `{"id":"x","result":{"type":"notification_show","shown":false,"reason":"no_foreground_client"}}`, NotificationResult{Reason: "no_foreground_client"}},
+		{"declined without a reason", `{"id":"x","result":{"shown":false}}`, NotificationResult{Reason: "no reason given"}},
+		{"declined with a hostile reason", `{"id":"x","result":{"shown":false,"reason":"busy\u001b[2J"}}`, NotificationResult{Reason: `busy\x1b[2J`}},
+		{"no result", ``, NotificationResult{Shown: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+				return exec.SensitiveResult{Stdout: exec.BoundedOutputForTest([]byte(tc.reply), exec.OutputComplete)}, nil
+			}}
+			got, err := NotificationShow(t.Context(), run, testHerdrPath, Notification{Title: "x"})
+			if err != nil {
+				t.Fatalf("NotificationShow: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("result = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNotificationShowCarriesHerdrsStderr: a failure that is not herdr's
+// JSON refusal (a usage error exits 2 with plain text) carries herdr's own
+// words, inert and redacted, so the operator need not run herdr by hand
+// (forgectl#1181).
+func TestNotificationShowCarriesHerdrsStderr(t *testing.T) {
+	stderr := "unknown option: queued item\x1b]0;x\x07\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n" //nolint:gosec // G101: a fake test credential shape
+	run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{ExitCode: 2, Stderr: exec.BoundedOutputForTest([]byte(stderr), exec.OutputComplete)},
+			exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
+	}}
+	_, err := NotificationShow(t.Context(), run, testHerdrPath, Notification{Title: "x"})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "herdr said: unknown option: queued item") {
+		t.Errorf("err = %q, want herdr's own stderr", msg)
+	}
+	if strings.ContainsAny(msg, "\x1b\x07\n") || strings.Contains(msg, "wJalrXUtnFEMI") {
+		t.Errorf("err = %q, want it inert and redacted", msg)
+	}
+	if !errors.Is(err, exec.ErrNonzeroExit) {
+		t.Errorf("err = %v, want the seam's nonzero-exit error kept", err)
 	}
 }

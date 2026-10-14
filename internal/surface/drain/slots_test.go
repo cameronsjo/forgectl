@@ -3,6 +3,7 @@ package drain
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
@@ -58,5 +59,30 @@ func TestUnclaim(t *testing.T) {
 	c.Apply(&r)
 	if r.State != worker.QueueQueued || r.LaunchID != "" || r.Attempts != 2 || r.LastError != "waiting for a claude session slot: full" {
 		t.Fatalf("unclaimed row %+v; want queued, no launch id, attempts unchanged", r)
+	}
+}
+
+func TestNextHoldAndSlotsStuck(t *testing.T) {
+	t0 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	broken := DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "broken"}, "")
+	h := NextHold(nil, broken, t0)
+	if h == nil || h.Cond != "exit 2" || !h.Since.Equal(t0) || !h.Fault() {
+		t.Fatalf("first hold %+v", h)
+	}
+	if same := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "other"}, "exit 2"), t0.Add(time.Minute)); same != h {
+		t.Fatalf("the same condition started a new hold: %+v", same)
+	}
+	full := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 1, Reason: "full"}, "exit 2"), t0.Add(2*time.Minute))
+	if full == h || full.Cond != "held" || full.Fault() || !full.Since.Equal(t0.Add(2*time.Minute)) {
+		t.Fatalf("a new condition kept the old hold: %+v", full)
+	}
+	if NextHold(full, DecideSlots(SlotsCheck{Need: 1, Exit: 0}, "held"), t0) != nil {
+		t.Fatal("a free check left a hold")
+	}
+	if SlotsStuck(h, t0.Add(SlotsStuckAfter-time.Second)) || !SlotsStuck(h, t0.Add(SlotsStuckAfter)) {
+		t.Fatal("a fault hold is stuck exactly at SlotsStuckAfter")
+	}
+	if SlotsStuck(full, t0.Add(time.Hour)) || SlotsStuck(nil, t0) {
+		t.Fatal("a full cap or no hold is never stuck")
 	}
 }

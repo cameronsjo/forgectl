@@ -50,12 +50,17 @@ type drainQueue interface {
 
 // drainNotifier signals the operator about a row's needs-you state. led is
 // the row's own ledger row (matched by launch id), whose ref names the
-// worker's pane. Each returns what failed; the drain records it as one error
-// event and carries on.
+// worker's pane. NeedsYou and Alert return one attempt per channel, each
+// recorded as a notify event, with the failures as one error event; Cleared
+// returns what failed, recorded as one error event. The drain carries on
+// either way.
 type drainNotifier interface {
 	// NeedsYou is called once each time a row enters needs-you, when
 	// [surface.drain] notify is on.
-	NeedsYou(ctx context.Context, row worker.QueueRow, led worker.Row, reason string) error
+	NeedsYou(ctx context.Context, row worker.QueueRow, led worker.Row, reason string) []notifyAttempt
+	// Alert is a notification tied to no worker, such as a claude-slots
+	// check that has failed for drain.SlotsStuckAfter.
+	Alert(ctx context.Context, title, body string) []notifyAttempt
 	// Cleared is called once each time a row leaves needs-you. It is not
 	// gated on notify: turning notify off must not strand a pane marked
 	// from before.
@@ -126,6 +131,10 @@ type drainer struct {
 	// slotsCond is the condition the last claude-slots check left
 	// (drain.SlotsDecision.Cond), so each is recorded once on entry.
 	slotsCond string
+	// hold is the claude-slots hold in force, for drain.json; holdAlerted
+	// says its slots-stuck alert went out.
+	hold        *drain.SlotsHold
+	holdAlerted bool
 	// closerRead is when each reported row's PR was last read, so a row is
 	// read at most every drain.CloserReadEvery. A restart forgets it.
 	closerRead map[string]time.Time
@@ -181,12 +190,37 @@ func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow, need int) (b
 	}
 	dec := drain.DecideSlots(d.io.slots(ctx, need), d.slotsCond)
 	d.slotsCond = dec.Cond
+	d.setHold(drain.NextHold(d.hold, dec, d.io.now()))
 	if dec.Emit {
 		e := dec.Event
 		e.Name, e.Repo = q.Name, q.Repo
 		d.event(e)
 	}
 	return dec.Hold, dec.Reason
+}
+
+// setHold records the claude-slots hold in force; a new one may alert again.
+func (d *drainer) setHold(h *drain.SlotsHold) {
+	if h != d.hold {
+		d.holdAlerted = false
+	}
+	d.hold = h
+}
+
+// slotsStuck records one slots-stuck event, and with notify on sends one
+// notification, when a hold the check cannot explain has lasted
+// drain.SlotsStuckAfter. Exit 1 (the cap is full) never alerts.
+func (d *drainer) slotsStuck(ctx context.Context) {
+	now := d.io.now()
+	if d.holdAlerted || !drain.SlotsStuck(d.hold, now) {
+		return
+	}
+	d.holdAlerted = true
+	text := fmt.Sprintf("claude launches held for %s: %s", now.Sub(d.hold.Since).Round(time.Minute), d.hold.Reason)
+	d.event(drain.Event{Kind: drain.EventSlotsStuck, State: d.hold.Cond, Error: text})
+	if d.settings.Notify {
+		d.recordNotify("", "", d.hold.Cond, "slots-stuck notification", d.io.notify.Alert(ctx, "forgectl: the drain needs you", text))
+	}
 }
 
 // unclaim puts a held row back to queued, quietly: the slots-held event
@@ -359,6 +393,7 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	if d.stopping() {
 		return rows
 	}
+	d.slotsStuck(ctx)
 	d.dailyPrune(ctx)
 	if fresh, ok := d.readRows(); ok {
 		rows = fresh
@@ -436,10 +471,8 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 		// Each call below happens once per state entry or exit, so a failure
 		// is one event, never one per tick.
 		if c.Notify && d.settings.Notify {
-			if err := d.io.notify.NeedsYou(ctx, written, own, written.LastError); err != nil {
-				d.event(drain.Event{Kind: drain.EventError, Name: written.Name, Repo: written.Repo, State: string(written.State),
-					Error: "needs-you notification: " + err.Error()})
-			}
+			d.recordNotify(written.Name, written.Repo, string(written.State), "needs-you notification",
+				d.io.notify.NeedsYou(ctx, written, own, written.LastError))
 		}
 		if q.State == worker.QueueNeedsYou && written.State != worker.QueueNeedsYou {
 			if err := d.io.notify.Cleared(ctx, written, own); err != nil {
@@ -460,6 +493,24 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 	}
 }
 
+// recordNotify records each attempt as a notify event (state: the channel;
+// error: why it failed, empty when it went out), then the failures together
+// as one error event naming what, in state.
+func (d *drainer) recordNotify(name, repo, state, what string, attempts []notifyAttempt) {
+	var failed []string
+	for _, a := range attempts {
+		e := drain.Event{Kind: drain.EventNotify, Name: name, Repo: repo, State: a.channel}
+		if a.err != nil {
+			e.Error = a.err.Error()
+			failed = append(failed, a.channel+": "+a.err.Error())
+		}
+		d.event(e)
+	}
+	if len(failed) > 0 {
+		d.event(drain.Event{Kind: drain.EventError, Name: name, Repo: repo, State: state, Error: what + ": " + strings.Join(failed, "; ")})
+	}
+}
+
 // claimAndLaunch claims and launches rows one at a time, oldest first, while
 // the slots allow and nothing pauses claiming.
 func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
@@ -468,6 +519,7 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 		// Nothing to launch ends a hold: the next one is a new entry and
 		// records its own slots-held event.
 		d.slotsCond = ""
+		d.setHold(nil)
 		if !d.pauseHeld(drain.PauseHerdr) {
 			return
 		}
@@ -860,6 +912,11 @@ func (d *drainer) status(base drain.Status, rows []worker.QueueRow) drain.Status
 	s.IntervalSeconds = int64(d.settings.Interval / time.Second)
 	s.Counts, s.Attention = drain.Summarize(rows)
 	s.Error = termsafe.SafeLineMax(d.lastErr, maxDrainErrorLen)
+	if d.hold != nil {
+		h := *d.hold
+		h.Reason = termsafe.SafeLineMax(h.Reason, maxDrainErrorLen)
+		s.SlotsHold = &h
+	}
 	return s
 }
 

@@ -6,7 +6,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -31,8 +30,9 @@ const deskSignalTimeout = signalTimeout
 // deskSignalBodyMax caps the notification body, matching herdr.NotificationMaxRunes.
 const deskSignalBodyMax = 200
 
-// deskSignalErrMax caps the cause shown in a failed-signal warning.
-const deskSignalErrMax = 200
+// deskSignalErrMax caps the cause shown in a failed-signal warning. It fits
+// the seam's exit summary and herdr's own one-line reason after it.
+const deskSignalErrMax = 400
 
 // deskMacNotify posts the macOS notification; a seam so tests record the call
 // instead of running osascript.
@@ -129,8 +129,11 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 	}
 	if path, ok := s.herdrPath(); ok && herdr.CheckSession(deskLookupEnv) == nil {
 		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
-		err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest})
+		res, err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest})
 		cancel()
+		if err == nil {
+			err = notShown(res)
+		}
 		if err != nil {
 			herdrFailed = true
 			failed = append(failed, signalFailure("herdr signal", "notify_herdr", err))
@@ -154,20 +157,24 @@ func signalFailure(what, setting string, err error) string {
 	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, failureHint(setting, err), setting)
 }
 
-// failureHint says what to try. The sensitive runner withholds the tool's own
-// stderr, and a runner error is only an exit status, so this names the likely
-// fix instead of echoing text the operator cannot act on.
+// failureHint says what to try. For macOS the runner's error is only an exit
+// status, so it names the likely fix. For herdr it is the error itself, which
+// carries herdr's refusal or its own stderr (forgectl#1181).
 func failureHint(setting string, err error) string {
-	switch setting {
-	case "notify_macos":
+	if setting == "notify_macos" {
 		return "osascript did not post it; check System Settings > Notifications"
-	default:
-		var he *herdr.Error
-		if errors.As(err, &he) {
-			return termsafe.SafeLineMax(he.Error(), deskSignalErrMax)
-		}
-		return "herdr exited with an error; run herdr by hand to see why"
 	}
+	return termsafe.SafeLineMax(err.Error(), deskSignalErrMax)
+}
+
+// notShown is the failure for a herdr notification herdr declined to show,
+// or nil. rate_limited is not one: herdr showed another notification moments
+// ago, so the operator was alerted.
+func notShown(r herdr.NotificationResult) error {
+	if r.Shown || r.Reason == "rate_limited" {
+		return nil
+	}
+	return fmt.Errorf("herdr did not show the notification: %s", r.Reason)
 }
 
 // cleanupPath is where herdr is for clearing a signal already raised. It does

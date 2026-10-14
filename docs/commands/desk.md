@@ -146,7 +146,7 @@ When an item is queued, `add` tells the operator it is waiting, so a waiting ite
 - **herdr** (inside a herdr pane): a herdr notification, and the queuing session's pane in herdr's needs-you (`blocked`) state, reported under the source `forgectl-desk`. The state clears when the item is run, skipped, or skipped as changed, and comes back when `u` re-arms a skipped item. While other items queued from that pane still wait, it stays with the count refreshed. Clearing works even after `notify_herdr` is turned off. Outside herdr nothing is sent to it.
 - **macOS**: a desktop notification (`osascript`); a no-op elsewhere.
 
-A signal that fails is a `warning: operator signal failed:` line (in `warnings` with `--json`) and never fails the add; it names the setting that turns it off. Turn each off in `config.toml`:
+A signal that fails is a `warning: operator signal failed:` line (in `warnings` with `--json`) and never fails the add; it names the setting that turns it off. A failed herdr call carries herdr's own refusal or stderr, and a herdr notification herdr declined to show (`disabled`, `no_foreground_client`, `busy`) is a failed signal naming that reason; `rate_limited` is not, since herdr showed another one moments ago. The macOS notification fails only when `osascript` does: it exits 0 whether or not macOS displays the notification. Turn each off in `config.toml`:
 
 ```toml
 [desk]

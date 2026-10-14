@@ -2,6 +2,7 @@ package drain
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
@@ -108,4 +109,45 @@ func Unclaim(q worker.QueueRow, why string) Change {
 	c := change(q).to(worker.QueueQueued, why)
 	c.ClearLaunch = true
 	return c
+}
+
+// SlotsStuckAfter is how long a claude-slots check that cannot answer (any
+// result but exit 0 or 1) may hold claude launches before the drain records
+// one slots-stuck event and, with notify on, sends a notification. Exit 1,
+// the cap being full, is the normal hold and stays quiet.
+const SlotsStuckAfter = 15 * time.Minute
+
+// SlotsHold is a claude-slots hold on claude launches, as drain.json and
+// drain status show it, so a queue the gate holds is not silent.
+type SlotsHold struct {
+	// Cond is the condition (SlotsDecision.Cond): "held" when the cap is
+	// full, otherwise the failure ("timeout", "exit 2", "run failed").
+	Cond string `json:"cond"`
+	// Reason is the hold's reason, as the held row's last_error has it.
+	Reason string `json:"reason"`
+	// Since is when the drain entered this condition.
+	Since time.Time `json:"since"`
+}
+
+// Fault reports a hold that is not the cap being full: the check itself
+// cannot answer.
+func (h SlotsHold) Fault() bool { return h.Cond != "held" }
+
+// NextHold is the hold after a check that decided d, from the hold before
+// it (nil when launches were free). A new condition starts a new hold at
+// now; the same condition keeps its start and first reason.
+func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
+	if d.Cond == "" {
+		return nil
+	}
+	if prev != nil && prev.Cond == d.Cond {
+		return prev
+	}
+	return &SlotsHold{Cond: d.Cond, Reason: d.Reason, Since: now.UTC()}
+}
+
+// SlotsStuck reports whether h is a fault hold that has lasted
+// SlotsStuckAfter by now.
+func SlotsStuck(h *SlotsHold, now time.Time) bool {
+	return h != nil && h.Fault() && now.Sub(h.Since) >= SlotsStuckAfter
 }

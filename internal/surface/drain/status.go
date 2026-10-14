@@ -87,6 +87,9 @@ type Status struct {
 	Seq             int64          `json:"seq"`
 	Counts          map[string]int `json:"counts"`
 	Attention       []Attention    `json:"attention"`
+	// SlotsHold is the claude-slots hold on claude launches, or nil when
+	// there is none.
+	SlotsHold *SlotsHold `json:"slots_hold,omitempty"`
 	// Error is the last I/O error a tick met (a queue, ledger or events
 	// write that failed), or empty.
 	Error string `json:"error,omitempty"`
@@ -146,6 +149,14 @@ const (
 	// EventSlotsHeld: claude-slots refused a launch (exit 1); recorded once
 	// per entry into that condition.
 	EventSlotsHeld = "slots-held"
+	// EventSlotsStuck: a claude-slots check that cannot answer (not exit 1)
+	// has held claude launches for SlotsStuckAfter; recorded once per hold.
+	EventSlotsStuck = "slots-stuck"
+	// EventNotify: one notification attempt on one channel, named in state
+	// (macos, herdr, herdr-pane); error says why it failed, and is empty when
+	// it went out. A macOS attempt that went out says only that osascript
+	// exited 0, which it does whether or not macOS displayed it.
+	EventNotify = "notify"
 	// EventNote: a notice that is neither a state change nor an error, such
 	// as running without claude-slots.
 	EventNote = "note"

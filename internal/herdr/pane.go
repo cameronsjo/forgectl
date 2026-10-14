@@ -398,16 +398,7 @@ func runVerb(ctx context.Context, run exec.SensitiveRunner, herdrPath string, ki
 		StderrCap: paneStreamCap,
 	})
 	if err != nil {
-		var se *exec.SensitiveError
-		if errors.As(err, &se) && se.Outcome == exec.OutcomeExit && res.ExitCode == exitFailure {
-			if data, complete := res.Stderr.CopyBytesForParse(); complete {
-				if e := refusal(data); e != nil {
-					e.cause = err
-					return nil, e
-				}
-			}
-		}
-		return nil, fmt.Errorf("herdr %s: %w", what, err)
+		return nil, runFailure(what, res, err)
 	}
 	data, complete := res.Stdout.CopyBytesForParse()
 	if !complete {
