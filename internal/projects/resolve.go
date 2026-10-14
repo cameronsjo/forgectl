@@ -220,13 +220,25 @@ func (c *Client) resolveByName(name string) (string, error) {
 func (c *Client) searchRoot(name string, budget *int) ([]string, error) {
 	var matches []string
 
+	// A leading-dot repo name is filed under its "dot-" leaf (repoDirLeaf,
+	// #1057), so `.github` must find `dot-github` too. Both spellings match,
+	// and a directory literally named `.github` alongside the mapped one is
+	// reported as ambiguous like any other duplicate.
+	leaf := name
+	if strings.HasPrefix(name, ".") {
+		if mapped, ok := repoDirLeaf(name); ok {
+			leaf = mapped
+		}
+	}
+	isName := func(entry string) bool { return entry == name || entry == leaf }
+
 	hosts, err := readDirNames(c.Dir, budget)
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range hosts {
 		// The flat layout: <root>/<name>.
-		if entry == name && isRealDir(filepath.Join(c.Dir, entry)) {
+		if isName(entry) && isRealDir(filepath.Join(c.Dir, entry)) {
 			matches = append(matches, filepath.Join(c.Dir, entry))
 			continue
 		}
@@ -264,7 +276,7 @@ func (c *Client) searchRoot(name string, budget *int) ([]string, error) {
 			// with no .git of its own: a session started inside a subdirectory
 			// of an unrelated repo. So this arm always continues, match or not.
 			if isWingMember(ownerDir) {
-				if owner == name {
+				if isName(owner) {
 					matches = append(matches, ownerDir)
 					if len(matches) > maxCandidates {
 						return matches, nil
@@ -277,7 +289,7 @@ func (c *Client) searchRoot(name string, budget *int) ([]string, error) {
 				return nil, err
 			}
 			for _, repo := range repos {
-				if repo != name {
+				if !isName(repo) {
 					continue
 				}
 				candidate := filepath.Join(ownerDir, repo)

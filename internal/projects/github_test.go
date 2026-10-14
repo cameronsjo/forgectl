@@ -374,3 +374,19 @@ func TestOwnersNote(t *testing.T) {
 		t.Errorf("config refusal note = %q", got)
 	}
 }
+
+// TestListOrg_KeepsDotLeadingName: an org's ".github" repo is listed (#1057);
+// it is filed under a "dot-github" leaf, so it is no longer a row we cannot
+// act on.
+func TestListOrg_KeepsDotLeadingName(t *testing.T) {
+	out := `[{"isPrivate":false,"name":".github","sshUrl":"git@github.com:o/.github.git"},{"isPrivate":false,"name":"..","sshUrl":"git@github.com:o/x.git"}]`
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+	repos, err := c.ListOrg(context.Background(), "o")
+	if err != nil {
+		t.Fatalf("ListOrg: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != ".github" {
+		t.Errorf("ListOrg = %+v; want only the .github row", repos)
+	}
+}

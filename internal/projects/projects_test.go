@@ -8,6 +8,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1396,9 +1397,9 @@ func TestPlacement_RejectsDotLeadingRepoNames(t *testing.T) {
 		r    Repo
 		wing string
 	}{
-		{".git as the name, host tree", Repo{Host: "github.com", Owner: "o", Name: ".git"}, ""},
-		{".git as the name, wing", Repo{Host: "github.com", Owner: "o", Name: ".git"}, "w"},
-		{".bare as the name", Repo{Host: "github.com", Owner: "o", Name: ".bare"}, ""},
+		{"dots-only name", Repo{Host: "github.com", Owner: "o", Name: "..."}, ""},
+		{"leading dash after the dot", Repo{Host: "github.com", Owner: "o", Name: "-x"}, ""},
+		{"dot name whose mapped leaf is over-long", Repo{Host: "github.com", Owner: "o", Name: "." + strings.Repeat("a", 98)}, ""},
 		{".git as the owner", Repo{Host: "github.com", Owner: ".git", Name: "n"}, ""},
 		{"dot-leading owner on the WING path", Repo{Host: "github.com", Owner: ".hidden", Name: "n"}, "w"},
 		{"colon in the name", Repo{Host: "github.com", Owner: "o", Name: "a:b"}, ""},
@@ -1410,6 +1411,94 @@ func TestPlacement_RejectsDotLeadingRepoNames(t *testing.T) {
 			// these, which is why the stronger one is load-bearing.
 			if _, err := Placement("/base", tc.r, tc.wing); err == nil {
 				t.Error("accepted a repo name/owner that must not become a directory")
+			}
+		})
+	}
+}
+
+// TestPlacement_MapsDotLeadingNames: a leading dot is a real repo name (an
+// org's ".github", #1057), so it is filed under a "dot-" leaf rather than
+// refused. The layout's own dot-names (.git, .bare) map the same way, so the
+// leaf can never be one of them.
+func TestPlacement_MapsDotLeadingNames(t *testing.T) {
+	for _, tc := range []struct {
+		name, wing, want string
+	}{
+		{".github", "", filepath.Join("/base", "github.com", "o", "dot-github")},
+		{".GitHub", "", filepath.Join("/base", "github.com", "o", "dot-github")},
+		{".github", "w", filepath.Join("/base", "w", "dot-github")},
+		{".git", "", filepath.Join("/base", "github.com", "o", "dot-git")},
+		{".git", "w", filepath.Join("/base", "w", "dot-git")},
+		{".bare", "", filepath.Join("/base", "github.com", "o", "dot-bare")},
+	} {
+		got, err := Placement("/base", Repo{Host: "github.com", Owner: "o", Name: tc.name}, tc.wing)
+		if err != nil {
+			t.Errorf("Placement(%q, wing %q) = error %v; want %s", tc.name, tc.wing, err, tc.want)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Placement(%q, wing %q) = %s; want %s", tc.name, tc.wing, got, tc.want)
+		}
+	}
+}
+
+// TestClone_DotLeadingNameClonesByItsRealName: the leaf is mapped, but gh
+// gets the repo's real name.
+func TestClone_DotLeadingNameClonesByItsRealName(t *testing.T) {
+	tmp := t.TempDir()
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+	dest, err := c.Clone(context.Background(), Repo{Host: "github.com", Owner: "o", Name: ".github"})
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if want := filepath.Join(tmp, "github.com", "o", "dot-github"); dest != want {
+		t.Errorf("dest = %s; want %s", dest, want)
+	}
+	var cloned bool
+	for _, call := range fake.Calls {
+		if call.Name == "gh" && slices.Contains(call.Args, "o/.github") {
+			cloned = true
+		}
+	}
+	if !cloned {
+		t.Errorf("no gh clone of o/.github; calls: %+v", fake.Calls)
+	}
+}
+
+// TestClone_DotLeafCollisionIsRefused: an owner can have both ".github" and a
+// real "dot-github", which file under one directory. The clone is refused and
+// the error names both repos rather than reusing the other one's checkout.
+func TestClone_DotLeafCollisionIsRefused(t *testing.T) {
+	for _, tc := range []struct{ cloning, existing string }{
+		{".github", "dot-github"},
+		{"dot-github", ".github"},
+	} {
+		t.Run(tc.cloning, func(t *testing.T) {
+			tmp := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tmp, "github.com", "o", "dot-github", ".git"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if name == "git" && slices.Contains(args, "get-url") {
+					return "git@github.com:o/" + tc.existing + ".git\n", nil
+				}
+				return "", nil
+			}}
+			c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+			_, err := c.Clone(context.Background(), Repo{Host: "github.com", Owner: "o", Name: tc.cloning})
+			if err == nil {
+				t.Fatal("Clone reused another repo's checkout; want a refusal")
+			}
+			for _, want := range []string{"o/.github", "o/dot-github"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %s", err, want)
+				}
+			}
+			for _, call := range fake.Calls {
+				if call.Name == "gh" {
+					t.Errorf("gh ran despite the collision: %+v", call)
+				}
 			}
 		})
 	}

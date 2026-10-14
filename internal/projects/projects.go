@@ -818,6 +818,15 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 		}
 		// dest is forgectl-composed from already-guarded segments, so it is
 		// safe to name; r.Host/Owner/Name are server-supplied and stay out.
+		if twin := dotLeafTwin(r.Name); twin != "" {
+			// A mapped leaf can collide with a real repo of that name: an
+			// owner may have both ".github" and "dot-github" (#1057). Name both
+			// so the operator knows which two repos share the directory. Both
+			// passed Placement's charset guard above, so they are safe to print.
+			return "", fmt.Errorf("%s already exists but its origin is a different repo — "+
+				"%s/%s and %s/%s file under the same directory; clone it elsewhere by hand",
+				dest, r.Owner, r.Name, r.Owner, twin)
+		}
 		return "", fmt.Errorf("%s already exists but its origin is a different repo — "+
 			"clone it elsewhere by hand", dest)
 	}
@@ -897,8 +906,12 @@ func Placement(root string, r Repo, wing string) (string, error) {
 	if root == "" {
 		return "", fmt.Errorf("refusing to place a repo: no projects root")
 	}
-	name := strings.ToLower(r.Name)
-	if !validRepoSegment(name) {
+	// The NAME is the repo's identity and the leaf is where it is filed, and
+	// only the leaf has to dodge the layout's own dot-names: a leading '.'
+	// maps to "dot-" (#1057), so the org's ".github" repo lands at
+	// "dot-github" while gh and git still get the real name.
+	name, ok := repoDirLeaf(strings.ToLower(r.Name))
+	if !ok {
 		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")
 	}
 	owner := strings.ToLower(r.Owner)
@@ -961,6 +974,59 @@ func validRepoSegment(s string) bool {
 		!strings.HasPrefix(s, ".") &&
 		len(s) <= maxRepoSegmentBytes &&
 		pr.ValidOwnerRepoPart(s)
+}
+
+// dotLeafPrefix replaces a repo name's leading '.' in its directory leaf.
+const dotLeafPrefix = "dot-"
+
+// validRepoName vets a repo NAME as an identity: the value that goes into a
+// `gh repo clone <owner>/<name>` argv and the inventory key. It is
+// validRepoSegment without the leading-dot rule, because a leading dot is a
+// real GitHub name (an org's ".github" repo, #1057) and is a hazard only as a
+// directory. A name of dots alone (".", "..", "...") is still refused: it has
+// no leaf to map.
+func validRepoName(s string) bool {
+	return validPathSegment(s) &&
+		strings.Trim(s, ".") != "" &&
+		len(s) <= maxRepoSegmentBytes &&
+		pr.ValidOwnerRepoPart(s)
+}
+
+// repoDirLeaf maps a repo NAME to the directory leaf it is filed under, and
+// reports false for a name that cannot be filed. It is THE mapping: Placement
+// uses it, so the clone, the worktree layout, and the duplicate probe all
+// agree, and searchRoot uses it so `surface launch .github` finds the checkout.
+//
+// A leading '.' becomes "dot-": ".github" → "dot-github", ".git" → "dot-git",
+// ".bare" → "dot-bare". The leaf then takes validRepoSegment's full check, so
+// the mapping can never produce a leaf the layout rejects. The inventory needs
+// no mapping: it attributes a checkout by its origin remote, which carries
+// the real name.
+func repoDirLeaf(name string) (string, bool) {
+	if !validRepoName(name) {
+		return "", false
+	}
+	leaf := name
+	if rest, ok := strings.CutPrefix(name, "."); ok {
+		leaf = dotLeafPrefix + rest
+	}
+	if !validRepoSegment(leaf) {
+		return "", false
+	}
+	return leaf, true
+}
+
+// dotLeafTwin returns the other repo name that repoDirLeaf files under the
+// same leaf as name — "dot-github" for ".github" and the reverse — or "" when
+// no other name can share it.
+func dotLeafTwin(name string) string {
+	if rest, ok := strings.CutPrefix(name, "."); ok {
+		return dotLeafPrefix + rest
+	}
+	if len(name) > len(dotLeafPrefix) && strings.EqualFold(name[:len(dotLeafPrefix)], dotLeafPrefix) {
+		return "." + name[len(dotLeafPrefix):]
+	}
+	return ""
 }
 
 // otherPlacements returns every path r could legitimately occupy OTHER than
