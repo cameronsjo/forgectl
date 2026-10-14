@@ -1277,7 +1277,7 @@ func drainCloseRow(run exec.Runner, session string) func(context.Context, worker
 		}
 		ctx, cancel := context.WithTimeout(ctx, closeTimeout)
 		defer cancel()
-		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr, ledger, q.Repo, led))
+		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr.ForSessionLedger(), ledger, q.Repo, led))
 	}
 }
 

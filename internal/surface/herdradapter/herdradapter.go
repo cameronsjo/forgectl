@@ -111,6 +111,12 @@ type Adapter struct {
 	warnings      io.Writer
 	// idleInterval is the wait between root-pane inspections.
 	idleInterval time.Duration
+
+	// sessionBound is set by ForSessionLedger: the caller vouches that every
+	// reference it passes to Close and Probe was taken in this adapter's
+	// session, so a changed incarnation can only be this session's server
+	// turning over (forgectl#1077).
+	sessionBound bool
 }
 
 // Option configures an Adapter at construction.
@@ -241,6 +247,26 @@ func checkSocketPath(socket string) error {
 		return errors.New("herdr reported a socket path longer than the platform allows")
 	}
 	return nil
+}
+
+// ForSessionLedger returns a copy of the adapter for a caller whose references
+// all come from this session's worker ledger, which is keyed on Session().
+//
+// The copy changes what Close, Probe and Prober conclude when the server's
+// incarnation no longer matches a reference. A plain adapter cannot tell a
+// restart from a reference taken in another named session (a named-session
+// reference does not record its name), so it refuses with an identity
+// mismatch. A ledger-bound one knows the session is the same, so a changed
+// incarnation means this session's server turned over, and it settles the
+// question by forgectl's ownership marker instead: see locateAfterTurnover.
+//
+// Reading and typing into a worker's pane (WorkerScreen, TypeText,
+// PressEnter) still refuse a changed incarnation: a workspace herdr restored
+// after a restart runs a fresh shell, not the worker.
+func (a *Adapter) ForSessionLedger() *Adapter {
+	c := *a
+	c.sessionBound = true
+	return &c
 }
 
 // Kind reports the backend this adapter drives.

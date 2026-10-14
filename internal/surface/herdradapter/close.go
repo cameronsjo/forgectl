@@ -3,6 +3,7 @@ package herdradapter
 import (
 	"context"
 	"errors"
+	"os"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -11,8 +12,19 @@ import (
 // Close removes exactly the workspace a reference names, after proving the
 // session is still the incarnation the reference was bound to AND that the
 // workspace is one we created.
+//
+// herdr closes by workspace id alone: `workspace close` takes no label and
+// no precondition. And herdr does reuse ids across a restart. Its id counter
+// is per process and starts again at 1; a session restore keeps the saved
+// ids and moves the counter past them, so only a workspace that was not
+// restored leaves its id free to name a new one (forgectl#1045). So the
+// incarnation is proved again on both sides of the close: immediately before
+// it, from a fresh stat of the socket, so a restart after the lookup refuses
+// instead of closing whatever now holds the id; and after it, so a restart
+// during the close is not reported as a clean close. What remains is the time
+// one herdr command takes to start, which nothing on this side can remove.
 func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResult {
-	workspace, server, state, cause := a.locate(ctx, ref)
+	workspace, server, state, cause := a.locateIn(ctx, ref, liveView{a}, a.sessionBound)
 	switch state {
 	case locateMismatch:
 		return backend.NewCloseIdentityMismatch(cause)
@@ -32,6 +44,18 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		// which put the guard on the wrong side of the value it named.
 		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureInternal,
 			errors.New("the workspace lookup produced no usable state")))
+	}
+
+	switch a.turnover(server) {
+	case turnoverGone:
+		// The endpoint vanished after the lookup: the server quit, and the
+		// workspace went with it. The same conclusion the failed-close path
+		// below draws from the same stat.
+		return backend.NewCloseAlreadyGone()
+	case turnoverChanged:
+		return backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the herdr server restarted between the lookup and the close; nothing was closed")))
+	case turnoverNone:
 	}
 
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindHerdrCleanup,
@@ -68,7 +92,48 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		}
 		return backend.NewCloseFailed(a.classifyRunError(err, res))
 	}
+	if a.turnover(server) == turnoverChanged {
+		// herdr answered, but the server behind the socket changed while it
+		// did, so which server took the close, and so which workspace it
+		// closed, is not known. Not reported closed: the caller keeps its
+		// obligation, and the next lookup settles it on the new server.
+		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the herdr server restarted while the close ran; which workspace it reached is not known")))
+	}
 	return backend.NewCloseClosed()
+}
+
+// turnoverState is what a fresh stat of the socket says about the server
+// locate proved.
+type turnoverState uint8
+
+const (
+	turnoverNone turnoverState = iota
+	turnoverChanged
+	turnoverGone
+)
+
+// turnover stats the socket again and compares its fingerprint with the
+// incarnation locate proved. No herdr command runs, so it is cheap enough to
+// bracket a close. A stat that fails for any reason but absence, or a socket
+// that no longer fingerprints, counts as changed: it cannot prove the server
+// is the one locate saw.
+func (a *Adapter) turnover(server serverInfo) turnoverState {
+	if server.socket == "" {
+		return turnoverChanged
+	}
+	info, err := a.lstat(server.socket)
+	if errors.Is(err, os.ErrNotExist) {
+		return turnoverGone
+	}
+	if err != nil {
+		return turnoverChanged
+	}
+	now, err := a.fingerprint(server.socket, info, server.version)
+	if err != nil || !server.incarnation.Matches(now) {
+		return turnoverChanged
+	}
+	return turnoverNone
 }
 
 // Probe answers whether the referenced workspace still exists, under exactly the
@@ -92,7 +157,7 @@ func (a *Adapter) Prober() func(context.Context, backend.Ref) backend.ProbeResul
 }
 
 func (a *Adapter) probeIn(ctx context.Context, ref backend.Ref, view workspaceView) backend.ProbeResult {
-	_, _, state, cause := a.locateIn(ctx, ref, view)
+	_, _, state, cause := a.locateIn(ctx, ref, view, a.sessionBound)
 	switch state {
 	case locateMismatch:
 		return backend.NewProbeIdentityMismatch(cause)
@@ -207,12 +272,17 @@ func (v *onceView) snapshot(ctx context.Context) (map[string]workspaceRow, *back
 // endpoint has vanished is a satisfied rollback, and answering that needs the
 // socket locate already resolved. cmux's adapter does the same with a socket it
 // knows at construction; herdr's comes from the roster, so it has to travel.
+//
+// locate is the strict form, for the pane readers: a changed incarnation is
+// always a mismatch.
 func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, serverInfo, locateState, backend.StartCause) {
-	return a.locateIn(ctx, ref, liveView{a})
+	return a.locateIn(ctx, ref, liveView{a}, false)
 }
 
-// locateIn is locate reading the server and listing through view.
-func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceView) (string, serverInfo, locateState, backend.StartCause) {
+// locateIn is locate reading the server and listing through view. With
+// acrossRestart, a changed incarnation is settled by locateAfterTurnover
+// instead of refused; only a ledger-bound adapter's Close and Probe pass it.
+func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceView, acrossRestart bool) (string, serverInfo, locateState, backend.StartCause) {
 	if ref.Kind() != backend.KindHerdr {
 		return "", serverInfo{}, locateUnreadable, backend.NewStartCause(backend.FailureInternal,
 			backend.ErrRefKindMismatch)
@@ -247,6 +317,9 @@ func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceV
 	// hold the workspace this reference names, and an id it does not recognise
 	// would otherwise read as an ordinary absence.
 	if !ref.Server().Matches(server.incarnation) {
+		if acrossRestart {
+			return a.locateAfterTurnover(ctx, ref, want, server, view)
+		}
 		return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the herdr server is not the one this reference was taken on: it restarted, or the reference is from another session"))
 	}
@@ -277,4 +350,47 @@ func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceV
 			errors.New("the workspace at this identifier does not carry our ownership marker"))
 	}
 	return row.id, server, locateFound, backend.StartCause{}
+}
+
+// locateAfterTurnover answers locate for a reference whose server incarnation
+// changed, when the caller vouches that the reference was taken in this
+// session (ForSessionLedger). The socket the session owns changed, so the
+// server that minted the reference has stopped or restarted, and its panes,
+// the worker's harness among them, went with it (forgectl#1077).
+//
+// What can remain is the workspace OBJECT: herdr's session restore brings a
+// workspace back under its saved id and label, with fresh shells. So the
+// answer comes from the ownership marker, which carries a random tag and
+// cannot be on anybody else's workspace, read from a complete listing:
+//
+//   - no workspace carries the marker: gone. The new server does not hold it.
+//   - exactly one does, at the reference's id: found, and Close closes it.
+//     This is also the answer when the socket's change time moved with no
+//     restart at all.
+//   - anything else (the marker at another id, or on two): a mismatch,
+//     because neither absence nor this id is proved.
+//
+// One gap is shared with serverGone: a server still running after its socket
+// path was taken over by another still holds the workspace, and nothing on
+// this side can see it.
+func (a *Adapter) locateAfterTurnover(ctx context.Context, ref backend.Ref, want string, server serverInfo, view workspaceView) (string, serverInfo, locateState, backend.StartCause) {
+	rows, scause := view.snapshot(ctx)
+	if scause != nil {
+		return "", server, locateUnreadable, *scause
+	}
+	marker := ref.OwnershipName()
+	var held []string
+	for _, row := range rows {
+		if row.marker == marker {
+			held = append(held, row.id)
+		}
+	}
+	switch {
+	case len(held) == 0:
+		return "", server, locateAbsent, backend.StartCause{}
+	case len(held) == 1 && held[0] == want:
+		return want, server, locateFound, backend.StartCause{}
+	}
+	return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+		errors.New("the herdr server restarted, and forgectl's marker is on a workspace other than the one the reference names"))
 }
