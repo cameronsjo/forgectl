@@ -235,9 +235,6 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 	if err != nil {
 		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
-	if err := checkWorkerFolderTrust(deps.Cfg.Launch, top, spec); err != nil {
-		return workerSetup{}, err
-	}
 	led, err := worker.Open(top, namer.Session())
 	if err != nil {
 		return workerSetup{}, err
@@ -250,6 +247,9 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
 		return workerSetup{}, WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	if err := checkWorkerFolderTrust(deps.Cfg.Launch, top, spec, injected, unset); err != nil {
+		return workerSetup{}, err
 	}
 	return workerSetup{adapter: adapter, top: top, led: led, self: self, injected: injected, unset: unset}, nil
 }
@@ -413,29 +413,22 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 // has not trusted for the account the worker runs as (forgectl#1240). It runs
 // before the worktree or ledger row exists. The repository root is checked:
 // the worktree under <repo>/.claude/worktrees/ does not exist yet, and it
-// inherits the root's trust. The account is --profile's config dir, else the
-// CLAUDE_CONFIG_DIR the worker inherits (the profile's env, else this
-// process's).
-func checkWorkerFolderTrust(lc config.LaunchConfig, top string, spec workerSpec) error {
-	p, err := launch.Resolve(lc, worker.WorktreePath(top, spec.name))
-	if err != nil {
-		return WithExitCode(termsafe.Error(err), exitUsage)
+// inherits the root's trust.
+//
+// The harness and the account come from the worker's own build
+// (buildWorkerInvocation's request, through launch.BuildInvocation), so the
+// CLAUDE_CONFIG_DIR checked is the one the worker gets: --profile's config
+// dir over the profile's env, the injected values and the allowlisted
+// inherited value. A build that fails here refuses nothing: the launch's own
+// build refuses it later with its own error.
+func checkWorkerFolderTrust(lc config.LaunchConfig, top string, spec workerSpec, injected map[string]string, unset []string) error {
+	req := spec.request(lc, worker.WorktreePath(top, spec.name), injected, unset)
+	req.Worker = true
+	built, err := launch.BuildInvocation(req)
+	if err != nil || built.Invocation.Harness != "claude" {
+		return nil //nolint:nilerr // the launch's own build reports this error; the trust check does not pre-empt it
 	}
-	harness := spec.harness
-	if harness == "" {
-		harness = p.Harness
-	}
-	if harness != "claude" {
-		return nil
-	}
-	configDir := spec.configDir
-	if configDir == "" {
-		configDir = p.Env["CLAUDE_CONFIG_DIR"]
-	}
-	if configDir == "" {
-		configDir = os.Getenv("CLAUDE_CONFIG_DIR")
-	}
-	return checkClaudeFolderTrust(top, configDir)
+	return checkClaudeFolderTrust(top, envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR"))
 }
 
 // errProfileNotClaude refuses --profile for a worker that is not claude.

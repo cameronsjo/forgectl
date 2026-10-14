@@ -383,9 +383,12 @@ var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORK
 // The variables that name the server stay: TMUX and CMUX_SOCKET_PATH, like
 // HERDR_SOCKET_PATH, are shared by the launcher and the new pane.
 //
-// tmux sets TMUX_PANE in every pane. cmux sets CMUX_WORKSPACE_ID,
-// CMUX_SURFACE_ID and CMUX_TAB_ID in the processes of a workspace it creates
-// (docs/plans/2026-07-10-cmux-integration.md).
+// tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
+// come from forgectl's own cmux integration plan, which recorded them in a
+// workspace it created ("Workspace-command processes receive
+// CMUX_SURFACE_ID, CMUX_WORKSPACE_ID, CMUX_TAB_ID (and more)",
+// docs/plans/2026-07-10-cmux-integration.md); this change was not re-verified
+// against a live cmux, so a cmux id variable not named there is not stripped.
 var paneIdentityEnvByBackend = map[string][]string{
 	"herdr": herdrPaneIdentityEnv,
 	"tmux":  {"TMUX_PANE"},
@@ -413,6 +416,10 @@ const maxPaneIdentityLen = 64
 // started its server, and those must not cross.
 const paneMarkerEnv = "FORGECTL_SURFACE_PANE"
 
+// legacyHerdrPaneMarkerEnv is the herdr-only marker an older launcher sets.
+// The trampoline still strips it, and reads it as a herdr launch.
+const legacyHerdrPaneMarkerEnv = "FORGECTL_SURFACE_HERDR_PANE"
+
 // markPane adds the backend's marker to an invocation's environment.
 func markPane(env []string, backend string) []string {
 	return append(slices.Clone(env), paneMarkerEnv+"="+backend)
@@ -435,8 +442,15 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 	backend := ""
 	out := make([]string, 0, len(env)+len(herdrPaneIdentityEnv))
 	for _, e := range env {
-		if k, v, _ := strings.Cut(e, "="); k == paneMarkerEnv {
+		k, v, _ := strings.Cut(e, "=")
+		switch k {
+		case paneMarkerEnv:
 			backend = v
+			continue
+		case legacyHerdrPaneMarkerEnv:
+			if backend == "" {
+				backend = "herdr"
+			}
 			continue
 		}
 		out = append(out, e)

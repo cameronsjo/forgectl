@@ -62,8 +62,8 @@ func fileExists(path string) bool {
 // claudeFolderTrust reports whether dir is trusted in the Claude Code config
 // file. Trust is inherited: Claude Code skips the dialog for a directory under
 // any trusted one (measured on 2.1.289, docs/plans/2026-09-28-forgectl-herdr-
-// coordinator.md), so dir and every parent count, under both the spelling
-// given and its resolved physical path. That is the widest reading of the
+// coordinator.md), so dir's physical path and every parent of it count, and
+// the spelling given counts as an exact key. That is the widest reading of the
 // inheritance rule, chosen so the check never refuses a folder the harness
 // would open without the dialog.
 func claudeFolderTrust(configFile, dir string) claudeTrustState {
@@ -82,20 +82,25 @@ func claudeFolderTrust(configFile, dir string) claudeTrustState {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return trustUnknown
 	}
-	candidates := []string{filepath.Clean(dir)}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		candidates = append(candidates, resolved)
+	trusted := func(path string) bool {
+		return doc.Projects[path].HasTrustDialogAccepted || doc.Projects[filepath.ToSlash(path)].HasTrustDialogAccepted
 	}
-	for _, start := range candidates {
-		for d := start; ; d = filepath.Dir(d) {
-			for _, key := range []string{d, filepath.ToSlash(d)} {
-				if doc.Projects[key].HasTrustDialogAccepted {
-					return trustTrusted
-				}
-			}
-			if parent := filepath.Dir(d); parent == d {
-				break
-			}
+	// The spelling given counts only as an exact key: Claude Code sees the
+	// physical path, so a trusted parent of a symlinked spelling
+	// (/trusted/link -> /untrusted) says nothing about the folder.
+	if trusted(filepath.Clean(dir)) {
+		return trustTrusted
+	}
+	physical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		physical = filepath.Clean(dir)
+	}
+	for d := physical; ; d = filepath.Dir(d) {
+		if trusted(d) {
+			return trustTrusted
+		}
+		if filepath.Dir(d) == d {
+			break
 		}
 	}
 	return trustUntrusted

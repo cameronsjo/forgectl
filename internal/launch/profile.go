@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -155,61 +154,47 @@ func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string,
 	if err != nil {
 		return Profile{}, nil, err
 	}
-	norm := normalizeCWD(cwd)
-	rl := withResolvedMatches(lc, home)
-	p := resolve(rl, norm, home)
-	i := matchProjectIndex(rl, norm, home)
-	if i < 0 {
-		return p, nil, nil
+	// The match is compared as written, never resolved: following a link in
+	// a match could widen it (a committed `scratch -> ..` would make a block
+	// written for scratch match its whole parent). The cwd is tried both
+	// resolved and as spelled, so a block written through a symlink applies
+	// when the operator reaches the directory through it (forgectl#1042).
+	i := matchProjectIndex(lc, []string{normalizeCWD(cwd), spelledCWD(cwd)}, home)
+	var win *config.LaunchProject
+	if i >= 0 {
+		win = &lc.Projects[i]
 	}
-	// The match was compared in its resolved form; report it as written.
-	p.Match = lc.Projects[i].Match
-	return p, &lc.Projects[i], nil
+	return resolveProject(lc, win, home), win, nil
 }
 
-// withResolvedMatches returns lc with each project match tilde-expanded and
-// its symlinks resolved best effort, as normalizeCWD resolves the cwd. A match
-// written through a symlink otherwise never equals the resolved cwd, and the
-// launch silently falls back to [launch.defaults] (forgectl#1042). A match
-// that does not resolve (a directory not created yet) is left as written. The
-// projects slice is copied, so lc is not changed.
-func withResolvedMatches(lc config.LaunchConfig, home string) config.LaunchConfig {
-	if len(lc.Projects) == 0 {
-		return lc
+// spelledCWD is cwd made absolute and clean with its symlinks left in place:
+// the path as the operator reached it ($PWD, or the target argument).
+func spelledCWD(cwd string) string {
+	if abs, err := filepath.Abs(cwd); err == nil {
+		return filepath.Clean(abs)
 	}
-	projects := slices.Clone(lc.Projects)
-	for i := range projects {
-		if projects[i].Match == "" {
-			continue
-		}
-		m := filepath.Clean(expandTilde(projects[i].Match, home))
-		if r, err := filepath.EvalSymlinks(m); err == nil {
-			m = r
-		}
-		projects[i].Match = m
-	}
-	lc.Projects = projects
-	return lc
+	return filepath.Clean(cwd)
 }
 
 // matchProject is the longest project match for an already normalized cwd.
 func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
-	if i := matchProjectIndex(lc, cwd, home); i >= 0 {
+	if i := matchProjectIndex(lc, []string{cwd}, home); i >= 0 {
 		return &lc.Projects[i]
 	}
 	return nil
 }
 
-// matchProjectIndex is matchProject as an index into lc.Projects, or -1.
-func matchProjectIndex(lc config.LaunchConfig, cwd, home string) int {
+// matchProjectIndex is the index in lc.Projects of the longest match that
+// covers any of cwds (each already absolute and clean), or -1.
+func matchProjectIndex(lc config.LaunchConfig, cwds []string, home string) int {
 	best, win := -1, -1
 	for i := range lc.Projects {
 		if lc.Projects[i].Match == "" {
 			continue
 		}
 		m := filepath.Clean(expandTilde(lc.Projects[i].Match, home))
-		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
-			if len(m) > best {
+		for _, cwd := range cwds {
+			if (cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator))) && len(m) > best {
 				best = len(m)
 				win = i
 			}
@@ -293,8 +278,13 @@ func projectsUseHome(ps []config.LaunchProject) bool {
 // resolve is the pure resolution: fixed home, already-clean absolute cwd. It is
 // the risk-bearing core and is exercised directly by the tests.
 func resolve(lc config.LaunchConfig, cwd, home string) Profile {
+	return resolveProject(lc, matchProject(lc, cwd, home), home)
+}
+
+// resolveProject merges the matched block win (nil for none) over the
+// defaults.
+func resolveProject(lc config.LaunchConfig, win *config.LaunchProject, home string) Profile {
 	p := defaultsProfile(lc.Defaults, home)
-	win := matchProject(lc, cwd, home)
 
 	if win != nil {
 		if win.Harness != "" {

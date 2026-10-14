@@ -50,7 +50,7 @@ env             = { OTEL_EXPORTER = "otlp" }
 add_dir         = ["~/Projects/minute/shared"]
 ```
 
-Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. A `match` written through a symlink is resolved the same way, so it matches its directory however the path is spelled. Inspect the result with `forgectl launch which`.
+Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. A `match` is compared as written and never resolved, against the working directory both resolved and as you reached it (`$PWD`, or the target you named), so a `match` written through a symlink applies when you work through that symlink. Resolving the `match` itself could widen it: a committed `scratch -> ..` would make a block written for `scratch` cover its parent. Inspect the result with `forgectl launch which`.
 
 **Effort is the exception to "scalars merge like the others."** It resolves *last*, against the **final** model:
 

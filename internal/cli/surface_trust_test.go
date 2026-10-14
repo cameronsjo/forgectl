@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,9 +20,9 @@ func writeClaudeConfig(t *testing.T, dir, body string) string {
 	return path
 }
 
-// TestClaudeFolderTrust pins the inheritance reading: the folder or any
-// parent trusted counts, under its own spelling or its physical path, and
-// anything the check cannot read refuses nothing.
+// TestClaudeFolderTrust pins the inheritance reading: the physical folder or
+// any parent of it trusted counts, the spelling given only as an exact key,
+// and anything the check cannot read refuses nothing.
 func TestClaudeFolderTrust(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -35,6 +36,14 @@ func TestClaudeFolderTrust(t *testing.T) {
 	if err := os.Symlink(repo, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	untrusted := filepath.Join(base, "untrusted")
+	if err := os.MkdirAll(untrusted, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(repo, "escape")
+	if err := os.Symlink(untrusted, escape); err != nil {
+		t.Fatal(err)
+	}
 	cfgDir := t.TempDir()
 	conf := func(body string) string { return writeClaudeConfig(t, cfgDir, body) }
 	q := func(p string) string { return `"` + filepath.ToSlash(p) + `"` }
@@ -46,6 +55,8 @@ func TestClaudeFolderTrust(t *testing.T) {
 		{"the folder itself", `{"projects":{` + q(repo) + `:{"hasTrustDialogAccepted":true}}}`, repo, trustTrusted},
 		{"a trusted parent", `{"projects":{` + q(filepath.Join(base, "projects")) + `:{"hasTrustDialogAccepted":true}}}`, filepath.Join(repo, "sub"), trustTrusted},
 		{"through a symlink", `{"projects":{` + q(repo) + `:{"hasTrustDialogAccepted":true}}}`, link, trustTrusted},
+		{"a trusted parent of a link out of it", `{"projects":{` + q(repo) + `:{"hasTrustDialogAccepted":true}}}`, escape, trustUntrusted},
+		{"a link itself trusted by its spelling", `{"projects":{` + q(escape) + `:{"hasTrustDialogAccepted":true}}}`, escape, trustTrusted},
 		{"an entry not accepted", `{"projects":{` + q(repo) + `:{"hasTrustDialogAccepted":false}}}`, repo, trustUntrusted},
 		{"no entry", `{"projects":{"/elsewhere":{"hasTrustDialogAccepted":true}}}`, repo, trustUntrusted},
 		{"no projects", `{}`, repo, trustUntrusted},
@@ -105,8 +116,10 @@ func TestCheckClaudeFolderTrust_Message(t *testing.T) {
 }
 
 // TestCheckWorkerFolderTrust checks the repository root for the account the
-// worker runs as: --profile's config dir, then the profile's env, then the
-// inherited CLAUDE_CONFIG_DIR. A worker that is not claude is not checked.
+// worker's own build gives it: --profile's config dir, then the profile's env,
+// then the injected value, then the inherited CLAUDE_CONFIG_DIR. A worker
+// that is not claude is not checked. Each case also builds the worker
+// invocation itself and asserts the account checked is the one it carries.
 func TestCheckWorkerFolderTrust(t *testing.T) {
 	top := t.TempDir()
 	trusted, untrusted, inherited := t.TempDir(), t.TempDir(), t.TempDir()
@@ -115,26 +128,43 @@ func TestCheckWorkerFolderTrust(t *testing.T) {
 	writeClaudeConfig(t, inherited, `{"projects":{}}`)
 	t.Setenv("CLAUDE_CONFIG_DIR", inherited)
 
-	codex := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex"}}
-	withEnv := config.LaunchConfig{Defaults: config.LaunchDefaults{Env: map[string]string{"CLAUDE_CONFIG_DIR": trusted}}}
+	bin := stubHarnessBinary(t)
+	claude := config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: bin}}
+	codex := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", CodexBinaryPath: bin}}
+	withEnv := config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: bin, Env: map[string]string{"CLAUDE_CONFIG_DIR": trusted}}}
 	cases := []struct {
-		name    string
-		lc      config.LaunchConfig
-		spec    workerSpec
-		refused bool
+		name     string
+		lc       config.LaunchConfig
+		spec     workerSpec
+		injected map[string]string
+		unset    []string
+		refused  bool
 	}{
-		{"inherited account, untrusted", config.LaunchConfig{}, workerSpec{name: "w"}, true},
-		{"--profile account, trusted", config.LaunchConfig{}, workerSpec{name: "w", configDir: trusted}, false},
-		{"--profile beats the profile env", withEnv, workerSpec{name: "w", configDir: untrusted}, true},
-		{"the profile env beats the inherited value", withEnv, workerSpec{name: "w"}, false},
-		{"a codex worker is not checked", codex, workerSpec{name: "w"}, false},
-		{"--harness codex is not checked", config.LaunchConfig{}, workerSpec{name: "w", harness: "codex"}, false},
+		{name: "inherited account, untrusted", lc: claude, spec: workerSpec{name: "w"}, refused: true},
+		{name: "--profile account, trusted", lc: claude, spec: workerSpec{name: "w", configDir: trusted}},
+		{name: "--profile beats the profile env", lc: withEnv, spec: workerSpec{name: "w", configDir: untrusted}, refused: true},
+		{name: "the profile env beats the inherited value", lc: withEnv, spec: workerSpec{name: "w"}},
+		{name: "an injected value beats the inherited value", lc: claude, spec: workerSpec{name: "w"},
+			injected: map[string]string{"CLAUDE_CONFIG_DIR": trusted}},
+		{name: "a codex worker is not checked", lc: codex, spec: workerSpec{name: "w"}},
+		{name: "--harness codex is not checked", lc: codex, spec: workerSpec{name: "w", harness: "codex"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := checkWorkerFolderTrust(c.lc, top, c.spec)
+			err := checkWorkerFolderTrust(c.lc, top, c.spec, c.injected, c.unset)
 			if c.refused != errors.Is(err, errUntrustedFolder) || (!c.refused && err != nil) {
 				t.Errorf("err = %v, refused want %v", err, c.refused)
+			}
+			built, berr := buildWorkerInvocation(c.spec.request(c.lc, filepath.Join(top, ".claude", "worktrees", c.spec.name), c.injected, c.unset),
+				"", func() (string, error) { return "00000000-0000-4000-8000-000000000000", nil }, io.Discard)
+			if berr != nil {
+				t.Fatalf("build: %v", berr)
+			}
+			if built.Invocation.Harness == "claude" {
+				got := envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR")
+				if refusedFor := claudeFolderTrust(claudeGlobalConfigFile(got, ""), top) == trustUntrusted; refusedFor != c.refused {
+					t.Errorf("the worker runs as %s, whose trust disagrees with the check", got)
+				}
 			}
 		})
 	}

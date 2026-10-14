@@ -155,6 +155,17 @@ func TestPaneIdentityEnv_PerBackend(t *testing.T) {
 	}
 }
 
+// TestPaneIdentityEnv_LegacyMarker: an older launcher's herdr-only marker
+// is stripped and still reads as a herdr launch.
+func TestPaneIdentityEnv_LegacyMarker(t *testing.T) {
+	got := paneIdentityEnv([]string{"PATH=/bin", legacyHerdrPaneMarkerEnv + "=1"}, func(k string) string {
+		return map[string]string{"HERDR_PANE_ID": "w1:p1"}[k]
+	})
+	if want := []string{"PATH=/bin", "HERDR_PANE_ID=w1:p1"}; !slices.Equal(got, want) {
+		t.Errorf("env = %q, want %q", got, want)
+	}
+}
+
 // TestSurfaceInvocationRequest_StdoutIsATerminal is #816: the surface launches
 // the harness into a TTY pane, so the request says its stdout is a terminal
 // rather than leaving the zero value, which means "not a terminal" and lets
