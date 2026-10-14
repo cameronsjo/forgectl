@@ -88,6 +88,8 @@ Under `--json`, a failure before any section runs (a bad flag, or a bad `--timeo
 ## Human view
 
 ```text
+2 problems: prs (gh is not signed in to github.com); clean (timed out)
+
 ✓ git    42 project(s) under "/Users/me/Projects": 38 clean, 3 dirty, 1 ahead, 0 unknown
     "forgectl"  [3 modified]
     "hearth"  [status unknown]
@@ -99,7 +101,7 @@ Under `--json`, a failure before any section runs (a bad flag, or a bad `--timeo
     ✗ chronicle — chronicle status failed
 ```
 
-The glyph is the section's `state`: `✓` ok, `!` degraded, `✗` failed. Colour follows the usual rules: none off a TTY or under `NO_COLOR`. The human view is an overview, so it caps its lists:
+The first line is the verdict: how many problems need you, which sections they hit, and why, or `nothing needs you`. Each degraded or failed section is named with a short reason taken from its error or notes. Sections with the same cause are one problem and share one reason: a missing projects folder fails both `git` and `clean`, so it reads `1 problem: git, clean (no projects folder)`. A section that is only not set up (`- bench  not set up (optional)`) does not count. The verdict line is new in the text view (forgectl#1151); scripts should read `--json`. The glyph is the section's `state`: `✓` ok, `!` degraded, `✗` failed. Colour follows the usual rules: none off a TTY or under `NO_COLOR`. The human view is an overview, so it caps its lists:
 
 - `git` lists up to 10 projects that are dirty, ahead or unknown. Clean trees and plain directories are counted but not listed.
 - `prs` lists up to 5 PRs awaiting your review.
@@ -153,6 +155,6 @@ The human view can change between releases. Scripts should read `--json`, whose 
 
 - **Refresh.** Opening the cockpit runs one full collection. After that, only `git` refreshes itself, every 60s; it reads local clones and makes no network call. `prs` (which calls `gh`), `clean` and `bench` refresh only when you press `r` or `R`. A section refreshes at most once every 15s, and only one refresh per section runs at a time. A section whose source is still running after its `--timeout` shows as failed, but stays `refreshing…`, and refuses another refresh, until that source has actually returned.
 
-`--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
+`--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. Under `TERM=dumb`, which cannot draw a full-screen view, it exits 1 and points at plain `status`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
 
 Unlike the hub, the cockpit has no `1`–`9` keys. Its rows carry no visible numbers, and a digit on a PR row would start a review on a row nobody saw numbered.

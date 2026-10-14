@@ -4,10 +4,7 @@ package cli
 
 import (
 	"context"
-	"os"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -35,19 +32,20 @@ func TestTrampoline_SurvivesATerminalSignalAndStillReaps(t *testing.T) {
 
 	// The harness ignores SIGINT and exits 7 — a claude session traps it and
 	// carries on, so the reaper must outlive the signal to see the real status.
+	//
+	// The harness sends the SIGINT to its parent, this process, itself. It
+	// runs only after Run installed its handling and before Run can return,
+	// so the signal lands while the reaper is waiting whatever the host's
+	// load. A timer in the test raced Run's setup: on a loaded host it could
+	// fire before the handling was installed and kill the test binary with
+	// no failing test named (forgectl#1120).
 	committed := serviceOn(t, listener, nonce, launch.Invocation{
 		Harness: "test",
 		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
-		Args:    []string{"-c", `trap '' INT; sleep 0.4; exit 7`},
+		Args:    []string{"-c", `trap '' INT; kill -INT "$PPID"; sleep 0.4; exit 7`},
 		Env:     []string{"PATH=/usr/bin:/bin"},
 		CWD:     "/",
 	})
-
-	go func() {
-		// Late enough that Run has installed its handling and is in Wait.
-		time.Sleep(200 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
-	}()
 
 	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
 	if runErr == nil {

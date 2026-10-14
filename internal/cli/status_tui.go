@@ -21,6 +21,9 @@ import (
 // without a TTY).
 var errStatusTUINeedsTerminal = errors.New("status --tui needs a terminal on stdin and stdout; use status --json (or plain status) instead")
 
+// errStatusTUIDumbTerminal is the --tui refusal under TERM=dumb (#1152).
+var errStatusTUIDumbTerminal = tui.DumbTerminalError("status --tui", "plain status, or status --json")
+
 // statusTUIRuntime is the seam `status --tui` is tested through: the two
 // terminal checks, the cockpit itself, and the run of a `pr <ref>` the
 // operator chose in it.
@@ -47,6 +50,9 @@ func productionStatusTUIRuntime() statusTUIRuntime {
 func runStatusCockpit(cmd *cobra.Command, src statusSources, th theme.Theme, rt statusTUIRuntime, timeout time.Duration) error {
 	if !rt.stdinIsTerminal(cmd.InOrStdin()) || !rt.stdoutIsTerminal(cmd.OutOrStdout()) {
 		return errStatusTUINeedsTerminal
+	}
+	if termIsDumb() {
+		return errStatusTUIDumbTerminal
 	}
 	act, err := rt.run(cmd.Context(), tui.CockpitOptions{
 		Sources:   statusCockpitSources(src, timeout),

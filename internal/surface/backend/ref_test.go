@@ -635,3 +635,76 @@ func TestRef_RendersNoSecrets(t *testing.T) {
 		}
 	}
 }
+
+// TestRef_EndpointRoundTripsAndFailsClosed covers the endpoint digest a herdr
+// reference records (forgectl#1077): it survives the wire, it never carries
+// the raw path, and every malformed or misplaced form is refused.
+func TestRef_EndpointRoundTripsAndFailsClosed(t *testing.T) {
+	const sock = "/tmp/herdr-test/herdr.sock"
+	e := backend.EndpointOf(sock)
+	if !e.Valid() || !e.Matches(backend.EndpointOf(sock)) || e.Matches(backend.EndpointOf(sock+"x")) {
+		t.Fatal("EndpointOf is not a stable digest of the path")
+	}
+	if (backend.EndpointID{}).Matches(backend.EndpointID{}) {
+		t.Fatal("zero endpoints matched")
+	}
+
+	plain := herdrRef(t)
+	if _, ok := plain.Endpoint(); ok {
+		t.Fatal("a reference built without an endpoint reports one")
+	}
+	ref, err := plain.WithEndpoint(e)
+	if err != nil {
+		t.Fatalf("WithEndpoint: %v", err)
+	}
+	raw, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), sock) {
+		t.Fatalf("the encoded reference carries the raw socket path: %s", raw)
+	}
+	back, err := backend.DecodeRef(raw)
+	if err != nil {
+		t.Fatalf("DecodeRef: %v", err)
+	}
+	if got, ok := back.Endpoint(); !ok || !got.Matches(e) {
+		t.Fatal("the endpoint did not survive a round trip")
+	}
+
+	if _, err := cmuxRef(t).WithEndpoint(e); err == nil {
+		t.Error("a cmux reference accepted an endpoint")
+	}
+	if _, err := plain.WithEndpoint(backend.EndpointID{}); err == nil {
+		t.Error("an empty endpoint was accepted")
+	}
+
+	inject := func(t *testing.T, r backend.Ref, endpoint string) []byte {
+		t.Helper()
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		m["endpoint"] = endpoint
+		b, err = json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	tm, _ := tmuxRef(t)
+	for name, raw := range map[string][]byte{
+		"a tmux reference with an endpoint": inject(t, tm, e.String()),
+		"a cmux reference with an endpoint": inject(t, cmuxRef(t), e.String()),
+		"a short digest":                    inject(t, plain, e.String()[:10]),
+		"an uppercase digest":               inject(t, plain, strings.ToUpper(e.String())),
+	} {
+		if _, err := backend.DecodeRef(raw); err == nil {
+			t.Errorf("%s decoded", name)
+		}
+	}
+}

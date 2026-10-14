@@ -48,11 +48,34 @@ const NoteMaxRunes = 200
 // Section is one source's slot in the report. Every field is always present
 // on the wire: Error is "" unless the section failed, Notes is [] rather than
 // null, and Data is null only when State is "failed".
+//
+// Cause is never on the wire: it is the categorical cause a source attached
+// to its error with WithCause, for a caller that groups failures by cause
+// rather than by their capped, escaped error text.
 type Section[T any] struct {
 	State State    `json:"state"`
 	Error string   `json:"error"`
 	Notes []string `json:"notes"`
 	Data  *T       `json:"data"`
+	Cause string   `json:"-"`
+}
+
+// causeError is an error carrying a categorical cause (WithCause).
+type causeError struct {
+	cause string
+	err   error
+}
+
+func (e *causeError) Error() string { return e.err.Error() }
+func (e *causeError) Unwrap() error { return e.err }
+
+// WithCause attaches cause to err for the failed Section's Cause field. The
+// error text is unchanged. A nil err stays nil.
+func WithCause(cause string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &causeError{cause: cause, err: err}
 }
 
 // Source reads one section. It returns the section's data, any degradation
@@ -208,11 +231,16 @@ func fold[T any](o outcome[T], timeout time.Duration) Section[T] {
 
 // failed builds a failed Section whose error text is escaped and capped.
 func failed[T any](err error) Section[T] {
-	return Section[T]{
+	s := Section[T]{
 		State: StateFailed,
 		Error: termsafe.SafeLineMax(termsafe.Error(err).Error(), ErrorMaxRunes),
 		Notes: []string{},
 	}
+	var ce *causeError
+	if errors.As(err, &ce) {
+		s.Cause = ce.cause
+	}
+	return s
 }
 
 // deadlineError names why a section's context ended.

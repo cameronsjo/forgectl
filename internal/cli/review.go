@@ -90,7 +90,8 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 	// `unknown flag: --json`.
 	cmd := &cobra.Command{
 		Use:                "review [--kind issue|pr] [--repo <owner/name>]",
-		Short:              "Cross-project work inventory: open issues and PRs across your repos",
+		Annotations:        map[string]string{rootHelpUseAnnotation: "review [--flags]"},
+		Short:              "Cross-project work inventory: open issues and PRs across repos",
 		Args:               cobra.ArbitraryArgs,
 		DisableFlagParsing: true,
 		RunE:               fail,
@@ -179,8 +180,11 @@ func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost st
 		// Without them, a flag VALUE (`review --repo owner/name`) is mistaken
 		// for an unknown subverb and routed to the TUI menu — a silent exit 1
 		// in any non-TTY invocation.
-		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
-		Short: "Cross-project work inventory: open issues and PRs across your repos",
+		Use: "review [--kind issue|pr] [--repo <owner/name>]",
+		// Root help's command column is as wide as its widest usage; this is
+		// the short form shown there only (forgectl#1151).
+		Annotations: map[string]string{rootHelpUseAnnotation: "review [--flags]"},
+		Short:       "Cross-project work inventory: open issues and PRs across repos",
 		Long: `review lists every open issue and pull request across the configured
 owners — the whole work inventory, rendered live from gh. Nothing is copied or
 synced; the only local state is the reviewed-marks file, and new activity on an
