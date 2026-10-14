@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -18,7 +19,32 @@ func TestMain(m *testing.M) {
 	sandboxGOOS = "linux"
 	sandboxLookPath = func(file string) (string, error) { return "/usr/bin/" + file, nil }
 	claudeProbe = healthyClaudeProbe
-	os.Exit(m.Run())
+	os.Exit(runInPrivateTempRoot(m))
+}
+
+// runInPrivateTempRoot runs m with the OS temp root pointed at a fresh dir,
+// then removes it. Review workspaces, and the private temp and settings dirs
+// a Claude launch makes beside each (forgectl#907), land under the temp root,
+// and not every test tears its workspace down. The settings dir is left 0500,
+// so removal makes every dir writable first.
+func runInPrivateTempRoot(m *testing.M) int {
+	root, err := os.MkdirTemp("", "forgectl-prtest-*")
+	if err != nil {
+		panic("create temp root: " + err.Error())
+	}
+	defer func() {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
+			}
+			return nil
+		})
+		_ = os.RemoveAll(root)
+	}()
+	if err := os.Setenv("TMPDIR", root); err != nil {
+		panic("set TMPDIR: " + err.Error())
+	}
+	return m.Run()
 }
 
 // healthyClaudeProbe answers the dispatch-time checks as a current claude

@@ -88,8 +88,9 @@ type sandboxSettings struct {
 // sandboxFilesystem narrows the sandbox's default write set, which is the
 // working directory (the workspace), Claude Code's temp directory, and every
 // --add-dir root. DenyWrite takes the workspace back out. The temp directory
-// is the review's own private one (createReviewTmpDir, forgectl#907), not
-// the claude-<uid> dir every session of the operator's shares.
+// is the claude-<uid> dir inside the review's own private one
+// (createReviewTmpDir, forgectl#907), not the claude-<uid> dir every session
+// of the operator's shares; the private dir's root is not writable.
 //
 // DenyRead takes the credential stores out of the default read set, which is
 // the whole host. Paths are `~/`-rooted, which the sandbox resolves against
@@ -102,7 +103,8 @@ type sandboxSettings struct {
 // pointers in it (`commondir`, for one) to configuration elsewhere. Writes
 // to the whole workspace are denied instead: a reviewer has nothing to
 // write there. What stays writable is the findings dir that `pr local` adds
-// with --add-dir, outside the workspace, and the review's private temp dir.
+// with --add-dir, outside the workspace, and the claude-<uid> dir inside the
+// review's private temp dir.
 type sandboxFilesystem struct {
 	DenyWrite []string `json:"denyWrite"`
 	DenyRead  []string `json:"denyRead"`

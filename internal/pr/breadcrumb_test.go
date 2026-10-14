@@ -52,10 +52,9 @@ func fakeWorkspace(t *testing.T) string {
 	}
 	t.Cleanup(func() {
 		_ = os.RemoveAll(ws)
-		// A Claude launch makes the review's private temp dir beside it.
-		if tmp, err := reviewTmpDirFor(ws); err == nil {
-			_ = os.RemoveAll(tmp)
-		}
+		// A Claude launch makes the review's private temp dir and its
+		// sealed settings dir beside it.
+		_ = removeReviewTmpDir(ws)
 	})
 	return ws
 }

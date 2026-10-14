@@ -255,11 +255,15 @@ func settingsFlagFrom(t *testing.T, args []string) (reviewSettings, map[string]a
 	if i < 0 || i+1 >= len(args) {
 		t.Fatalf("claude argv carries no --settings: %v", args)
 	}
-	// The document is a 0400 file in the review's private temp dir, outside
-	// claude-<uid>, so Claude Code keeps no writable-dir copy of it.
+	// The document is a 0400 file in a 0500 settings dir of its own beside
+	// the workspace, outside the private temp dir, so Claude Code keeps no
+	// copy of it and nothing in the sandbox's write set can replace it.
 	path := args[i+1]
-	if filepath.Base(path) != reviewSettingsFile || !strings.HasPrefix(filepath.Base(filepath.Dir(path)), reviewTmpPrefix) {
-		t.Fatalf("--settings %q is not the settings file in the review's private temp dir", path)
+	if filepath.Base(path) != reviewSettingsFile || !strings.HasPrefix(filepath.Base(filepath.Dir(path)), reviewSettingsPrefix) {
+		t.Fatalf("--settings %q is not the settings file in the review's settings dir", path)
+	}
+	if dir, err := os.Lstat(filepath.Dir(path)); err != nil || !dir.IsDir() || dir.Mode().Perm() != 0o500 {
+		t.Fatalf("settings dir = %v (%v), want a 0500 dir", dir, err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {

@@ -628,7 +628,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		// permission-scoped Edit(//<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all. It is also what
 		// makes the dir writable inside the sandbox, where it is the only
-		// writable root besides the review's private temp directory.
+		// writable root besides the claude-<uid> dir inside the review's
+		// private temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
 		if perms, err = localProfile(sess.FindingsDir); err != nil {
@@ -683,7 +684,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// shared dir becomes read-only to the reviewer's Bash (measured on Claude
 	// Code 2.1.296). The dir outlives this call with the review and goes with
 	// the workspace (teardownWorkspace); a refusal before the window opens
-	// removes it here.
+	// removes it, and the settings dir below, here.
 	tmpDir, err := createReviewTmpDir(sess.Workspace)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
@@ -694,7 +695,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 			return
 		}
 		if rerr := removeReviewTmpDir(sess.Workspace); rerr != nil {
-			slog.Warn("Failed to remove the review's private temp dir after a refused dispatch.",
+			slog.Warn("Failed to remove the review's private temp and settings dirs after a refused dispatch.",
 				"dir", tmpDir, "error", rerr)
 		}
 	}()
@@ -707,19 +708,20 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// (reviewRelocationEnv). The unset ones are unset for real, below.
 	relocSet, relocUnset := reviewRelocationEnv()
 	windowEnv = pinEnv(windowEnv, relocSet, relocUnset)
-	// The document goes to claude as a file forgectl writes 0400 in the
-	// private temp dir, beside claude-<uid> rather than in it. Passed inline,
+	// The document goes to claude as a file forgectl writes 0400 in a 0500
+	// dir of its own beside the workspace, outside CLAUDE_CODE_TMPDIR and
+	// every other root the sandbox can write (writeReviewSettings). Passed inline,
 	// Claude Code keeps a copy at claude-<uid>/claude-settings-<hash>.json,
 	// inside the one dir the reviewer's Bash may write. That copy was
 	// mounted read-only to it (measured on 2.1.296), but a file outside every
 	// writable root leaves no copy to ask about: with it, no settings copy
 	// appeared, and the reviewer's writes, replace and unlink of the file
 	// all failed.
-	settingsPath, err := writeReviewSettings(tmpDir, settingsJSON)
+	settingsPath, err := writeReviewSettings(sess.Workspace, settingsJSON)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
-	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsPath, windowEnv); err != nil {
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsPath, windowEnv, relocUnset); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{

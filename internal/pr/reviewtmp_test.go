@@ -14,6 +14,9 @@ package pr
 //   [x] A missing dir is not an error
 //   [x] A symlink in its place is refused and its target left alone
 //   [x] teardownWorkspace removes the workspace and then the private dir
+// writeReviewSettings (Classification: security control, filesystem)
+//   [x] A 0400 file in a 0500 sibling dir outside the private temp dir
+//   [x] Refuses a second write; teardown removes the sealed dir
 // pinReviewClaudeEnv
 //   [x] Replaces ambient TMPDIR / CLAUDE_CODE_TMPDIR / scrub entries
 // teardownWorkspace after a failure
@@ -69,7 +72,52 @@ func fakeWorkspaceIn(t *testing.T, parent string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The settings dir is left 0500, which t.TempDir's own cleanup cannot
+	// empty without root; this cleanup runs before it.
+	t.Cleanup(func() { _ = removeReviewTmpDir(ws) })
 	return ws
+}
+
+// TestWriteReviewSettings_SealsADirOfItsOwn: the settings file lands 0400 in
+// a 0500 sibling of the workspace that is not inside the private temp dir,
+// a second write is refused, and teardown removes the sealed dir.
+func TestWriteReviewSettings_SealsADirOfItsOwn(t *testing.T) {
+	ws := fakeWorkspaceIn(t, t.TempDir())
+	tmp, err := createReviewTmpDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := writeReviewSettings(ws, `{"a":1}`)
+	if err != nil {
+		t.Fatalf("writeReviewSettings: %v", err)
+	}
+	dir := filepath.Dir(path)
+	if filepath.Dir(dir) != filepath.Dir(ws) || !strings.HasPrefix(filepath.Base(dir), reviewSettingsPrefix) {
+		t.Errorf("settings dir %q is not a %s sibling of %q", dir, reviewSettingsPrefix, ws)
+	}
+	if rel, err := filepath.Rel(tmp, path); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Errorf("settings file %q sits inside the private temp dir %q", path, tmp)
+	}
+	if info, err := os.Lstat(dir); err != nil || info.Mode().Perm() != 0o500 {
+		t.Errorf("settings dir mode = %v (%v), want 0500", info, err)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != 0o400 {
+		t.Errorf("settings file mode = %v (%v), want 0400", info, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != `{"a":1}` { //nolint:gosec // G304: the path the test just wrote
+		t.Errorf("settings file = %q (%v)", data, err)
+	}
+	if _, err := writeReviewSettings(ws, `{}`); err == nil {
+		t.Error("a second writeReviewSettings over an existing settings dir succeeded")
+	}
+	if err := teardownWorkspace(context.Background(), &exec.FakeRunner{}, ws); err != nil {
+		t.Fatalf("teardownWorkspace: %v", err)
+	}
+	for _, gone := range []string{ws, tmp, dir} {
+		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%q survived teardown: %v", gone, err)
+		}
+	}
 }
 
 func TestCreateReviewTmpDir_MakesAPrivateDir(t *testing.T) {
@@ -361,6 +409,7 @@ func TestReviewRelocationEnv_SetsUsableValuesAndUnsetsTheRest(t *testing.T) {
 		"KUBECONFIG":        "/k/a" + string(os.PathListSeparator) + "/k/b",
 		"CLAUDE_CONFIG_DIR": "relative",
 		"GNUPGHOME":         "",
+		"DOCKER_CONFIG":     "/home/o/link/../docker",
 	})
 	set, unset := reviewRelocationEnv()
 	for _, want := range []string{"CODEX_HOME=/data/codex", "KUBECONFIG=/k/a" + string(os.PathListSeparator) + "/k/b"} {
@@ -368,7 +417,7 @@ func TestReviewRelocationEnv_SetsUsableValuesAndUnsetsTheRest(t *testing.T) {
 			t.Errorf("set %v missing %q", set, want)
 		}
 	}
-	for _, want := range []string{"CLAUDE_CONFIG_DIR", "GNUPGHOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "SOPS_AGE_KEY_FILE"} {
+	for _, want := range []string{"CLAUDE_CONFIG_DIR", "GNUPGHOME", "DOCKER_CONFIG", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "SOPS_AGE_KEY_FILE"} {
 		if !slices.Contains(unset, want) {
 			t.Errorf("unset %v missing %q", unset, want)
 		}

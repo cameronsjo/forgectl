@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -56,6 +57,10 @@ var credentialPaths = []credentialPath{
 	{"~/.cargo/credentials", false},
 	{"~/.cargo/credentials.toml", false},
 	{"~/.terraform.d/credentials.tfrc.json", false},
+	// Terraform's CLI config, which can hold `credentials` blocks inline:
+	// ~/.terraformrc on Unix, terraform.rc on Windows.
+	{"~/.terraformrc", false},
+	{"~/terraform.rc", false},
 	{"~/.m2/settings.xml", false},
 	{"~/.gem/credentials", false},
 	{"~/.claude/.credentials.json", false},
@@ -100,6 +105,9 @@ var relocations = []relocation{
 	{variable: "PASSWORD_STORE_DIR", targets: []credentialPath{{"", true}}},
 	{variable: "PGPASSFILE", targets: []credentialPath{{"", false}}},
 	{variable: "NPM_CONFIG_USERCONFIG", targets: []credentialPath{{"", false}}},
+	// npm reads its config variables in either case, and the lowercase
+	// spelling is the one npm itself documents.
+	{variable: "npm_config_userconfig", targets: []credentialPath{{"", false}}},
 	{variable: "CARGO_HOME", targets: []credentialPath{{"credentials", false}, {"credentials.toml", false}}},
 	{variable: "TF_CLI_CONFIG_FILE", targets: []credentialPath{{"", false}}},
 	{variable: "SOPS_AGE_KEY_FILE", targets: []credentialPath{{"", false}}},
@@ -137,14 +145,24 @@ func relocationValues(r relocation) (values []string, ok bool) {
 		if part == "" {
 			continue
 		}
-		if !filepath.IsAbs(part) || strings.ContainsAny(part, permissionPathMeta) {
-			slog.Warn("Unsetting a credential-store variable in the review window: its path is not absolute or holds a pattern character, so it cannot be denied.",
+		if !filepath.IsAbs(part) || strings.ContainsAny(part, permissionPathMeta) || hasDotDot(part) {
+			slog.Warn("Unsetting a credential-store variable in the review window: its path is not absolute, holds a pattern character, or has a .. element, so it cannot be denied.",
 				"variable", r.variable)
 			return nil, false
 		}
 		values = append(values, filepath.Clean(part))
 	}
 	return values, len(values) > 0
+}
+
+// hasDotDot reports whether path has a ".." element. Cleaning one away is
+// lexical, while the program reading the variable resolves it through any
+// symlink before it, so the cleaned deny could name a different file than
+// the one the store is really in.
+func hasDotDot(path string) bool {
+	return slices.Contains(strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == filepath.Separator
+	}), "..")
 }
 
 // reviewCredentialPaths are the credential paths a review denies reads of:

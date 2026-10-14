@@ -325,6 +325,7 @@ func TestProfiles_DenyReadsOfCredentialStores(t *testing.T) {
 			"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.netrc)", "Read(~/.config/sops/**)",
 			"Read(~/.claude/.credentials.json)", "Read(~/.codex/auth.json)", "Read(~/.config/hub/**)",
 			"Read(~/.cargo/credentials.toml)", "Read(~/.terraform.d/credentials.tfrc.json)", "Read(~/.vault-token)",
+			"Read(~/.terraformrc)", "Read(~/terraform.rc)",
 			"Read(~/.pgpass)", "Read(~/.password-store/**)", "Read(~/.local/share/keyrings/**)",
 			"Read(~/.config/rclone/**)", "Read(~/.m2/settings.xml)", "Read(~/.gem/credentials)", "Read(~/.config/op/**)",
 			"Read(//proc/**)",
@@ -369,6 +370,7 @@ func TestReviewCredentialPaths_FollowRelocations(t *testing.T) {
 		"AWS_SHARED_CREDENTIALS_FILE": "/srv/aws/credentials",
 		"CLAUDE_CONFIG_DIR":           "relative/claude",
 		"CODEX_HOME":                  "/srv/co*dex",
+		"GNUPGHOME":                   "/srv/link/../gnupg",
 	}
 	credentialEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 
@@ -387,7 +389,7 @@ func TestReviewCredentialPaths_FollowRelocations(t *testing.T) {
 			}
 		}
 		for _, rule := range perms.Deny {
-			if strings.Contains(rule, "relative/claude") || strings.Contains(rule, "co*dex") {
+			if strings.Contains(rule, "relative/claude") || strings.Contains(rule, "co*dex") || strings.Contains(rule, "/srv/gnupg") || strings.Contains(rule, "/srv/link") {
 				t.Errorf("%s deny list carries an unusable relocation: %q", name, rule)
 			}
 		}
@@ -422,6 +424,7 @@ func TestReviewCredentialPaths_FollowTheWiderRelocations(t *testing.T) {
 		"PASSWORD_STORE_DIR":    "/ps",
 		"PGPASSFILE":            "/pg/pass",
 		"NPM_CONFIG_USERCONFIG": "/n/npmrc",
+		"npm_config_userconfig": "/n/lower-npmrc",
 		"CARGO_HOME":            "/c",
 		"TF_CLI_CONFIG_FILE":    "/tf/rc",
 		"SOPS_AGE_KEY_FILE":     "/s/keys.txt",
@@ -434,7 +437,7 @@ func TestReviewCredentialPaths_FollowTheWiderRelocations(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Read(//k/one)", "Read(//k/two)", "Read(//a/config)", "Read(//g/**)", "Read(//d/**)", "Read(//az/**)",
-		"Read(//ps/**)", "Read(//pg/pass)", "Read(//n/npmrc)", "Read(//c/credentials)", "Read(//c/credentials.toml)",
+		"Read(//ps/**)", "Read(//pg/pass)", "Read(//n/npmrc)", "Read(//n/lower-npmrc)", "Read(//c/credentials)", "Read(//c/credentials.toml)",
 		"Read(//tf/rc)", "Read(//s/keys.txt)", "Read(//xd/keyrings/**)",
 		"Read(~/Library/Application Support/sops/age/keys.txt)",
 	} {
