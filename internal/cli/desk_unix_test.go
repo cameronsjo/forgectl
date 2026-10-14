@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -354,7 +355,7 @@ func TestDeskStatus(t *testing.T) {
 
 	out, _, err = deskRun(t, deskDeps(), "status", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"dir", "done", "pending", "running", "skipped", "taken"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"dir", "done", "found", "pending", "running", "skipped", "taken"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("status --json keys = %v, want %v", got, want)
 	}
 	var snap deskStatusJSON
@@ -374,7 +375,7 @@ func TestDeskStatus(t *testing.T) {
 	}
 	out, _, err = deskRun(t, deskDeps(), "status", done, "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"events", "item", "log", "record", "steps", "summary"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"events", "events_exists", "item", "log", "record", "steps", "summary"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("detail --json keys = %v, want %v", got, want)
 	}
 	_, _, err = deskRun(t, deskDeps(), "status", "77-missing")
@@ -746,6 +747,27 @@ func TestDeskDashboard_RefusesWithoutATerminal(t *testing.T) {
 	}
 }
 
+// TERM=dumb cannot draw the dashboard: it refuses with a usage exit and
+// points at --frame, before the desk dir is opened; --frame still works
+// there (#1152).
+func TestDeskDashboard_RefusesOnADumbTerminal(t *testing.T) {
+	dir := newDeskDir(t)
+	prev := deskHasTerminal
+	deskHasTerminal = func() bool { return true }
+	t.Cleanup(func() { deskHasTerminal = prev })
+	stubTermIsDumb(t, true)
+	_, _, err := deskRun(t, deskDeps())
+	wantExit(t, err, deskExitUsage)
+	if !errors.Is(err, tui.ErrDumbTerminal) || !strings.Contains(err.Error(), "desk --frame") {
+		t.Errorf("err = %v, want the TERM=dumb refusal naming desk --frame", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refusal created the desk dir: %v", err)
+	}
+	_, _, err = deskRun(t, deskDeps(), "--frame")
+	wantExit(t, err, 0)
+}
+
 func TestDeskFrame(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "desk")
 	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "30"})
@@ -836,12 +858,13 @@ func TestDeskNoIconsHonorsConfig(t *testing.T) {
 	}
 }
 
-// desk --help's key paragraph stays within 80 columns (#1107 review: a word
-// was left alone on its own line).
+// desk --help's key list stays within 80 columns (#1107 review: a word
+// was left alone on its own line), and lists every dashboard key from the
+// table the footer and ? draw from, so it cannot drift (#1159).
 func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "--help")
 	wantExit(t, err, 0)
-	_, para, ok := strings.Cut(out, "Dashboard keys:")
+	_, para, ok := strings.Cut(out, "Dashboard keys")
 	para, _, _ = strings.Cut(para, "\n\n")
 	if !ok {
 		t.Fatalf("no dashboard keys paragraph:\n%s", out)
@@ -851,10 +874,202 @@ func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 			t.Errorf("keys paragraph line is %d columns: %q", len(l), l)
 		}
 	}
-	// Every dashboard key, including the timeline's t and the history's h.
-	for _, want := range []string{"t the\ntimeline", "h the finished runs", "j/k move", "? the keys"} {
+	if !strings.Contains(para, tui.DeskKeysHelp(deskHelpWidth)) {
+		t.Errorf("keys paragraph is not the generated key list:\n%s", para)
+	}
+	for _, want := range []string{"\n  t    open the timeline", "\n  h    show the finished runs", "\n  j/k  move", "\n  ?    show these keys", "\n  q    quit"} {
 		if !strings.Contains(para, want) {
 			t.Errorf("keys paragraph lacks %q:\n%s", want, para)
 		}
+	}
+}
+
+// TestDeskReadVerbsNeverCreateADesk pins forgectl#1150: status, runs, show,
+// watch and plan, pointed at a directory that is not a desk, neither create
+// nor chmod it. status and runs report the empty result (found=false for
+// status) with a note on stderr, exit 0; a verb given a NAME exits 1 and
+// names the path.
+func TestDeskReadVerbsNeverCreateADesk(t *testing.T) {
+	fastWatch(t)
+	dir := newDeskDir(t) // DESK_DIR names it; nothing has created it
+
+	out, errOut, err := deskRun(t, deskDeps(), "status")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, ": not found; 0 waiting") || !strings.Contains(errOut, "note: desk not found at") {
+		t.Errorf("status: stdout %q stderr %q", out, errOut)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", "--json")
+	wantExit(t, err, 0)
+	var snap deskStatusJSON
+	if err := json.Unmarshal([]byte(out), &snap); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if snap.Found || snap.Dir != dir || snap.Pending == nil || len(snap.Pending) != 0 {
+		t.Errorf("status --json = %+v; want found=false, dir %s, empty lists", snap, dir)
+	}
+
+	out, errOut, err = deskRun(t, deskDeps(), "runs", "--json")
+	wantExit(t, err, 0)
+	if strings.TrimSpace(out) != "[]" || !strings.Contains(errOut, "is not a desk") {
+		t.Errorf("runs --json: stdout %q stderr %q", out, errOut)
+	}
+
+	for _, args := range [][]string{{"status", "01-x"}, {"show", "01-x"}, {"watch", "01-x"}, {"plan", "01-x"}} {
+		_, _, err := deskRun(t, deskDeps(), args...)
+		wantExit(t, err, 1)
+		if err == nil || !strings.Contains(err.Error(), "is not a desk") || !strings.Contains(err.Error(), "DESK_DIR") {
+			t.Errorf("%v: err = %v; want it to name the path and how to check it", args, err)
+		}
+	}
+
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a read verb created the desk directory (lstat err %v)", err)
+	}
+
+	// A directory that exists but is not a desk is not chmodded either.
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil { //nolint:gosec // G302: a test dir whose group bit proves status did not narrow it to 0700
+		t.Fatal(err)
+	}
+	_, _, err = deskRun(t, deskDeps(), "status")
+	wantExit(t, err, 0)
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o750 {
+		t.Errorf("status changed a non-desk directory's mode to %v", fi.Mode())
+	}
+	if ok, _ := desk.Present(dir); ok {
+		t.Error("status made the directory a desk")
+	}
+}
+
+// TestDeskNotFoundNamesTheListingVerb pins forgectl#1095: a name that matches
+// nothing says which command lists the valid names.
+func TestDeskNotFoundNamesTheListingVerb(t *testing.T) {
+	newDeskDir(t)
+	queueItem(t, "w.sh", "true\n")
+	for verb, want := range map[string]string{
+		"status": "forgectl desk status lists every item",
+		"watch":  "forgectl desk status lists every item",
+		"show":   "forgectl desk runs lists every run",
+		"plan":   "forgectl desk status lists every item",
+	} {
+		_, _, err := deskRun(t, deskDeps(), verb, "99-nope")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("desk %s 99-nope: err = %v; want %q", verb, err, want)
+		}
+	}
+}
+
+// TestDeskStatus_SkippedItemNamesNoMissingEventsFile pins forgectl#1095: a
+// skipped item never ran, so status does not name an events file that is not
+// there; a waiting item still names where its events will be.
+func TestDeskStatus_SkippedItemNamesNoMissingEventsFile(t *testing.T) {
+	newDeskDir(t)
+	skipped, _ := queueItem(t, "s.sh", "true\n")
+	waiting, _ := queueItem(t, "w.sh", "true\n")
+	if _, _, err := deskRun(t, deskDeps(), "skip", skipped, "--reason", "dup"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := deskRun(t, deskDeps(), "status", skipped)
+	wantExit(t, err, 0)
+	if strings.Contains(out, "events=") {
+		t.Errorf("skipped item detail names an events file: %q", out)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", skipped, "--json")
+	wantExit(t, err, 0)
+	var res deskDetailJSON
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.EventsExists || !strings.HasSuffix(res.Events, skipped+".events") {
+		t.Errorf("skipped item events = %q exists=%v (err %v); want the path, unchanged, and events_exists false", res.Events, res.EventsExists, err)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", waiting)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "events=") {
+		t.Errorf("waiting item detail lacks its events path: %q", out)
+	}
+}
+
+// TestDeskReadVerbsLeaveANonDeskDirAlone is the review finding on #1270: a
+// project directory that happens to hold a done/ folder is read, never
+// migrated. Its modes and entries are unchanged after every read verb, and
+// a script in it keeps its execute bit.
+func TestDeskReadVerbsLeaveANonDeskDirAlone(t *testing.T) {
+	fastWatch(t)
+	dir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(filepath.Join(dir, "done"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "done", "01-x.sh")
+	if err := os.WriteFile(script, []byte("echo hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, filepath.Join(dir, "done"), script} {
+		if err := os.Chmod(p, 0o755); err != nil { //nolint:gosec // G302: the wide modes are what the test proves are left alone
+			t.Fatal(err)
+		}
+	}
+	state := func() map[string]os.FileMode {
+		t.Helper()
+		m := map[string]os.FileMode{}
+		err := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			fi, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			m[p] = fi.Mode()
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	before := state()
+	for _, args := range [][]string{
+		{"status"}, {"status", "--json"}, {"status", "01-x"}, {"runs", "--json"},
+		{"show", "01-x"}, {"plan", "01-x"}, {"--frame"}, {"prune", "--dry-run"},
+	} {
+		_, _, _ = deskRun(t, deskDeps(), append(args, "--dir", dir)...)
+		if after := state(); !reflect.DeepEqual(after, before) {
+			t.Fatalf("desk %v changed the directory:\nbefore %v\nafter  %v", args, before, after)
+		}
+	}
+}
+
+// TestDeskFrameAndSkipNeverCreateADesk: --frame and skip on a path that is
+// not a desk create nothing.
+func TestDeskFrameAndSkipNeverCreateADesk(t *testing.T) {
+	dir := newDeskDir(t)
+	out, errOut, err := deskRun(t, deskDeps(), "--frame")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "not found") || !strings.Contains(errOut, "note: desk not found") {
+		t.Errorf("--frame: stdout %q stderr %q", out, errOut)
+	}
+	_, _, err = deskRun(t, deskDeps(), "skip", "01-x", "--reason", "dup")
+	wantExit(t, err, 1)
+	if err == nil || !strings.Contains(err.Error(), "is not a desk") {
+		t.Errorf("skip: err = %v", err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("--frame or skip created the desk directory (lstat err %v)", err)
+	}
+}
+
+// TestDeskStatus_UnreadablePathIsAnError: a DESK_DIR that is a regular file
+// is an error, not "not a desk" with a desk-add hint and exit 0.
+func TestDeskStatus_UnreadablePathIsAnError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "desk")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubDeskEnv(t, map[string]string{"DESK_DIR": file})
+	_, _, err := deskRun(t, deskDeps(), "status", "--json")
+	if err == nil || strings.Contains(err.Error(), "desk add creates one") {
+		t.Errorf("status on a regular file: err = %v; want the real error", err)
 	}
 }

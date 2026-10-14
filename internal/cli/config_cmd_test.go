@@ -388,6 +388,54 @@ func TestConfig_ThemeColorsExemptionIsNarrow(t *testing.T) {
 	}
 }
 
+// TestConfig_SurfaceProfilesShowConfigDir pins forgectl#1238: --json must
+// carry every [surface.profiles] entry's name and config_dir, so a reader can
+// confirm which accounts workers run under without a launch. A config_dir is
+// a path, not a secret, so the entry is not marked redacted.
+func TestConfig_SurfaceProfilesShowConfigDir(t *testing.T) {
+	body := "[surface.profiles.alt]\nconfig_dir = \"~/.claude-alt\"\n" +
+		"[surface.profiles.work]\nconfig_dir = \"/srv/claude-work\"\n"
+
+	text := runConfig(t, body)
+	for _, want := range []string{"alt(config_dir=~/.claude-alt)", "work(config_dir=/srv/claude-work)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("human config output is missing %q; got:\n%s", want, text)
+		}
+	}
+
+	doc := runConfigJSON(t, body)
+	e := findEntry(t, doc, "surface.profiles")
+	if e.Redacted || !e.Set {
+		t.Errorf("surface.profiles redacted=%v set=%v, want redacted=false set=true", e.Redacted, e.Set)
+	}
+	got, err := json.Marshal(e.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `[{"config_dir":"~/.claude-alt","name":"alt"},{"config_dir":"/srv/claude-work","name":"work"}]`
+	if string(got) != want {
+		t.Errorf("surface.profiles value = %s, want %s", got, want)
+	}
+}
+
+// TestConfig_SurfaceProfilesUnsetIsEmptyList pins the fallback in
+// surfaceProfilesValue: with no [surface.profiles] table, --json carries an
+// empty list, never null, so a reader can range over it without a nil check.
+func TestConfig_SurfaceProfilesUnsetIsEmptyList(t *testing.T) {
+	doc := runConfigJSON(t, "")
+	e := findEntry(t, doc, "surface.profiles")
+	if e.Redacted || e.Set {
+		t.Errorf("surface.profiles redacted=%v set=%v, want both false", e.Redacted, e.Set)
+	}
+	got, err := json.Marshal(e.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "[]" {
+		t.Errorf("unset surface.profiles value = %s, want []", got)
+	}
+}
+
 // TestConfig_EveryBindableFieldIsTagged extends configStructSections' fatal
 // from top-level sections to every field at every depth.
 //
@@ -656,7 +704,7 @@ func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
 	}
 
 	var js bytes.Buffer
-	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved); err != nil {
+	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved, nil); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {

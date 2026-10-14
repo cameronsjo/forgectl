@@ -68,7 +68,9 @@ func menuFixtureDoc(t *testing.T) (menuJSON, tui.HubHeader) {
 // menuLeaves (pr gains a "pr pr" leaf); count an optional <…> in
 // usageRequiresArg (reviewed's needs_args flips); drop the Args clause from
 // menuNeedsArgs (pin NAME's needs_args flips); drop the nested menuLeaves
-// call (findings loses its list leaf).
+// call (findings loses its list leaf). The text form is pinned twice: the
+// whole menu, one line per command with a subverb count, and a named group's
+// expanded form (forgectl#1151).
 func TestMenu_Golden(t *testing.T) {
 	doc, header := menuFixtureDoc(t)
 	var js bytes.Buffer
@@ -77,8 +79,11 @@ func TestMenu_Golden(t *testing.T) {
 	if err := enc.Encode(doc); err != nil {
 		t.Fatal(err)
 	}
-	var txt bytes.Buffer
-	if err := writeMenuText(&txt, doc, header); err != nil {
+	var txt, expanded bytes.Buffer
+	if err := writeMenuText(&txt, doc, header, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMenuText(&expanded, doc, header, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, g := range []struct {
@@ -87,6 +92,7 @@ func TestMenu_Golden(t *testing.T) {
 	}{
 		{"menu.golden.json", js.Bytes()},
 		{"menu.golden.txt", txt.Bytes()},
+		{"menu.golden.expanded.txt", expanded.Bytes()},
 	} {
 		path := filepath.Join("testdata", g.file)
 		if *updateMenuGolden {
@@ -284,5 +290,31 @@ func TestMenu_TextHasNoEscapes(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("menu text lacks %q:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestMenu_TextCollapsesUnlessScoped pins forgectl#1151: bare `menu` prints
+// one line per command and says how to see subverbs; `menu <command>` lists
+// them. Mutations that turn it red: pass expand=true unconditionally; drop the
+// closing hint line.
+func TestMenu_TextCollapsesUnlessScoped(t *testing.T) {
+	isolateJSONContractEnv(t)
+	t.Setenv("HISTFILE", filepath.Join(t.TempDir(), "absent"))
+	whole, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "menu")
+	if err != nil {
+		t.Fatalf("menu: %v (stderr %q)", err, stderr)
+	}
+	if strings.Contains(whole, "forgectl docs serve") {
+		t.Errorf("bare menu lists docs' subverbs; want one line per command:\n%s", whole)
+	}
+	if !strings.Contains(whole, "subverbs)") || !strings.Contains(whole, "forgectl menu <command> lists a command's subverbs.") {
+		t.Errorf("bare menu lacks the subverb count or the closing hint:\n%s", whole)
+	}
+	scoped, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "menu", "docs")
+	if err != nil {
+		t.Fatalf("menu docs: %v (stderr %q)", err, stderr)
+	}
+	if !strings.Contains(scoped, "forgectl docs serve") {
+		t.Errorf("menu docs does not list docs' subverbs:\n%s", scoped)
 	}
 }

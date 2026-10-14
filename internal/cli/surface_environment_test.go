@@ -149,9 +149,66 @@ func TestPaneIdentityEnv_OnlyForHerdr(t *testing.T) {
 	}
 	got := paneIdentityEnv(markHerdrPane([]string{"PATH=/bin"}), stale)
 	for _, e := range got {
-		if strings.HasPrefix(e, herdrPaneMarkerEnv+"=") {
+		if strings.HasPrefix(e, paneMarkerEnv+"=") {
 			t.Errorf("the marker reached the harness: %q", got)
 		}
+	}
+}
+
+// TestSurfaceLaunchEnvironment_StripsTmuxAndCmuxPanes is forgectl#1044: the
+// launcher's tmux and cmux pane ids go like herdr's, and the variables naming
+// the server they share stay.
+func TestSurfaceLaunchEnvironment_StripsTmuxAndCmuxPanes(t *testing.T) {
+	base := []string{
+		"PATH=/bin",
+		"TMUX=/tmp/tmux-501/default,123,0",
+		"TMUX_PANE=%3",
+		"CMUX_SOCKET_PATH=/tmp/cmux.sock",
+		"CMUX_WORKSPACE_ID=0F1E2D3C-0000-0000-0000-000000000001",
+		"CMUX_SURFACE_ID=0F1E2D3C-0000-0000-0000-000000000002",
+		"CMUX_TAB_ID=0F1E2D3C-0000-0000-0000-000000000003",
+	}
+	want := []string{"PATH=/bin", "TMUX=/tmp/tmux-501/default,123,0", "CMUX_SOCKET_PATH=/tmp/cmux.sock"}
+	if got := surfaceLaunchEnvironment(base); !slices.Equal(got, want) {
+		t.Fatalf("surface environment = %q, want %q", got, want)
+	}
+}
+
+// TestPaneIdentityEnv_PerBackend carries back the marked backend's own pane
+// ids and no other manager's: a tmux pane started from inside cmux still holds
+// the cmux ids of the server's starter, and those must not cross.
+func TestPaneIdentityEnv_PerBackend(t *testing.T) {
+	own := map[string]string{
+		"TMUX_PANE":          "%7",
+		"CMUX_WORKSPACE_ID":  "ws-1",
+		"CMUX_SURFACE_ID":    "sf-2",
+		"CMUX_TAB_ID":        "tb-3",
+		"HERDR_PANE_ID":      "w1:p1",
+		"HERDR_TAB_ID":       "w1:t1",
+		"HERDR_WORKSPACE_ID": "w1",
+	}
+	getenv := func(k string) string { return own[k] }
+	cases := map[string][]string{
+		"tmux":  {"PATH=/bin", "TMUX_PANE=%7"},
+		"cmux":  {"PATH=/bin", "CMUX_WORKSPACE_ID=ws-1", "CMUX_SURFACE_ID=sf-2", "CMUX_TAB_ID=tb-3"},
+		"herdr": {"PATH=/bin", "HERDR_PANE_ID=w1:p1", "HERDR_TAB_ID=w1:t1", "HERDR_WORKSPACE_ID=w1"},
+		"other": {"PATH=/bin"},
+	}
+	for backend, want := range cases {
+		if got := paneIdentityEnv(markPane([]string{"PATH=/bin"}, backend), getenv); !slices.Equal(got, want) {
+			t.Errorf("%s: env = %q, want %q", backend, got, want)
+		}
+	}
+}
+
+// TestPaneIdentityEnv_LegacyMarker: an older launcher's herdr-only marker
+// is stripped and still reads as a herdr launch.
+func TestPaneIdentityEnv_LegacyMarker(t *testing.T) {
+	got := paneIdentityEnv([]string{"PATH=/bin", legacyHerdrPaneMarkerEnv + "=1"}, func(k string) string {
+		return map[string]string{"HERDR_PANE_ID": "w1:p1"}[k]
+	})
+	if want := []string{"PATH=/bin", "HERDR_PANE_ID=w1:p1"}; !slices.Equal(got, want) {
+		t.Errorf("env = %q, want %q", got, want)
 	}
 }
 

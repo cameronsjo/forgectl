@@ -85,9 +85,10 @@
 //     out. Not measured: an https remote whose credentials only an
 //     interactive prompt supplies, which GIT_TERMINAL_PROMPT=0 would refuse.
 //
-//   - Hooks. The Local calls that can run one (branch -D's
-//     reference-transaction, worktree add's post-checkout) run it in the
-//     operator's own repository.
+//   - Hooks. The Local call that can run one, branch -D's
+//     reference-transaction, runs it in the operator's own repository.
+//     worktree add's post-checkout goes through RunNoHooks, which switches
+//     every hook off.
 //
 // # Transport
 //
@@ -118,7 +119,7 @@ import (
 	"strings"
 	"time"
 
-	fexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // Profile selects how git is hardened for one call. The zero value is Local.
@@ -293,6 +294,9 @@ func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args
 // RunBinRefusing is RunRefusing with the git executable named, as RunBin is
 // Run's: internal/projects pulls through the absolute path it resolved.
 func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse []string, args ...string) (string, error) {
+	if setsConfig(args) {
+		return "", errCallerConfig
+	}
 	overrides, unset := filter(p, os.Environ())
 	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
 		if overrides == nil {
@@ -305,6 +309,52 @@ func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse
 		pre = append(pre, "-c", "protocol."+name+".allow=never")
 	}
 	return r.RunWithEnvFiltered(ctx, overrides, unset, bin, append(pre, args...)...)
+}
+
+// errCallerConfig is RunBinRefusing's refusal of a call that carries config
+// options of its own (#1020).
+var errCallerConfig = errors.New("gitenv: refusing a git call that sets config of its own: it could override the refused transports")
+
+// setsConfig reports whether args, up to a "--" that ends option parsing,
+// carry any config option: git's global -c and --config-env, or clone's
+// -c/--config, in the separate, attached, abbreviated (--conf=…) and bundled
+// (-qcfoo=x) spellings.
+//
+// Every config option is refused, not only protocol keys. git keeps the last
+// value given for a key and the refusing -c options come first, so a
+// caller's own `-c protocol.ext.allow=always` would cancel the refusal, and
+// so would `-c include.path=<file>` or `-c includeIf.<cond>.path=<file>`
+// naming a file that sets it. A list of dangerous keys would have to keep up
+// with every way git can pull configuration in; no refusing call needs a
+// config option of its own, so none is allowed. A clone's -c also persists
+// into the new repository's .git/config.
+//
+// It errs toward refusing: a single-dash bundle holding a 'c' anywhere is
+// refused, though a flag's attached value could be what holds it.
+//
+// It trusts the first "--" to be a real end-of-options marker and does not
+// look past it. An option that takes a value can swallow a "--" as that
+// value (`clone --template -- -c foo.bar=x …` writes foo.bar), so a caller
+// must never pass "--" as an option's value.
+func setsConfig(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if long, ok := strings.CutPrefix(a, "--"); ok {
+			name, _, _ := strings.Cut(long, "=")
+			// --config-env, --config, and any abbreviation of --config git's
+			// option parser would accept (--c, --co, --con, …).
+			if strings.HasPrefix(name, "config") || (name != "" && strings.HasPrefix("config", name)) {
+				return true
+			}
+			continue
+		}
+		if len(a) > 1 && a[0] == '-' && strings.ContainsRune(a[1:], 'c') {
+			return true
+		}
+	}
+	return false
 }
 
 // allowProtocolVar is git's transport allowlist variable.
@@ -348,13 +398,12 @@ func filter(p Profile, environ []string) (map[string]string, []string) {
 	return overrides, unset
 }
 
-// filterDriverKeys matches every configuration key that names a filter
+// listedKeys (hooks.go) matches every configuration key that names a filter
 // driver's program (gitattributes(5)): filter.<driver>.clean, .smudge and
 // .process. The driver name is a config subsection, so it may itself hold
 // dots; it is parsed from the right.
-const filterDriverKeys = `^filter\..*\.(clean|smudge|process)$`
 
-// filterDriverVars are the variables filterDriverKeys matches, in the order
+// filterDriverVars are the filter variables listedKeys matches, in the order
 // RunUnfiltered blanks them.
 var filterDriverVars = []string{"clean", "smudge", "process"}
 
@@ -390,33 +439,35 @@ var repoDeadline = 30 * time.Second
 // projects inventory's `remote get-url`, for one. The caller defers cancel.
 //
 // A git in its own group no longer gets the terminal's Ctrl-C, which goes
-// to the foreground group only, so Bounded passes it on (interruptible): a
+// to the foreground group only, so Bounded passes it on (internal/sigrelay): a
 // terminating signal that reaches forgectl while the context is live
 // cancels it, which kills the git's group, and cancel then re-raises the
 // signal, so forgectl stops as it did when git shared its group rather
 // than carrying on to the next repository.
 func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
-	dctx, cancel := context.WithTimeout(ctx, repoDeadline)
-	ictx, stop := interruptible(dctx)
-	return fexec.WithProcessGroup(ictx), func() {
-		stop()
-		cancel()
-	}
+	return sigrelay.Group(ctx, repoDeadline)
 }
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
-// (cameronsjo/forgectl#977). It is for a call that can run a filter on the
+// (cameronsjo/forgectl#977) and hooks switched off by both mechanisms git
+// has (cameronsjo/forgectl#1079, hooks.go): core.hooksPath=/dev/null for the
+// hooks directory, and hook.<name>.enabled=false for each hook configuration
+// defines (git 2.54+). It is for a call that can run a filter on the
 // working tree and needs none: status, whose racy or stat-dirty entries are
 // re-hashed through the clean filter (or the process filter) that
 // .gitattributes names. Local cannot stop that by itself: no option turns
 // filters off, and the repository's own .gitattributes and .git/config
 // select and define them.
 //
-// So it lists the drivers first, under Local, with `git config
-// --get-regexp`, and the call then carries
+// A status that refreshes the index also fires post-index-change, which is
+// why the hooks are switched off as well.
+//
+// So it lists the drivers and configured hooks first, under Local, with one
+// `git config --get-regexp`, and the call then carries
 // `-c filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`
-// for each name found, which outranks every configuration file. A driver
+// for each driver name found and `-c hook.<name>.enabled=false` for each
+// hook name, which outrank every configuration file. A driver
 // with filter.<name>.required set then fails the call instead of running,
 // which the callers read as an unknown state, never a clean one.
 //
@@ -436,8 +487,8 @@ func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 //
 // It fails closed, refusing the call with an error that says why, when:
 //   - a listing fails, or lists anything it does not expect;
-//   - a driver's name holds '=' (git splits a -c argument there) or a
-//     newline, which -c cannot override;
+//   - a driver's or configured hook's name holds '=' (git splits a -c
+//     argument there) or a newline, which -c cannot override;
 //   - a gitlink's path is a symbolic link, or its .git is a symbolic link
 //     or not a repository (a directory with no HEAD, or a gitfile that names
 //     none). git itself would not enter such a submodule, but proving that
@@ -508,20 +559,25 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 			visited[key] = true
 		}
 	}
-	var names []string
+	var names, hooks []string
 	for listed := 0; len(queue) > 0; listed++ {
 		if listed == maxUnfilteredRepos {
 			return "", errTooManyRepos
 		}
 		cur := queue[0]
 		queue = queue[1:]
-		found, err := listFilterDrivers(ctx, r, bin, cur.dir)
+		found, foundHooks, err := listDriversAndHooks(ctx, r, bin, cur.dir)
 		if err != nil {
 			return "", err
 		}
 		for _, name := range found {
 			if !slices.Contains(names, name) {
 				names = append(names, name)
+			}
+		}
+		for _, name := range foundHooks {
+			if !slices.Contains(hooks, name) {
+				hooks = append(hooks, name)
 			}
 		}
 		subs, err := populatedSubmodules(ctx, r, bin, cur.dir)
@@ -540,8 +596,9 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 		}
 	}
 	slices.Sort(names)
+	slices.Sort(hooks)
 	at := atDir(dir)
-	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
+	off := NoHookArgs(hooks)
 	for _, name := range names {
 		for _, v := range filterDriverVars {
 			off = append(off, "-c", "filter."+name+"."+v+"=")
@@ -558,19 +615,14 @@ func atDir(dir string) []string {
 	return []string{"-C", dir}
 }
 
-// listFilterDrivers returns every filter driver dir's configuration
-// defines, in any scope.
-func listFilterDrivers(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
-	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
+// listDriversAndHooks returns every filter driver and every configured hook
+// dir's configuration defines, in any scope, from one listing.
+func listDriversAndHooks(ctx context.Context, r Runner, bin, dir string) ([]string, []string, error) {
+	out, err := listConfig(ctx, r, bin, dir, listedKeys, "filter drivers and hooks")
 	if err != nil {
-		// git config exits 1, printing nothing, when no key matches.
-		var ce *fexec.CommandError
-		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
-			return nil, fmt.Errorf("list the filter drivers git could run: %w", err)
-		}
-		out = ""
+		return nil, nil, err
 	}
-	return filterDriverNames(out)
+	return listedNames(out)
 }
 
 // submodule is a populated submodule's working tree and the key of the
@@ -686,10 +738,10 @@ func gitDirKey(sub string) (string, error) {
 }
 
 // readGitfile returns the path the gitfile at path names. It opens the file
-// without following a link or blocking (openGitfile), refuses a handle that
+// without following a link or blocking (OpenGitfile), refuses a handle that
 // is not a regular file, and reads at most maxGitfileBytes+1 bytes.
 func readGitfile(path string) (string, error) {
-	f, err := openGitfile(path)
+	f, err := OpenGitfile(path)
 	if err != nil {
 		return "", fmt.Errorf("open a submodule's gitfile: %w", err)
 	}
@@ -729,7 +781,7 @@ var errUnfilteredDeadline = errors.New("git did not finish")
 
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.
-var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver; refusing to run unfiltered")
+var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver or hook; refusing to run unfiltered")
 
 // errUnoverridableFilter is returned for a driver name -c cannot override.
 var errUnoverridableFilter = errors.New("a filter driver's name holds '=' or a newline, which git -c cannot override; refusing to run with it live")
@@ -758,7 +810,7 @@ var errSubmoduleDepth = errors.New("submodules nest too deeply to list their fil
 var errTooManyRepos = errors.New("too many submodules to list their filter drivers; refusing to run unfiltered")
 
 // filterDriverNames parses `git config -z --name-only --get-regexp
-// filterDriverKeys` output into the sorted, distinct driver names.
+// listedKeys` output's filter keys into the sorted, distinct driver names.
 func filterDriverNames(out string) ([]string, error) {
 	var names []string
 	for _, key := range strings.Split(out, "\x00") {

@@ -62,6 +62,9 @@ type deskRunView struct {
 	// raw shows each line as the log wrote it rather than as a lens's say
 	// rewrote it (o); rewrites is set once any event was rewritten.
 	raw, rewrites bool
+	// flowchart draws the steps as a top-down flowchart beside the
+	// timeline (desk show --live --layout flow) rather than the flow above it.
+	flowchart bool
 	// clock is the time a running step is counted from; nil is time.Now.
 	clock func() time.Time
 	err   error
@@ -155,7 +158,7 @@ func (m deskModel) openRunViewOf(r queueRow, ok bool) (tea.Model, tea.Cmd) {
 	}
 	name := ""
 	if ok {
-		if r.kind == rowWaiting || r.kind == rowRefused {
+		if r.kind == rowWaiting || r.kind == rowHeld || r.kind == rowRefused {
 			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet; r opens its run once it starts"))
 			return m, nil
 		}
@@ -300,7 +303,7 @@ func (m deskModel) switchRun(step int) (tea.Model, tea.Cmd) {
 	}
 	idx := (v.idx + step + len(v.refs)) % len(v.refs)
 	m.runGen++
-	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true, ascii: v.ascii}
+	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true, ascii: v.ascii, flowchart: v.flowchart}
 	return m, loadRunCmd(m.runs, m.rv.gen, "", m.rv.ref(), nil)
 }
 
@@ -352,6 +355,11 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 		return m.switchRun(1)
 	case "p":
 		return m.switchRun(-1)
+	case "?":
+		// The run view's own key list, from the table its hints are drawn
+		// from (#1158). Closing it returns here, since rv stays open.
+		v.stopPlay()
+		m.pager = &deskPager{title: "keys", lines: runKeyLines(), keys: true}
 	}
 	return m, nil
 }
@@ -459,6 +467,8 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		lines = append(lines, st.Muted.Render(" loading…"))
 	case v.err != nil && !v.loaded:
 		lines = append(lines, cut(" "+st.Danger.Render(safeMessage(v.err.Error())), width))
+	case v.flowchart:
+		lines = append(lines, v.flowchartBody(st, g, s, width, max(body, 1))...)
 	default:
 		flowRows := max(min(body/2, 12), 1)
 		flow := runFlow(st, g, s, v.timing(), width, flowRows)
@@ -481,10 +491,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		lines = append(lines, "")
 	}
 	lines = lines[:height-1]
-	hints := runHintsFor(width, finished)
-	if v.rewrites {
-		hints = runHintsWith(hints, width, v.raw)
-	}
+	hints := runHintsFor(width, finished, v.rewrites, v.raw)
 	return strings.Join(append(lines, cut(st.Muted.Render(hints), width)), "\n")
 }
 
@@ -519,19 +526,6 @@ func (v *deskRunView) gist(st theme.Styles, s runview.RunState) string {
 	return style.Render(g)
 }
 
-// runHintsWith adds the o key to the hints when the width has room for it.
-func runHintsWith(hints string, width int, raw bool) string {
-	o := " · o as written"
-	if raw {
-		o = " · o plain words"
-	}
-	h := strings.Replace(hints, " · q close", o+" · q close", 1)
-	if ansi.StringWidth(h) <= width {
-		return h
-	}
-	return hints
-}
-
 // noEventsText says why a run shows no events: one that never ran says so,
 // in the word the queue uses; one that may still start is waiting for them.
 func noEventsText(live runview.LiveState) string {
@@ -544,24 +538,69 @@ func noEventsText(live runview.LiveState) string {
 	return "no events yet"
 }
 
-// runHintsFor is the widest key-hint line that fits, so "q close" is never
-// the part cut off. G goes to a finished run's end, or back to a live run's
-// newest event.
-func runHintsFor(width int, finished bool) string {
-	g := "g/G start/live"
-	if finished {
-		g = "g/G start/end"
-	}
-	for _, h := range []string{
-		" ←/→ step · [ ] ±10 · " + g + " · space play · n/p run · q close",
-		" ←/→ step · " + g + " · space play · n/p run · q close",
-		" ←/→ · g/G · space · n/p · q close",
-	} {
-		if ansi.StringWidth(h) <= width {
-			return h
+// runBinding is one run view key: its hint label, what ? says it does, and
+// its place in the hints' drop order (0 is dropped last). The hints and the ?
+// screen both come from runBindings, as the dashboard's come from
+// deskBindings, so they cannot drift (#1158).
+type runBinding struct {
+	key, label, help string
+	prio             int
+}
+
+// runBindings are the run view's keys in hint order. g/G's label and o's
+// depend on the run; runHintsFor fills them in.
+var runBindings = []runBinding{
+	{"←/→", "step", "step the replay back or forward one event (also h/l)", 2},
+	{"[ ]", "±10", "move the replay 10 events back or forward", 6},
+	{"g/G", "start/live", "jump to the run's first event, or to its last (back to live while it runs)", 3},
+	{"space", "play", "play the replay forward one event at a time; space again pauses", 4},
+	{"n/p", "run", "show the next or the previous run", 5},
+	{"o", "as written", "show each line as the log wrote it, or in plain words again (when a lens rewrote lines)", 7},
+	{"?", "help", "show these keys", 1},
+	{"q", "close", "close the run view", 0},
+}
+
+// runHintsFor is the run view's key-hint line from runBindings, fitted to
+// width with the shared fitHints: q close always stays, and ? help until the
+// window is very narrow. G goes to a finished run's end, or back to a live
+// run's newest event. o shows only when a lens rewrote a line.
+func runHintsFor(width int, finished, rewrites, raw bool) string {
+	var hints []string
+	var shown []runBinding
+	for _, b := range runBindings {
+		label := b.label
+		switch b.key {
+		case "g/G":
+			if finished {
+				label = "start/end"
+			}
+		case "o":
+			if !rewrites {
+				continue
+			}
+			if raw {
+				label = "plain words"
+			}
 		}
+		hints = append(hints, b.key+" "+label)
+		shown = append(shown, b)
 	}
-	return " q close"
+	prio := make([]int, len(shown))
+	for i := range prio {
+		prio[i] = i
+	}
+	slices.SortStableFunc(prio, func(a, b int) int { return shown[a].prio - shown[b].prio })
+	return " " + fitHints(width-1, hints, prio)
+}
+
+// runKeyLines is the run view's ? screen: every key and what it does, from
+// runBindings.
+func runKeyLines() []string {
+	lines := make([]string, 0, len(runBindings))
+	for _, b := range runBindings {
+		lines = append(lines, fmt.Sprintf("%-6s %s", b.key, b.help))
+	}
+	return lines
 }
 
 // timing is the runner's step state, which describes the run now: shown only

@@ -68,6 +68,11 @@ type listRow struct {
 	Marker          string    `json:"marker,omitempty"`
 	Failure         string    `json:"failure,omitempty"`
 	Recovery        string    `json:"recovery,omitempty"`
+
+	// TerminalID is herdr's terminal_id for the pane, which survives a pane
+	// move where pane_id renumbers. Read for a present worker under --json
+	// only, and absent when that read, or an earlier row's, failed.
+	TerminalID string `json:"terminal_id,omitempty"`
 }
 
 type listOptions struct {
@@ -103,7 +108,7 @@ error, such as a ledger that cannot be read.
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the workers were launched from (project name or path)")
 	cmd.Flags().BoolVar(&opts.Orphans, "orphans", false, "show only workers whose workspace is gone or whose launch never finished")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery"}]} as JSON`)
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","terminal_id"}]} as JSON`)
 	return cmd
 }
 
@@ -138,7 +143,10 @@ func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, rep
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
 	}
-	return &workerLedgerContext{herdr: herdr, led: led, top: top}, nil
+	// Every reference this context reads comes from the session's own
+	// ledger, so a changed server incarnation is that session restarting:
+	// close and list settle it by the ownership marker (forgectl#1077).
+	return &workerLedgerContext{herdr: herdr.ForSessionLedger(), led: led, top: top}, nil
 }
 
 func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) error {
@@ -158,12 +166,19 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	}
 	now := time.Now()
 	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}
+	var kept []worker.Row
 	for _, r := range rows {
 		row := reconcileRow(ctx, w.herdr, r, w.top, listed, now)
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
 		res.Workers = append(res.Workers, row)
+		kept = append(kept, r)
+	}
+	if opts.JSON {
+		// After every probe, so a slow terminal read cannot starve a later
+		// row's probe into unreadable.
+		fillTerminalIDs(ctx, w.herdr, kept, res.Workers)
 	}
 	return reportList(cmd, res, opts.JSON)
 }
@@ -191,9 +206,44 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 	return row
 }
 
+// terminalReadTimeoutPerRow bounds one list row's terminal_id read.
+const terminalReadTimeoutPerRow = 5 * time.Second
+
+// fillTerminalIDs reads the terminal_id of each present worker in out (rows
+// are their ledger rows, index for index). Each read has its own short
+// timeout, and the first failed read ends the pass: a herdr that is slow or
+// failing for one pane is likely so for the next, and the ids are a
+// convenience, so the rest are left out rather than waited on.
+func fillTerminalIDs(ctx context.Context, tr terminalReader, rows []worker.Row, out []listRow) {
+	for i := range out {
+		if out[i].State != workerPresent {
+			continue
+		}
+		id, err := rowTerminalID(ctx, tr, rows[i])
+		if err != nil {
+			return
+		}
+		out[i].TerminalID = id
+	}
+}
+
+// rowTerminalID reads the terminal_id of a present worker's pane, under its
+// own timeout.
+func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) (string, error) {
+	ref, err := backend.DecodeRef(r.Ref)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, terminalReadTimeoutPerRow)
+	defer cancel()
+	return tr.TerminalID(ctx, ref)
+}
+
 // probeWorkspace probes the row's workspace. A row with no reference never
-// started one. An identity mismatch is unreadable: a restarted server or a
-// workspace that does not carry our marker cannot prove ours is gone.
+// started one. An identity mismatch is unreadable: a workspace id that does
+// not carry our marker, or our marker on another id, cannot prove ours is
+// gone. A restarted herdr session is not a mismatch here: the adapter is
+// ledger-bound, so a workspace the new server does not hold is gone.
 func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row *listRow) (string, string) {
 	if len(r.Ref) == 0 {
 		if r.Recovery != "" {
@@ -211,11 +261,15 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 	res := probe.Probe(ctx, ref)
 	switch res.State() {
 	case backend.ProbePresent:
+		if res.Restored() {
+			return workerPresent, "the herdr server behind this session changed (a restart or a live handoff) and holds the workspace again; " +
+				"after a restart the worker is gone, after a handoff it may still be running: check with herdr agent read before closing"
+		}
 		return workerPresent, ""
 	case backend.ProbeGone:
 		return workerGone, "the herdr workspace is gone"
 	case backend.ProbeIdentityMismatch:
-		return workerUnreadable, "herdr restarted, the reference is from another herdr session, or the workspace id no longer carries forgectl's marker (" + causeText(res) + ")"
+		return workerUnreadable, "the workspace cannot be proven to be forgectl's (" + causeText(res) + ")"
 	default:
 		return workerUnreadable, "herdr could not be read (" + causeText(res) + ")"
 	}

@@ -166,3 +166,31 @@ func TestQueueRemoveIfIsConditional(t *testing.T) {
 		t.Fatalf("RemoveIf of a missing row: err %v, want ErrQueueNoRow", err)
 	}
 }
+
+// TestReadUsagePastTheSharedCap pins forgectl#1221: usage-daily.jsonl is
+// never rotated, so ReadUsage reads past the shared 1 MiB cap up to
+// MaxUsageBytes, and refuses a file one byte larger.
+func TestReadUsagePastTheSharedCap(t *testing.T) {
+	d, dir := testDrainFiles(t)
+	// One 1 KiB line, appended until the file is exactly MaxUsageBytes.
+	line := append(bytes.Repeat([]byte("u"), 1023), '\n')
+	if err := d.AppendUsage(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, usageDailyName), bytes.Repeat(line, MaxUsageBytes/len(line)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.ReadUsage()
+	if err != nil || len(got) != MaxUsageBytes {
+		t.Fatalf("at MaxUsageBytes: read %d bytes, err %v; want %d", len(got), err, MaxUsageBytes)
+	}
+	if MaxUsageBytes <= MaxDrainEventsBytes {
+		t.Fatalf("MaxUsageBytes %d is not above the shared cap %d", MaxUsageBytes, MaxDrainEventsBytes)
+	}
+	if err := d.AppendUsage([]byte("x\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ReadUsage(); !errors.Is(err, ErrLedgerUnreadable) {
+		t.Fatalf("one byte past MaxUsageBytes: err %v, want ErrLedgerUnreadable", err)
+	}
+}

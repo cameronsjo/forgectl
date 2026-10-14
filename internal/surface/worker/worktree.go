@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 
@@ -13,7 +15,8 @@ import (
 
 // GitRunner is the slice of exec.Runner the worktree helper uses. Every git
 // call goes through gitenv under its Local profile, which pins the hardening
-// every forgectl git call carries; AddWorktree adds core.hooksPath on top.
+// every forgectl git call carries; AddWorktree switches every hook off on
+// top (gitenv.RunNoHooks).
 type GitRunner = gitenv.Runner
 
 // Worktree is what AddWorktree created.
@@ -47,8 +50,15 @@ var worktreeDirs = []string{".claude", "worktrees"}
 // main checkout, so it keeps the worktree's own top.
 func RepoTop(ctx context.Context, run GitRunner, dir string) (string, error) {
 	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--show-toplevel")
+	if errors.Is(err, osexec.ErrNotFound) {
+		return "", fmt.Errorf("worker: git is not installed: %w", err)
+	}
 	if err != nil {
-		return "", fmt.Errorf("worker: %s is not inside a git checkout: %w", dir, err)
+		// git's own message carries the whole git command line, which names
+		// no fix; the raw error goes to the log and the caller gets the
+		// next step (forgectl#1095).
+		slog.Debug("git rev-parse --show-toplevel failed.", "dir", dir, "error", err)
+		return "", fmt.Errorf("worker: %s is not inside a git checkout; run from inside the repository, or pass --repo with its path or project name", dir)
 	}
 	top := strings.TrimSpace(out)
 	common, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -80,10 +90,11 @@ func WorktreePath(top, name string) string {
 // other name becomes a new branch at the commit base returns, called only then
 // (forgectl#1061 reads it from GitHub rather than the often-stale HEAD).
 //
-// Every git call that writes runs with core.hooksPath=/dev/null. A branch
-// fetched from a remote carries whatever hook-runner config its tree points at
-// (husky, .githooks), and a post-checkout hook would run before any folder-trust
-// dialog had a chance to ask.
+// Every git call that writes runs with every hook switched off
+// (gitenv.RunNoHooks: the hooks directory and every configured hook). A
+// branch fetched from a remote carries whatever hook-runner config its tree
+// points at (husky, .githooks), and a post-checkout hook would run before any
+// folder-trust dialog had a chance to ask.
 //
 // The directories between top and the worktree are refused if any is a
 // symlink: a repo can commit .claude as a symlink, and following it would put
@@ -101,7 +112,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 		return Worktree{}, err
 	}
 
-	add := []string{"-C", top, "-c", "core.hooksPath=/dev/null", "worktree", "add"}
+	add := []string{"worktree", "add"}
 	from := branchSource(ctx, run, top, branch)
 	switch from {
 	case BranchLocal:
@@ -118,7 +129,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 		}
 		add = append(add, "-b", branch, "--", path, sha)
 	}
-	if _, err := gitenv.Run(ctx, run, gitenv.Local, add...); err != nil {
+	if _, err := gitenv.RunNoHooks(ctx, run, top, add...); err != nil {
 		return Worktree{}, fmt.Errorf("worker: git worktree add: %w", err)
 	}
 

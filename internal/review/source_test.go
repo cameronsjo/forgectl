@@ -8,10 +8,12 @@ package review
 //   [x] Unhappy: EVERY source failed → error (all-degraded is not an empty
 //       inventory)
 //   [x] Boundary: zero sources → error
+//   [x] Determinism: notes in source order, not arrival order (#1018)
 
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -75,5 +77,43 @@ func TestAggregate_AllSourcesFailed(t *testing.T) {
 func TestAggregate_NoSources(t *testing.T) {
 	if _, _, err := Aggregate(context.Background()); err == nil {
 		t.Error("zero sources must be an error")
+	}
+}
+
+// gatedSource is a fakeSource that answers only once gate is closed, and
+// closes done when it has answered.
+type gatedSource struct {
+	fakeSource
+	gate <-chan struct{}
+	done chan<- struct{}
+}
+
+func (g gatedSource) Items(ctx context.Context) ([]Item, []string, error) {
+	if g.gate != nil {
+		<-g.gate
+	}
+	if g.done != nil {
+		defer close(g.done)
+	}
+	return g.fakeSource.Items(ctx)
+}
+
+// #1018: notes come out in source order, not arrival order. The first source
+// answers only after the second has, so arrival order is the reverse.
+// Mutation: append notes as results arrive (the order flips to b, a).
+func TestAggregate_NotesKeepSourceOrder(t *testing.T) {
+	secondDone := make(chan struct{})
+	first := gatedSource{fakeSource: fakeSource{name: "a", err: errors.New("boom"), notes: []string{"a: own note"}}, gate: secondDone}
+	second := gatedSource{fakeSource: fakeSource{name: "b", items: []Item{testItem(KindIssue, "alpha", 1)}, notes: []string{"b: own note"}}, done: secondDone}
+
+	_, notes, err := Aggregate(context.Background(), first, second)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	// a failed but gave a note of its own, so no "a: source failed" follows
+	// it (#1096).
+	want := []string{"a: own note", "b: own note"}
+	if !slices.Equal(notes, want) {
+		t.Errorf("notes = %q; want %q", notes, want)
 	}
 }

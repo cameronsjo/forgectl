@@ -36,6 +36,9 @@ type ownerLock struct {
 
 // openLock opens (creating) the lock file, which must be a regular file.
 func (d *Desk) openLock(name string) (*os.File, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	f, err := d.root.OpenFile(lockName(name), os.O_RDWR|os.O_CREATE|unix.O_NONBLOCK, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("desk: open the owner lock for %s: %w", describe(name), err)
@@ -111,9 +114,15 @@ func (d *Desk) tryLockOwnerSettled(name string) (l *ownerLock, held bool, err er
 		if err != nil || !held || try == ownerLockTries {
 			return l, held, err
 		}
-		time.Sleep(ownerLockWait)
+		ownerLockPause()
 	}
 }
+
+// ownerLockPause is the wait between tries. Tests replace it to let a held
+// lock go at a known try instead of racing a timer against this loop. It is
+// an unsynchronised package variable, so a test that swaps it must not call
+// t.Parallel.
+var ownerLockPause = func() { time.Sleep(ownerLockWait) }
 
 // release drops the lock, removing the lock file first (while still holding
 // it) when remove is set. Remove only once the item has left running/ (Finish,

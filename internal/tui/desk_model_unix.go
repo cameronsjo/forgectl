@@ -54,6 +54,11 @@ type DeskOptions struct {
 	// ASCII draws the dashboard's marks, borders and bars in ASCII
 	// (--no-icons). The script viewer (v) is never changed.
 	ASCII bool
+	// NewerInstalled reports the version of a forgectl installed that is
+	// newer than this one, or "", for the line under the header (#1180). It
+	// runs every deskNewerEvery, off the frame. RunDesk sets the PATH check;
+	// nil checks nothing.
+	NewerInstalled func(ctx context.Context) string
 }
 
 const (
@@ -104,6 +109,9 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 	if opts.Runs == nil {
 		opts.Runs = runview.NewDeskSource(d)
 	}
+	if opts.NewerInstalled == nil {
+		opts.NewerInstalled = installedNewer(opts.Version)
+	}
 	_, err := tea.NewProgram(newDeskModel(ctx, d, opts), tea.WithContext(ctx)).Run()
 	return err
 }
@@ -130,6 +138,9 @@ type deskPager struct {
 	title  string
 	lines  []string
 	offset int
+	// keys marks a key list (?): v and l, which close the script and log
+	// pagers, leave it open, since in the run view l and h step the replay.
+	keys bool
 }
 
 type deskModel struct {
@@ -277,6 +288,9 @@ type (
 
 func (m deskModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.scanCmd(), m.tick()}
+	if c := m.newerCmd(0); c != nil {
+		cmds = append(cmds, c)
+	}
 	env := theme.Env{
 		StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
 		StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
@@ -357,6 +371,9 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.scanCmd())
 		}
 		return m, tea.Batch(cmds...)
+	case deskNewerMsg:
+		m.frame.Newer = t.version
+		return m, m.newerCmd(deskNewerEvery)
 	case deskScanMsg:
 		m.scanning = false
 		if t.err != nil {
@@ -552,9 +569,10 @@ func herdrNotify(ctx context.Context, title, body string) error {
 	if err != nil {
 		return nil //nolint:nilerr // no herdr binary on PATH: nothing to notify through
 	}
-	return herdr.NotificationShow(ctx, exec.NewOSSensitiveRunner(), path, herdr.Notification{
+	_, err = herdr.NotificationShow(ctx, exec.NewOSSensitiveRunner(), path, herdr.Notification{
 		Title: title, Body: body, Sound: herdr.SoundRequest,
 	})
+	return err
 }
 
 func (m deskModel) styles() theme.Styles { return m.theme.Styles() }
@@ -633,7 +651,7 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "?":
 		// The key list, from the table the footer is drawn from (#1108).
-		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
+		m.pager = &deskPager{title: "keys", lines: deskKeyLines(), keys: true}
 		return m, nil
 	}
 	return m, nil
@@ -735,7 +753,7 @@ func (m deskModel) askSkip() (tea.Model, tea.Cmd) {
 	if !ok || m.busy {
 		return m, nil
 	}
-	if r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowLost {
+	if r.kind != rowWaiting && r.kind != rowHeld && r.kind != rowRefused && r.kind != rowLost {
 		m.message = m.styles().Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; there is nothing to skip"))
 		return m, nil
 	}
@@ -1013,7 +1031,7 @@ func (m deskModel) log() tea.Cmd {
 func (m deskModel) logOf(r queueRow, ok bool) tea.Cmd {
 	name := ""
 	if ok {
-		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged ||
+		if r.kind == rowWaiting || r.kind == rowHeld || r.kind == rowRefused || r.kind == rowChanged ||
 			(r.kind == rowSkipped && r.item.Meta.SkipReason != desk.SkipLost) {
 			// No run, so no log: say so rather than open another item's log as
 			// this one's (#1106).
@@ -1096,9 +1114,16 @@ func (m *deskModel) pagerKey(key string) {
 	page := max(m.height-2, 1)
 	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
-	case "q", "esc", "v", "l", "?":
+	case "q", "esc", "?":
 		m.pager = nil
 		return
+	case "v", "l":
+		// v and l close the pagers they open. A key list (?) stays open:
+		// in the run view, under its keys list, l and h step the replay.
+		if !p.keys {
+			m.pager = nil
+			return
+		}
 	case "j", "down":
 		p.offset++
 	case "k", "up":
@@ -1238,7 +1263,7 @@ func (m deskModel) pagerView(width, height int) string {
 		lines = append(lines, "")
 	}
 	closeHint := "q close"
-	if p.title == "keys" {
+	if p.keys {
 		closeHint = "? or q close"
 	}
 	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+closeHint), width))
@@ -1304,9 +1329,12 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 		return nil, errors.Join(fmt.Errorf("desk: %s is a %s, not a TTY script; it does not run in the terminal", itemLabel(c.Name), c.Kind), d.Release(c.Name, desk.SkipLaunchFailed))
 	}
 	// A TTY item starts where a detached one does: in the home directory,
-	// with the operator's environment minus bash's startup hooks.
-	home, err := desk.HomeDir()
-	if err != nil {
+	// with the operator's environment minus bash's startup hooks. It is
+	// settled before the run begins, so a missing home releases the claim
+	// (launch-failed) rather than recording a run. Only Dir and Env are read
+	// from itemEnv: script(1) is not chosen until the log exists.
+	itemEnv := &osexec.Cmd{}
+	if err := desk.ApplyItemEnv(itemEnv); err != nil {
 		_ = os.Remove(rcPath)
 		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
 	}
@@ -1332,7 +1360,7 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 	}
 	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
-	cmd.Dir, cmd.Env = home, ttyEnv(desk.ChildEnv())
+	cmd.Dir, cmd.Env = itemEnv.Dir, ttyEnv(itemEnv.Env)
 	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 

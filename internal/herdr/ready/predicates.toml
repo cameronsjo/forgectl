@@ -24,8 +24,10 @@
 #     screen first. Use it while the harness's dialogs are uncaptured: a false
 #     "blocked" only makes the coordinator wait.
 #
-# Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0, and
-# npm on herdr 0.9.1, and Pi 1.0.4 on herdr 0.9.3 (testdata/). Screens marked "uncaptured" are written from
+# Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0 and
+# npm on herdr 0.9.1, and Codex 0.162.1 and Pi 1.0.4 on herdr 0.9.3 (testdata/).
+# Rows marked "seen live" were read from a live worker pane and are tested by
+# splicing those rows into a captured screen. Screens marked "uncaptured" are written from
 # the 2026-09-28 trial notes and have no fixture yet.
 
 version = 1
@@ -58,6 +60,11 @@ prompt_first = true
 # messages in the transcript use a plain space. The bare `❯` of a starship
 # shell prompt has no rule lines around it.
 prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](?P<input>.*(?:\n  .*)*))?\n─{20,}(?P<footer>(?:\n(?:  .*)?){0,12})\z'
+# An empty box sometimes shows a dim example prompt (`Try "refactor <filepath>"`).
+# Screen text carries no dim attribute, so it is matched by shape and read as no
+# input. Typed text of exactly this shape also reads as empty; the brief's
+# read-back then fails and nothing is sent, the safe direction.
+placeholder = '^Try "[^"\n]+"$'  # seen live 2026-10-12 (forgectl#1236, read from a worker pane); the test splices it into a captured screen
 
 [[harness.claude.blocking]]
 name = "folder-trust dialog"
@@ -84,12 +91,25 @@ name = "session feedback survey"
 with_prompt = true
 any = ['How is Claude doing this session\?', '(?m)^\s*1: Bad\s+2: Fine\s+3: Good']  # uncaptured
 
+[[harness.claude.blocking]]
+name = "auto-mode setup dialog"
+# Shown after a turn in auto mode once the classifier has denied a few actions.
+# Drawn above the input box with the box still showing, and it takes every
+# keystroke, so a typed brief vanishes (forgectl#1235). A worker's settings can
+# turn it off: "skillOverrides": {"auto-mode-setup": "off"}.
+with_prompt = true
+any = ['(?m)^\s*Teach auto mode about your environment\?\s*$(?:\n.*){1,8}\n\s*Enter to confirm · Esc to cancel\s*$']  # seen live 2026-10-12 (read from a worker pane); the test splices those rows into a captured screen
+
 [harness.codex]
 agent = "codex"
 prompt_first = false
 # The composer (continuation rows indented two spaces), an optional blank
-# row, the model/context footer, then up to 3 indented or empty rows.
-prompt = '(?m)^› (?P<input>.*(?:\n  .*)*?)\n\n?(?P<footer>  \S.*· Context \d+% left.*(?:\n(?:\s.*)?){0,3})\z'
+# row, the model/context footer, then up to 3 indented or empty rows. A long
+# branch or path cuts the model row off before "Context N% left" (Codex 0.162.1
+# in a worker worktree), so a model row shaped `<model> <effort> · …` also
+# marks the footer. Typing hides the shortcuts row under it, so that row is
+# not required.
+prompt = '(?m)^› (?P<input>.*(?:\n  .*)*?)\n\n?(?P<footer>(?:  \S.*· Context \d+% left.*|  \S+ (?:minimal|low|medium|high|xhigh) · .*)(?:\n(?:\s.*)?){0,3})\z'
 # An empty composer shows a placeholder. It is reported as no input.
 placeholder = '^Ask Codex to do anything$'  # captured; Codex rotates others, which read as typed input (the safe direction)
 

@@ -121,6 +121,21 @@ func TestFindReport(t *testing.T) {
 			want:   "fixed the bug and pushed feat/x", ok: true,
 		},
 		{
+			name:   "banner rows after the report are not part of it",
+			screen: echo + "\n\n⏺ REPORT " + testMarker + ": no PR\n  ▄ ▀ ▄ ▄ ▄▀▀▀▀▀▀▀▀▀▄▀▀▄▀▀▄ ▀▀\n",
+			want:   "no PR", ok: true,
+		},
+		{
+			name:   "a row indented past the text column is not a wrap",
+			screen: echo + "\n\n⏺ REPORT " + testMarker + ": no PR\n      Claude Code v2.1.289\n",
+			want:   "no PR", ok: true,
+		},
+		{
+			name:   "codex wrap under bold report",
+			screen: echo + "\n• **REPORT " + testMarker + ":** tests pass\n  on feat/x\n› \n",
+			want:   "tests pass on feat/x", ok: true,
+		},
+		{
 			name:   "last report wins",
 			screen: echo + "\n⏺ REPORT " + testMarker + ": first\n⏺ REPORT " + testMarker + ": second\n",
 			want:   "second", ok: true,

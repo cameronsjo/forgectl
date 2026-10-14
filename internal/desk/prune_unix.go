@@ -27,6 +27,9 @@ var protocolSuffixes = [...]string{extMeta, extManifest, extEvents, extScript, e
 // symlinks, dot files, or anything else; an item still in running/ keeps its
 // done/ files. Nothing in pending/ or running/ is touched.
 func (d *Desk) Prune(days int) (int, error) {
+	if d.readOnly {
+		return 0, ErrReadOnly
+	}
 	cands, err := d.pruneCandidates(days)
 	if err != nil {
 		return 0, err
@@ -122,19 +125,6 @@ func selectPrune(list func(sub string) ([]fs.DirEntry, error), now time.Time, da
 		}
 	}
 	return out, nil
-}
-
-// Exists reports whether dir looks like a desk: it holds at least one of the
-// protocol subdirectories as a real directory (a symlink does not count). It
-// reads only. Open creates a missing desk, so a verb that must not create one
-// asks this first.
-func Exists(dir string) bool {
-	for _, sub := range protocolDirs {
-		if fi, err := os.Lstat(filepath.Join(dir, sub)); err == nil && fi.IsDir() {
-			return true
-		}
-	}
-	return false
 }
 
 // PrunePlanAt returns what [Desk.Prune] would remove from the desk at dir,

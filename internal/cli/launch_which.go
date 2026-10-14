@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -29,7 +30,8 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+safeText(notice))
 			}
 			cfg.Launch = effLaunch
-			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
+			lc, source := resolveLaunchConfigSource(boundary, cfg, effFrom)
+			src := source.label()
 			profile, err := launch.Resolve(lc, cwd)
 			if err != nil {
 				return WithExitCode(termsafe.Error(err), exitUsage)
@@ -51,16 +53,26 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			if profile.Harness == "claude" {
 				runDir = launch.SettingsRoot(cwd)
 			}
+			// What a worker started here would get (forgectl#1125): a worker
+			// does not read [launch.defaults], so the profile above is not
+			// its posture. Resolved through the launch's own worker path.
+			worker, err := launch.ResolveWorkerPosture(lc, cwd)
+			if err != nil {
+				return WithExitCode(termsafe.Error(err), exitUsage)
+			}
 			if asJSON {
-				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, runDir, src, injected)
+				doc := buildLaunchWhichJSON(profile, cwd, runDir, source, injected)
+				doc.Worker = buildLaunchWhichWorkerJSON(worker)
+				return encodeLaunchWhichJSON(cmd.OutOrStdout(), doc)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			printLaunchProfile(out, th, profile, cwd, runDir, src, injected)
+			printWorkerPosture(out, th, worker)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"directory":...,"run_directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
+		`emit {"directory":...,"run_directory":...,"config":...,"config_path":...,"config_note":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
 	return cmd
 }
 
@@ -75,8 +87,16 @@ type launchWhichJSON struct {
 	// repository's settings root for a claude launch from a subfolder,
 	// otherwise Directory. Present for the claude harness only, the one that
 	// can move (launch.SettingsRoot).
-	RunDirectory   string   `json:"run_directory,omitempty"`
-	Config         string   `json:"config"`
+	RunDirectory string `json:"run_directory,omitempty"`
+	// Config is the human source label: the path, then any note in
+	// parentheses. ConfigPath and ConfigNote carry the two apart.
+	Config string `json:"config"`
+	// ConfigPath is the file the profile was read from, or would be (a
+	// missing config.toml), usable as a path.
+	ConfigPath string `json:"config_path"`
+	// ConfigNote is "" for the file's own [launch] section, else why it is
+	// not: "legacy", "missing — built-in defaults", and the like.
+	ConfigNote     string   `json:"config_note"`
 	Matched        string   `json:"matched"`
 	Harness        string   `json:"harness"`
 	Model          string   `json:"model"`
@@ -91,12 +111,81 @@ type launchWhichJSON struct {
 	// URL on a surface that gets pasted into an issue.
 	InjectedEnvKeys []string `json:"injected_env_keys"`
 	AddDir          []string `json:"add_dir"`
+	// Worker is the posture a worker started in Directory gets: a worker
+	// reads [launch.worker], not [launch.defaults], so the fields above are
+	// not its posture (forgectl#1125).
+	Worker *launchWhichWorkerJSON `json:"worker,omitempty"`
+}
+
+// launchWhichWorkerJSON is the effective worker posture. Posture names each
+// field the harness takes with its source: "default" (the built-in worker
+// value), "launch.worker", or "repo-profile" (the matched project block's
+// stricter value). Refused is the worker floor's refusal, empty when a worker
+// may start here.
+type launchWhichWorkerJSON struct {
+	Harness string                   `json:"harness"`
+	Posture []launchWhichPostureJSON `json:"posture"`
+	Notes   []string                 `json:"notes"`
+	Refused string                   `json:"refused,omitempty"`
+}
+
+type launchWhichPostureJSON struct {
+	Field  string `json:"field"`
+	Value  string `json:"value"`
+	Source string `json:"source"`
+}
+
+func buildLaunchWhichWorkerJSON(w launch.WorkerPosture) *launchWhichWorkerJSON {
+	out := &launchWhichWorkerJSON{Harness: w.Harness, Posture: []launchWhichPostureJSON{}, Notes: []string{}, Refused: w.Refused}
+	for _, v := range w.Values {
+		out.Posture = append(out.Posture, launchWhichPostureJSON(v))
+	}
+	if w.Notes != nil {
+		out.Notes = w.Notes
+	}
+	return out
+}
+
+// workerPostureSummary is the one-line worker posture: the harness, then each
+// field with its value and source.
+func workerPostureSummary(w *launchWhichWorkerJSON) string {
+	parts := make([]string, 0, len(w.Posture))
+	for _, v := range w.Posture {
+		parts = append(parts, fmt.Sprintf("%s %s (%s)", v.Field, v.Value, v.Source))
+	}
+	switch {
+	case len(parts) > 0:
+		return w.Harness + "  " + strings.Join(parts, ", ")
+	case w.Refused == "":
+		return w.Harness + "  (no posture flags)"
+	}
+	return w.Harness
+}
+
+// printWorkerPosture renders the worker row under the launch profile.
+func printWorkerPosture(w io.Writer, th theme.Theme, p launch.WorkerPosture) {
+	styles := th.Styles()
+	labelStyle := styles.Muted.Width(14)
+	valueStyle := styles.Fg
+	dimStyle := styles.Muted.Italic(true)
+	row := func(label, value string, style func(...string) string) {
+		_, _ = fmt.Fprintln(w, renderSafe(labelStyle.Render, label)+renderSafe(style, value))
+	}
+
+	view := buildLaunchWhichWorkerJSON(p)
+	row("worker", workerPostureSummary(view), valueStyle.Render)
+	if view.Refused != "" {
+		row("", "refused: "+view.Refused, dimStyle.Render)
+	}
+	for _, n := range view.Notes {
+		row("", "note: "+n, dimStyle.Render)
+	}
 }
 
 // buildLaunchWhichJSON converts a resolved profile into the --json wire
 // shape. Slice fields are never nil so the encoder emits [] rather than null
 // for a profile with no env or no add-dir entries.
-func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, injected []string) launchWhichJSON {
+func buildLaunchWhichJSON(p launch.Profile, cwd, runDir string, src launchConfigSource, injected []string) launchWhichJSON {
 	envKeys := launch.SortedEnvKeys(p.Env)
 	if envKeys == nil {
 		envKeys = []string{}
@@ -111,7 +200,9 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, inject
 	return launchWhichJSON{
 		Directory:       cwd,
 		RunDirectory:    runDir,
-		Config:          confPath,
+		Config:          src.label(),
+		ConfigPath:      src.Path,
+		ConfigNote:      src.Note,
 		Matched:         p.Match,
 		Harness:         p.Harness,
 		Model:           p.Model,
@@ -124,13 +215,13 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, inject
 	}
 }
 
-// writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
-// seam. Nothing is written before a marshal error, so a failing writer or
-// encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir, confPath string, injected []string) error {
+// encodeLaunchWhichJSON encodes a built document through the sanctioned
+// termsafe seam. Nothing is written before a marshal error, so a failing
+// writer or encoder never leaves a partial document on stdout.
+func encodeLaunchWhichJSON(w io.Writer, doc launchWhichJSON) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildLaunchWhichJSON(p, cwd, runDir, confPath, injected))
+	return enc.Encode(doc)
 }
 
 func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, runDir, confPath string, injected []string) {

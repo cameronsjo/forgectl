@@ -112,10 +112,11 @@ func githubListOrg(ctx context.Context, run exec.Runner, org, host string) ([]Re
 	repos := make([]Repo, 0, len(raw))
 	for _, r := range raw {
 		// r.Name is server-supplied and becomes a directory. Drop rather than
-		// repair: a name we cannot file is a row we cannot act on, and a
-		// ".git"/".bare" name would collide with the layout itself. Categorical
-		// log — the rejected value is exactly the untrusted one.
-		if !validRepoSegment(r.Name) {
+		// repair: a name we cannot file is a row we cannot act on. A leading
+		// dot is filed under a "dot-" leaf (repoDirLeaf, #1057), so ".github"
+		// is kept. Categorical log — the rejected value is exactly the
+		// untrusted one.
+		if _, ok := repoDirLeaf(r.Name); !ok {
 			slog.Warn("Dropped a GitHub repo whose name is not a safe path segment.", "owner", org)
 			continue
 		}

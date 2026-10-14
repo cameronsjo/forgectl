@@ -219,3 +219,53 @@ func TestRunRefusingKeepsTheOperatorsOtherTransports(t *testing.T) {
 		t.Error("RunRefusing set GIT_ALLOW_PROTOCOL where none was inherited")
 	}
 }
+
+// A caller's own config would outrank the refusal, because git keeps the
+// last value for a key and the refusing -c options come first (#1020): a
+// protocol allow key directly, or an include that points at a file setting
+// one. RunRefusing refuses any config option before running anything, in
+// each spelling the table lists, and leaves an argument after "--" alone.
+// Mutation: drop the check (the call runs with the caller's config last).
+func TestRunRefusingRejectsACallersConfig(t *testing.T) {
+	refuse := []string{"ext", "fd"}
+	for _, args := range [][]string{
+		{"-c", "protocol.ext.allow=always", "clone", "--", "u", "d"},
+		{"-c", "Protocol.EXT.Allow=always", "fetch"},
+		{"-c", "protocol.allow=always", "fetch"},
+		{"-c", "include.path=/f", "fetch"},
+		{"-c", "includeIf.gitdir:/.path=/f", "fetch"},
+		{"-c", "core.autocrlf=false", "fetch"},
+		{"-cinclude.path=/f", "fetch"},
+		{"--config-env", "include.path=VAR", "fetch"},
+		{"--config-env=include.path=VAR", "fetch"},
+		{"--config-env=protocol.ext.allow=VAR", "fetch"},
+		{"clone", "--config", "protocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "--config=protocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "--conf=protocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "--c", "include.path=/f", "--", "u", "d"},
+		{"clone", "-cprotocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "-qcfoo=x", "--", "u", "d"},
+	} {
+		f := &exec.FakeRunner{}
+		if _, err := RunRefusing(t.Context(), f, Transport, refuse, args...); err == nil {
+			t.Errorf("RunRefusing(%q) ran; want a refusal", args)
+		}
+		if len(f.Calls) != 0 {
+			t.Errorf("RunRefusing(%q) started git: %+v", args, f.Calls)
+		}
+	}
+	for _, args := range [][]string{
+		{"-C", "dir", "fetch", "origin"},
+		{"clone", "--bare", "--branch", "main", "--", "-c", "d"},
+		// The first "--" is trusted as the end of options, even where an
+		// option would swallow it as its value; setsConfig documents that
+		// callers must never pass "--" as one. This pins the assumption, so
+		// a change to it is a deliberate one.
+		{"clone", "--template", "--", "-c", "foo.bar=x", "src", "d"},
+	} {
+		f := &exec.FakeRunner{}
+		if _, err := RunRefusing(t.Context(), f, Transport, refuse, args...); err != nil {
+			t.Errorf("RunRefusing(%q) was refused: %v", args, err)
+		}
+	}
+}

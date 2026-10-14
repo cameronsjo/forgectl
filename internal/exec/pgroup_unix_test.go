@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/procstart"
 )
 
 // TestWithProcessGroupKillsDescendants: a timed-out child that forked a
@@ -34,14 +36,27 @@ func TestWithProcessGroupKillsDescendants(t *testing.T) {
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
+	// Far below the helper's 30s sleep, so a survivor still fails the test.
+	deadline := time.Now().Add(10 * time.Second)
+	for running(pid) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL) // clean up the survivor before failing
 			t.Fatalf("helper pid %d survived the group kill", pid)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// running reports whether pid is a process that has not exited. The killed
+// helper is an orphan: its reaping is up to whichever process inherited it,
+// and a container's pid 1 can leave it a zombie for seconds, which signal 0
+// alone still finds. A zombie has exited, so it does not count.
+func running(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	_, err := procstart.Of(pid)
+	return !errors.Is(err, procstart.ErrZombie) && !errors.Is(err, procstart.ErrNoProcess)
 }
 
 // A deadline that fires after the group has already exited must not read as

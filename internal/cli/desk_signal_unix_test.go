@@ -280,10 +280,11 @@ func TestDeskSkip_ClearsEvenWhenTheSettingIsNowOff(t *testing.T) {
 	}
 }
 
-// A pending item edited after it was queued is skipped as changed by whichever
-// verb scans next. Each verb that scans must clear the pane that item was
-// blocking, not only the dashboard and skip.
-func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
+// A pending item edited after it was queued is skipped as changed by the next
+// writing verb (the dashboard, a run, skip), which clears its pane. status and
+// runs only read (the #1270 review): they move nothing, so they release no
+// pane, and status shows the item refused until a writing verb moves it.
+func TestDeskReadVerbsLeaveAChangedItemAndItsPane(t *testing.T) {
 	for _, verb := range [][]string{{"status"}, {"runs"}} {
 		t.Run(verb[0], func(t *testing.T) {
 			dir := newDeskDir(t)
@@ -292,15 +293,23 @@ func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
 			if _, err := addItem(t, rig, "one"); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, desk.DirPending, "01-one.sh"), []byte("echo changed\n"), 0o600); err != nil {
+			item := filepath.Join(dir, desk.DirPending, "01-one.sh")
+			if err := os.WriteFile(item, []byte("echo changed\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			before := len(rig.herdr.Calls())
-			if _, _, err := deskRun(t, rig.deps, verb...); err != nil {
+			out, _, err := deskRun(t, rig.deps, verb...)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if calls := rig.herdr.Calls()[before:]; len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p9")) {
-				t.Fatalf("`desk %s` after the edit: %d herdr calls, want the release of w1:p9", verb[0], len(calls))
+			if calls := rig.herdr.Calls()[before:]; len(calls) != 0 {
+				t.Fatalf("`desk %s` after the edit: %d herdr calls, want none (it only reads)", verb[0], len(calls))
+			}
+			if _, err := os.Stat(item); err != nil {
+				t.Errorf("`desk %s` moved the changed item: %v", verb[0], err)
+			}
+			if verb[0] == "status" && !strings.Contains(out, "refused") {
+				t.Errorf("status = %q; want the changed item shown refused", out)
 			}
 		})
 	}
@@ -448,5 +457,67 @@ func TestOpenDeskDirFor_UnskipDoesNotReraiseWhenHerdrSignalIsOff(t *testing.T) {
 	}
 	if n := len(rig.herdr.Calls()) - before; n != 0 {
 		t.Errorf("Unskip raised %d herdr calls with notify_herdr = false", n)
+	}
+}
+
+// TestDeskAdd_HerdrFailureNamesHerdrsReason: the warning carries herdr's own
+// stderr, not "run herdr by hand" (forgectl#1181), and a notification herdr
+// declined is a failed signal, except a rate-limited one.
+func TestDeskAdd_HerdrFailureNamesHerdrsReason(t *testing.T) {
+	notifyReply := func(reply string) func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return func(c exec.SensitiveCommand) (exec.SensitiveResult, error) {
+			if c.Kind != exec.KindHerdrNotify {
+				return exec.SensitiveResult{}, nil
+			}
+			return exec.SensitiveResult{Stdout: exec.BoundedOutputForTest([]byte(reply), exec.OutputComplete)}, nil
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(exec.SensitiveCommand) (exec.SensitiveResult, error)
+		want string // "" wants no warning
+	}{
+		{
+			name: "usage error",
+			run: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+				return exec.SensitiveResult{ExitCode: 2, Stderr: exec.BoundedOutputForTest([]byte("unknown option: x\n"), exec.OutputComplete)},
+					exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
+			},
+			want: "herdr said: unknown option: x",
+		},
+		{
+			name: "not shown",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":false,"reason":"no_foreground_client"}}`),
+			want: "herdr did not show the notification: no_foreground_client",
+		},
+		{
+			name: "rate limited",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":false,"reason":"rate_limited"}}`),
+		},
+		{
+			name: "shown",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":true,"reason":"shown"}}`),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newDeskDir(t)
+			inHerdr(t, "w1:p9")
+			rig := newSignalRig(t, config.DeskConfig{})
+			rig.herdr.RunFunc = tc.run
+			errOut, err := addItem(t, rig, "merge")
+			wantExit(t, err, 0)
+			if tc.want == "" {
+				if strings.Contains(errOut, "operator signal failed") {
+					t.Errorf("stderr = %q, want no failed signal", errOut)
+				}
+				return
+			}
+			if !strings.Contains(errOut, tc.want) {
+				t.Errorf("stderr = %q, want %q", errOut, tc.want)
+			}
+			if strings.Contains(errOut, "run herdr by hand") {
+				t.Errorf("stderr = %q still sends the operator to run herdr by hand", errOut)
+			}
+		})
 	}
 }

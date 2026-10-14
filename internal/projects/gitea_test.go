@@ -139,10 +139,8 @@ func indexOfArg(args []string, want string) int {
 func TestGiteaList_DropsUnsafeAndHostileRows(t *testing.T) {
 	const good = "cameron\tgoodrepo\tsource\tssh://git@git.sjo.lol:222/cameron/goodrepo.git"
 	for _, tc := range []struct{ name, row, why string }{
-		{"repo named .git", "cameron\t.git\tsource\tssh://git@git.sjo.lol:222/cameron/x.git",
-			"a .git directory makes isGitRepo report the WING as a repo, hiding every member"},
-		{"repo named .bare", "cameron\t.bare\tsource\tssh://git@git.sjo.lol:222/cameron/x.git",
-			"collides with the worktree layout's object store"},
+		{"repo named ..", "cameron\t..\tsource\tssh://git@git.sjo.lol:222/cameron/x.git",
+			"traversal; a dots-only name has no leaf to map"},
 		{"owner with a leading dot", ".hidden\trepo\tsource\tssh://git@git.sjo.lol:222/x/y.git",
 			"a tree invisible to ls"},
 		{"name with a colon", "cameron\tre:po\tsource\tssh://git@git.sjo.lol:222/x/y.git",
@@ -184,5 +182,19 @@ func TestGiteaList_LongNameIsDropped(t *testing.T) {
 	}
 	if len(repos) != 0 {
 		t.Errorf("a %d-byte repo name was kept: %+v", len(long), repos)
+	}
+}
+
+// TestGiteaList_KeepsDotLeadingName: a leading-dot repo is filed under a
+// "dot-" leaf (#1057), so the row is kept with its real name.
+func TestGiteaList_KeepsDotLeadingName(t *testing.T) {
+	out := "owner\tname\ttype\tssh\ncameron\t.github\tsource\tssh://git@git.sjo.lol:222/cameron/.github.git\n"
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+	repos, err := giteaList(context.Background(), fake, "github.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != ".github" {
+		t.Errorf("rows = %+v; want the .github row kept under its real name", repos)
 	}
 }

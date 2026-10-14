@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -42,12 +43,24 @@ asked to review — a union of three gh searches. Rows you've already marked
 reviewed are dimmed; new activity on the PR auto-un-dims them.
 
   forgectl pr prs          human table (REPO / # / TITLE / STATE)
-  forgectl pr prs --json   machine-readable output for scripting`,
+  forgectl pr prs --json   machine-readable output for scripting
+
+When every query fails (gh not signed in, the host unreachable) prs exits 1
+rather than show an empty list; under --json the failure object's error names
+each query's cause and fix.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			prs, notes, err := client.PRs(cmd.Context())
 			if err != nil {
 				return err
+			}
+			// Every query failed: there is no list, and an empty one would read
+			// as inbox zero (ADR-0008 rule 3, forgectl#1150). Under --json the
+			// notes, which carry each query's cause and fix, go inside the one
+			// failure object.
+			allFailed := failedQueries(notes) == prQueryCount
+			if allFailed && asJSON {
+				return failureWithNotes(errEveryPRQueryFailed, notes)
 			}
 			// Per-query degradation notes are diagnostics → stderr, never stdout,
 			// and escaped on the way.
@@ -58,7 +71,13 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 				return emitPRsJSON(cmd.OutOrStdout(), prs, store)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			return renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted, failedQueries(notes), prQueryCount)
+			if err := renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted, failedQueries(notes), prQueryCount); err != nil {
+				return err
+			}
+			if allFailed {
+				return errEveryPRQueryFailed
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref","repo","number","title","state","author","isDraft","updatedAt","url","reviewed"}] to stdout (an empty list is [])`)
@@ -158,6 +177,10 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, 
 	}
 	return nil
 }
+
+// errEveryPRQueryFailed is pr prs and pr dash's exit 1 when no gh query
+// answered, so nothing was listed.
+var errEveryPRQueryFailed = errors.New("every gh query failed, so nothing was listed; the notes say why")
 
 // prQueryCount is how many gh searches pr prs unions: authored, assigned and
 // review-requested (pr.Client.PRs).

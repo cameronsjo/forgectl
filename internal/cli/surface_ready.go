@@ -180,7 +180,7 @@ func launchedWorker(led *worker.Ledger, name string) (worker.Row, backend.Ref, e
 	}
 	r, ok := findRow(rows, name)
 	if !ok {
-		return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger", name)
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger; forgectl surface list shows the workers", name)
 	}
 	if r.Stage != worker.StageLaunched {
 		return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q is at stage %q, want %q", name, r.Stage, worker.StageLaunched)

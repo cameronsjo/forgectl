@@ -44,7 +44,7 @@ var surfaceModule = module.Manifest{
 func newSurfaceCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "surface",
-		Short: "Start a harness inside a terminal manager without exposing its invocation",
+		Short: "Start a harness in a terminal manager, invocation hidden",
 		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
 tmux, cmux, or herdr — without the manager ever seeing the harness invocation.
 
@@ -89,9 +89,15 @@ rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 
   forgectl surface prune --dry-run
 
-usage sums what the drain's workers cost by UTC day:
+usage sums what the drain's workers cost by UTC day, or prices one worker's
+transcript with no GitHub call:
 
   forgectl surface usage --days 7
+  forgectl surface usage fix-login --json
+
+tag stamps display tokens on a worker's herdr pane for the sidebar:
+
+  forgectl surface tag fix-login --token task=PAP-12
 
 send, inbox, flush and event carry messages between a coordinator and
 its workers across harnesses. See forgectl surface send --help.`,
@@ -115,6 +121,7 @@ its workers across harnesses. See forgectl surface send --help.`,
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	cmd.AddCommand(newSurfacePruneCmd(deps))
 	cmd.AddCommand(newSurfaceUsageCmd(deps))
+	cmd.AddCommand(newSurfaceTagCmd(deps))
 	cmd.AddCommand(newSurfaceSendCmd(deps))
 	cmd.AddCommand(newSurfaceInboxCmd(deps))
 	cmd.AddCommand(newSurfaceFlushCmd(deps))
@@ -196,7 +203,24 @@ only it sees, so a clean preview is not a promise. --json prints the preview as 
 and absent otherwise. posture maps each field the harness takes (claude
 permission_mode; codex sandbox, approval_policy) to {"value","source"}, where
 source is default, launch.worker, or repo-profile; the text preview prints
-<field>= and <field>_source= lines. --json needs --dry-run.
+<field>= and <field>_source= lines.
+
+Without --dry-run, --json prints what the launch created as one object:
+{"surface","name","target","harness","ref","workspace_id","tab_id",
+"pane_id","terminal_id","worker"}. ref is the line a launch prints without
+--json. The herdr ids are present for a herdr launch; terminal_id is read
+after the launch and left out when that read fails. worker is
+{"repo","worktree","branch","session_id","transcript","marker"} for
+--worktree and absent otherwise; marker is the first brief's REPORT marker.
+If a worker starts but its ledger row cannot be read back or completed, the
+object is still printed, with the ids and the worktree, and the launch then
+exits 1: check the exit code before trusting the empty fields.
+
+A worker launch also shows the worker's name in herdr's sidebar: it sets the
+workspace token "worker" (herdr workspace report-metadata), which a
+[ui.sidebar.spaces] row shows as $worker, after the workspace ownership
+check. The workspace label stays the ownership marker. A failure to set it is a note on stderr, not a failed
+launch.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
@@ -248,7 +272,7 @@ source is default, launch.worker, or repo-profile; the text preview prints
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`print the --dry-run preview as {"dry_run","surface","name","target","harness","run_directory","worker"} JSON (needs --dry-run)`)
+		`print what the launch created as {"surface","name","target","harness","ref","workspace_id","tab_id","pane_id","terminal_id","worker"} JSON, or with --dry-run the preview as {"dry_run","surface","name","target","harness","run_directory","worker"}`)
 
 	return cmd
 }
@@ -291,10 +315,6 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
 	}
-	if opts.JSON && !opts.DryRun {
-		return WithExitCode(errors.New("--json prints the --dry-run preview; add --dry-run (a launch prints one line, not JSON)"), exitUsage)
-	}
-
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)
 	}
@@ -332,6 +352,13 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if err != nil {
 		return err
 	}
+	// Before anything is created, and in --dry-run too: a claude session in a
+	// folder its account never trusted would sit at the trust dialog.
+	if built.Invocation.Harness == "claude" {
+		if err := checkClaudeFolderTrust(built.Invocation.CWD, envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR")); err != nil {
+			return err
+		}
+	}
 
 	if opts.DryRun {
 		// The service refuses an unaccepted binary (a harness found on $PATH
@@ -355,9 +382,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
-	if opts.Backend == "herdr" {
-		built.Invocation.Env = markHerdrPane(built.Invocation.Env)
-	}
+	built.Invocation.Env = markPane(built.Invocation.Env, opts.Backend)
 	req := surface.NewLaunchRequest(displayNameFor(opts.DisplayName, target), built.Invocation)
 	req.Self = self
 
@@ -366,6 +391,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return err
 	}
 
+	if opts.JSON {
+		return writeJSON(cmd.OutOrStdout(), newLaunchResult(cmd.Context(), adapter, result.Ref(), opts.Backend,
+			displayNameFor(opts.DisplayName, target), target, built.Invocation.Harness))
+	}
 	// One line, to stdout, naming only what the manager already knows. The ref
 	// renders as its backend and recovery tag; it has no accessor that would
 	// print an invocation, an environment, or a server fingerprint.
@@ -390,42 +419,84 @@ func withoutClaudeInbox(env []string) []string {
 // launcher and the new pane share.
 var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
 
-// maxPaneIdentityLen bounds a herdr id carried into a harness. herdr's ids are
-// short ("w83:p5"); anything longer is not one.
+// paneIdentityEnvByBackend lists, per terminal manager, the variables that
+// name the pane (or its tab and workspace) a process runs in (forgectl#1044).
+// The variables that name the server stay: TMUX and CMUX_SOCKET_PATH, like
+// HERDR_SOCKET_PATH, are shared by the launcher and the new pane.
+//
+// tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
+// come from forgectl's own cmux integration plan, which recorded them in a
+// workspace it created ("Workspace-command processes receive
+// CMUX_SURFACE_ID, CMUX_WORKSPACE_ID, CMUX_TAB_ID (and more)",
+// docs/plans/2026-07-10-cmux-integration.md); this change was not re-verified
+// against a live cmux, so a cmux id variable not named there is not stripped.
+var paneIdentityEnvByBackend = map[string][]string{
+	"herdr": herdrPaneIdentityEnv,
+	"tmux":  {"TMUX_PANE"},
+	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID"},
+}
+
+// isPaneIdentityKey reports whether key names a pane under any manager.
+func isPaneIdentityKey(key string) bool {
+	for _, keys := range paneIdentityEnvByBackend {
+		if slices.Contains(keys, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxPaneIdentityLen bounds a pane id carried into a harness. herdr's ids are
+// short ("w83:p5"), tmux's are "%" and a number, and cmux's are UUIDs;
+// anything longer is not one.
 const maxPaneIdentityLen = 64
 
-// herdrPaneMarkerEnv marks an invocation the herdr backend delivered. Only
-// then is the trampoline inside a pane herdr opened: a tmux or cmux pane can
-// carry stale HERDR_* values inherited from whatever started its server.
-const herdrPaneMarkerEnv = "FORGECTL_SURFACE_HERDR_PANE"
+// paneMarkerEnv marks an invocation with the backend that delivered it. Only
+// then does the trampoline know which manager opened its pane: a pane can
+// carry stale identity variables of another manager inherited from whatever
+// started its server, and those must not cross.
+const paneMarkerEnv = "FORGECTL_SURFACE_PANE"
+
+// legacyHerdrPaneMarkerEnv is the herdr-only marker an older launcher sets.
+// The trampoline still strips it, and reads it as a herdr launch.
+const legacyHerdrPaneMarkerEnv = "FORGECTL_SURFACE_HERDR_PANE"
+
+// markPane adds the backend's marker to an invocation's environment.
+func markPane(env []string, backend string) []string {
+	return append(slices.Clone(env), paneMarkerEnv+"="+backend)
+}
 
 // markHerdrPane adds the herdr marker to an invocation's environment.
 func markHerdrPane(env []string) []string {
-	return append(slices.Clone(env), herdrPaneMarkerEnv+"=1")
+	return markPane(env, "herdr")
 }
 
-// paneIdentityEnv removes the herdr marker from env and, only when it was
-// there, appends the trampoline's own herdr pane identity.
+// paneIdentityEnv removes the pane marker from env and, only when it was
+// there, appends the trampoline's own pane identity for the backend it names.
 //
 // The trampoline runs inside the new pane, so getenv here answers with that
-// pane's ids, which herdr set when it opened it. Only these three keys cross,
-// only when env does not already name them, and only when the value has the
-// shape of a herdr id, so nothing else of the trampoline's environment reaches
-// the harness.
+// pane's ids, which the manager set when it opened it. Only the marked
+// backend's keys cross, only when env does not already name them, and only
+// when the value has the shape of a pane id, so nothing else of the
+// trampoline's environment reaches the harness.
 func paneIdentityEnv(env []string, getenv func(string) string) []string {
-	marked := false
+	backend := ""
 	out := make([]string, 0, len(env)+len(herdrPaneIdentityEnv))
 	for _, e := range env {
-		if k, _, _ := strings.Cut(e, "="); k == herdrPaneMarkerEnv {
-			marked = true
+		k, v, _ := strings.Cut(e, "=")
+		switch k {
+		case paneMarkerEnv:
+			backend = v
+			continue
+		case legacyHerdrPaneMarkerEnv:
+			if backend == "" {
+				backend = "herdr"
+			}
 			continue
 		}
 		out = append(out, e)
 	}
-	if !marked {
-		return out
-	}
-	for _, key := range herdrPaneIdentityEnv {
+	for _, key := range paneIdentityEnvByBackend[backend] {
 		value := getenv(key)
 		if !validPaneIdentity(value) || slices.ContainsFunc(env, func(e string) bool {
 			k, _, _ := strings.Cut(e, "=")
@@ -444,7 +515,7 @@ func validPaneIdentity(v string) bool {
 	}
 	for _, r := range v {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ':', r == '_', r == '-':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ':', r == '_', r == '-', r == '%':
 		default:
 			return false
 		}
@@ -458,12 +529,13 @@ func validPaneIdentity(v string) bool {
 // and silently disable its transcript. This policy belongs at the surface
 // boundary: ordinary in-place launches continue to inherit the marker.
 //
-// The herdr pane-identity variables go for the same reason. They name the pane
-// the LAUNCHER runs in, and the trampoline replaces the new pane's environment
-// with this one, so a worker started from a herdr pane would report its agent
-// state, and receive anything addressed to "its" pane, on the launcher's pane.
-// For a herdr launch, which marks its invocation (markHerdrPane), the
-// trampoline puts back the new pane's own values (paneIdentityEnv).
+// The pane-identity variables of every manager go for the same reason
+// (paneIdentityEnvByBackend). They name the pane the LAUNCHER runs in, and the
+// trampoline replaces the new pane's environment with this one, so a session
+// started from a herdr, tmux or cmux pane would report its agent state, and
+// receive anything addressed to "its" pane, on the launcher's pane. Every
+// launch marks its invocation with its backend (markPane), and the trampoline
+// puts back the new pane's own values for that backend (paneIdentityEnv).
 //
 // Claude Code's messaging socket and token go too: they are the launcher
 // session's inbox, so a Codex or pi agent in the new surface would otherwise
@@ -472,7 +544,7 @@ func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || slices.Contains(herdrPaneIdentityEnv, key) {
+		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) {
 			continue
 		}
 		out = append(out, entry)

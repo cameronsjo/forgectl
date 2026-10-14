@@ -2,6 +2,8 @@ package drain
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
@@ -10,9 +12,12 @@ import (
 // check N`, the machine's cap on live Claude sessions, where N counts this
 // launch and every one the tick already made: a session launched moments ago
 // may not be registered yet, so the Nth launch of a tick asks for N slots.
-// Exit 0 launches, exit 1 holds the row, and anything else (another exit code, a timeout, a run
-// that fails to start) launches as if the tool were missing, so a broken
-// tool never wedges the queue.
+// Exit 0 launches; anything else holds the row. A check that cannot answer (a
+// timeout, another exit code, a run that fails to start) holds too: a timeout
+// comes most often from the overload the cap guards against, so the gate
+// fails closed. Holding is reversible: the row stays queued with no attempt
+// counted, and codex and pi rows still launch. Only a claude-slots missing at
+// drain start launches without the cap.
 
 // SlotsCheck is the result of one `claude-slots check N` run.
 type SlotsCheck struct {
@@ -53,9 +58,8 @@ type SlotsDecision struct {
 const NoSlotsNote = "claude-slots not found; launching without the session cap"
 
 // DecideSlots reads one check against the condition the previous check left
-// (prev): exit 0 launches; exit 1 holds; anything else launches without the
-// cap. An event is due only when the check enters a condition other than
-// free that differs from prev.
+// (prev): exit 0 launches; every other result holds. An event is due only
+// when the check enters a condition other than free that differs from prev.
 //
 // A stopped check holds the row and leaves the condition as it was, with no
 // event: the drain is shutting down, not judging the cap.
@@ -69,22 +73,32 @@ func DecideSlots(c SlotsCheck, prev string) SlotsDecision {
 	}
 	call := fmt.Sprintf("claude-slots check %d", max(c.Need, 1))
 	var d SlotsDecision
+	var what string
 	switch {
 	case c.TimedOut:
 		d.Cond = "timeout"
-		d.Event = Event{Kind: EventError, Error: call + " did not finish in time; launching without the session cap"}
+		what = call + " did not finish in time"
 	case c.Err != "":
 		d.Cond = "run failed"
-		d.Event = Event{Kind: EventError, Error: call + " could not run: " + c.Err + "; launching without the session cap"}
+		what = call + " could not run: " + c.Err
 	case c.Exit == 0:
 		return SlotsDecision{}
 	case c.Exit == 1:
-		d.Hold, d.Cond = true, "held"
-		d.Reason = "waiting for a claude session slot: " + reason
-		d.Event = Event{Kind: EventSlotsHeld, State: string(worker.QueueQueued), Error: call + " exited 1: " + reason}
+		d.Cond = "held"
+		what = call + " exited 1: " + reason
 	default:
 		d.Cond = fmt.Sprintf("exit %d", c.Exit)
-		d.Event = Event{Kind: EventError, Error: fmt.Sprintf("%s exited %d, expected 0 or 1: %s; launching without the session cap", call, c.Exit, reason)}
+		what = fmt.Sprintf("%s exited %d, expected 0 or 1: %s", call, c.Exit, reason)
+	}
+	d.Hold = true
+	if d.Cond == "held" {
+		d.Reason = "waiting for a claude session slot: " + reason
+	} else {
+		d.Reason = "held: the session cap could not be checked: " + what
+	}
+	d.Event = Event{Kind: EventSlotsHeld, State: string(worker.QueueQueued), Error: what}
+	if d.Cond != "held" {
+		d.Event.Error += "; holding the row, not launching without the session cap"
 	}
 	d.Emit = d.Cond != prev
 	return d
@@ -96,4 +110,66 @@ func Unclaim(q worker.QueueRow, why string) Change {
 	c := change(q).to(worker.QueueQueued, why)
 	c.ClearLaunch = true
 	return c
+}
+
+// SlotsStuckAfter is how long a claude-slots check that cannot answer (any
+// result but exit 0 or 1) may hold claude launches before the drain records
+// one slots-stuck event and, with notify on, sends a notification. Exit 1,
+// the cap being full, is the normal hold and stays quiet.
+const SlotsStuckAfter = 15 * time.Minute
+
+// SlotsHold is a claude-slots hold on claude launches, as drain.json and
+// drain status show it, so a queue the gate holds is not silent.
+type SlotsHold struct {
+	// Cond is the condition (SlotsDecision.Cond): "held" when the cap is
+	// full, otherwise the failure ("timeout", "exit 2", "run failed").
+	Cond string `json:"cond"`
+	// Reason is the latest check's reason, as the held row's last_error has
+	// it.
+	Reason string `json:"reason"`
+	// Since is when the drain entered this condition.
+	Since time.Time `json:"since"`
+}
+
+// Fault reports a hold that is not the cap being full: the check itself
+// cannot answer.
+func (h SlotsHold) Fault() bool { return h.Cond != "held" }
+
+// NextHold is the hold after a check that decided d, from the hold before
+// it (nil when launches were free). A hold starts at now when launches were
+// free or it crosses between a full cap and a fault; a fault that changes
+// kind (a timeout, then exit 2) is the same fault hold and keeps its start,
+// so a check that alternates between failures still reaches
+// SlotsStuckAfter. A hold that continues takes the latest condition and
+// reason, so status and alerts quote the current wording. The returned
+// pointer equals prev exactly when the hold continues.
+func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
+	if d.Cond == "" {
+		return nil
+	}
+	next := SlotsHold{Cond: d.Cond, Reason: d.Reason, Since: now.UTC()}
+	if prev == nil || prev.Fault() != next.Fault() {
+		return &next
+	}
+	prev.Cond, prev.Reason = d.Cond, d.Reason
+	return prev
+}
+
+// SlotsStuck reports whether h is a fault hold that has lasted
+// SlotsStuckAfter by now.
+func SlotsStuck(h *SlotsHold, now time.Time) bool {
+	return h != nil && h.Fault() && now.Sub(h.Since) >= SlotsStuckAfter
+}
+
+// HeldFor renders how long a hold has lasted: whole minutes ("15m",
+// "1h5m", "2h"), or whole seconds under a minute.
+func HeldFor(d time.Duration) string {
+	if d = max(d, 0).Round(time.Second); d < time.Minute {
+		return d.String()
+	}
+	s := strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }

@@ -301,3 +301,20 @@ func TestBranchExistsRemedyClearsTheRefusal(t *testing.T) {
 		t.Fatalf("after both deletes: %v, want the branch new", err)
 	}
 }
+
+// TestRepoTopOutsideARepoNamesTheFix pins forgectl#1095: outside a git
+// checkout the error says what to do (--repo, or cd), not git's command line.
+func TestRepoTopOutsideARepoNamesTheFix(t *testing.T) {
+	dir := t.TempDir()
+	_, err := RepoTop(context.Background(), fexec.OSRunner{}, dir)
+	if err == nil {
+		t.Fatal("RepoTop outside a repo succeeded")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "not inside a git checkout") || !strings.Contains(msg, "--repo") {
+		t.Errorf("error = %q; want it to say so and name --repo", msg)
+	}
+	if strings.Contains(msg, "rev-parse") || strings.Contains(msg, "protocol.allow") {
+		t.Errorf("error = %q; want no git command line", msg)
+	}
+}

@@ -34,13 +34,19 @@ type RunWatchOptions struct {
 	// Poll is how often the run is re-read; 0 means deskPollEvery.
 	Poll  time.Duration
 	ASCII bool
+	// LogOnStdin is set when stdin carries the log (desk show --log -): only
+	// stdout must be a terminal, and the keys are read from the controlling
+	// terminal.
+	LogOnStdin bool
+	// Flowchart draws the steps as a top-down flowchart (--layout flow).
+	Flowchart bool
 }
 
 // RunWatch opens the run view full screen on one run of src, without the
 // dashboard around it: the same flow, timeline, replay and keys as the
 // dashboard's r. It follows the run live until q.
 func RunWatch(ctx context.Context, src runview.Source, opts RunWatchOptions) error {
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !runWatchHasTerminal(opts.LogOnStdin) {
 		return ErrRunWatchNeedsTerminal
 	}
 	final, err := tea.NewProgram(newRunWatchModel(ctx, src, opts), keymap.ProgramOptions(ctx)...).Run()
@@ -51,6 +57,24 @@ func RunWatch(ctx context.Context, src runview.Source, opts RunWatchOptions) err
 		return fmt.Errorf("%w: %s", ErrRunWatchNoRun, safeMessage(opts.Name))
 	}
 	return nil
+}
+
+// runWatchHasTerminal reports whether the view can draw and read keys: a
+// terminal on stdout, and on stdin unless stdin carries the log, when the
+// controlling terminal must open instead (Bubble Tea reads keys from it).
+func runWatchHasTerminal(logOnStdin bool) bool {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return false
+	}
+	if !logOnStdin {
+		return term.IsTerminal(int(os.Stdin.Fd()))
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
 }
 
 // runWatchModel hosts the dashboard's run view alone. It holds a deskModel
@@ -69,7 +93,7 @@ func newRunWatchModel(ctx context.Context, src runview.Source, opts RunWatchOpti
 	}
 	m := deskModel{ctx: ctx, theme: opts.Theme, poll: poll, runs: src, opts: DeskOptions{ASCII: opts.ASCII}}
 	m.runGen++
-	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true, ascii: opts.ASCII, want: opts.Name}
+	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true, ascii: opts.ASCII, want: opts.Name, flowchart: opts.Flowchart}
 	return runWatchModel{m: m}
 }
 
@@ -96,6 +120,12 @@ func (w runWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskRunPlayMsg:
 		next, cmd = w.m.playStep(t)
 	case tea.KeyPressMsg:
+		if t.String() != "ctrl+c" && w.m.pager != nil {
+			// The run view's ? key list is open: its keys scroll and close
+			// it, and q returns to the run rather than quitting (#1158).
+			w.m.pagerKey(t.String())
+			return w, nil
+		}
 		switch t.String() {
 		case "ctrl+c":
 			return w, tea.Quit
@@ -119,7 +149,10 @@ func (w runWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (w runWatchModel) View() tea.View {
 	v := tea.NewView("")
-	if w.m.rv != nil {
+	switch {
+	case w.m.pager != nil:
+		v = tea.NewView(w.m.pagerView(w.m.screenWidth(), w.m.screenHeight()))
+	case w.m.rv != nil:
 		v = tea.NewView(asciiFrame(w.m.rv.render(w.m.styles(), w.m.screenWidth(), w.m.screenHeight()), w.m.opts.ASCII))
 	}
 	v.AltScreen = true

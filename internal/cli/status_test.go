@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -550,13 +551,18 @@ func TestStatus_DefaultCleanSourceFailsOnAnUnscannableRoot(t *testing.T) {
 }
 
 // statusTextHeadlines renders r as the text view and returns each section
-// line's text after its glyph and label, in report order.
+// line's text after its glyph and label, in report order. The verdict line
+// that opens the view is checked and skipped.
 func statusTextHeadlines(t *testing.T, r statusReportJSON) []string {
 	t.Helper()
 	var buf bytes.Buffer
 	renderStatus(&buf, r, theme.Theme{}.Marks())
+	verdict, body, _ := strings.Cut(buf.String(), "\n")
+	if want := statusVerdict(statusSectionViews(r)); verdict != want {
+		t.Fatalf("first line = %q, want the verdict %q", verdict, want)
+	}
 	var got []string
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for _, line := range strings.Split(body, "\n") {
 		if line == "" || strings.HasPrefix(line, " ") {
 			continue
 		}
@@ -624,5 +630,72 @@ func TestRenderStatus_UnconfiguredBenchIsNotHealthy(t *testing.T) {
 	half.Hearth.State = bench.StateOK
 	if got := render(half); !strings.HasPrefix(got, marks.OK+" bench  hearth ok") {
 		t.Errorf("configured bench line = %q, want the ✓ component headline", got)
+	}
+}
+
+// TestStatusVerdict pins forgectl#1151's verdict line: it names every
+// degraded or failed section with a short reason, counts problems (one per
+// cause) so the count matches what is listed, groups sections by their Cause
+// field (a missing projects folder fails git and clean, and is one problem),
+// and leaves out a section that is only not set up. Mutations that turn it
+// red: count an Unset section; drop the degraded state; count sections in
+// place of causes; keep a gh note's fix text; read "no projects folder" for a
+// clean root that is some other missing folder.
+func TestStatusVerdict(t *testing.T) {
+	ok := func(label string) statusSectionView {
+		return statusSectionView{Label: label, State: status.StateOK}
+	}
+	missing := statusCauseMissingFolder + "/h/Projects"
+	unset := statusSectionView{Label: "bench", State: status.StateDegraded, Unset: true}
+	noFolder := statusSectionView{Label: "git", State: status.StateFailed, Cause: missing,
+		Error: `projects directory not found: "/h/Projects" (set PROJECTS_DIR to the folder that holds your repos, or create it)`}
+	cleanScan := statusSectionView{Label: "clean", State: status.StateFailed, Cause: missing,
+		Error: `scan "/h/Projects": lstat "/h/Projects": no such file or directory`}
+	otherScan := statusSectionView{Label: "clean", State: status.StateFailed, Cause: statusCauseMissingFolder + "/elsewhere",
+		Error: `scan "/elsewhere": lstat "/elsewhere": no such file or directory`}
+	ghNotes := statusSectionView{Label: "prs", State: status.StateDegraded, Notes: []string{
+		"awaiting-you: query failed (gh is not signed in to github.com; run gh auth login --hostname github.com)",
+		"your-open: query failed (gh is not signed in to github.com; run gh auth login --hostname github.com)",
+	}}
+	unknownNote := statusSectionView{Label: "prs", State: status.StateDegraded, Notes: []string{
+		"awaiting-you: query failed (run forgectl doctor for the cause)",
+	}}
+	timedOut := statusSectionView{Label: "bench", State: status.StateFailed, Error: "timed out after 20s"}
+	for _, tc := range []struct {
+		name  string
+		views [statusSectionCount]statusSectionView
+		want  string
+	}{
+		{"all ok", [statusSectionCount]statusSectionView{ok("git"), ok("prs"), ok("clean"), unset}, "nothing needs you"},
+		{"one degraded", [statusSectionCount]statusSectionView{ok("git"), ghNotes, ok("clean"), ok("bench")}, "1 problem: prs (gh is not signed in to github.com)"},
+		{"shared cause", [statusSectionCount]statusSectionView{noFolder, unknownNote, cleanScan, unset}, "2 problems: git, clean (no projects folder); prs (query failed)"},
+		{"different folder", [statusSectionCount]statusSectionView{noFolder, ok("prs"), otherScan, timedOut}, "3 problems: git (no projects folder); clean (folder not found); bench (timed out)"},
+	} {
+		if got := statusVerdict(tc.views); got != tc.want {
+			t.Errorf("%s: statusVerdict = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestStatusVerdict_DeepPathStillGroups runs real sources over a projects
+// folder whose path is long enough that status.Collect's 200-rune cap cuts
+// the clean error before "no such file or directory". The grouping still
+// holds, because it reads the Cause each source attached, not the error text.
+// Mutation that turns it red: match the cause on the error text again.
+func TestStatusVerdict_DeepPathStillGroups(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("a", 120), strings.Repeat("b", 120), "Projects")
+	src := okStatusSources()
+	src.Git = func(context.Context) (statusGitJSON, []string, error) {
+		return statusGitJSON{}, nil, withMissingFolderCause(dir, fmt.Errorf("projects directory not found: %q (set PROJECTS_DIR to the folder that holds your repos, or create it)", dir))
+	}
+	src.Clean = func(context.Context) (statusCleanJSON, []string, error) {
+		return statusCleanJSON{}, nil, withMissingFolderCause(dir, fmt.Errorf("scan %q: lstat %q: no such file or directory", dir, dir))
+	}
+	r := collectStatus(context.Background(), src, time.Second)
+	if strings.Contains(r.Clean.Error, "no such file") {
+		t.Fatalf("the clean error was not capped, so the test proves nothing: %q", r.Clean.Error)
+	}
+	if got, want := statusVerdict(statusSectionViews(r)), "1 problem: git, clean (no projects folder)"; got != want {
+		t.Errorf("statusVerdict = %q, want %q", got, want)
 	}
 }

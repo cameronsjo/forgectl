@@ -49,6 +49,9 @@ var tmuxModule = module.Manifest{
 // (forgectl#1100).
 var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use forgectl tmux ls or forgectl tmux tree for plain output")
 
+// errTmuxMenuDumbTerminal is the tmux menu's refusal under TERM=dumb (#1152).
+var errTmuxMenuDumbTerminal = tui.DumbTerminalError("the tmux menu", "forgectl tmux ls or forgectl tmux tree for plain output")
+
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
 func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
@@ -79,15 +82,23 @@ func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra
 			if !isInteractiveTTY() {
 				return errTmuxMenuNeedsTerminal
 			}
+			if termIsDumb() {
+				return errTmuxMenuDumbTerminal
+			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)
+			// The root's context, not cmd's: cobra sets the root's afresh on
+			// every dispatch but a subcommand's only while it is nil, so a
+			// second dispatch would see the first one's (#1018, as #1011
+			// did for the deferred-verb slot).
+			ctx := cmd.Root().Context()
+			opts := hubRunOptions(ctx, deps, cmd.Root(), client)
 			opts.StartInTmux = true
 			opts.NoIcons = noIcons
 			opts.Theme = th
 			// A verb chosen in the hub is deferred, not run here: this RunE
 			// is inside fang, and the verb's own dispatch is a second fang
 			// frame (forgectl#1000).
-			return runActionWith(cmd.Context(), client, opts, run, func(argv []string) error {
+			return runActionWith(ctx, client, opts, run, func(argv []string) error {
 				return deferHubVerb(cmd, th, argv)
 			})
 		},

@@ -3,7 +3,8 @@
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
 ```sh
-forgectl menu            # the hub as plain text: status line, sections, every command and subverb
+forgectl menu            # the hub as plain text: status line, sections, one line per command
+forgectl menu docs       # one command with its subverbs
 forgectl menu --json     # the same content as one JSON document
 forgectl menu --json desk  # only the `desk` rows and subverbs (one subtree, a fraction of the bytes)
 forgectl menu --json repos # one area: every command in it
@@ -20,7 +21,7 @@ On a TTY the hub shows the pinned rows, the recent rows, and one row per area, s
 - **`/`** searches every command and every runnable subcommand by name, including those inside areas; a subcommand shows under its full path (`pr findings list`). Inside an area it filters that area. It matches names, not descriptions: `forgectl menu | grep <word>` searches those. When nothing matches, the line under the list says so. `esc` clears the search before it backs out of a screen.
 - **`enter`** opens the selected row. **`q`** or **`esc`** goes back one screen, and quits from the top.
 
-The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line when the terminal has rows to spare (20 or more). On a terminal too short for every row, the recent rows go first, then the section dividers, so at 16 rows or more (17 on a first run, when the `init` row shows) the pinned rows and the areas stay on screen. Shorter terminals page (the page number shows under the list), and `1`–`9` still reach every keyed row. The footer's enter hint says what enter does to the selected row: `enter open` opens its subcommands, an area, or the argument picker; `enter run` runs it (a row whose placeholders are all optional runs without them); `enter print command` leaves the hub and prints the command with its placeholders when a required argument is one the picker cannot take. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
+The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line when the terminal has rows to spare (20 or more). On a terminal too short for every row, the recent rows go first, then the section dividers, so at 16 rows or more (17 on a first run, when the `init` row shows) the pinned rows and the areas stay on screen. Shorter terminals page (the page number shows under the list), and `1`–`9` still reach every keyed row. The footer's enter hint says what enter does to the selected row: `enter open` opens its subcommands, an area, or the argument picker; `enter run` runs it (a row whose placeholders are all optional runs without them); `enter print command` leaves the hub and prints the command with its placeholders when a required argument is one the picker cannot take. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit. Under `TERM=dumb`, which cannot draw a full-screen view, bare `forgectl` exits 2 and points at `forgectl menu` instead of opening the hub, and bare `forgectl tmux` exits 1 and points at `forgectl tmux ls`, as it does off a terminal.
 
 **One subtree.** The default `--json` document is about 33 KB on one line, because each pinned command's `leaves` also appear under `commands`. That does not change: dropping the duplicate `leaves` would remove keys from existing rows, which ADR-0008 forbids. To read less, name a group:
 
@@ -88,16 +89,18 @@ A bad flag or a stray argument follows the [stderr contract](../json-contract.md
 
 ## Text form
 
-Without `--json`, `menu` prints the hub's status line, then one line per row under each section heading: `pinned`, `recent`, then one heading per area. Each line holds the row's usage and then its description, and each subverb is indented under its row. The text is plain, with no colour and no escapes, so it is safe to grep.
+Without `--json`, `menu` prints the hub's status line, then one line per row under each section heading: `pinned`, `recent`, then one heading per area. Each line holds the row's usage and then its description.
+
+Bare `menu` lists commands only, one line each. A command with subverbs ends with a count, such as `(6 subverbs)`, and a last line says how to list them. Name a command or an area (`forgectl menu docs`, `forgectl menu repos`) and each subverb is indented under its row. Until forgectl#1151, bare `menu` listed every subverb. A script that greps for a subverb (`forgectl pr findings`, say) should now grep `forgectl menu <command>`, or better, read `forgectl menu --json`, which always carries every subverb.
+
+The text is plain, with no colour and no escapes, so it is safe to grep. Its shape can change between releases; `--json` is the stable surface.
 
 ```text
 forgectl · forgectl @ main · 3 tmux · 1 review running, 2 queued
 
 pinned
-  forgectl docs  Local markdown reader — render + serve an indexed doc set over loopback HTTP
-    forgectl docs list [dir|file ...]  List the indexed docs, most-recently-modified first
-  forgectl pr <ref>  Clean-room review of a pull request
-    forgectl pr prs  List open PRs across your repos (authored, assigned, review-requested)
+  forgectl docs  Local markdown reader over loopback HTTP (6 subverbs)
+  forgectl pr <ref>  Clean-room review of a pull request (16 subverbs)
 …
 
 recent
@@ -109,6 +112,8 @@ agents
 
 setup
   forgectl doctor  …
+
+forgectl menu <command> lists a command's subverbs.
 ```
 
 ## The picker opt-out

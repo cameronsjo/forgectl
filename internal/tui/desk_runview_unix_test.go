@@ -409,14 +409,72 @@ func TestRunViewTickPollsALiveRun(t *testing.T) {
 	}
 }
 
-// The key hints keep "q close" at every width.
+// The key hints keep "q close" at every width, and "? help" until the
+// window is very narrow (#1158).
 func TestRunHintsKeepQClose(t *testing.T) {
 	for _, finished := range []bool{false, true} {
-		for _, w := range []int{80, 60, 40, 20, 10} {
-			if h := runHintsFor(w, finished); !strings.HasSuffix(h, "q close") || ansi.StringWidth(h) > max(w, 8) {
-				t.Errorf("width %d finished %v: hints %q", w, finished, h)
+		for _, rewrites := range []bool{false, true} {
+			for _, w := range []int{100, 80, 60, 40, 20, 10} {
+				h := runHintsFor(w, finished, rewrites, false)
+				if !strings.HasSuffix(h, "q close") || ansi.StringWidth(h) > max(w, 8) {
+					t.Errorf("width %d finished %v rewrites %v: hints %q", w, finished, rewrites, h)
+				}
+				if w >= 20 && !strings.Contains(h, "? help") {
+					t.Errorf("width %d: hints %q lack ? help", w, h)
+				}
 			}
 		}
+	}
+}
+
+// The hints come from runBindings: at a wide window every key shows, o only
+// when a lens rewrote a line, and G names the end of a finished run.
+func TestRunHintsFromBindings(t *testing.T) {
+	h := runHintsFor(200, false, true, false)
+	for _, b := range runBindings {
+		if !strings.Contains(h, b.key+" ") {
+			t.Errorf("wide hints %q lack %q", h, b.key)
+		}
+	}
+	if strings.Contains(runHintsFor(200, false, false, false), "o as written") {
+		t.Error("o shows with no rewritten line")
+	}
+	if got := runHintsFor(200, false, true, true); !strings.Contains(got, "o plain words") {
+		t.Errorf("raw hints %q lack o plain words", got)
+	}
+	if got := runHintsFor(200, true, false, false); !strings.Contains(got, "g/G start/end") {
+		t.Errorf("finished hints %q lack g/G start/end", got)
+	}
+}
+
+// ? in the run view opens its key list, and closing it returns to the run
+// view, not the dashboard (#1158).
+func TestRunViewQuestionMarkShowsItsKeys(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "go.sh", "echo hi\n", nil, 0)
+	h.selectItem(name)
+	h.send("r")
+	h.send("?")
+	if h.m.pager == nil || h.m.pager.title != "keys" {
+		t.Fatalf("? did not open the run view's key list: %+v", h.m.pager)
+	}
+	view := ansi.Strip(h.m.View().Content)
+	for _, b := range runBindings {
+		if !strings.Contains(view, b.help) {
+			t.Errorf("key list lacks %q:\n%s", b.help, view)
+		}
+	}
+	// l and h step the replay in the run view; under its key list they
+	// do not close it.
+	for _, k := range []string{"l", "h", "v"} {
+		h.send(k)
+		if h.m.pager == nil {
+			t.Fatalf("%s closed the run view's key list", k)
+		}
+	}
+	h.send("?")
+	if h.m.pager != nil || h.m.rv == nil {
+		t.Errorf("? did not close the key list back to the run view: pager %v rv %v", h.m.pager, h.m.rv)
 	}
 }
 

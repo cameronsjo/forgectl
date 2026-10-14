@@ -41,8 +41,9 @@ func newResumeCmd(deps module.Deps) *cobra.Command {
 	var limit int
 
 	cmd := &cobra.Command{
-		Use:   "resume [filter]",
-		Short: "Pick a recent Claude Code session in any repo and resume it there",
+		Use:         "resume [filter]",
+		Annotations: map[string]string{rootHelpUseAnnotation: "resume"},
+		Short:       "Resume a recent Claude Code session in any repo",
 		Long: `resume lists every recent Claude Code session across every repo — name,
 repo, branch, last activity — and lands you back inside the one you pick, in
 the right directory, with its task list restored.

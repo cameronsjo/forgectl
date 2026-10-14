@@ -57,6 +57,20 @@ const redactedPlaceholder = "(redacted)"
 // map under [theme]", so it cannot widen to cover a future sensitive map.
 const themeColorsKey = "theme.colors"
 
+// surfaceProfilesKey is the second exempt map leaf. A [surface.profiles]
+// entry holds one field, config_dir: a path, not a secret, and the whole point
+// of reading it back is to confirm which Claude config directory each named
+// worker profile runs under (forgectl#1238). Scoped to this exact dotted key
+// for the same reason as themeColorsKey.
+const surfaceProfilesKey = "surface.profiles"
+
+// valueExemptMaps maps each exempt map leaf to the renderer that shows its
+// values. Any map leaf not listed here keeps leafValue's keys-only policy.
+var valueExemptMaps = map[string]func(reflect.Value) (string, any){
+	themeColorsKey:     themeColorsValue,
+	surfaceProfilesKey: surfaceProfilesValue,
+}
+
 // configEntry is one leaf of config.Config as rendered by the walk: a dotted
 // key, its value, and whether the config file actually set it.
 type configEntry struct {
@@ -115,6 +129,10 @@ type launchResolvedView struct {
 	// defaults or project add_dir, or a project match) cannot be expanded
 	// because the home directory is unresolved.
 	HomeNote string `json:"home_note,omitempty"`
+	// Worker is the posture a worker gets with no project block matched: a
+	// worker reads [launch.worker], not [launch.defaults] (forgectl#1125).
+	// `forgectl launch which` shows it for a directory.
+	Worker *launchWhichWorkerJSON `json:"worker"`
 }
 
 // configReport is the --json document. It is the stable surface: the human
@@ -131,6 +149,9 @@ type configReport struct {
 	Entries         []configEntry      `json:"entries"`
 	HostResolved    hostResolvedView   `json:"host_resolved"`
 	LaunchResolved  launchResolvedView `json:"launch_resolved"`
+	// EnvResolved is each setting an environment variable can supply, as the
+	// verbs resolve it, and which source supplied it (forgectl#1150).
+	EnvResolved []envResolvedEntry `json:"env_resolved"`
 }
 
 func newConfigCmd(module.Deps) *cobra.Command {
@@ -151,11 +172,13 @@ func newConfigCmd(module.Deps) *cobra.Command {
 			entries := walkConfig(cfg, rep)
 			hosts := resolveHostView(cfg)
 			resolved := resolveLaunchView(cfg)
+			envResolved := resolveEnvView(cfg, deskGetenv)
 
 			if asJSON {
-				return emitConfigJSON(out, entries, rep, hosts, resolved)
+				return emitConfigJSON(out, entries, rep, hosts, resolved, envResolved)
 			}
 			renderConfigText(out, entries, rep, hosts, resolved)
+			renderEnvResolvedText(out, envResolved)
 
 			slog.Info("Successfully displayed configuration.",
 				"path", rep.Path, "found", rep.Found, "entries", len(entries),
@@ -163,7 +186,7 @@ func newConfigCmd(module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout (stable; the human rendering is not)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path","found","unrecognized","entries":[{"key","group","value","set"}],"host_resolved","launch_resolved","env_resolved":[{"key","value","source"}]} to stdout (stable; the human rendering is not); path_error, decode_error and validation_error appear when set`)
 	return cmd
 }
 
@@ -210,11 +233,12 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			continue
 		}
 		display, value := leafValue(fv)
-		if key == themeColorsKey && fv.Kind() == reflect.Map {
-			// The narrow exemption: render the actual colours instead of
+		render, exempt := valueExemptMaps[key]
+		if exempt && fv.Kind() == reflect.Map {
+			// The narrow exemption: render the actual values instead of
 			// leafValue's keys-only rendering, and never mark this leaf
 			// Redacted below — nothing was withheld.
-			display, value = themeColorsValue(fv)
+			display, value = render(fv)
 		}
 		entry := configEntry{
 			Key:     key,
@@ -229,7 +253,7 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			entry.Value = redactedPlaceholder
 			entry.display = redactedPlaceholder
 			entry.Redacted = true
-		case key != themeColorsKey && fv.Kind() == reflect.Map && fv.Len() > 0:
+		case !exempt && fv.Kind() == reflect.Map && fv.Len() > 0:
 			// leafValue already dropped the values; say so, so a reader is
 			// never left thinking the key set is the whole content.
 			entry.Redacted = true
@@ -319,6 +343,37 @@ func themeColorsValue(v reflect.Value) (display string, value any) {
 		c := colors[key]
 		entries = append(entries, themeColorEntry{Role: key, Dark: c.Dark, Light: c.Light})
 		parts = append(parts, fmt.Sprintf("%s(dark=%s light=%s)", key, c.Dark, c.Light))
+	}
+	return "{" + strings.Join(parts, " ") + "}", entries
+}
+
+// surfaceProfileEntry is one [surface.profiles] entry in --json.
+type surfaceProfileEntry struct {
+	Name      string `json:"name"`
+	ConfigDir string `json:"config_dir"`
+}
+
+// surfaceProfilesValue renders the [surface.profiles] map's names and
+// config_dir values — see surfaceProfilesKey for why it is exempt. Like
+// themeColorsValue, any other shape falls back to an empty rendering.
+func surfaceProfilesValue(v reflect.Value) (display string, value any) {
+	profiles, ok := v.Interface().(map[string]config.SurfaceProfile)
+	if !ok || len(profiles) == 0 {
+		return "{}", []surfaceProfileEntry{}
+	}
+
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	entries := make([]surfaceProfileEntry, 0, len(names))
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		dir := profiles[name].ConfigDir
+		entries = append(entries, surfaceProfileEntry{Name: name, ConfigDir: dir})
+		parts = append(parts, fmt.Sprintf("%s(config_dir=%s)", name, dir))
 	}
 	return "{" + strings.Join(parts, " ") + "}", entries
 }
@@ -423,6 +478,7 @@ func resolveLaunchView(cfg config.Config) launchResolvedView {
 	if homeErr != nil {
 		view.HomeNote = homeErr.Error()
 	}
+	view.Worker = buildLaunchWhichWorkerJSON(launch.DefaultWorkerPosture(cfg.Launch))
 
 	var bin string
 	var err error
@@ -537,6 +593,12 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	// path, and a middle cut would drop the error's own words.
 	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeText(resolved.BinaryPath))
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
+	if w := resolved.Worker; w != nil {
+		_, _ = fmt.Fprintf(out, "  launch.worker        %s  (no project matched; launch which shows a directory's)\n", safeText(workerPostureSummary(w)))
+		if w.Refused != "" {
+			_, _ = fmt.Fprintf(out, "                       refused: %s\n", safeText(w.Refused))
+		}
+	}
 	if resolved.HomeNote != "" {
 		_, _ = fmt.Fprintf(out, "  launch.home          (unresolved: %s; ~ paths in [launch] are not expanded)\n", safeText(resolved.HomeNote))
 	}
@@ -583,8 +645,9 @@ func provenance(e configEntry) string {
 }
 
 // emitConfigJSON writes the stable machine-readable document.
-func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hosts hostResolvedView, resolved launchResolvedView) error {
+func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hosts hostResolvedView, resolved launchResolvedView, envResolved []envResolvedEntry) error {
 	doc := configReport{
+		EnvResolved:    envResolved,
 		Path:           rep.Path,
 		Found:          rep.Found,
 		Unrecognized:   rep.Unrecognized,

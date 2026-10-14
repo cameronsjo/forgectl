@@ -27,14 +27,19 @@ import (
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
+// errDeskDumbTerminal is the dashboard's refusal under TERM=dumb (#1152).
+var errDeskDumbTerminal = tui.DumbTerminalError("desk: the dashboard", "desk --frame for one frame, or desk status")
+
 // Unix-only seams: whether the process has a terminal on stdin and stdout
-// (for the dashboard), and on stdin alone (for `add -`).
+// (for the dashboard), on stdin alone (for `add -`), and on stdout alone
+// (for `show --log - --live`, which reads its keys from the terminal).
 var (
 	deskHasTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	}
-	deskStdinIsTerminal           = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
-	deskStdin           io.Reader = os.Stdin
+	deskStdinIsTerminal             = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	deskStdoutHasTerminal           = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
+	deskStdin             io.Reader = os.Stdin
 )
 
 const (
@@ -62,6 +67,51 @@ func openDeskDir(flag string) (*desk.Desk, error) {
 	return desk.Open(dir)
 }
 
+// errNoDesk marks a read verb pointed at a directory that is not a desk.
+var errNoDesk = errors.New("not a desk")
+
+// openReadDeskFor opens the desk for a verb that only reads (forgectl#1150):
+// desk.OpenReadOnly, which creates, migrates, chmods and writes nothing, so a
+// typo in --dir or DESK_DIR, or a project directory that happens to hold a
+// done/ folder, is never turned into a desk or has its modes changed. A
+// directory that is not a desk is an error wrapping errNoDesk that names the
+// directory and how to check it; any other failure (a file at the path, a
+// parent that cannot be read) is returned as itself.
+func openReadDeskFor(flag, verb string) (*desk.Desk, error) {
+	dir, err := resolveDeskDir(flag)
+	if err != nil {
+		return nil, err
+	}
+	d, err := desk.OpenReadOnly(dir)
+	if errors.Is(err, desk.ErrNoDesk) {
+		return nil, noDeskError(verb, dir)
+	}
+	return d, err
+}
+
+// requireDesk refuses a writing verb that acts on an existing item (skip)
+// when the directory is not a desk, before Open would create one.
+func requireDesk(flag, verb string) error {
+	dir, err := resolveDeskDir(flag)
+	if err != nil {
+		return err
+	}
+	ok, err := desk.Present(dir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return noDeskError(verb, dir)
+	}
+	return nil
+}
+
+// noDeskError is the error a read verb returns for a directory that is not a
+// desk.
+func noDeskError(verb, dir string) error {
+	return fmt.Errorf("%s: %s is %w; desk add creates one, so check --dir and DESK_DIR (forgectl config shows desk.dir)", verb, safePath(dir), errNoDesk)
+}
+
 // openDeskDirFor opens the desk and attaches the operator-signal clearing, so
 // every verb that can take an item out of pending/ (a run, a skip, a Scan that
 // skips a changed item) keeps the pane state in step.
@@ -78,6 +128,15 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	if !frame && !deskHasTerminal() {
 		return WithExitCode(tui.ErrDeskNeedsTerminal, deskExitUsage)
 	}
+	if !frame && termIsDumb() {
+		return WithExitCode(errDeskDumbTerminal, deskExitUsage)
+	}
+	if frame {
+		return runDeskFrame(cmd, deps, dirFlag)
+	}
+	// The interactive dashboard is the desk's runner (y runs, s skips), the
+	// pane `desk layout` starts before anything is queued, so it opens the
+	// desk for writing and creates it when absent. --frame only reads.
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
@@ -85,10 +144,31 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	defer d.Close()           //nolint:errcheck // read side; nothing to flush
 	home, _ := deskUserHome() // display only: no home shows the full path
 	ascii := deskNoIcons(cmd, deps)
-	if frame {
-		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, ascii)
-	}
 	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: ascii})
+}
+
+// runDeskFrame is `desk --frame`: one frame, read through a read-only open, so
+// it creates, chmods and writes nothing. A directory that is not a desk prints
+// a note on stderr and a not-found line, exit 0, as desk status does.
+func runDeskFrame(cmd *cobra.Command, deps module.Deps, dirFlag string) error {
+	d, err := openReadDeskFor(dirFlag, "desk")
+	if errors.Is(err, errNoDesk) {
+		dir, derr := resolveDeskDir(dirFlag)
+		if derr != nil {
+			return derr
+		}
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing queued (desk add creates it; forgectl config shows desk.dir)\n", safePath(dir)); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "desk %s: not found; 0 waiting, 0 running, 0 done, 0 skipped\n", safeText(dir))
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	defer d.Close()           //nolint:errcheck // read-only
+	home, _ := deskUserHome() // display only: no home shows the full path
+	return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, deskNoIcons(cmd, deps))
 }
 
 // deskNoIcons reports whether the desk draws in ASCII: the root's
@@ -214,11 +294,7 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		a         desk.Added
 		duplicate bool
 	)
-	if o.allowDuplicate {
-		a, err = d.Add(src, what, why, o.tty)
-	} else {
-		a, duplicate, err = d.AddUnique(src, what, why, o.tty)
-	}
+	a, duplicate, err = d.AddWith(src, desk.Headers{What: what, Why: why, TTY: o.tty, After: o.after}, !o.allowDuplicate)
 	if err != nil {
 		return err
 	}
@@ -237,6 +313,11 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	}
 	for _, f := range signalFailures {
 		warnings = append(warnings, "operator signal failed: "+f)
+	}
+	for _, n := range a.After {
+		if !d.Known(n) {
+			warnings = append(warnings, "--after "+n+" names no item waiting, running, or done with a recorded exit code; "+a.Name+" stays held until one of that name finishes with exit 0")
+		}
 	}
 	signal := deskSignalState(signalNow, len(signalFailures), sig.enabled())
 	if signal == deskSignalSent {
@@ -362,7 +443,7 @@ func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string
 	if err := checkDeskName(target); err != nil {
 		return "", nil, err
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(dirFlag, "desk plan")
 	if err != nil {
 		return "", nil, err
 	}
@@ -384,7 +465,7 @@ func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string
 	}
 	data, kind, err := d.Record(target)
 	if errors.Is(err, desk.ErrNotFound) {
-		return "", nil, fmt.Errorf("desk plan: no item named %s", target)
+		return "", nil, fmt.Errorf("desk plan: no item named %s; %s", target, deskListHint("desk plan"))
 	}
 	if err != nil {
 		return "", nil, err
@@ -405,6 +486,7 @@ type deskItemJSON struct {
 	What            string     `json:"what"`
 	Why             string     `json:"why"`
 	TTY             bool       `json:"tty"`
+	After           []string   `json:"after"`
 	SHA256          string     `json:"sha256"`
 	AddedAt         *time.Time `json:"added_at"`
 	StartedAt       *time.Time `json:"started_at"`
@@ -418,13 +500,17 @@ type deskItemJSON struct {
 	SkippedBy       string     `json:"skipped_by"`
 	SkippedAt       *time.Time `json:"skipped_at"`
 	Refusal         string     `json:"refusal"`
+	Hold            string     `json:"hold"`
 	PID             int        `json:"pid"`
 }
 
 // deskStatusJSON is `desk status --json`.
 type deskStatusJSON struct {
-	Dir     string         `json:"dir"`
-	Taken   time.Time      `json:"taken"`
+	Dir   string    `json:"dir"`
+	Taken time.Time `json:"taken"`
+	// Found is false when Dir is not a desk: nothing was opened or created,
+	// and every list is empty because there is no desk (as desk prune).
+	Found   bool           `json:"found"`
 	Pending []deskItemJSON `json:"pending"`
 	Running []deskItemJSON `json:"running"`
 	Done    []deskItemJSON `json:"done"`
@@ -433,12 +519,15 @@ type deskStatusJSON struct {
 
 // deskDetailJSON is `desk status NAME --json`.
 type deskDetailJSON struct {
-	Item    deskItemJSON      `json:"item"`
-	Log     string            `json:"log"`
-	Events  string            `json:"events"`
-	Steps   []deskStepJSON    `json:"steps"`
-	Summary *desk.Summary     `json:"summary"`
-	Record  *deskRecordDigest `json:"record"`
+	Item   deskItemJSON `json:"item"`
+	Log    string       `json:"log"`
+	Events string       `json:"events"`
+	// EventsExists is false when Events names no file yet, or none at all
+	// (a skipped item never ran): read Events only when it is true.
+	EventsExists bool              `json:"events_exists"`
+	Steps        []deskStepJSON    `json:"steps"`
+	Summary      *desk.Summary     `json:"summary"`
+	Record       *deskRecordDigest `json:"record"`
 }
 
 // deskRecordDigest names the bytes a running or finished item ran.
@@ -461,9 +550,12 @@ type deskStepJSON struct {
 func itemView(it desk.Item, now time.Time) deskItemJSON {
 	v := deskItemJSON{
 		Name: it.Name, Kind: string(it.Kind), State: string(it.State), Legacy: it.Legacy,
-		What: it.What, Why: it.Why, TTY: it.TTY, SHA256: it.Meta.SHA256,
+		What: it.What, Why: it.Why, TTY: it.TTY, After: it.After, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
-		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, PID: it.Meta.PID,
+		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, Hold: it.Hold, PID: it.Meta.PID,
+	}
+	if v.After == nil {
+		v.After = []string{}
 	}
 	if it.Number >= 0 {
 		n := it.Number
@@ -479,7 +571,7 @@ func itemView(it desk.Item, now time.Time) deskItemJSON {
 	}
 	var since *time.Time
 	switch it.State {
-	case desk.StateWaiting, desk.StateRefused:
+	case desk.StateWaiting, desk.StateHeld, desk.StateRefused:
 		since = v.AddedAt
 	case desk.StateRunning, desk.StateLost:
 		since = v.StartedAt
@@ -505,13 +597,16 @@ func itemViews(items []desk.Item, now time.Time) []deskItemJSON {
 	return out
 }
 
-func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, asJSON bool) error {
+func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, asJSON, full bool) error {
 	if name != "" {
 		if err := checkDeskName(name); err != nil {
 			return err
 		}
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(dirFlag, "desk status")
+	if errors.Is(err, errNoDesk) && name == "" {
+		return reportNoDeskStatus(cmd, dirFlag, asJSON)
+	}
 	if err != nil {
 		return err
 	}
@@ -528,7 +623,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 	}
 	if asJSON {
 		return writeJSON(out, deskStatusJSON{
-			Dir: snap.Dir, Taken: snap.Taken,
+			Dir: snap.Dir, Taken: snap.Taken, Found: true,
 			Pending: itemViews(snap.Pending, now), Running: itemViews(snap.Running, now),
 			Done: itemViews(snap.Done, now), Skipped: itemViews(snap.Skipped, now),
 		})
@@ -538,7 +633,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 		safeText(snap.Dir), len(snap.Pending), len(snap.Running), len(snap.Done), len(snap.Skipped))
 	for _, group := range [][]desk.Item{snap.Pending, snap.Running} {
 		for _, it := range group {
-			w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+			w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 		}
 	}
 	for i, it := range snap.Done {
@@ -546,17 +641,40 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 			w.printf("… %d older done items (--json lists all)\n", len(snap.Done)-deskStatusDone)
 			break
 		}
-		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 	}
 	for _, it := range snap.Skipped {
-		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 	}
 	return w.err
 }
 
+// reportNoDeskStatus is `desk status` on a directory that is not a desk:
+// nothing is opened or created, a note names the path on stderr, and the
+// report is the empty one with found=false. Exit 0, as desk prune.
+func reportNoDeskStatus(cmd *cobra.Command, dirFlag string, asJSON bool) error {
+	dir, err := resolveDeskDir(dirFlag)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing queued (desk add creates it; forgectl config shows desk.dir)\n", safePath(dir)); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if asJSON {
+		return writeJSON(out, deskStatusJSON{
+			Dir: dir, Taken: deskNow().UTC(),
+			Pending: []deskItemJSON{}, Running: []deskItemJSON{}, Done: []deskItemJSON{}, Skipped: []deskItemJSON{},
+		})
+	}
+	_, err = fmt.Fprintf(out, "desk %s: not found; 0 waiting, 0 running, 0 done, 0 skipped\n", safeText(dir))
+	return err
+}
+
 // statusLine renders one item as a grep-friendly line. Every untrusted field
-// (WHAT, a skip note, a refusal) goes through termsafe.
-func statusLine(v deskItemJSON) string {
+// (WHAT, a skip note, a refusal) goes through termsafe. WHAT is cut at
+// deskWhatCols unless full is set.
+func statusLine(v deskItemJSON, full bool) string {
 	parts := []string{fmt.Sprintf("%-8s %s", v.State, v.Name)}
 	if v.AgeSeconds != nil {
 		parts = append(parts, "age="+shortAge(*v.AgeSeconds))
@@ -597,8 +715,19 @@ func statusLine(v deskItemJSON) string {
 	if v.State == string(desk.StateLost) {
 		parts = append(parts, "(clear it: forgectl desk skip "+v.Name+" --reason ...)")
 	}
-	if v.What != "" && (v.State == string(desk.StateWaiting) || v.State == string(desk.StateRunning)) {
-		parts = append(parts, "what="+strconv.Quote(termsafe.SafeLineMax(v.What, deskWhatCols)))
+	pending := v.State == string(desk.StateWaiting) || v.State == string(desk.StateHeld)
+	if len(v.After) > 0 && (pending || v.State == string(desk.StateRefused)) {
+		parts = append(parts, "after="+termsafe.SafeLineMax(strings.Join(v.After, ","), deskQuoteMax))
+	}
+	if v.Hold != "" {
+		parts = append(parts, "held="+strconv.Quote(termsafe.SafeLineMax(v.Hold, deskQuoteMax)))
+	}
+	if v.What != "" && (pending || v.State == string(desk.StateRunning)) {
+		what := termsafe.SafeLineMax(v.What, deskWhatCols)
+		if full {
+			what = safeText(v.What)
+		}
+		parts = append(parts, "what="+strconv.Quote(what))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -634,8 +763,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if !ok {
 		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
-	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: d.EventsPath(name)}
-	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
+	events, eventsExist, showEvents := detailEvents(d, it)
+	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: events, EventsExists: eventsExist}
+	if it.State != desk.StateWaiting && it.State != desk.StateHeld && it.State != desk.StateRefused {
 		if data, _, err := d.Record(name); err == nil {
 			res.Record = &deskRecordDigest{SHA256: desk.SHA256Hex(data), Bytes: len(data)}
 		}
@@ -667,6 +797,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	kv("what", safeText(v.What))
 	kv("why", safeText(v.Why))
 	kv("tty", strconv.FormatBool(v.TTY))
+	if len(v.After) > 0 {
+		kv("after", strings.Join(v.After, ","))
+	}
 	kv("sha256", v.SHA256)
 	for _, t := range []struct {
 		k string
@@ -684,7 +817,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.Stale {
 		kv("stale", "true")
 	}
-	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skipped_by", v.SkippedBy}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}} {
+	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skipped_by", v.SkippedBy}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}, {"hold", v.Hold}} {
 		if f.v != "" {
 			kv(f.k, safeText(f.v))
 		}
@@ -695,7 +828,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.State == string(desk.StateDone) {
 		kv("log", safeText(res.Log))
 	}
-	kv("events", safeText(res.Events))
+	if showEvents {
+		kv("events", safeText(res.Events))
+	}
 	if res.Summary != nil {
 		s := res.Summary
 		w.printf("summary rc=%d reason=%s ok=%d failed=%d skipped=%d\n", s.RC, safeText(s.Reason), s.OK, s.Failed, s.Skipped)
@@ -722,6 +857,23 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 		w.printf("%s\n", safeText(line))
 	}
 	return w.err
+}
+
+// detailEvents is the item's events file and whether it exists now
+// (forgectl#1095). The path is always reported in JSON, unchanged; exists
+// tells a caller whether reading it will find anything, since a skipped item
+// never ran and has none. show is whether the text form prints it: while the
+// item can still run or is running (the file appears when it starts), and
+// afterwards only when the file is there.
+func detailEvents(d *desk.Desk, it desk.Item) (path string, exists, show bool) {
+	path = d.EventsPath(it.Name)
+	_, err := os.Lstat(path)
+	exists = err == nil
+	switch it.State {
+	case desk.StateWaiting, desk.StateHeld, desk.StateRunning, desk.StateLost:
+		return path, exists, true
+	}
+	return path, exists, exists
 }
 
 func stepView(r desk.StepStatus) deskStepJSON {
@@ -755,12 +907,21 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 			return deskUsage("desk watch: --dir %w, so a resume= line could not name it", err)
 		}
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(dirFlag, "desk watch")
 	if err != nil {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // read side
 	name = resolveDeskName(d, name)
+	if deadline == deskWatchDeadlineUnset {
+		// No --deadline: wait for the run when stdin is a terminal (a person
+		// at it, even with stdout piped to tee), but never without bound for
+		// a caller with no terminal on stdin (forgectl#1094).
+		deadline = 0
+		if !deskStdinIsTerminal() {
+			deadline = deskWatchDefaultDeadline
+		}
+	}
 	// A write to a closed stdout must come back as EPIPE, not kill the
 	// process with SIGPIPE before it can say where to resume.
 	signal.Ignore(syscall.SIGPIPE)
@@ -897,6 +1058,11 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	if len([]rune(reason)) > desk.SkipNoteMax {
 		return deskUsage("desk skip: --reason must be at most %d characters", desk.SkipNoteMax)
 	}
+	// skip acts on an item that already exists, so a directory that is not
+	// a desk is refused before Open would create one.
+	if err := requireDesk(dirFlag, "desk skip"); err != nil {
+		return err
+	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
@@ -997,7 +1163,11 @@ func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int
 	// A prune never creates the desk: every other verb makes a missing desk
 	// directory by opening it, which for prune would turn a typo in --dir into
 	// a new empty desk and a quiet pruned=0.
-	if !desk.Exists(dir) {
+	present, err := desk.Present(dir)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return reportNoDeskToPrune(cmd, dir, days, asJSON, dryRun)
 	}
 	if dryRun {

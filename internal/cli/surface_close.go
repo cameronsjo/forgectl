@@ -102,6 +102,11 @@ cannot be read, when the workspace cannot be proven to be forgectl's, or
 when the row is a launch at pending or worktree less than ten minutes old,
 which may still be running. A row at stage closed skips herdr.
 
+After a herdr restart the worker's harness is gone with the old server.
+close then looks for forgectl's ownership marker on the new server: none
+means the workspace is already gone, and one at the recorded id (a workspace
+herdr restored) is closed.
+
 When the workspace is closed and no worktree remains, the ledger row is
 removed. A kept worktree keeps the row at stage "closed"; run close again
 once the work is saved.
@@ -152,7 +157,7 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	}
 	row, ok := findRow(rows, opts.Name)
 	if !ok {
-		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger", opts.Name), exitUsage)
+		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger; forgectl surface list shows the workers", opts.Name), exitUsage)
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), closeTimeout)
 	defer cancel()
@@ -249,7 +254,7 @@ func decideWorkspace(row worker.Row, now time.Time) workspaceDecision {
 	switch {
 	case row.Stage == worker.StageClosed:
 		// An earlier close closed the workspace and kept the worktree. herdr
-		// is not asked again: after a restart it could only refuse.
+		// is not asked again: there is nothing left there to close.
 		return workspaceDecision{state: closeWorkspaceEarlier}
 	case len(row.Ref) == 0:
 		d := workspaceDecision{state: closeWorkspaceNone}
@@ -322,7 +327,7 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 		case backend.CloseAlreadyGone:
 			res.Workspace = closeWorkspaceGone
 		case backend.CloseIdentityMismatch:
-			return refuse("herdr restarted, the reference is from another herdr session, or the workspace id no longer carries forgectl's marker (" + causeText(cr) + ")")
+			return refuse("the workspace cannot be proven to be forgectl's (" + causeText(cr) + ")")
 		case backend.CloseUnreadable:
 			return refuse("herdr could not be read (" + causeText(cr) + ")")
 		default:

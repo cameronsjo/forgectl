@@ -190,6 +190,11 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 					t.Errorf("stdout = %q, want empty", stdout)
 				}
 				obj := decodeOneStderrObject(t, stderr)
+				// One line (forgectl#1150): the object is the last line of
+				// stderr, so a caller reading only that line gets all of it.
+				if strings.Contains(strings.TrimSuffix(stderr, "\n"), "\n") {
+					t.Errorf("stderr = %q, want the object on one line", stderr)
+				}
 				if msg, _ := obj["error"].(string); !strings.Contains(msg, "unknown flag: --forgectl-bogus") {
 					t.Errorf("error = %q, want the unknown-flag message", msg)
 				}

@@ -188,6 +188,9 @@ func newEnvCmdForClient(client *envpkg.Client, sopsClient sopsSetter, clip *clip
 output, or a session transcript: key names are always visible, values never
 print. --file defaults to .env (relative to the current directory).
 
+Every env verb runs inside a git repository: the file must sit inside the
+checkout that holds the current directory. Outside one, env exits 1 and says so.
+
   forgectl env keys                    list KEY names only — never values
   forgectl env set KEY                 value from piped stdin, no-echo
                                         prompt, or --clipboard — never argv
@@ -319,7 +322,20 @@ func newEnvSetCmd(client *envpkg.Client, sopsClient sopsSetter, clip *clippkg.Cl
 	cmd := &cobra.Command{
 		Use:   "set <KEY>",
 		Short: "Set KEY's value — piped stdin, a no-echo prompt, or --clipboard; never argv",
-		Args:  cobra.ExactArgs(1),
+		Long: `set writes KEY's value into --file. The value never comes from argv. Its
+sources, non-inline producers first:
+
+  op read op://vault/item/field | forgectl env set API_KEY   # 1Password by composition
+  forgectl env set API_KEY < value.txt                       # from a file
+  forgectl env set API_KEY --clipboard                       # from the clipboard
+  forgectl env set API_KEY                                   # interactive, no echo
+
+Never inline the secret in the producing command itself
+(printf 'secret' | forgectl env set KEY): that puts it in that command's own
+argv and transcript, a channel forgectl cannot close.
+
+Like every env verb, set runs inside a git repository.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
 			// The key gate BRANCHES, and it stays in this position.

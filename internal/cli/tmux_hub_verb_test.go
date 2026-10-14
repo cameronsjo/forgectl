@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -128,6 +130,39 @@ func stubInteractiveTTY(t *testing.T, interactive bool) {
 	prev := isInteractiveTTY
 	isInteractiveTTY = func() bool { return interactive }
 	t.Cleanup(func() { isInteractiveTTY = prev })
+	// A terminal that can draw the hub, whatever TERM the test runs under.
+	stubTermIsDumb(t, false)
+}
+
+func stubTermIsDumb(t *testing.T, dumb bool) {
+	t.Helper()
+	prev := termIsDumb
+	termIsDumb = func() bool { return dumb }
+	t.Cleanup(func() { termIsDumb = prev })
+}
+
+// TERM=dumb cannot draw the tmux menu: it refuses without opening it and
+// names the plain forms (#1152).
+func TestTmux_DumbTerminalRefusesWithoutOpeningTheHub(t *testing.T) {
+	stubInteractiveTTY(t, true)
+	stubTermIsDumb(t, true)
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	opened := false
+	hub := func(context.Context, *tmux.Client, tui.RunOptions) (tui.Action, error) {
+		opened = true
+		return tui.Action{}, nil
+	}
+	cmd := newTmuxCmdWith(deps, tmux.New(deps.Runner), hub)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(nil)
+	err := cmd.Execute()
+	if opened {
+		t.Fatal("the hub opened under TERM=dumb")
+	}
+	if !errors.Is(err, tui.ErrDumbTerminal) || !strings.Contains(err.Error(), "forgectl tmux ls") {
+		t.Fatalf("err = %v, want the TERM=dumb refusal naming the plain forms", err)
+	}
 }
 
 // TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub pins forgectl#1100:
@@ -154,5 +189,62 @@ func TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "needs a terminal") || !strings.Contains(err.Error(), "forgectl tmux ls") {
 		t.Fatalf("err = %v, want a terminal-required message naming the plain forms", err)
+	}
+}
+
+// tmuxDispatchKey marks which dispatch a context belongs to.
+type tmuxDispatchKey struct{}
+
+// TestTmux_ASecondDispatchGetsItsOwnContext: cobra sets a subcommand's
+// context only while it is nil, so a second dispatch of `forgectl tmux` in
+// one process would hand the hub the first dispatch's context (#1018 item 2).
+// Mutation that turns it red: pass cmd.Context() to the hub again.
+func TestTmux_ASecondDispatchGetsItsOwnContext(t *testing.T) {
+	stubInteractiveTTY(t, true)
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	var seen []any
+	hub := func(ctx context.Context, _ *tmux.Client, _ tui.RunOptions) (tui.Action, error) {
+		seen = append(seen, ctx.Value(tmuxDispatchKey{}))
+		return tui.Action{}, nil
+	}
+	root := &cobra.Command{Use: "forgectl", SilenceUsage: true}
+	root.AddCommand(newTmuxCmdWith(deps, tmux.New(deps.Runner), hub))
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	for _, id := range []string{"first", "second"} {
+		ctx := context.WithValue(context.Background(), tmuxDispatchKey{}, id)
+		if err := execDispatch(ctx, deps, root, []string{"tmux"}, theme.Theme{}); err != nil {
+			t.Fatalf("dispatch %s: %v", id, err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != "first" || seen[1] != "second" {
+		t.Errorf("the hub saw dispatch contexts %v, want [first second]", seen)
+	}
+}
+
+// Bare forgectl on a TERM=dumb terminal refuses with a usage exit and
+// points at forgectl menu, instead of drawing the hub as escape sequences
+// (#1152). It drives the real Execute route.
+func TestExecute_BareOnADumbTerminalPointsAtMenu(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	withArgs(t)
+	stubInteractiveTTY(t, true)
+	stubTermIsDumb(t, true)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStderr := os.Stderr
+	os.Stderr = w
+	execErr := Execute(context.Background())
+	os.Stderr = prevStderr
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if got := ExitCode(execErr); got != 2 || !errors.Is(execErr, tui.ErrDumbTerminal) {
+		t.Fatalf("Execute = %v (exit %d), want the TERM=dumb refusal with exit 2", execErr, got)
+	}
+	if !strings.Contains(string(out), "forgectl menu") {
+		t.Errorf("stderr %q does not point at forgectl menu", out)
 	}
 }

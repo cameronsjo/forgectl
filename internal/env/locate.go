@@ -14,7 +14,9 @@ import (
 )
 
 // errNotInRepo is returned when no .git entry is found walking up from cwd.
-var errNotInRepo = errors.New("not inside a git repository")
+// The text names the fix: every env verb works on a file inside a git
+// checkout, so the caller changes into one.
+var errNotInRepo = errors.New("not inside a git repository; forgectl env works on a file inside a git checkout, so cd into the repository first")
 
 // Target is a --file argument that has already been resolved to its canonical
 // path and cleared for use — by the env-file-name allowlist, or by an

@@ -75,7 +75,7 @@ func (a *Adapter) ownedPane(ctx context.Context, ref backend.Ref) (pane, ws stri
 	case locateFound:
 	case locateAbsent:
 		return "", "", ErrWorkerGone
-	case locateMismatch, locateUnreadable, locateInvalid:
+	case locateMismatch, locateUnreadable, locateInvalid, locateRestored:
 		return "", "", fmt.Errorf("%w: %v", ErrScreenUnreadable, cause)
 	}
 	identity, err := ref.HerdrIdentity()
@@ -163,6 +163,16 @@ type paneGetReply struct {
 // paneStatus reads herdr's record of pane and checks it is the pane asked
 // for, in workspace ws.
 func (a *Adapter) paneStatus(ctx context.Context, pane, ws string) (ready.Screen, error) {
+	p, err := a.paneRecord(ctx, pane, ws)
+	if err != nil {
+		return ready.Screen{}, err
+	}
+	return ready.Screen{Agent: p.Agent, Status: p.AgentStatus}, nil
+}
+
+// paneRecord runs `pane get` for pane and checks herdr answered for that
+// pane, in workspace ws.
+func (a *Adapter) paneRecord(ctx context.Context, pane, ws string) (herdr.Pane, error) {
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrPaneStatus,
 		exec.MustFixed("pane"),
 		exec.MustFixed("get"),
@@ -170,23 +180,23 @@ func (a *Adapter) paneStatus(ctx context.Context, pane, ws string) (ready.Screen
 	))
 	if runErr != nil {
 		c := a.classifyRunError(runErr, res)
-		return ready.Screen{}, fmt.Errorf("%w: pane get: %v", ErrScreenUnreadable, c)
+		return herdr.Pane{}, fmt.Errorf("%w: pane get: %v", ErrScreenUnreadable, c)
 	}
 	raw, complete := res.Stdout.CopyBytesForParse()
 	if !complete {
-		return ready.Screen{}, fmt.Errorf("%w: pane get output was truncated", ErrScreenUnreadable)
+		return herdr.Pane{}, fmt.Errorf("%w: pane get output was truncated", ErrScreenUnreadable)
 	}
 	var r paneGetReply
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return ready.Screen{}, fmt.Errorf("%w: pane get: %w", ErrScreenUnreadable, err)
+		return herdr.Pane{}, fmt.Errorf("%w: pane get: %w", ErrScreenUnreadable, err)
 	}
 	if r.Result == nil || r.Result.Pane == nil {
-		return ready.Screen{}, fmt.Errorf("%w: pane get reply has no pane", ErrScreenUnreadable)
+		return herdr.Pane{}, fmt.Errorf("%w: pane get reply has no pane", ErrScreenUnreadable)
 	}
 	p := r.Result.Pane
 	if p.PaneID != pane || p.WorkspaceID != ws {
-		return ready.Screen{}, fmt.Errorf("%w: asked for pane %q in %q, herdr answered for %q in %q",
+		return herdr.Pane{}, fmt.Errorf("%w: asked for pane %q in %q, herdr answered for %q in %q",
 			ErrScreenUnreadable, pane, ws, p.PaneID, p.WorkspaceID)
 	}
-	return ready.Screen{Agent: p.Agent, Status: p.AgentStatus}, nil
+	return *p, nil
 }

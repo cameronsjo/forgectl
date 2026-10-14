@@ -3,6 +3,7 @@ package drain
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
@@ -24,15 +25,15 @@ func TestDecideSlots(t *testing.T) {
 		"held again":                {check: SlotsCheck{Exit: 1, Reason: "3 of 3 sessions live"}, prev: "held", hold: true, cond: "held", reasonIn: "3 of 3"},
 		"names the asked count":     {check: SlotsCheck{Need: 3, Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "claude-slots check 3 exited 1"},
 		"held with no output":       {check: SlotsCheck{Exit: 1}, hold: true, cond: "held", emit: true, kind: EventSlotsHeld, errHas: "no reason given"},
-		"odd exit launches":         {check: SlotsCheck{Exit: 2, Reason: "usage"}, cond: "exit 2", emit: true, kind: EventError, errHas: "exited 2"},
-		"odd exit again is quiet":   {check: SlotsCheck{Exit: 2}, prev: "exit 2", cond: "exit 2"},
-		"another odd exit is new":   {check: SlotsCheck{Exit: 3}, prev: "exit 2", cond: "exit 3", emit: true, kind: EventError, errHas: "exited 3"},
-		"signal (no exit code)":     {check: SlotsCheck{Exit: -1}, cond: "exit -1", emit: true, kind: EventError},
-		"timeout launches":          {check: SlotsCheck{Exit: -1, TimedOut: true}, cond: "timeout", emit: true, kind: EventError, errHas: "did not finish in time"},
-		"timeout again is quiet":    {check: SlotsCheck{Exit: -1, TimedOut: true}, prev: "timeout", cond: "timeout"},
-		"run failure launches":      {check: SlotsCheck{Exit: -1, Err: "permission denied"}, cond: "run failed", emit: true, kind: EventError, errHas: "permission denied"},
+		"odd exit holds":            {check: SlotsCheck{Exit: 2, Reason: "usage"}, hold: true, cond: "exit 2", emit: true, kind: EventSlotsHeld, errHas: "exited 2", reasonIn: "exited 2"},
+		"odd exit again is quiet":   {check: SlotsCheck{Exit: 2}, prev: "exit 2", hold: true, cond: "exit 2"},
+		"another odd exit is new":   {check: SlotsCheck{Exit: 3}, prev: "exit 2", hold: true, cond: "exit 3", emit: true, kind: EventSlotsHeld, errHas: "exited 3"},
+		"signal (no exit code)":     {check: SlotsCheck{Exit: -1}, hold: true, cond: "exit -1", emit: true, kind: EventSlotsHeld},
+		"timeout holds":             {check: SlotsCheck{Exit: -1, TimedOut: true}, hold: true, cond: "timeout", emit: true, kind: EventSlotsHeld, errHas: "check 1 did not finish in time; holding the row", reasonIn: "did not finish in time"},
+		"timeout again is quiet":    {check: SlotsCheck{Exit: -1, TimedOut: true}, prev: "timeout", hold: true, cond: "timeout"},
+		"run failure holds":         {check: SlotsCheck{Exit: -1, Err: "permission denied"}, hold: true, cond: "run failed", emit: true, kind: EventSlotsHeld, errHas: "permission denied"},
 		"hold after timeout is new": {check: SlotsCheck{Exit: 1}, prev: "timeout", hold: true, cond: "held", emit: true, kind: EventSlotsHeld},
-		"timeout after hold is new": {check: SlotsCheck{TimedOut: true, Exit: -1}, prev: "held", cond: "timeout", emit: true, kind: EventError},
+		"timeout after hold is new": {check: SlotsCheck{TimedOut: true, Exit: -1}, prev: "held", hold: true, cond: "timeout", emit: true, kind: EventSlotsHeld},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -58,5 +59,61 @@ func TestUnclaim(t *testing.T) {
 	c.Apply(&r)
 	if r.State != worker.QueueQueued || r.LaunchID != "" || r.Attempts != 2 || r.LastError != "waiting for a claude session slot: full" {
 		t.Fatalf("unclaimed row %+v; want queued, no launch id, attempts unchanged", r)
+	}
+}
+
+func TestNextHoldAndSlotsStuck(t *testing.T) {
+	t0 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	broken := DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "broken"}, "")
+	h := NextHold(nil, broken, t0)
+	if h == nil || h.Cond != "exit 2" || !h.Since.Equal(t0) || !h.Fault() {
+		t.Fatalf("first hold %+v", h)
+	}
+	if same := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "other"}, "exit 2"), t0.Add(time.Minute)); same != h || !strings.Contains(same.Reason, "other") {
+		t.Fatalf("the same condition started a new hold, or kept the old reason: %+v", same)
+	}
+	full := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 1, Reason: "full"}, "exit 2"), t0.Add(2*time.Minute))
+	if full == h || full.Cond != "held" || full.Fault() || !full.Since.Equal(t0.Add(2*time.Minute)) {
+		t.Fatalf("a new condition kept the old hold: %+v", full)
+	}
+	if NextHold(full, DecideSlots(SlotsCheck{Need: 1, Exit: 0}, "held"), t0) != nil {
+		t.Fatal("a free check left a hold")
+	}
+	if SlotsStuck(h, t0.Add(SlotsStuckAfter-time.Second)) || !SlotsStuck(h, t0.Add(SlotsStuckAfter)) {
+		t.Fatal("a fault hold is stuck exactly at SlotsStuckAfter")
+	}
+	if SlotsStuck(full, t0.Add(time.Hour)) || SlotsStuck(nil, t0) {
+		t.Fatal("a full cap or no hold is never stuck")
+	}
+}
+
+// TestNextHoldFaultToFaultKeepsItsStart: a check alternating between
+// failures is one fault hold, so the slots-stuck timer runs on.
+func TestNextHoldFaultToFaultKeepsItsStart(t *testing.T) {
+	t0 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	h := NextHold(nil, DecideSlots(SlotsCheck{Need: 1, TimedOut: true}, ""), t0)
+	for i, c := range []SlotsCheck{{Need: 1, Exit: 2, Reason: "x"}, {Need: 1, TimedOut: true}, {Need: 1, Err: "gone"}} {
+		next := NextHold(h, DecideSlots(c, h.Cond), t0.Add(time.Duration(i+1)*time.Minute))
+		if next != h || !next.Since.Equal(t0) {
+			t.Fatalf("check %d: hold %+v, want the same hold since %s", i, next, t0)
+		}
+		if want := DecideSlots(c, "").Cond; next.Cond != want {
+			t.Fatalf("check %d: cond %q, want the latest %q", i, next.Cond, want)
+		}
+	}
+	if !SlotsStuck(h, t0.Add(SlotsStuckAfter)) {
+		t.Fatal("an alternating fault never got stuck")
+	}
+}
+
+func TestHeldFor(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0: "0s", 42 * time.Second: "42s", 15 * time.Minute: "15m", 15*time.Minute + 20*time.Second: "15m",
+		time.Hour + 5*time.Minute: "1h5m", 2 * time.Hour: "2h", -time.Second: "0s",
+		59*time.Second + 500*time.Millisecond: "1m",
+	} {
+		if got := HeldFor(d); got != want {
+			t.Errorf("HeldFor(%s) = %q, want %q", d, got, want)
+		}
 	}
 }
