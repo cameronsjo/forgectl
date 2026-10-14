@@ -43,11 +43,21 @@ func linkUnlink(fromfd int, from string, tofd int, to string) error {
 	if err := unix.Linkat(fromfd, from, tofd, to, 0); err != nil {
 		return err
 	}
-	if err := unix.Unlinkat(fromfd, from, 0); err != nil {
+	if err := unlinkSource(fromfd, from, 0); err != nil {
+		// The file must not stay under both names: drop the new link, so it
+		// is where it was (or, if someone else moved the source meanwhile,
+		// only where they put it).
+		if uerr := unix.Unlinkat(tofd, to, 0); uerr != nil {
+			return fmt.Errorf("remove %s after linking it: %w (and the new link could not be removed: %w)", from, err, uerr)
+		}
 		return fmt.Errorf("remove %s after linking it: %w", from, err)
 	}
 	return nil
 }
+
+// unlinkSource removes linkUnlink's source name. Tests replace it to fail
+// that step.
+var unlinkSource = unix.Unlinkat
 
 // unsupportedRename reports a no-replace rename the filesystem does not
 // offer, for which linkUnlink stands in.

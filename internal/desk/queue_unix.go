@@ -33,20 +33,12 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 	}()
 
-	// running/ is listed first, so a waiting item whose name a run holds is
-	// seen as such (forgectl#1157).
-	running, err := d.list(DirRunning)
+	// running/ is listed before pending/, so a waiting item whose name a run
+	// holds is seen as such (forgectl#1157), and again after it, so an item
+	// claimed between the two listings is still shown, as running.
+	inRunning, err := d.runningNames()
 	if err != nil {
 		return nil, err
-	}
-	inRunning := map[string]bool{}
-	for _, e := range running {
-		name, kind, ok := kindOfFile(e.Name())
-		if !ok {
-			continue
-		}
-		inRunning[name] = true
-		snap.Running = append(snap.Running, d.runningItem(name, kind))
 	}
 
 	pending, err := d.list(DirPending)
@@ -70,6 +62,19 @@ func (d *Desk) Scan() (*Snapshot, error) {
 			d.hold(&it, inRunning[name])
 		}
 		snap.Pending = append(snap.Pending, it)
+	}
+
+	running, err := d.list(DirRunning)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range running {
+		name, kind, ok := kindOfFile(e.Name())
+		if !ok {
+			continue
+		}
+		inRunning[name] = true
+		snap.Running = append(snap.Running, d.runningItem(name, kind))
 	}
 
 	if snap.Done, err = d.doneItems(inRunning); err != nil {
@@ -123,21 +128,40 @@ func (d *Desk) Known(name string) bool {
 			return true
 		}
 	}
-	return d.exists(path.Join(DirDone, name+extLog))
+	// A run in done/ counts only with the exit code the desk recorded: a
+	// legacy run (an EXIT= line in its log, no meta) never satisfies AFTER.
+	_, ok := d.doneExit(name)
+	return ok
 }
 
-// holdRunning is the hold on a waiting item whose name a run in running/
-// holds: claiming it would rename over that run's record.
-const holdRunning = "an item of this name is running; it waits until that run ends"
+// runningNames is the set of item names in running/.
+func (d *Desk) runningNames() (map[string]bool, error) {
+	entries, err := d.list(DirRunning)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		if name, _, ok := kindOfFile(e.Name()); ok {
+			names[name] = true
+		}
+	}
+	return names, nil
+}
 
-// hold sets a waiting item's state when it cannot be claimed yet: held (it
-// clears on its own) while its name is held by a run in running/, or while
-// an item its "# AFTER:" line names has not finished with exit 0; refused
-// when the AFTER line itself can never be met. Either way it stays in
-// pending/.
+// refusedNameTaken is the refusal of a pending item whose name a run already
+// holds, in running/ or done/: claiming it would rename over that run's
+// record, or its run would be skipped as name-reused once approved. It never
+// clears; the item is skipped and queued again under a new number.
+const refusedNameTaken = "another item already uses this name"
+
+// hold sets a waiting item's state when it cannot be claimed: refused when
+// its name is taken by a run (in running/ or done/) or its "# AFTER:" line
+// can never be met, held (it clears on its own) while an item its AFTER line
+// names has not finished with exit 0. Either way it stays in pending/.
 func (d *Desk) hold(it *Item, running bool) {
-	if running {
-		it.State, it.Hold = StateHeld, holdRunning
+	if running || d.doneTaken(it.Name) {
+		it.State, it.Refusal = StateRefused, refusedNameTaken
 		return
 	}
 	why, permanent := d.unmetAfter(it.Name, it.After)

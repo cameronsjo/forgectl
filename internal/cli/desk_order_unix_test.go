@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -161,5 +164,20 @@ func TestDeskPlan_PreviewsAHeldBatch(t *testing.T) {
 	wantExit(t, err, 0)
 	if !strings.Contains(out, "a") {
 		t.Errorf("plan of the held batch printed %q", out)
+	}
+}
+
+// A legacy done run (an EXIT= log, no recorded exit code) never satisfies
+// --after, so add warns about it too.
+func TestDeskAdd_AfterWarnsOnALegacyDoneRun(t *testing.T) {
+	dir := newDeskDir(t)
+	openTestDesk(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, desk.DirDone, "01-old.log"), []byte("EXIT=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, err := deskRun(t, deskDeps(), "add", writeTemp(t, "v.sh", "true\n"), "--what", "v", "--why", "v", "--after", "01-old")
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "warning: --after 01-old names no item") {
+		t.Errorf("stderr %q lacks the warning", errOut)
 	}
 }

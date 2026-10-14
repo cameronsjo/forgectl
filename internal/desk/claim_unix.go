@@ -118,8 +118,8 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	// of the other kind shares its log and events. Nothing has been written
 	// yet, so the item stays waiting. The renames below refuse an existing
 	// target too, which closes the window after this check.
-	if _, err := d.findKind(DirRunning, name); err == nil {
-		return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning)
+	if _, err := d.findKind(DirRunning, name); err == nil || d.doneTaken(name) {
+		return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), refusedNameTaken)
 	}
 	// An item that runs after others waits for each to finish with exit 0.
 	// The pending bytes are read here for their AFTER line, and must be the
@@ -131,11 +131,11 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	case errors.Is(err, ErrNotFound):
 		return nil, ErrClaimed
 	case errors.As(err, &pr):
-		// As a refusal found after the rename always was: the item goes to
-		// skipped/ and nothing runs it.
-		meta.SkipReason = "refused: " + pr.reason
-		defer d.leftPending(meta)
-		return nil, errors.Join(err, d.writeMeta(DirPending, name, meta), d.move(name, kind, DirPending, DirSkipped))
+		// Refused, and left where it is: a second link may be another desk's
+		// claim in flight (the link-and-unlink rename), which must not be
+		// moved out from under it. The check after the rename still guards
+		// what runs, and a scan shows the item refused meanwhile.
+		return nil, err
 	case err != nil:
 		return nil, fmt.Errorf("%w: %s: %w", ErrRefused, describe(name), err)
 	}
@@ -168,21 +168,27 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 			return nil, ErrClaimed
 		case errors.Is(err, fs.ErrExist):
 			// A run of this name reached running/ after the check above.
-			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning), d.writeMeta(DirPending, name, unclaimed))
+			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), refusedNameTaken), d.writeMeta(DirPending, name, unclaimed))
 		}
 		return nil, fmt.Errorf("desk: claim %s: %w", describe(name), err)
 	}
-	// The item has left pending/ whatever happens next (run, changed, or
-	// refused), so the signal raised for it is done.
-	defer d.leftPending(meta)
 	if err := claimMeta(d, name); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			// running/ holds another item's meta under this name: that item
 			// is the one Release would act on, so put this one back in
-			// pending/ instead, unclaimed, and leave the other alone.
+			// pending/ instead, unclaimed, and leave the other alone. If the
+			// move back fails the item stays in running/ beside that meta
+			// and is reported; it has no owner, so it reads as lost once the
+			// claim grace passes, and only `desk skip` moves it on.
 			back := d.renameNoReplace(DirRunning, DirPending, file)
-			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), holdRunning), back, d.writeMeta(DirPending, name, unclaimed))
+			if back != nil {
+				d.leftPending(meta)
+			}
+			return nil, errors.Join(fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), refusedNameTaken), back, d.writeMeta(DirPending, name, unclaimed))
 		}
+		// The item has left pending/ (it is released to skipped/ below), so
+		// the signal raised for it is done.
+		defer d.leftPending(meta)
 		// The item is in running/ and nothing will own it: without its meta it
 		// would read as a claim in progress for ever. Give running/ the meta
 		// this claim already holds and release the item, so it ends in
@@ -195,6 +201,9 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		}
 		return nil, errors.Join(fmt.Errorf("desk: claim %s meta: %w", describe(name), err), werr, rerr)
 	}
+	// The item has left pending/ whatever happens next (run, changed, or
+	// refused), so the signal raised for it is done.
+	defer d.leftPending(meta)
 
 	data, _, err := d.readItem(DirRunning, file)
 	var r *refusal

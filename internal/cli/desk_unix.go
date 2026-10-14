@@ -236,7 +236,7 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	}
 	for _, n := range a.After {
 		if !d.Known(n) {
-			warnings = append(warnings, "--after "+n+" names no item waiting, running or done; "+a.Name+" stays held until one of that name finishes with exit 0")
+			warnings = append(warnings, "--after "+n+" names no item waiting, running, or done with a recorded exit code; "+a.Name+" stays held until one of that name finishes with exit 0")
 		}
 	}
 	signal := deskSignalState(signalNow, len(signalFailures), sig.enabled())

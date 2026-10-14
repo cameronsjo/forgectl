@@ -40,7 +40,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -245,16 +244,20 @@ func headerLine(line string) (key, value string, ok bool) {
 const MaxAfter = 16
 
 // splitAfter reads an AFTER value: item names separated by commas or spaces,
-// each kept once, in order.
+// each kept once, in order. It stops at MaxAfter+1 distinct names, enough to
+// refuse the line as over the cap, so a hostile line costs one linear pass.
 func splitAfter(value string) []string {
-	var out []string
+	out := []string{}
+	seen := map[string]bool{}
 	for _, n := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-		if !slices.Contains(out, n) {
-			out = append(out, n)
+		if seen[n] {
+			continue
 		}
-	}
-	if out == nil {
-		out = []string{}
+		seen[n] = true
+		out = append(out, n)
+		if len(out) > MaxAfter {
+			break
+		}
 	}
 	return out
 }

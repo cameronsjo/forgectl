@@ -305,6 +305,9 @@ func (b *Batch) launch(s Step) error {
 	}
 	_ = w.Close() // the child holds the write end now; EOF comes when every holder exits
 	if startErr != nil {
+		if itemEnvErr != nil {
+			_, _ = fmt.Fprintf(logF, "run-batch: could not start: %v\n", itemEnvErr)
+		}
 		_ = r.Close()
 		_ = logF.Close()
 		b.endStep(s, 127, stepFailed)

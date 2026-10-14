@@ -215,8 +215,9 @@ in the dashboard's own pane. A batch cannot be a TTY item.
 adds an "# AFTER:" line, and the item shows as held ("waits on NAME") and
 cannot be run until each named item has finished with exit 0. A run that
 failed keeps it held; skip it, or queue a new item, to go on. A name the desk
-does not know (a typo, or an item already skipped) holds it for ever, so add
-warns when NAME is not waiting, running or done.
+does not know (a typo, an item already skipped, a legacy run with no recorded
+exit code) holds it for ever, so add warns when NAME is not waiting, running,
+or done with a recorded exit code.
 
 Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the

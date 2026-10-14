@@ -11,7 +11,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // pendingItem returns the pending item called name from a scan.
@@ -27,7 +31,7 @@ func pendingItem(t *testing.T, s *Snapshot, name string) Item {
 }
 
 // A pending item queued under the name of an item still in running/ is
-// shown held, and claiming it is refused before anything moves: the
+// shown refused, and claiming it is refused before anything moves: the
 // claim's rename would replace the running item's record (forgectl#1157).
 func TestClaimRefusesANameARunHolds(t *testing.T) {
 	d := openDesk(t)
@@ -36,8 +40,8 @@ func TestClaimRefusesANameARunHolds(t *testing.T) {
 
 	dropPending(t, d, c.Name+".sh", "# WHAT: again\n# WHY: a test\necho second\n")
 	it := pendingItem(t, scan(t, d), c.Name)
-	if it.State != StateHeld || !strings.Contains(it.Hold, "running") {
-		t.Fatalf("pending %s: state %s hold %q, want held because a run holds the name", c.Name, it.State, it.Hold)
+	if it.State != StateRefused || it.Refusal != refusedNameTaken {
+		t.Fatalf("pending %s: state %s refusal %q, want refused because a run holds the name", c.Name, it.State, it.Refusal)
 	}
 	if _, err := d.Claim(c.Name, queuedSHA(t, d, c.Name)); !errors.Is(err, ErrRefused) {
 		t.Fatalf("Claim = %v, want ErrRefused", err)
@@ -50,6 +54,22 @@ func TestClaimRefusesANameARunHolds(t *testing.T) {
 	}
 	if m, ok, err := d.readMeta(DirPending, c.Name); err != nil || !ok || m.ClaimedAt != nil {
 		t.Errorf("pending meta after the refusal: %+v ok=%v err=%v; want it untouched", m, ok, err)
+	}
+
+	// Once the run ends its name is in done/: the item stays refused, never
+	// waiting, since an approval would only be skipped as name-reused.
+	run, err := d.BeginRun(c.Name, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(0, "exit"); err != nil {
+		t.Fatal(err)
+	}
+	if it := pendingItem(t, scan(t, d), c.Name); it.State != StateRefused || it.Refusal != refusedNameTaken {
+		t.Fatalf("after the run ended: state %s refusal %q, want refused", it.State, it.Refusal)
+	}
+	if _, err := d.Claim(c.Name, queuedSHA(t, d, c.Name)); !errors.Is(err, ErrRefused) {
+		t.Fatalf("Claim after the run ended = %v, want ErrRefused", err)
 	}
 }
 
@@ -153,6 +173,26 @@ func TestAddWithRefusesABadAfter(t *testing.T) {
 	}
 }
 
+// A hostile AFTER line with a huge number of names parses in one linear
+// pass and is refused as over the cap.
+func TestSplitAfterIsLinearAndCapped(t *testing.T) {
+	var b strings.Builder
+	for i := range 165_000 {
+		fmt.Fprintf(&b, "%d-n,", i)
+	}
+	start := time.Now()
+	h := ParseHeaders([]byte("# AFTER: " + b.String() + "\n"))
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("parsing took %v", took)
+	}
+	if len(h.After) != MaxAfter+1 {
+		t.Errorf("parsed %d names, want MaxAfter+1 = %d (enough to refuse)", len(h.After), MaxAfter+1)
+	}
+	if why, permanent := (&Desk{}).unmetAfter("99-x", h.After); !permanent || !strings.Contains(why, "at most") {
+		t.Errorf("unmetAfter = %q, %v; want refused as over the cap", why, permanent)
+	}
+}
+
 func TestParseHeadersReadsAfter(t *testing.T) {
 	h := ParseHeaders([]byte("# AFTER: 01-a, 02-b,01-a\n# AFTER: 03-c\n"))
 	if !slices.Equal(h.After, []string{"01-a", "02-b"}) {
@@ -200,6 +240,77 @@ func TestRenameNoReplaceKeepsTheTarget(t *testing.T) {
 	}
 	if err := d.renameNoReplace(DirPending, DirRunning, "01-a.sh"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("renameNoReplace of a missing source = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// When the source cannot be removed after linking, the new link goes, so
+// the file is never left under both names.
+func TestLinkUnlinkDropsTheLinkWhenTheSourceStays(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a"), "a\n", 0o600)
+	f, err := os.Open(dir) //nolint:gosec // G304: a directory under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test
+	prev := unlinkSource
+	unlinkSource = func(int, string, int) error { return unix.EIO }
+	t.Cleanup(func() { unlinkSource = prev })
+	fd := int(f.Fd())
+	if err := linkUnlink(fd, "a", fd, "b"); err == nil {
+		t.Fatal("linkUnlink succeeded with the unlink failing")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "b")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the new link was left: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "a")); err != nil || fi.Sys().(*syscall.Stat_t).Nlink != 1 {
+		t.Errorf("a: %v; want it in place with one link", err)
+	}
+}
+
+// A pending item with a second link (another desk's link-and-unlink claim
+// in flight) is refused by Claim and left where it is, never moved to
+// skipped/ out from under that claim.
+func TestClaimLeavesATwoLinkItemInPlace(t *testing.T) {
+	d := openDesk(t)
+	a := addScript(t, d, "a.sh", "echo a\n")
+	scan(t, d)
+	p := filepath.Join(d.Path(), DirPending, a.Name+".sh")
+	if err := os.Link(p, filepath.Join(t.TempDir(), "other")); err != nil {
+		t.Skipf("no hard link across these directories: %v", err)
+	}
+	if _, err := d.Claim(a.Name, a.SHA256); !errors.Is(err, ErrRefused) {
+		t.Fatalf("Claim = %v, want ErrRefused", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("the item left pending/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d.Path(), DirSkipped, a.Name+".sh")); err == nil {
+		t.Error("the item was moved to skipped/")
+	}
+}
+
+// Known counts a done run only with a recorded exit code: a legacy run (an
+// EXIT= log, no meta) would hold an AFTER item for ever.
+func TestKnownNeedsARecordedExit(t *testing.T) {
+	d := openDesk(t)
+	writeFile(t, d.LogPath("01-legacy"), "EXIT=0\n", 0o600)
+	if d.Known("01-legacy") {
+		t.Error("Known(01-legacy) with only an EXIT= log = true")
+	}
+	c := queue(t, d, "b.sh", "echo b\n")
+	if !d.Known(c.Name) {
+		t.Errorf("Known(%s) running = false", c.Name)
+	}
+	run, err := d.BeginRun(c.Name, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(3, "exit"); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Known(c.Name) {
+		t.Errorf("Known(%s) done with exit 3 = false", c.Name)
 	}
 }
 
