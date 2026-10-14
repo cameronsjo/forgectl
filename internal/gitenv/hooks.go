@@ -207,7 +207,7 @@ const maxIncludedFiles = 64
 var (
 	// errIncludeUnresolvable is returned for an include whose path cannot be
 	// resolved the way git would.
-	errIncludeUnresolvable = errors.New("a configuration include names a path that cannot be resolved; refusing to run with its hooks unread")
+	errIncludeUnresolvable = errors.New(`a configuration include names a path forgectl cannot resolve as git would (a ".." component, a relative path in config.worktree, "~user/" or "%(prefix)/"); refusing to run with its hooks unread. Write that include path as an absolute path without ".."`)
 	// errIncludeNotRegular is returned for an include that names something
 	// other than a regular file.
 	errIncludeNotRegular = errors.New("a configuration include names something other than a regular file; refusing to run with its hooks unread")
@@ -235,9 +235,11 @@ func includedHookNames(ctx context.Context, r Runner, bin, dir string) ([]string
 		}
 		from := ""
 		if f, isFile := strings.CutPrefix(origin, "file:"); isFile {
-			if !filepath.IsAbs(f) {
-				// git prints a path relative to where it ran: dir.
-				f = filepath.Join(dir, f)
+			if !filepath.IsAbs(f) && dir != "" {
+				// git prints a path relative to where it ran: dir. Joined as
+				// a string, never cleaned, so the kernel resolves any
+				// symbolic link in it as it did for git.
+				f = dir + "/" + f
 			}
 			from = f
 		}
@@ -305,31 +307,77 @@ func includedHookNames(ctx context.Context, r Runner, bin, dir string) ([]string
 	return names, nil
 }
 
-// resolveInclude resolves an include's path as git does: a leading "~/"
-// names the home directory, and a relative path is relative to the
-// directory of the file the include is in. A form this cannot resolve the
-// same way ("~user/", "%(prefix)/", a relative path from a source that is
-// not a file) is refused.
+// resolveInclude builds the path of the file an include names the way git
+// does, by string, never cleaning it: a leading "~/" is $HOME followed by
+// the rest, an absolute path stands as written, and a relative one is the
+// including file's directory, up to its last '/', followed by the path. The
+// kernel then resolves the result as it did for git: path.Clean or
+// filepath.Join would collapse "lnk/.." lexically where the kernel follows
+// lnk first, and read a different file.
+//
+// It fails closed rather than emulate git further. Refused:
+//   - a "~user/" or "%(prefix)/" path, which git resolves in ways not
+//     modelled here;
+//   - a path or an including file with a ".." component: the kernel's
+//     answer depends on symbolic links met on the way, and such includes
+//     are rare;
+//   - a relative path from a source that is not a file, or from a
+//     config.worktree. worktree add copies the main worktree's
+//     config.worktree into the new worktree's admin directory, and the
+//     children resolve a relative include against that copy, not the file
+//     the listing reported;
+//   - an empty path.
 func resolveInclude(from, path string) (string, error) {
-	switch {
-	case path == "":
+	if path == "" || hasDotDot(path) || hasDotDot(from) {
 		return "", errIncludeUnresolvable
+	}
+	switch {
 	case path == "~" || strings.HasPrefix(path, "~/"):
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
+		home := os.Getenv("HOME")
+		if home == "" {
 			return "", errIncludeUnresolvable
 		}
-		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+		return home + strings.TrimPrefix(path, "~"), nil
 	case strings.HasPrefix(path, "~"), strings.HasPrefix(path, "%("):
 		return "", errIncludeUnresolvable
+	case filepath.IsAbs(path):
+		return path, nil
 	}
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path), nil
-	}
-	if from == "" {
+	if from == "" || isWorktreeConfig(from) {
 		return "", errIncludeUnresolvable
 	}
-	return filepath.Join(filepath.Dir(from), path), nil
+	slash := strings.LastIndexAny(from, includeSeparators)
+	if slash < 0 {
+		// An including file in git's working directory.
+		return path, nil
+	}
+	return from[:slash+1] + path, nil
+}
+
+// includeSeparators are the separators a path git prints may hold: '/'
+// everywhere, and '\' on Windows as well.
+var includeSeparators = func() string {
+	if filepath.Separator == '/' {
+		return "/"
+	}
+	return "/" + string(filepath.Separator)
+}()
+
+// hasDotDot reports whether p has a ".." component.
+func hasDotDot(p string) bool {
+	for _, part := range strings.FieldsFunc(p, func(r rune) bool { return strings.ContainsRune(includeSeparators, r) }) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// isWorktreeConfig reports whether from is a per-worktree configuration file,
+// which worktree add copies.
+func isWorktreeConfig(from string) bool {
+	slash := strings.LastIndexAny(from, includeSeparators)
+	return from[slash+1:] == "config.worktree"
 }
 
 // runConfigList runs a `git config --get-regexp` listing under Local. git

@@ -50,23 +50,22 @@ func writeConfig(t *testing.T, path, body string) {
 // from the including file's directory and "~/" from HOME, and the includes
 // those files name are followed in turn; an include naming no file is
 // skipped.
-// Mutations: read only includes whose condition holds (git config without
-// --no-includes on the listing, onbranch:evil is dropped); resolve a
-// relative path from dir instead of the including file (nested.inc is not
-// found).
+// Mutations: read only includes whose condition holds (onbranch:evil is
+// dropped); resolve a relative path from dir instead of the including file
+// (evil.inc and nested.inc are not found).
 func TestIncludedHookNamesReadsEveryInclude(t *testing.T) {
 	dir := includeRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writeConfig(t, filepath.Join(dir, "evil.inc"), "[hook \"on.branch\"]\n\tcommand = x\n\tevent = post-checkout\n[include]\n\tpath = sub/nested.inc\n")
-	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o750); err != nil {
+	writeConfig(t, filepath.Join(dir, ".git", "evil.inc"), "[hook \"on.branch\"]\n\tcommand = x\n\tevent = post-checkout\n[include]\n\tpath = sub/nested.inc\n")
+	if err := os.Mkdir(filepath.Join(dir, ".git", "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	writeConfig(t, filepath.Join(dir, "sub", "nested.inc"), "[hook \"nested\"]\n\tevent = reference-transaction\n")
+	writeConfig(t, filepath.Join(dir, ".git", "sub", "nested.inc"), "[hook \"nested\"]\n\tevent = reference-transaction\n")
 	gitdirInc := filepath.Join(t.TempDir(), "gitdir.inc")
 	writeConfig(t, gitdirInc, "[hook \"by-gitdir\"]\n\tcommand = y\n")
 	writeConfig(t, filepath.Join(home, "home.inc"), "[hook \"home\"]\n\tcommand = z\n")
-	repoGit(t, dir, "config", "includeIf.onbranch:evil.path", "../evil.inc")
+	repoGit(t, dir, "config", "includeIf.onbranch:evil.path", "evil.inc")
 	repoGit(t, dir, "config", "includeIf.gitdir:**/worktrees/w/.path", gitdirInc)
 	repoGit(t, dir, "config", "--add", "include.path", "~/home.inc")
 	repoGit(t, dir, "config", "--add", "include.path", "missing.inc")
@@ -120,19 +119,40 @@ func TestIncludedHookNamesFailsClosed(t *testing.T) {
 	}
 }
 
+// resolveInclude builds paths by string as git does, never cleaning them,
+// and refuses the shapes it does not emulate.
+// Mutations: build with filepath.Join (lnk/./x.inc and a//b.inc come back
+// cleaned); drop the ".." refusal; drop the config.worktree refusal.
 func TestResolveInclude(t *testing.T) {
 	t.Setenv("HOME", "/home/op")
 	for _, c := range []struct{ from, path, want string }{
-		{"/r/.git/config", "../x.inc", "/r/x.inc"},
-		{"/r/.git/config", "/abs/x.inc", "/abs/x.inc"},
+		{"/r/.git/config", "x.inc", "/r/.git/x.inc"},
+		{"/r/.git/config", "lnk/./x.inc", "/r/.git/lnk/./x.inc"},
+		{"/r/.git/config", "a//b.inc", "/r/.git/a//b.inc"},
+		{".git/config", "x.inc", ".git/x.inc"},
+		{"config", "x.inc", "x.inc"},
+		{"/r/.git/config", "/abs/./x.inc", "/abs/./x.inc"},
 		{"", "/abs/x.inc", "/abs/x.inc"},
 		{"/r/.git/config", "~/x.inc", "/home/op/x.inc"},
+		{"/r/.git/config.worktree", "/abs/x.inc", "/abs/x.inc"},
 	} {
 		if got, err := resolveInclude(c.from, c.path); err != nil || got != c.want {
 			t.Errorf("resolveInclude(%q, %q) = %q, %v; want %q", c.from, c.path, got, err, c.want)
 		}
 	}
-	for _, bad := range [][2]string{{"", "rel.inc"}, {"/r/c", ""}, {"/r/c", "~op/x"}, {"/r/c", "%(prefix)/x"}} {
+	for _, bad := range [][2]string{
+		{"", "rel.inc"},
+		{"/r/c", ""},
+		{"/r/c", "~op/x"},
+		{"/r/c", "%(prefix)/x"},
+		{"/r/.git/config", "../x.inc"},
+		{"/r/.git/config", "lnk/../x.inc"},
+		{"/r/.git/config", "/abs/../x.inc"},
+		{"/r/.git/config", "~/../x.inc"},
+		{"/r/.git/lnk/../config", "x.inc"},
+		{"/r/.git/config.worktree", "x.inc"},
+		{"config.worktree", "x.inc"},
+	} {
 		if _, err := resolveInclude(bad[0], bad[1]); !errors.Is(err, errIncludeUnresolvable) {
 			t.Errorf("resolveInclude(%q, %q) = %v, want errIncludeUnresolvable", bad[0], bad[1], err)
 		}
