@@ -408,6 +408,7 @@ func runVerb(ctx context.Context, run exec.SensitiveRunner, herdrPath string, ki
 		return nil, fmt.Errorf("herdr %s: the reply was cut short", what)
 	}
 	if e := refusal(data); e != nil {
+		e.Message = scrubValues(e.Message, hide)
 		return nil, e
 	}
 	return data, nil

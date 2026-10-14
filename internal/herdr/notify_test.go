@@ -263,3 +263,26 @@ func TestNotificationResultErr(t *testing.T) {
 		t.Errorf("busy: err %v, want a failure naming it", err)
 	}
 }
+
+// TestNotificationShowScrubsItsTextFromARefusal: herdr's structured refusal
+// message is scrubbed of the call's own text too.
+func TestNotificationShowScrubsItsTextFromARefusal(t *testing.T) {
+	n := Notification{Title: "deploy prod-db", Body: "rotate secret-ABC"}
+	envelope := []byte(`{"error":{"code":"invalid_request","message":"cannot show rotate secret-ABC"}}`)
+	for name, res := range map[string]exec.SensitiveResult{
+		"exit 1": {ExitCode: exitFailure, Stderr: exec.BoundedOutputForTest(envelope, exec.OutputComplete)},
+		"exit 0": {Stdout: exec.BoundedOutputForTest(envelope, exec.OutputComplete)},
+	} {
+		run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+			if res.ExitCode != 0 {
+				return res, exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
+			}
+			return res, nil
+		}}
+		_, err := NotificationShow(t.Context(), run, testHerdrPath, n)
+		var he *Error
+		if !errors.As(err, &he) || he.Code != "invalid_request" || strings.Contains(err.Error(), "secret-ABC") || !strings.Contains(err.Error(), "[redacted]") {
+			t.Errorf("%s: err = %v, want the refusal with the body scrubbed", name, err)
+		}
+	}
+}

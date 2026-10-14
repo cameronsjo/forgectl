@@ -149,7 +149,7 @@ func TestDrainSlotsStuckAlertsOnce(t *testing.T) {
 			if len(stuck) != tc.events || len(f.alerted) != tc.alerts {
 				t.Fatalf("%d slots-stuck events, alerts %q; want %d and %d", len(stuck), f.alerted, tc.events, tc.alerts)
 			}
-			if tc.events == 1 && !strings.Contains(stuck[0].Error, "claude launches held for 15m0s") {
+			if tc.events == 1 && !strings.Contains(stuck[0].Error, "claude launches held for 15m:") {
 				t.Fatalf("slots-stuck event %+v; want how long", stuck[0])
 			}
 		})
@@ -176,7 +176,7 @@ func TestDrainStatusShowsTheSlotsHold(t *testing.T) {
 	}
 	out, err := runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
 	var v drainStatusView
-	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.SlotsHold == nil || v.SlotsHold.Cond != "exit 2" || v.HeldFor < 20*60 {
+	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.SlotsHold == nil || v.SlotsHold.Cond != "exit 2" || v.HeldFor == nil || *v.HeldFor < 20*60 {
 		t.Fatalf("status --json: %s, %v; want slots_hold exit 2 held 20 minutes", out, err)
 	}
 	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd())
@@ -235,7 +235,7 @@ func TestDrainStatusDropsTheHoldOfADeadDrain(t *testing.T) {
 	}
 	out, err := runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
 	var v drainStatusView
-	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.Status != drain.StatusStale || v.SlotsHold != nil || v.HeldFor != 0 {
+	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.Status != drain.StatusStale || v.SlotsHold != nil || v.HeldFor != nil {
 		t.Fatalf("status --json: %s, %v; want stale with no slots_hold", out, err)
 	}
 	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd())
@@ -313,5 +313,58 @@ func TestDrainSlotsAlternatingFaultsStillAlert(t *testing.T) {
 	}
 	if st := d.status(drain.Status{}, nil); st.SlotsHold == nil || !st.SlotsHold.Since.Equal(drainT0) {
 		t.Fatalf("slots_hold %+v; want the hold since the first failure", st.SlotsHold)
+	}
+}
+
+// TestDrainPauseAfterAFaultEndsTheHold: one claude-slots failure, then a
+// pause that stops claiming before any check. The pause is what blocks, so
+// the hold ends: drain status does not show it growing, and slots-stuck
+// never fires on it.
+func TestDrainPauseAfterAFaultEndsTheHold(t *testing.T) {
+	f, d, q, calls := slotsDrain(t, drain.SlotsCheck{Exit: -1, TimedOut: true})
+	on := true
+	f.cfg.Surface.Drain.Notify = &on
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	d.tick(t.Context())
+	if st := d.status(drain.Status{}, nil); st.SlotsHold == nil {
+		t.Fatal("no hold after the failed check")
+	}
+	f.herdrErr = errors.New("herdr is not ready")
+	for i := 1; i <= 3; i++ {
+		f.now = drainT0.Add(time.Duration(i) * drain.SlotsStuckAfter)
+		d.tick(t.Context())
+	}
+	if *calls != 1 {
+		t.Fatalf("%d claude-slots checks, want 1: the pause stops claiming", *calls)
+	}
+	if st := d.status(drain.Status{}, nil); st.SlotsHold != nil || !strings.Contains(st.PauseReason, "herdr is not ready") {
+		t.Fatalf("slots_hold %+v, pause %q; want no hold and the herdr pause", st.SlotsHold, st.PauseReason)
+	}
+	if n := len(eventsOfKind(f, drain.EventSlotsStuck)); n != 0 || len(f.alerted) != 0 {
+		t.Fatalf("%d slots-stuck events, alerts %q while paused", n, f.alerted)
+	}
+}
+
+// TestDrainStatusAlwaysCarriesHeldSeconds: slots_held_seconds is present,
+// even as 0, whenever slots_hold is.
+func TestDrainStatusAlwaysCarriesHeldSeconds(t *testing.T) {
+	files := drainCmdEnv(t)
+	lock, err := files.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()                       //nolint:errcheck // test
+	now := time.Now().UTC().Add(time.Minute) // a clock a little ahead: held 0 s
+	data, err := drain.EncodeStatus(drain.Status{Status: drain.StatusRunning, PID: 4242, StartedAt: now, LastTick: time.Now(), IntervalSeconds: 30,
+		SlotsHold: &drain.SlotsHold{Cond: "held", Reason: "waiting for a claude session slot: full", Since: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.WriteStatus(lock, data); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
+	if err != nil || !strings.Contains(out, `"slots_held_seconds": 0`) {
+		t.Fatalf("status --json: %s, %v; want slots_held_seconds 0", out, err)
 	}
 }

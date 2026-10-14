@@ -2,6 +2,7 @@ package drain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -123,7 +124,8 @@ type SlotsHold struct {
 	// Cond is the condition (SlotsDecision.Cond): "held" when the cap is
 	// full, otherwise the failure ("timeout", "exit 2", "run failed").
 	Cond string `json:"cond"`
-	// Reason is the hold's reason, as the held row's last_error has it.
+	// Reason is the latest check's reason, as the held row's last_error has
+	// it.
 	Reason string `json:"reason"`
 	// Since is when the drain entered this condition.
 	Since time.Time `json:"since"`
@@ -138,8 +140,9 @@ func (h SlotsHold) Fault() bool { return h.Cond != "held" }
 // free or it crosses between a full cap and a fault; a fault that changes
 // kind (a timeout, then exit 2) is the same fault hold and keeps its start,
 // so a check that alternates between failures still reaches
-// SlotsStuckAfter. A hold that changes kind takes the new condition and
-// reason. The returned pointer equals prev exactly when the hold continues.
+// SlotsStuckAfter. A hold that continues takes the latest condition and
+// reason, so status and alerts quote the current wording. The returned
+// pointer equals prev exactly when the hold continues.
 func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
 	if d.Cond == "" {
 		return nil
@@ -147,9 +150,6 @@ func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
 	next := SlotsHold{Cond: d.Cond, Reason: d.Reason, Since: now.UTC()}
 	if prev == nil || prev.Fault() != next.Fault() {
 		return &next
-	}
-	if prev.Cond == d.Cond {
-		return prev
 	}
 	prev.Cond, prev.Reason = d.Cond, d.Reason
 	return prev
@@ -159,4 +159,17 @@ func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
 // SlotsStuckAfter by now.
 func SlotsStuck(h *SlotsHold, now time.Time) bool {
 	return h != nil && h.Fault() && now.Sub(h.Since) >= SlotsStuckAfter
+}
+
+// HeldFor renders how long a hold has lasted: whole minutes ("15m",
+// "1h5m", "2h"), or whole seconds under a minute.
+func HeldFor(d time.Duration) string {
+	if d < time.Minute {
+		return max(d, 0).Round(time.Second).String()
+	}
+	s := strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }

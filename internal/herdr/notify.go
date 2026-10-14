@@ -55,9 +55,9 @@ type NotificationResult struct {
 // because it showed another moments ago.
 const ReasonRateLimited = "rate_limited"
 
-// Err is the failure for a notification herdr did not show, or nil. Every
-// caller (the desk's signal, the drain's needs-you) reads a result through
-// it, so both treat the reasons alike. rate_limited is not a failure: herdr
+// Err is the failure for a notification herdr did not show, or nil. The
+// desk's signal and the drain's needs-you read a result through it, so both
+// treat the reasons alike (the desk TUI's own reminder ignores the result). rate_limited is not a failure: herdr
 // showed another notification moments ago, so the operator was alerted, and
 // a burst of signals must not read as a burst of errors. [NotificationResult.Note]
 // names it instead.
@@ -127,6 +127,7 @@ func NotificationOutcome(n Notification, res exec.SensitiveResult, err error) (N
 	}
 	// An exit-0 reply can still be herdr's refusal envelope (#722).
 	if e := refusal(data); e != nil {
+		e.Message = scrubValues(e.Message, []string{notificationText(n.Title), notificationText(n.Body)})
 		return NotificationResult{}, e
 	}
 	r, derr := wire.DecodeResult[struct {
@@ -182,6 +183,7 @@ func runFailure(what string, res exec.SensitiveResult, err error, hide ...string
 	if errors.As(err, &se) && se.Outcome == exec.OutcomeExit && res.ExitCode == exitFailure {
 		if data, complete := res.Stderr.CopyBytesForParse(); complete {
 			if e := refusal(data); e != nil {
+				e.Message = scrubValues(e.Message, hide)
 				e.cause = err
 				return e
 			}

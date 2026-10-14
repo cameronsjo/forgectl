@@ -68,10 +68,11 @@ type drainStatusView struct {
 	HeldSlots int      `json:"held_slots"`
 	Holding   []string `json:"holding"`
 	// SlotsHold is the claude-slots hold on claude launches as the last tick
-	// left it, with HeldFor its length now in whole seconds. Absent when
+	// left it, with HeldFor its length now in whole seconds (present, even
+	// as 0, whenever SlotsHold is). Absent when
 	// claude launches are not held, and when the drain is stopped or stale.
 	SlotsHold *drain.SlotsHold `json:"slots_hold,omitempty"`
-	HeldFor   int64            `json:"slots_held_seconds,omitempty"`
+	HeldFor   *int64           `json:"slots_held_seconds,omitempty"`
 	Error     string           `json:"error,omitempty"`
 }
 
@@ -429,7 +430,8 @@ func runSurfaceDrainStatus(cmd *cobra.Command, asJSON bool) error {
 		// killed) left its last hold behind, and its length would only grow.
 		if st.SlotsHold != nil && (view.Status == drain.StatusRunning || view.Status == drain.StatusPaused) {
 			view.SlotsHold = st.SlotsHold
-			view.HeldFor = int64(max(time.Since(st.SlotsHold.Since), 0) / time.Second)
+			held := int64(max(time.Since(st.SlotsHold.Since), 0) / time.Second)
+			view.HeldFor = &held
 		}
 	}
 	view.Counts, view.Attention = drain.Summarize(rows)
@@ -473,7 +475,11 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 	if h := v.SlotsHold; h != nil {
 		// The reason says which: waiting for a slot (exit 1), or the cap
 		// could not be checked.
-		held := (time.Duration(v.HeldFor) * time.Second).String()
+		var secs int64
+		if v.HeldFor != nil {
+			secs = *v.HeldFor
+		}
+		held := drain.HeldFor(time.Duration(secs) * time.Second)
 		if _, err := fmt.Fprintf(out, "claude launches held for %s (since %s): %s\n", held, h.Since.UTC().Format(time.RFC3339), termsafe.SafeLineMax(h.Reason, 400)); err != nil {
 			return err
 		}

@@ -69,8 +69,8 @@ func TestNextHoldAndSlotsStuck(t *testing.T) {
 	if h == nil || h.Cond != "exit 2" || !h.Since.Equal(t0) || !h.Fault() {
 		t.Fatalf("first hold %+v", h)
 	}
-	if same := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "other"}, "exit 2"), t0.Add(time.Minute)); same != h {
-		t.Fatalf("the same condition started a new hold: %+v", same)
+	if same := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 2, Reason: "other"}, "exit 2"), t0.Add(time.Minute)); same != h || !strings.Contains(same.Reason, "other") {
+		t.Fatalf("the same condition started a new hold, or kept the old reason: %+v", same)
 	}
 	full := NextHold(h, DecideSlots(SlotsCheck{Need: 1, Exit: 1, Reason: "full"}, "exit 2"), t0.Add(2*time.Minute))
 	if full == h || full.Cond != "held" || full.Fault() || !full.Since.Equal(t0.Add(2*time.Minute)) {
@@ -103,5 +103,16 @@ func TestNextHoldFaultToFaultKeepsItsStart(t *testing.T) {
 	}
 	if !SlotsStuck(h, t0.Add(SlotsStuckAfter)) {
 		t.Fatal("an alternating fault never got stuck")
+	}
+}
+
+func TestHeldFor(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0: "0s", 42 * time.Second: "42s", 15 * time.Minute: "15m", 15*time.Minute + 20*time.Second: "15m",
+		time.Hour + 5*time.Minute: "1h5m", 2 * time.Hour: "2h", -time.Second: "0s",
+	} {
+		if got := HeldFor(d); got != want {
+			t.Errorf("HeldFor(%s) = %q, want %q", d, got, want)
+		}
 	}
 }

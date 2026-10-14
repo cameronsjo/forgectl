@@ -135,6 +135,8 @@ type drainer struct {
 	// says its slots-stuck alert went out.
 	hold        *drain.SlotsHold
 	holdAlerted bool
+	// slotsChecked says this tick's claimAndLaunch ran a claude-slots check.
+	slotsChecked bool
 	// closerRead is when each reported row's PR was last read, so a row is
 	// read at most every drain.CloserReadEvery. A restart forgets it.
 	closerRead map[string]time.Time
@@ -188,6 +190,7 @@ func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow, need int) (b
 	if d.io.slots == nil {
 		return false, ""
 	}
+	d.slotsChecked = true
 	dec := drain.DecideSlots(d.io.slots(ctx, need), d.slotsCond)
 	d.slotsCond = dec.Cond
 	d.setHold(drain.NextHold(d.hold, dec, d.io.now()))
@@ -216,7 +219,7 @@ func (d *drainer) slotsStuck(ctx context.Context) {
 		return
 	}
 	d.holdAlerted = true
-	text := fmt.Sprintf("claude launches held for %s: %s", now.Sub(d.hold.Since).Round(time.Minute), d.hold.Reason)
+	text := fmt.Sprintf("claude launches held for %s: %s", drain.HeldFor(now.Sub(d.hold.Since)), d.hold.Reason)
 	d.event(drain.Event{Kind: drain.EventSlotsStuck, State: d.hold.Cond, Error: text})
 	if d.settings.Notify {
 		d.recordNotify("", "", d.hold.Cond, "slots-stuck notification", d.io.notify.Alert(ctx, "forgectl: the drain needs you", text))
@@ -516,11 +519,19 @@ func (d *drainer) recordNotify(name, repo, state, what string, attempts []notify
 // the slots allow and nothing pauses claiming.
 func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, ledgers map[string]drain.Ledger) {
 	plan := drain.PlanClaims(rows, ledgers, d.settings)
+	// A tick that runs no claude-slots check ends a hold: nothing to claim,
+	// the drain's own cap full, or a pause stopping claiming first. Whatever
+	// blocks launches then is not claude-slots, so the hold must not keep
+	// growing in drain status or reach slots-stuck. The next hold is a new
+	// entry and records its own slots-held event. A stop leaves it as is.
+	d.slotsChecked = false
+	defer func() {
+		if !d.slotsChecked && !d.stopping() && ctx.Err() == nil {
+			d.slotsCond = ""
+			d.setHold(nil)
+		}
+	}()
 	if len(plan) == 0 {
-		// Nothing to launch ends a hold: the next one is a new entry and
-		// records its own slots-held event.
-		d.slotsCond = ""
-		d.setHold(nil)
 		if !d.pauseHeld(drain.PauseHerdr) {
 			return
 		}
