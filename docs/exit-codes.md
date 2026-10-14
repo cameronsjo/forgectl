@@ -44,8 +44,10 @@ Setup failures raised before any verb starts (an unresolvable `$HOME`, a relativ
 | `config zzbogus`, `completion nonesuch` | 0 | 2 |
 | Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` (not `resume snapshot`, which exits 0, and not `tasks` or `env check`, which stay at 1) | 1 | 2 |
 | `resume` flag and argument errors (not `resume snapshot`) | 1 | 2 |
-
-`sessions search`, `why` and `last` with no concordance DSN configured exit 2 (unconfigured), where a DSN that cannot be reached stays 1. `review` with a malformed `--repo` or an unknown `--kind` exits 2 with `usage_error`.
+| `sessions search`, `why`, `last` with no concordance DSN configured (`usage_error` under `--json`; a DSN that cannot be reached stays 1) | 1 | 2 |
+| `review` with a malformed `--repo` or an unknown `--kind` (`usage_error` under `--json`) | 1 | 2 |
+| `pr prs` when every gh query failed (no list; under `--json` one failure object) | 0 | 1 |
+| `pr dash` when both gh queries failed (the dashboard is still written) | 0 | 1 |
 
 `desk show a/b --json` and `tasks show abc --json` now report `code: "usage_error"` instead of `failed`. Their exit status is unchanged by the code string (2 and 1).
 

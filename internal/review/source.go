@@ -62,7 +62,13 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 			// standard context sentinels survive, as identity — the specific
 			// reason lives in the log and in the source's own notes.
 			slog.Warn("Review source degraded.", "source", res.name, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: source failed", res.name))
+			// The categorical "source failed" note only when the source gave
+			// none of its own: its per-query notes already say what failed
+			// and why, and a bare "github: source failed" after them adds
+			// nothing (forgectl#1096).
+			if len(res.notes) == 0 {
+				notes = append(notes, fmt.Sprintf("%s: source failed", res.name))
+			}
 			failed++
 			sawDeadline = sawDeadline || errors.Is(res.err, context.DeadlineExceeded)
 			sawCanceled = sawCanceled || errors.Is(res.err, context.Canceled)

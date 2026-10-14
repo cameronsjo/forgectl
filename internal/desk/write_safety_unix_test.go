@@ -3,6 +3,7 @@
 package desk
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -315,15 +316,15 @@ func TestSightStampsAHandDroppedFileAsSignalled(t *testing.T) {
 	}
 }
 
-// Exists is true for a desk and false for a directory that is not one, and it
+// Present is true for a desk and false for a directory that is not one, and it
 // writes nothing either way.
-func TestExistsAndPrunePlanAtWriteNothingInANonDeskDir(t *testing.T) {
+func TestPresentAndPrunePlanAtWriteNothingInANonDeskDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a wide mode to see it left alone
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "stray.txt"), "keep\n", 0o644)
-	if Exists(dir) {
+	if ok, err := Present(dir); err != nil || ok {
 		t.Fatal("a non-desk directory reads as a desk")
 	}
 	before := dirState(t, dir)
@@ -336,8 +337,8 @@ func TestExistsAndPrunePlanAtWriteNothingInANonDeskDir(t *testing.T) {
 	}
 
 	d := openDesk(t)
-	if !Exists(d.Path()) {
-		t.Error("an open desk does not read as a desk")
+	if ok, err := Present(d.Path()); err != nil || !ok {
+		t.Errorf("an open desk does not read as a desk (err %v)", err)
 	}
 }
 
@@ -389,5 +390,48 @@ func TestBindRootRefusesADifferentDirectory(t *testing.T) {
 	}
 	if err := bindRoot(fd, other, a); err == nil {
 		t.Error("a root on another directory was accepted")
+	}
+}
+
+// TestOpenReadOnlyWritesNothing: a hand-dropped pending item gets no meta,
+// a changed item is reported refused and stays in pending/, no directory is
+// created or chmodded, and a write through the read-only desk is refused.
+func TestOpenReadOnlyWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pending", "01-hand.sh"), "echo hi\n", 0o644)
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a wide mode to see it left alone
+		t.Fatal(err)
+	}
+	before := dirState(t, dir)
+	beforePending := dirState(t, filepath.Join(dir, "pending"))
+	d, err := OpenReadOnly(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	snap, err := d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Pending) != 1 || snap.Pending[0].Meta.SHA256 == "" {
+		t.Errorf("pending = %+v; want the hand-dropped item with its hash in memory", snap.Pending)
+	}
+	if after := dirState(t, dir); after != before {
+		t.Errorf("OpenReadOnly+Scan changed the desk root:\nbefore %s\nafter  %s", before, after)
+	}
+	if after := dirState(t, filepath.Join(dir, "pending")); after != beforePending {
+		t.Errorf("Scan wrote into pending/:\nbefore %s\nafter  %s", beforePending, after)
+	}
+	if err := d.Skip("01-hand", SkipOperator); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("Skip through a read-only desk = %v; want ErrReadOnly", err)
+	}
+
+	if _, err := OpenReadOnly(filepath.Join(t.TempDir(), "absent")); !errors.Is(err, ErrNoDesk) {
+		t.Errorf("OpenReadOnly on an absent dir = %v; want ErrNoDesk", err)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	writeFile(t, file, "", 0o600)
+	if _, err := OpenReadOnly(file); err == nil || errors.Is(err, ErrNoDesk) {
+		t.Errorf("OpenReadOnly on a file = %v; want an error that is not ErrNoDesk", err)
 	}
 }

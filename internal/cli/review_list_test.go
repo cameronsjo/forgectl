@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -507,4 +508,49 @@ func (c *countingReviewSource) Name() string { return "counting" }
 func (c *countingReviewSource) Items(context.Context) ([]review.Item, []string, error) {
 	c.calls++
 	return nil, nil, nil
+}
+
+// TestReviewCmd_JSON_NotSignedInCarriesTheLoginFix is #1096 end to end: a gh
+// that is not signed in reaches the --json failure object as ghfail's fixed
+// text, with the fix, as one object on one line, and no trailing
+// "github: source failed" note repeats what the per-query notes said.
+func TestReviewCmd_JSON_NotSignedInCarriesTheLoginFix(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" {
+			return "", &exec.CommandError{Name: name, Args: args, Stderr: "To get started with GitHub CLI, please run:  gh auth login", ExitCode: 4, Err: errors.New("exit status 4")}
+		}
+		return "", nil
+	}}
+	src := review.NewGitHub(fake, []string{"cameronsjo"}, "github.com")
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("review with gh signed out succeeded")
+	}
+	_ = jsonFailure(cmd, err, true, jsonCodeFailed) // what the root's contract does with it
+
+	line := strings.TrimSuffix(stderr.String(), "\n")
+	if strings.Contains(line, "\n") {
+		t.Fatalf("stderr = %q; want one line", stderr.String())
+	}
+	var obj jsonFailureObject
+	if err := json.Unmarshal([]byte(line), &obj); err != nil {
+		t.Fatalf("stderr is not one JSON object: %v\n%q", err, stderr.String())
+	}
+	if !strings.Contains(obj.Error, "gh is not signed in to github.com; run gh auth login") {
+		t.Errorf("error = %q; want the not-signed-in cause and its fix", obj.Error)
+	}
+	if strings.Contains(obj.Error, "github: source failed") {
+		t.Errorf("error = %q; want no bare source-failed note after the per-query ones", obj.Error)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q; want empty", stdout.String())
+	}
 }

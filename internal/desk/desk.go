@@ -103,6 +103,11 @@ var (
 	ErrRefused = errors.New("desk: item refused")
 	// ErrNotFound reports an item absent from the directory asked about.
 	ErrNotFound = errors.New("desk: no such item")
+	// ErrNoDesk reports a directory that is not a desk: it is absent, or holds
+	// none of the protocol subdirectories. Only OpenReadOnly returns it.
+	ErrNoDesk = errors.New("desk: not a desk")
+	// ErrReadOnly reports a write attempted through a desk opened read-only.
+	ErrReadOnly = errors.New("desk: opened read-only")
 	// ErrUnsupported reports a platform without the primitives the desk needs.
 	ErrUnsupported = errors.New("desk: not supported on this platform")
 )

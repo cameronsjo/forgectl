@@ -313,12 +313,12 @@ With NAME it prints that item in detail as key=value lines, including the full
 sha256 and, for a batch, its steps (the run's summary.json once it has
 finished).
 
-Like the dashboard, status fixes the hash of a hand-dropped item the first time
-it sees it, and moves a pending item whose bytes changed to skipped/.
-
-status never creates a desk. A directory that is not one (a typo in --dir or
-DESK_DIR) prints a note on stderr and the empty queue with found=false, exit 0;
-with NAME it is an error. forgectl config shows the desk.dir in use.
+status only reads: it creates, moves, chmods and writes nothing. A pending
+item whose bytes changed shows as refused until the dashboard or a run moves
+it to skipped/, and a hand-dropped item's hash is fixed by the first writing
+verb, not by status. A directory that is not a desk (a typo in --dir or
+DESK_DIR) prints a note on stderr and the empty queue with found=false, exit
+0; with NAME it is an error. forgectl config shows the desk.dir in use.
 
 Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 		Args: cobra.MaximumNArgs(1),
@@ -330,7 +330,7 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 			return runDeskStatus(cmd, deps, *dir, name, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the queue as {"dir","taken","found","pending","running","done","skipped"}, or with NAME the item as {"item","log","events","record","steps","summary"}`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the queue as {"dir","taken","found","pending","running","done","skipped"}, or with NAME the item as {"item","log","events","events_exists","record","steps","summary"}`)
 	return cmd
 }
 

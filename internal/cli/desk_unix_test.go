@@ -375,7 +375,7 @@ func TestDeskStatus(t *testing.T) {
 	}
 	out, _, err = deskRun(t, deskDeps(), "status", done, "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"events", "item", "log", "record", "steps", "summary"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"events", "events_exists", "item", "log", "record", "steps", "summary"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("detail --json keys = %v, want %v", got, want)
 	}
 	_, _, err = deskRun(t, deskDeps(), "status", "77-missing")
@@ -916,7 +916,7 @@ func TestDeskReadVerbsNeverCreateADesk(t *testing.T) {
 	} else if fi.Mode().Perm() != 0o750 {
 		t.Errorf("status changed a non-desk directory's mode to %v", fi.Mode())
 	}
-	if desk.Exists(dir) {
+	if ok, _ := desk.Present(dir); ok {
 		t.Error("status made the directory a desk")
 	}
 }
@@ -957,12 +957,95 @@ func TestDeskStatus_SkippedItemNamesNoMissingEventsFile(t *testing.T) {
 	out, _, err = deskRun(t, deskDeps(), "status", skipped, "--json")
 	wantExit(t, err, 0)
 	var res deskDetailJSON
-	if err := json.Unmarshal([]byte(out), &res); err != nil || res.Events != "" {
-		t.Errorf("skipped item events = %q (err %v); want \"\"", res.Events, err)
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.EventsExists || !strings.HasSuffix(res.Events, skipped+".events") {
+		t.Errorf("skipped item events = %q exists=%v (err %v); want the path, unchanged, and events_exists false", res.Events, res.EventsExists, err)
 	}
 	out, _, err = deskRun(t, deskDeps(), "status", waiting)
 	wantExit(t, err, 0)
 	if !strings.Contains(out, "events=") {
 		t.Errorf("waiting item detail lacks its events path: %q", out)
+	}
+}
+
+// TestDeskReadVerbsLeaveANonDeskDirAlone is the review finding on #1270: a
+// project directory that happens to hold a done/ folder is read, never
+// migrated. Its modes and entries are unchanged after every read verb, and
+// a script in it keeps its execute bit.
+func TestDeskReadVerbsLeaveANonDeskDirAlone(t *testing.T) {
+	fastWatch(t)
+	dir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(filepath.Join(dir, "done"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "done", "01-x.sh")
+	if err := os.WriteFile(script, []byte("echo hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, filepath.Join(dir, "done"), script} {
+		if err := os.Chmod(p, 0o755); err != nil { //nolint:gosec // G302: the wide modes are what the test proves are left alone
+			t.Fatal(err)
+		}
+	}
+	state := func() map[string]os.FileMode {
+		t.Helper()
+		m := map[string]os.FileMode{}
+		err := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			fi, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			m[p] = fi.Mode()
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	before := state()
+	for _, args := range [][]string{
+		{"status"}, {"status", "--json"}, {"status", "01-x"}, {"runs", "--json"},
+		{"show", "01-x"}, {"plan", "01-x"}, {"--frame"}, {"prune", "--dry-run"},
+	} {
+		_, _, _ = deskRun(t, deskDeps(), append(args, "--dir", dir)...)
+		if after := state(); !reflect.DeepEqual(after, before) {
+			t.Fatalf("desk %v changed the directory:\nbefore %v\nafter  %v", args, before, after)
+		}
+	}
+}
+
+// TestDeskFrameAndSkipNeverCreateADesk: --frame and skip on a path that is
+// not a desk create nothing.
+func TestDeskFrameAndSkipNeverCreateADesk(t *testing.T) {
+	dir := newDeskDir(t)
+	out, errOut, err := deskRun(t, deskDeps(), "--frame")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "not found") || !strings.Contains(errOut, "note: desk not found") {
+		t.Errorf("--frame: stdout %q stderr %q", out, errOut)
+	}
+	_, _, err = deskRun(t, deskDeps(), "skip", "01-x", "--reason", "dup")
+	wantExit(t, err, 1)
+	if err == nil || !strings.Contains(err.Error(), "is not a desk") {
+		t.Errorf("skip: err = %v", err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("--frame or skip created the desk directory (lstat err %v)", err)
+	}
+}
+
+// TestDeskStatus_UnreadablePathIsAnError: a DESK_DIR that is a regular file
+// is an error, not "not a desk" with a desk-add hint and exit 0.
+func TestDeskStatus_UnreadablePathIsAnError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "desk")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubDeskEnv(t, map[string]string{"DESK_DIR": file})
+	_, _, err := deskRun(t, deskDeps(), "status", "--json")
+	if err == nil || strings.Contains(err.Error(), "desk add creates one") {
+		t.Errorf("status on a regular file: err = %v; want the real error", err)
 	}
 }

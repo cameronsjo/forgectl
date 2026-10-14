@@ -65,20 +65,40 @@ func openDeskDir(flag string) (*desk.Desk, error) {
 // errNoDesk marks a read verb pointed at a directory that is not a desk.
 var errNoDesk = errors.New("not a desk")
 
-// openReadDeskFor is openDeskDirFor for a verb that only reads (forgectl#1150):
-// a directory that is not a desk is neither created nor tightened, and the
-// error, which wraps errNoDesk, names the directory and how to check it. Open
-// creates a missing desk, so without this a typo in --dir or DESK_DIR made a
-// new empty desk and reported an empty queue the operator never sees.
-func openReadDeskFor(cmd *cobra.Command, deps module.Deps, flag, verb string) (*desk.Desk, error) {
+// openReadDeskFor opens the desk for a verb that only reads (forgectl#1150):
+// desk.OpenReadOnly, which creates, migrates, chmods and writes nothing, so a
+// typo in --dir or DESK_DIR, or a project directory that happens to hold a
+// done/ folder, is never turned into a desk or has its modes changed. A
+// directory that is not a desk is an error wrapping errNoDesk that names the
+// directory and how to check it; any other failure (a file at the path, a
+// parent that cannot be read) is returned as itself.
+func openReadDeskFor(flag, verb string) (*desk.Desk, error) {
 	dir, err := resolveDeskDir(flag)
 	if err != nil {
 		return nil, err
 	}
-	if !desk.Exists(dir) {
+	d, err := desk.OpenReadOnly(dir)
+	if errors.Is(err, desk.ErrNoDesk) {
 		return nil, noDeskError(verb, dir)
 	}
-	return openDeskDirFor(cmd, deps, flag)
+	return d, err
+}
+
+// requireDesk refuses a writing verb that acts on an existing item (skip)
+// when the directory is not a desk, before Open would create one.
+func requireDesk(flag, verb string) error {
+	dir, err := resolveDeskDir(flag)
+	if err != nil {
+		return err
+	}
+	ok, err := desk.Present(dir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return noDeskError(verb, dir)
+	}
+	return nil
 }
 
 // noDeskError is the error a read verb returns for a directory that is not a
@@ -103,6 +123,12 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	if !frame && !deskHasTerminal() {
 		return WithExitCode(tui.ErrDeskNeedsTerminal, deskExitUsage)
 	}
+	if frame {
+		return runDeskFrame(cmd, deps, dirFlag)
+	}
+	// The interactive dashboard is the desk's runner (y runs, s skips), the
+	// pane `desk layout` starts before anything is queued, so it opens the
+	// desk for writing and creates it when absent. --frame only reads.
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
@@ -110,10 +136,31 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	defer d.Close()           //nolint:errcheck // read side; nothing to flush
 	home, _ := deskUserHome() // display only: no home shows the full path
 	ascii := deskNoIcons(cmd, deps)
-	if frame {
-		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, ascii)
-	}
 	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: ascii})
+}
+
+// runDeskFrame is `desk --frame`: one frame, read through a read-only open, so
+// it creates, chmods and writes nothing. A directory that is not a desk prints
+// a note on stderr and a not-found line, exit 0, as desk status does.
+func runDeskFrame(cmd *cobra.Command, deps module.Deps, dirFlag string) error {
+	d, err := openReadDeskFor(dirFlag, "desk")
+	if errors.Is(err, errNoDesk) {
+		dir, derr := resolveDeskDir(dirFlag)
+		if derr != nil {
+			return derr
+		}
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing queued (desk add creates it; forgectl config shows desk.dir)\n", safePath(dir)); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "desk %s: not found; 0 waiting, 0 running, 0 done, 0 skipped\n", safeText(dir))
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	defer d.Close()           //nolint:errcheck // read-only
+	home, _ := deskUserHome() // display only: no home shows the full path
+	return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, deskNoIcons(cmd, deps))
 }
 
 // deskNoIcons reports whether the desk draws in ASCII: the root's
@@ -387,7 +434,7 @@ func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string
 	if err := checkDeskName(target); err != nil {
 		return "", nil, err
 	}
-	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk plan")
+	d, err := openReadDeskFor(dirFlag, "desk plan")
 	if err != nil {
 		return "", nil, err
 	}
@@ -461,12 +508,15 @@ type deskStatusJSON struct {
 
 // deskDetailJSON is `desk status NAME --json`.
 type deskDetailJSON struct {
-	Item    deskItemJSON      `json:"item"`
-	Log     string            `json:"log"`
-	Events  string            `json:"events"`
-	Steps   []deskStepJSON    `json:"steps"`
-	Summary *desk.Summary     `json:"summary"`
-	Record  *deskRecordDigest `json:"record"`
+	Item   deskItemJSON `json:"item"`
+	Log    string       `json:"log"`
+	Events string       `json:"events"`
+	// EventsExists is false when Events names no file yet, or none at all
+	// (a skipped item never ran): read Events only when it is true.
+	EventsExists bool              `json:"events_exists"`
+	Steps        []deskStepJSON    `json:"steps"`
+	Summary      *desk.Summary     `json:"summary"`
+	Record       *deskRecordDigest `json:"record"`
 }
 
 // deskRecordDigest names the bytes a running or finished item ran.
@@ -539,7 +589,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 			return err
 		}
 	}
-	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk status")
+	d, err := openReadDeskFor(dirFlag, "desk status")
 	if errors.Is(err, errNoDesk) && name == "" {
 		return reportNoDeskStatus(cmd, dirFlag, asJSON)
 	}
@@ -687,7 +737,8 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if !ok {
 		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
-	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: detailEventsPath(d, it)}
+	events, eventsExist, showEvents := detailEvents(d, it)
+	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: events, EventsExists: eventsExist}
 	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
 		if data, _, err := d.Record(name); err == nil {
 			res.Record = &deskRecordDigest{SHA256: desk.SHA256Hex(data), Bytes: len(data)}
@@ -748,7 +799,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.State == string(desk.StateDone) {
 		kv("log", safeText(res.Log))
 	}
-	if res.Events != "" {
+	if showEvents {
 		kv("events", safeText(res.Events))
 	}
 	if res.Summary != nil {
@@ -779,21 +830,21 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	return w.err
 }
 
-// detailEventsPath is the events file status names for it: its path while
-// the item can still run or is running (the file appears when it starts), and
-// for an item that has finished, been skipped or been refused, the path only
-// when the file exists, else "" (forgectl#1095). A skipped item never ran, so
-// naming a file that is not there sends a caller to an ENOENT.
-func detailEventsPath(d *desk.Desk, it desk.Item) string {
-	p := d.EventsPath(it.Name)
+// detailEvents is the item's events file and whether it exists now
+// (forgectl#1095). The path is always reported in JSON, unchanged; exists
+// tells a caller whether reading it will find anything, since a skipped item
+// never ran and has none. show is whether the text form prints it: while the
+// item can still run or is running (the file appears when it starts), and
+// afterwards only when the file is there.
+func detailEvents(d *desk.Desk, it desk.Item) (path string, exists, show bool) {
+	path = d.EventsPath(it.Name)
+	_, err := os.Lstat(path)
+	exists = err == nil
 	switch it.State {
 	case desk.StateWaiting, desk.StateRunning, desk.StateLost:
-		return p
+		return path, exists, true
 	}
-	if _, err := os.Lstat(p); err != nil {
-		return ""
-	}
-	return p
+	return path, exists, exists
 }
 
 func stepView(r desk.StepStatus) deskStepJSON {
@@ -827,7 +878,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 			return deskUsage("desk watch: --dir %w, so a resume= line could not name it", err)
 		}
 	}
-	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk watch")
+	d, err := openReadDeskFor(dirFlag, "desk watch")
 	if err != nil {
 		return err
 	}
@@ -969,6 +1020,11 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	if len([]rune(reason)) > desk.SkipNoteMax {
 		return deskUsage("desk skip: --reason must be at most %d characters", desk.SkipNoteMax)
 	}
+	// skip acts on an item that already exists, so a directory that is not
+	// a desk is refused before Open would create one.
+	if err := requireDesk(dirFlag, "desk skip"); err != nil {
+		return err
+	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
@@ -1069,7 +1125,11 @@ func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int
 	// A prune never creates the desk: every other verb makes a missing desk
 	// directory by opening it, which for prune would turn a typo in --dir into
 	// a new empty desk and a quiet pruned=0.
-	if !desk.Exists(dir) {
+	present, err := desk.Present(dir)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return reportNoDeskToPrune(cmd, dir, days, asJSON, dryRun)
 	}
 	if dryRun {

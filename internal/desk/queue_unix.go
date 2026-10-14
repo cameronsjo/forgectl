@@ -137,7 +137,10 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	if err != nil {
 		return it, false, err
 	}
-	if !ok || meta.SHA256 == "" {
+	if (!ok || meta.SHA256 == "") && d.readOnly {
+		// Read-only: the hash a writing verb would fix now, held in memory.
+		meta = Meta{AddedAt: &mtime, SHA256: sum, Kind: kind}
+	} else if !ok || meta.SHA256 == "" {
 		// First sighting of a hand-dropped item: its hash is fixed now. The
 		// file's mtime stands in for its arrival. Nothing here ever signalled
 		// it, and nothing will: stamping signalled_at keeps `desk add`'s retry
@@ -156,6 +159,12 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	}
 	if meta.Kind != "" && meta.Kind != kind {
 		it.State, it.Refusal, it.Meta = StateRefused, "another item already uses this name", meta
+		return it, false, nil
+	}
+	if meta.SHA256 != sum && d.readOnly {
+		// A writing verb moves it to skipped/ as changed; read-only reports
+		// it refused, so it can never look runnable.
+		it.State, it.Refusal, it.Meta = StateRefused, "its bytes changed since it was queued", meta
 		return it, false, nil
 	}
 	if meta.SHA256 != sum {

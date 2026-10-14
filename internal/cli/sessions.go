@@ -68,9 +68,10 @@ func resolveDSN(flagDSN string, cfg config.SessionsConfig) string {
 func withConcordance(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Concordance) error) error {
 	resolved := resolveDSN(dsn, cfg)
 	if resolved == "" {
-		// Unconfigured, so exit 2 (docs/exit-codes.md): retrying cannot help,
-		// unlike a connection that failed (exit 1).
-		return WithExitCode(errors.New("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn"), exitUsage)
+		// Unconfigured, so exit 2 and usage_error (docs/exit-codes.md,
+		// docs/json-contract.md): nothing was attempted and retrying cannot
+		// help, unlike a connection that failed (exit 1, failed).
+		return withJSONUsageCode(WithExitCode(errors.New("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn"), exitUsage))
 	}
 	concordance, err := sessions.ConnectConcordance(cmd.Context(), resolved)
 	if err != nil {

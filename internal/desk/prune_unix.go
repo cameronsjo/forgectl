@@ -124,19 +124,6 @@ func selectPrune(list func(sub string) ([]fs.DirEntry, error), now time.Time, da
 	return out, nil
 }
 
-// Exists reports whether dir looks like a desk: it holds at least one of the
-// protocol subdirectories as a real directory (a symlink does not count). It
-// reads only. Open creates a missing desk, so a verb that must not create one
-// asks this first.
-func Exists(dir string) bool {
-	for _, sub := range protocolDirs {
-		if fi, err := os.Lstat(filepath.Join(dir, sub)); err == nil && fi.IsDir() {
-			return true
-		}
-	}
-	return false
-}
-
 // PrunePlanAt returns what [Desk.Prune] would remove from the desk at dir,
 // without opening it: no MkdirAll, no chmod, no migration, nothing written.
 // (Open tightens modes and creates the protocol directories, so a preview

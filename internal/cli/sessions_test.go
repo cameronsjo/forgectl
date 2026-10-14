@@ -715,4 +715,8 @@ func TestWithConcordance_NoDSNIsExit2(t *testing.T) {
 	if ran {
 		t.Error("fn ran with no DSN")
 	}
+	var coded *jsonCodedError
+	if !chainAs(err, &coded) || coded.code != jsonCodeUsage {
+		t.Errorf("err = %#v; want it to carry the usage_error JSON code", err)
+	}
 }
