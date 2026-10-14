@@ -121,7 +121,7 @@ func TestReviewSettingsJSON_RemoteIsStrictAndScopedToThePRHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := reviewSettingsJSON(ws, "github.com", perms)
+	doc, err := reviewSettingsJSON(ws, "", "github.com", perms)
 	if err != nil {
 		t.Fatalf("reviewSettingsJSON: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestReviewSettingsJSON_RemoteIsStrictAndScopedToThePRHost(t *testing.T) {
 func TestReviewSettingsJSON_LocalReachesNoNetwork(t *testing.T) {
 	ws := t.TempDir()
 	findingsDir := filepath.Join(t.TempDir(), "findings")
-	doc, err := reviewSettingsJSON(ws, "", mustLocalProfile(t, findingsDir))
+	doc, err := reviewSettingsJSON(ws, "", "", mustLocalProfile(t, findingsDir))
 	if err != nil {
 		t.Fatalf("reviewSettingsJSON: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestReviewDenyWrite_LinkedWorktreeDeniesTheSharedGitDir(t *testing.T) {
 	gitRun("-C", repo, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
 	gitRun("-C", repo, "worktree", "add", "-q", "--detach", ws)
 
-	got, err := reviewDenyWrite(ws)
+	got, err := reviewDenyWrite(ws, "")
 	if err != nil {
 		t.Fatalf("reviewDenyWrite: %v", err)
 	}
@@ -227,11 +227,11 @@ func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(ws, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	got, err := reviewDenyWrite(ws)
+	got, err := reviewDenyWrite(ws, "")
 	if err != nil {
 		t.Fatalf("reviewDenyWrite: %v", err)
 	}
-	shared, err := sharedClaudeTmpDirs(ws)
+	shared, err := sharedClaudeTmpDirs(ws, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,12 +269,12 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 
 	sandboxGOOS = "linux"
 	want := []string{filepath.Join(tmp, "claude-501"), "/tmp/claude-501"}
-	if got, err := sharedClaudeTmpDirs(ws); err != nil || !slices.Equal(got, want) {
+	if got, err := sharedClaudeTmpDirs(ws, ""); err != nil || !slices.Equal(got, want) {
 		t.Errorf("linux: sharedClaudeTmpDirs = %v, %v, want %v", got, err, want)
 	}
 	sandboxGOOS = "darwin"
 	want = append(want, "/private/tmp/claude-501")
-	got, err := sharedClaudeTmpDirs(ws)
+	got, err := sharedClaudeTmpDirs(ws, "")
 	if err != nil || !slices.Equal(got, want) {
 		t.Errorf("darwin: sharedClaudeTmpDirs = %v, %v, want %v", got, err, want)
 	}
@@ -287,7 +287,7 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 	// The backstop: a workspace inside the shared dir refuses the review.
 	sandboxGOOS = "linux"
 	inner := filepath.Join(tmp, "claude-501")
-	if got, err := sharedClaudeTmpDirs(filepath.Join(inner, "forgectl-workflow-1")); err == nil {
+	if got, err := sharedClaudeTmpDirs(filepath.Join(inner, "forgectl-workflow-1"), ""); err == nil {
 		t.Errorf("a workspace inside the shared dir got denies %v, want a refusal", got)
 	}
 
@@ -299,7 +299,7 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 	if err := os.Symlink(linked, filepath.Join(linked, "claude-501")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1")); err == nil || !strings.Contains(err.Error(), "is a link to") {
+	if got, err := sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1"), ""); err == nil || !strings.Contains(err.Error(), "is a link to") {
 		t.Errorf("with a shared dir linked to the workspace's parent: sharedClaudeTmpDirs = %v, %v, want a refusal naming the link", got, err)
 	}
 	// The same through a TMPDIR that is itself reached by a link, as macOS's
@@ -314,8 +314,25 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 	if err := os.Symlink(viaLink, filepath.Join(realRoot, "claude-501")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := sharedClaudeTmpDirs(filepath.Join(viaLink, "forgectl-workflow-1")); err == nil || !strings.Contains(err.Error(), "is a link to") {
+	if got, err := sharedClaudeTmpDirs(filepath.Join(viaLink, "forgectl-workflow-1"), ""); err == nil || !strings.Contains(err.Error(), "is a link to") {
 		t.Errorf("with a linked TMPDIR and a shared dir linked to it: sharedClaudeTmpDirs = %v, %v, want a refusal naming the link", got, err)
+	}
+	// A shared dir linked to the dir that holds the review's private temp dir
+	// (a link to /tmp, say) refuses too, naming the private dir, rather than
+	// silently denying it.
+	holder := t.TempDir()
+	private := filepath.Join(holder, reviewTmpPrefix+"1-abcde")
+	elsewhereTmp := t.TempDir()
+	t.Setenv("TMPDIR", elsewhereTmp)
+	if err := os.Symlink(holder, filepath.Join(elsewhereTmp, "claude-501")); err != nil {
+		t.Fatal(err)
+	}
+	wsAway := filepath.Join(t.TempDir(), "forgectl-workflow-1")
+	if got, err := sharedClaudeTmpDirs(wsAway, private); err == nil || !strings.Contains(err.Error(), "private temp dir") {
+		t.Errorf("with a shared dir linked to the private dir's parent: sharedClaudeTmpDirs = %v, %v, want a refusal naming the private dir", got, err)
+	}
+	if _, err := sharedClaudeTmpDirs(wsAway, ""); err != nil {
+		t.Errorf("without a private dir to protect the same link is a plain deny, got %v", err)
 	}
 	// A link pointing anywhere else stays denied.
 	elsewhere := t.TempDir()
@@ -324,13 +341,13 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 	if err := os.Symlink(elsewhere, filepath.Join(other, "claude-501")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = sharedClaudeTmpDirs(filepath.Join(other, "forgectl-workflow-1"))
+	got, err = sharedClaudeTmpDirs(filepath.Join(other, "forgectl-workflow-1"), "")
 	if err != nil || !slices.Contains(got, filepath.Join(other, "claude-501")) {
 		t.Errorf("with a symlinked shared dir: sharedClaudeTmpDirs = %v, %v, want it denied", got, err)
 	}
 
 	reviewUID = func() int { return -1 }
-	if got, err := sharedClaudeTmpDirs(ws); got != nil || err != nil {
+	if got, err := sharedClaudeTmpDirs(ws, ""); got != nil || err != nil {
 		t.Errorf("without a uid: sharedClaudeTmpDirs = %v, %v, want none", got, err)
 	}
 }
@@ -353,21 +370,21 @@ func TestPathWithin(t *testing.T) {
 }
 
 func TestReviewDenyWrite_Refusals(t *testing.T) {
-	if _, err := reviewDenyWrite("relative/ws"); err == nil {
+	if _, err := reviewDenyWrite("relative/ws", ""); err == nil {
 		t.Error("a relative workspace must be refused")
 	}
 	ws := t.TempDir()
 	if err := os.WriteFile(filepath.Join(ws, ".git"), []byte("not a pointer\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reviewDenyWrite(ws); err == nil {
+	if _, err := reviewDenyWrite(ws, ""); err == nil {
 		t.Error("an unparseable .git file must be refused, not skipped")
 	}
 	globbed := filepath.Join(t.TempDir(), "ws[1]")
 	if err := os.Mkdir(globbed, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reviewDenyWrite(globbed); err == nil {
+	if _, err := reviewDenyWrite(globbed, ""); err == nil {
 		t.Error("a workspace path holding a glob character must be refused: the Linux sandbox skips such a write deny")
 	}
 }
@@ -568,11 +585,11 @@ func TestReviewGitEnv_StopsARepoConfiguredFsmonitor(t *testing.T) {
 // same paths, so a read no command text shows is refused too.
 func TestReviewSandbox_DeniesReadsOfCredentialStores(t *testing.T) {
 	ws := t.TempDir()
-	remote, err := reviewSandbox(ws, "github.com")
+	remote, err := reviewSandbox(ws, "", "github.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := reviewSandbox(ws, "")
+	local, err := reviewSandbox(ws, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

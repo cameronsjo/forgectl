@@ -3,8 +3,6 @@ package pr
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,10 +17,10 @@ import (
 )
 
 // reviewTmpPrefix starts the name of the private temp directory each Claude
-// review window gets (forgectl#907): reviewTmpPrefix, then 6 hex digits of
-// the workspace path's SHA-256, then reviewTmpRandLen random characters. It
-// is short on purpose (see claudeTmpDirMax) and deliberately not
-// sandbox.WorkspacePrefix, so nothing that recognizes a workspace by its
+// review window gets (forgectl#907): reviewTmpPrefix, the workspace's own
+// random suffix and "-" (reviewSiblingName), then reviewTmpRandLen random
+// characters. It is short on purpose (see claudeTmpDirMax) and deliberately
+// not sandbox.WorkspacePrefix, so nothing that recognizes a workspace by its
 // prefix mistakes this for one.
 const reviewTmpPrefix = "fr"
 
@@ -31,16 +29,25 @@ const reviewTmpPrefix = "fr"
 const reviewTmpRandLen = 5
 
 // claudeTmpDirMax is the longest per-uid temp dir, CLAUDE_CODE_TMPDIR plus
-// "/claude-<uid>", that Claude Code gives the sandboxed Bash as its TMPDIR.
-// A longer one is too long for its AF_UNIX sockets, and Claude Code silently
-// falls back: read from the 2.1.299 bundle, `if(Buffer.byteLength(n)<=gMr)
-// return n` with gMr=44, else the claude-<uid> dir under os.tmpdir(), with
-// the debug-log warning "CLAUDE_CODE_TMPDIR makes the per-uid temp dir N
-// bytes, too long for AF_UNIX sockets; child-process $TMPDIR falls back to
-// ...". Measured on Linux (2.1.299): a 54-byte per-uid dir with TMPDIR=/tmp
-// gave the reviewer's Bash TMPDIR=/tmp/claude-0, the shared dir; a 35-byte
-// one gave it the private dir. On macOS (2.1.289) the long private dir beside
-// a /var/folders workspace fell back to /tmp/claude-501.
+// "/claude-<uid>", that Claude Code gives the sandboxed Bash as its TMPDIR;
+// a longer one is too long for its AF_UNIX sockets. What it falls back to
+// differs by version, read from the bundles:
+//
+//   - 2.1.289 (darwin-arm64): `if(Buffer.byteLength(t)<=elr)return t;let
+//     r="/tmp"` with elr=44, then claude-<uid> under that literal /tmp. The
+//     fallback is the shared /tmp/claude-<uid> whatever TMPDIR says.
+//   - 2.1.299: the same test with gMr=44, but the fallback is claude-<uid>
+//     under os.tmpdir(), which is TMPDIR. forgectl pins TMPDIR to the private
+//     dir as well, so under its pins that fallback stays inside the private
+//     dir: a live probe with a 54-byte private dir and both variables pinned
+//     gave the reviewer <private dir>/claude-0. (A 54-byte dir with TMPDIR
+//     left at /tmp gave /tmp/claude-0; a 35-byte one gave the private dir.)
+//
+// So keeping the per-uid dir within 44 bytes is what keeps 2.1.289 off the
+// shared dir, and it is harmless on 2.1.299. That this is why the macOS
+// reviewer in forgectl#907 (2.1.289, a private dir under /var/folders) saw
+// TMPDIR=/tmp/claude-501 fits the bundle, but is unconfirmed until a live
+// macOS re-check: TMPDIR not reaching the shell there would look the same.
 const claudeTmpDirMax = 44
 
 // reviewTmpEnvKeys are the variables a review window's temp directory is
@@ -71,8 +78,8 @@ const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 // workspace's own random suffix + "-" + a fresh random part os.MkdirTemp
 // picks (reviewSiblingName). Its private temp dir is made in the first of
 // the workspace root and reviewShortTmpBase whose path keeps Claude Code's
-// per-uid dir within claudeTmpDirMax, named from a hash of the workspace path
-// (reviewTmpName). Both derive from the workspace path alone, so every
+// per-uid dir within claudeTmpDirMax, named from the workspace's own random
+// suffix (reviewTmpName). Both derive from the workspace path alone, so every
 // teardown path finds them again from the breadcrumb's workspace field; the
 // fresh random part means nobody who can see the workspace's name in a shared
 // temp dir can predict theirs and make it first, and a name someone made
@@ -98,14 +105,19 @@ const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 const reviewSettingsPrefix = "forgectl-rset-"
 
 // reviewTmpName returns the name prefix of workspace's private temp dir:
-// reviewTmpPrefix and 6 hex digits of the SHA-256 of the workspace path as
-// spelled. A workspace without the sandbox prefix has none.
+// reviewTmpPrefix, the workspace's own random suffix, and "-", as
+// reviewSiblingName gives every sibling. It names exactly one workspace in a
+// root (no hash to collide, so teardown cannot match another live review's
+// dir), and it is the same for every spelling of the workspace path (/var or
+// /private/var). The suffix os.MkdirTemp picks is at most 10 digits. A
+// workspace without the sandbox prefix has none.
+//
+// Teardown finds the dir by this name rather than from a path recorded in
+// the breadcrumb: the breadcrumb is a file a hostile process might rewrite,
+// and a removal path read from it would let that process pick what goes.
 func reviewTmpName(workspace string) (string, error) {
-	if _, _, err := reviewSiblingName(workspace, reviewTmpPrefix); err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256([]byte(filepath.Clean(workspace)))
-	return reviewTmpPrefix + hex.EncodeToString(sum[:3]), nil
+	_, name, err := reviewSiblingName(workspace, reviewTmpPrefix)
+	return name, err
 }
 
 // isReviewTmpName reports whether name is a private temp dir name for name
@@ -135,14 +147,15 @@ func reviewTmpBases(workspace string) []string {
 	return out
 }
 
-// claudeTmpDirFits reports whether a private temp dir made in base keeps
-// Claude Code's per-uid dir inside it within claudeTmpDirMax.
-func claudeTmpDirFits(base string) bool {
+// claudeTmpDirFits reports whether a private temp dir named name plus the
+// random tail, made in base, keeps Claude Code's per-uid dir inside it within
+// claudeTmpDirMax.
+func claudeTmpDirFits(base, name string) bool {
 	uid := reviewUID()
 	if uid < 0 {
 		return true
 	}
-	perUID := len(filepath.Clean(base)) + 1 + len(reviewTmpPrefix) + 6 + reviewTmpRandLen + len("/claude-") + len(strconv.Itoa(uid))
+	perUID := len(filepath.Clean(base)) + 1 + len(name) + reviewTmpRandLen + len("/claude-") + len(strconv.Itoa(uid))
 	return perUID <= claudeTmpDirMax
 }
 
@@ -297,7 +310,7 @@ func createReviewTmpDir(workspace string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make the review's private temp dir: %w", err)
 	}
-	base, err := reviewTmpHome()
+	base, err := reviewTmpHome(name)
 	if err != nil {
 		return "", err
 	}
@@ -308,9 +321,9 @@ func createReviewTmpDir(workspace string) (string, error) {
 	return dir, nil
 }
 
-// reviewTmpHome is the directory a new private temp dir goes in: the
-// workspace root when it fits claudeTmpDirMax, else reviewShortTmpBase.
-func reviewTmpHome() (string, error) {
+// reviewTmpHome is the directory a new private temp dir named name goes in:
+// the workspace root when it fits claudeTmpDirMax, else reviewShortTmpBase.
+func reviewTmpHome(name string) (string, error) {
 	var bases []string
 	if root, err := reviewWorkspaceRoot(); err == nil {
 		bases = append(bases, root)
@@ -319,7 +332,7 @@ func reviewTmpHome() (string, error) {
 		bases = append(bases, reviewShortTmpBase)
 	}
 	for _, base := range bases {
-		if claudeTmpDirFits(base) {
+		if claudeTmpDirFits(base, name) {
 			return base, nil
 		}
 	}

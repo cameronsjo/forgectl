@@ -2,6 +2,9 @@ package pr
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,8 +45,9 @@ func runInPrivateTempRoot(m *testing.M) int {
 	// A review's private temp dir must stay short (claudeTmpDirMax), and the
 	// root above is too long for it, so it falls back to reviewShortTmpBase:
 	// a short dir of the run's own rather than the real /tmp.
+	// Its name is kept to 4 bytes, so a 10-digit workspace suffix still fits.
 	if reviewShortTmpBase != "" {
-		short, err := os.MkdirTemp(reviewShortTmpBase, "fp")
+		short, err := makeShortTestBase(reviewShortTmpBase)
 		if err != nil {
 			panic("create the short temp base: " + err.Error())
 		}
@@ -54,6 +58,28 @@ func runInPrivateTempRoot(m *testing.M) int {
 		}()
 	}
 	return m.Run()
+}
+
+// makeShortTestBase makes a fresh 0700 dir in base named "p" plus 3 random
+// characters, retrying past names that exist.
+func makeShortTestBase(base string) (string, error) {
+	for range 256 {
+		var b [3]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = reviewTmpAlphabet[int(b[i])%len(reviewTmpAlphabet)]
+		}
+		dir := filepath.Join(base, "p"+string(b[:]))
+		if err := os.Mkdir(dir, 0o700); errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return "", fmt.Errorf("no free short test base name in %q", base)
 }
 
 // healthyClaudeProbe answers the dispatch-time checks as a current claude

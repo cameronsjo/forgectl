@@ -646,12 +646,46 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 			return Dispatch{}, err
 		}
 	}
+	// Give the window a private, 0700 temp dir of its own (forgectl#907).
+	// Claude Code's default one, claude-<uid> under the system temp dir, is
+	// shared with every other session the operator runs, and its sandbox
+	// leaves it writable, so a hostile review could plant files there for
+	// another session to read, among them the copy of an inline --settings
+	// document Claude Code keeps under a content hash (the reviewer's own
+	// document is a file, so it gets no such copy; see below). Pointed here,
+	// the reviewer's Bash gets the claude-<uid> dir inside this one as its
+	// TMPDIR (measured on Linux, Claude Code 2.1.299). createReviewTmpDir keeps
+	// that path within claudeTmpDirMax, past which 2.1.289 falls back to the
+	// shared /tmp/claude-<uid>. The sandbox's write denies on the shared dirs
+	// back that up (sharedClaudeTmpDirs). It is made before the settings
+	// document, which checks no shared dir is a link holding it. The
+	// dir outlives this call with the review and goes with
+	// the workspace (teardownWorkspace); a refusal before the window opens
+	// removes it, and the settings dir below, here. That removal names only
+	// the dirs this call made, never an entry it merely found under a
+	// matching name.
+	tmpDir, err := createReviewTmpDir(sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	made := []string{tmpDir}
+	windowOpening := false
+	defer func() {
+		if windowOpening {
+			return
+		}
+		for _, dir := range made {
+			if rerr := removeReviewSibling(dir); rerr != nil {
+				slog.Warn("Failed to remove a review dir after a refused dispatch.", "dir", dir, "error", rerr)
+			}
+		}
+	}()
 	// The reviewer's whole configuration is this one document, and it loads
 	// no settings source besides it (--setting-sources ""): the workspace is
 	// the PR head, so any settings file in it is PR-authored, and Claude Code
 	// merges settings arrays and runs hooks from every source it loads. See
 	// reviewSettingSources.
-	settingsJSON, err := reviewSettingsJSON(sess.Workspace, ghHost, perms)
+	settingsJSON, err := reviewSettingsJSON(sess.Workspace, tmpDir, ghHost, perms)
 	if err != nil {
 		return Dispatch{}, err
 	}
@@ -674,39 +708,6 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
-	// Give the window a private, 0700 temp dir of its own (forgectl#907).
-	// Claude Code's default one, claude-<uid> under the system temp dir, is
-	// shared with every other session the operator runs, and its sandbox
-	// leaves it writable, so a hostile review could plant files there for
-	// another session to read, among them the copy of an inline --settings
-	// document Claude Code keeps under a content hash (the reviewer's own
-	// document is a file, so it gets no such copy; see below). Pointed here,
-	// the reviewer's Bash gets the claude-<uid> dir inside this one as its
-	// TMPDIR, provided that path fits claudeTmpDirMax, which
-	// createReviewTmpDir sees to (measured on Linux, Claude Code 2.1.299; on
-	// macOS 2.1.289 a longer one fell back to the shared dir). The sandbox's
-	// write denies on the shared dirs back that up (sharedClaudeTmpDirs). The
-	// dir outlives this call with the review and goes with
-	// the workspace (teardownWorkspace); a refusal before the window opens
-	// removes it, and the settings dir below, here. That removal names only
-	// the dirs this call made, never an entry it merely found under a
-	// matching name.
-	tmpDir, err := createReviewTmpDir(sess.Workspace)
-	if err != nil {
-		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
-	}
-	made := []string{tmpDir}
-	windowOpening := false
-	defer func() {
-		if windowOpening {
-			return
-		}
-		for _, dir := range made {
-			if rerr := removeReviewSibling(dir); rerr != nil {
-				slog.Warn("Failed to remove a review dir after a refused dispatch.", "dir", dir, "error", rerr)
-			}
-		}
-	}()
 	// The same pin turns on Claude Code's subprocess environment scrub, so
 	// an allowed `cat /proc/self/environ` cannot print the window's
 	// credentials into the transcript (reviewEnvScrub).

@@ -65,13 +65,13 @@ func emittedDocuments(t *testing.T) map[string]string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		doc, err := reviewSettingsJSON(ws, host, perms)
+		doc, err := reviewSettingsJSON(ws, "", host, perms)
 		if err != nil {
 			t.Fatal(err)
 		}
 		docs["remote "+host] = doc
 	}
-	doc, err := reviewSettingsJSON(ws, "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
+	doc, err := reviewSettingsJSON(ws, "", "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func emittedDocuments(t *testing.T) map[string]string {
 		return "", false
 	}
 	defer func() { credentialEnv = orig }()
-	doc, err = reviewSettingsJSON(ws, "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
+	doc, err = reviewSettingsJSON(ws, "", "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestSettingsSchema_RejectsTheShapesThatVoidTheDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	good, err := reviewSettingsJSON(t.TempDir(), "github.com", perms)
+	good, err := reviewSettingsJSON(t.TempDir(), "", "github.com", perms)
 	if err != nil {
 		t.Fatal(err)
 	}

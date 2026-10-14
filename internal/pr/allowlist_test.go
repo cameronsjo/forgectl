@@ -402,7 +402,7 @@ func TestReviewCredentialPaths_FollowRelocations(t *testing.T) {
 			t.Errorf("local deny list missing %q", rule)
 		}
 	}
-	sb, err := reviewSandbox(t.TempDir(), "")
+	sb, err := reviewSandbox(t.TempDir(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

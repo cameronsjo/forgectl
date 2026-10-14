@@ -100,7 +100,7 @@ func TestReviewDirs_InsideAClaudeSessionStayOutOfTheSharedDir(t *testing.T) {
 	if pathWithin(tmp, shared) {
 		t.Errorf("private temp dir %s is inside the shared dir %s", tmp, shared)
 	}
-	deny, err := reviewDenyWrite(ws)
+	deny, err := reviewDenyWrite(ws, "")
 	if err != nil {
 		t.Fatalf("reviewDenyWrite: %v", err)
 	}

@@ -125,7 +125,7 @@ func plantedSibling(t *testing.T, ws, prefix, tail string) string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		base, err := reviewTmpHome()
+		base, err := reviewTmpHome(name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,22 +274,83 @@ func TestCreateReviewTmpDir_IgnoresEntriesUnderAMatchingName(t *testing.T) {
 // dir outside it.
 func TestClaudeTmpDirFits(t *testing.T) {
 	stubReviewUID(t, 501)
-	// "/claude-501" is 11 bytes and the name 13, so a base of up to 19 fits.
-	if !claudeTmpDirFits("/tmp") {
+	// The longest name, for a 10-digit workspace suffix, is 13 bytes, the tail
+	// 5, and "/claude-501" 11, so a base of up to 14 bytes fits.
+	long := reviewTmpPrefix + "1234567890-"
+	if !claudeTmpDirFits("/tmp", long) {
 		t.Error("/tmp does not fit")
 	}
-	if !claudeTmpDirFits("/" + strings.Repeat("d", 18)) {
-		t.Error("a 19-byte base does not fit")
+	if !claudeTmpDirFits("/"+strings.Repeat("d", 13), long) {
+		t.Error("a 14-byte base does not fit")
 	}
-	if claudeTmpDirFits("/" + strings.Repeat("d", 19)) {
-		t.Error("a 20-byte base fits")
+	if claudeTmpDirFits("/"+strings.Repeat("d", 14), long) {
+		t.Error("a 15-byte base fits")
 	}
-	if claudeTmpDirFits("/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T") {
+	if !claudeTmpDirFits("/"+strings.Repeat("d", 22), reviewTmpPrefix+"1-") {
+		t.Error("a short suffix does not get the room it leaves")
+	}
+	if claudeTmpDirFits("/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T", reviewTmpPrefix+"1-") {
 		t.Error("macOS's per-user temp dir fits")
 	}
+	// The worst case /tmp must hold: a 10-digit suffix and a 10-digit uid.
+	stubReviewUID(t, 4294967294)
+	if !claudeTmpDirFits("/tmp", long) {
+		t.Error("/tmp does not fit the longest name and uid")
+	}
 	stubReviewUID(t, -1)
-	if !claudeTmpDirFits("/" + strings.Repeat("d", 200)) {
+	if !claudeTmpDirFits("/"+strings.Repeat("d", 200), long) {
 		t.Error("without a uid nothing can be measured, so everything fits")
+	}
+}
+
+// TestReviewTmpName_ExactAndSpellingFree: the private temp dir's name is the
+// workspace's own suffix, so one workspace's teardown never matches another
+// live review's dir (12 against 123), and the /var and /private/var
+// spellings of one workspace name the same dir.
+func TestReviewTmpName_ExactAndSpellingFree(t *testing.T) {
+	a, err := reviewTmpName("/var/folders/x/T/" + sandbox.WorkspacePrefix + "12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := reviewTmpName("/private/var/folders/x/T/" + sandbox.WorkspacePrefix + "12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("two spellings of one workspace name %q and %q", a, b)
+	}
+	other, err := reviewTmpName("/var/folders/x/T/" + sandbox.WorkspacePrefix + "123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isReviewTmpName(other+"abcde", a) || isReviewTmpName(a+"abcde", other) {
+		t.Errorf("%q and %q match each other's dirs", a, other)
+	}
+
+	parent := t.TempDir()
+	ws12 := filepath.Join(parent, sandbox.WorkspacePrefix+"12")
+	ws123 := filepath.Join(parent, sandbox.WorkspacePrefix+"123")
+	for _, ws := range []string{ws12, ws123} {
+		if err := os.Mkdir(ws, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = removeReviewTmpDir(ws) })
+	}
+	if _, err := createReviewTmpDir(ws12); err != nil {
+		t.Fatal(err)
+	}
+	keep, err := createReviewTmpDir(ws123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := removeReviewTmpDir(ws12); err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewSiblings(t, ws12, reviewTmpPrefix)) != 0 {
+		t.Error("workspace 12's private dir survived its teardown")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("workspace 12's teardown removed workspace 123's private dir: %v", err)
 	}
 }
 

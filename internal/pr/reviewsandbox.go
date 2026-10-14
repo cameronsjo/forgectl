@@ -138,11 +138,12 @@ type sandboxNetwork struct {
 	AllowAllUnixSockets bool     `json:"allowAllUnixSockets"`
 }
 
-// reviewSandbox builds the sandbox block for a review of workspace. ghHost is
+// reviewSandbox builds the sandbox block for a review of workspace, whose
+// private temp dir is tmpDir ("" when none is known yet). ghHost is
 // the PR's host for a remote review, or "" for a local one, which reaches no
 // network at all.
-func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
-	denyWrite, err := reviewDenyWrite(workspace)
+func reviewSandbox(workspace, tmpDir, ghHost string) (sandboxSettings, error) {
+	denyWrite, err := reviewDenyWrite(workspace, tmpDir)
 	if err != nil {
 		return sandboxSettings{}, err
 	}
@@ -169,8 +170,8 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 // sandboxNetwork); the schema test is what stands between an edit here and
 // an unconfined reviewer, and claudeAcceptsReviewSettings is what stands
 // between an auto-updated claude and one.
-func reviewSettingsJSON(workspace, ghHost string, perms permissions) (string, error) {
-	sb, err := reviewSandbox(workspace, ghHost)
+func reviewSettingsJSON(workspace, tmpDir, ghHost string, perms permissions) (string, error) {
+	sb, err := reviewSandbox(workspace, tmpDir, ghHost)
 	if err != nil {
 		return "", err
 	}
@@ -203,7 +204,7 @@ func ghAPIDomains(host string) []string {
 // temp paths live under /var, a symlink to /private/var, and a deny that
 // names only one spelling must not depend on which one the sandbox compares.
 // A path holding a glob character is refused rather than listed.
-func reviewDenyWrite(workspace string) ([]string, error) {
+func reviewDenyWrite(workspace, tmpDir string) ([]string, error) {
 	if workspace == "" || !filepath.IsAbs(workspace) {
 		return nil, errors.New("refusing to build the review sandbox: the workspace path is not absolute")
 	}
@@ -215,7 +216,7 @@ func reviewDenyWrite(workspace string) ([]string, error) {
 	if shared != "" {
 		paths = append(paths, shared)
 	}
-	sharedTmp, err := sharedClaudeTmpDirs(workspace)
+	sharedTmp, err := sharedClaudeTmpDirs(workspace, tmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -252,15 +253,16 @@ var reviewUID = os.Getuid
 // temp dir (createReviewTmpDir), whose name none of these covers.
 //
 // On macOS (Claude Code 2.1.289) the reviewer's Bash saw
-// TMPDIR=/tmp/claude-501 and wrote there: the private dir sat under the long
-// /var/folders temp dir, past claudeTmpDirMax, so Claude Code fell back to a
-// claude-<uid> dir of its own choosing. createReviewTmpDir now keeps the
-// private dir short enough, and these denies make a write to a shared dir
-// fail even if Claude Code falls back again (the reviewer's commands then
-// fail rather than write there): measured on Linux (2.1.299) with
-// CLAUDE_CODE_TMPDIR unset and the dir granted by --add-dir, the write failed
-// read-only, and with the pin in place the private claude-<uid> dir stayed
-// writable. A listed dir that does not exist is accepted.
+// TMPDIR=/tmp/claude-501 and wrote there. The private dir sat under the long
+// /var/folders temp dir, past claudeTmpDirMax, and the 2.1.289 bundle falls
+// back to a literal /tmp/claude-<uid> past it; that this was the cause is
+// unconfirmed until a live macOS re-check (see claudeTmpDirMax).
+// createReviewTmpDir keeps the private dir short enough either way, and these
+// denies make a write to a shared dir fail whatever the cause (the reviewer's
+// commands then fail rather than write there): measured on Linux (2.1.299)
+// with CLAUDE_CODE_TMPDIR unset and the dir granted by --add-dir, the write
+// failed read-only, and with the pin in place the private claude-<uid> dir
+// stayed writable. A listed dir that does not exist is accepted.
 //
 // A workspace inside one of these refuses the review: denying that dir would
 // deny the review's settings dir beside the workspace, and leaving it out
@@ -269,7 +271,7 @@ var reviewUID = os.Getuid
 // against each dir as spelled, not resolved: a symlink someone else put at
 // /tmp/claude-<uid>, pointing at /tmp, must not make every workspace look
 // inside it.
-func sharedClaudeTmpDirs(workspace string) ([]string, error) {
+func sharedClaudeTmpDirs(workspace, tmpDir string) ([]string, error) {
 	uid := reviewUID()
 	if uid < 0 {
 		return nil, nil
@@ -279,14 +281,18 @@ func sharedClaudeTmpDirs(workspace string) ([]string, error) {
 	if sandboxGOOS == "darwin" {
 		bases = append(bases, "/private/tmp")
 	}
-	// The workspace's resolved spelling, through its parent when it does not
-	// exist yet: on macOS /var/folders is /private/var/folders, and a link's
-	// target is always resolved.
-	resolvedWS := resolvedOrSelf(workspace)
-	if resolvedWS == filepath.Clean(workspace) {
-		resolvedWS = filepath.Join(resolvedOrSelf(filepath.Dir(filepath.Clean(workspace))), filepath.Base(workspace))
+	ws := []string{filepath.Clean(workspace), resolvedViaParent(workspace)}
+	// What a link at a shared dir's path must not hold: the workspace (with
+	// its settings dir beside it) and the review's private temp dir. Denying
+	// either would break every command the reviewer runs, silently.
+	type held struct{ what, path string }
+	var holds []held
+	for _, w := range ws {
+		holds = append(holds, held{"the workspace", w})
 	}
-	ws := []string{filepath.Clean(workspace), resolvedWS}
+	if tmpDir != "" {
+		holds = append(holds, held{"the review's private temp dir", filepath.Clean(tmpDir)}, held{"the review's private temp dir", resolvedViaParent(tmpDir)})
+	}
 	var out []string
 	for _, base := range bases {
 		dir := filepath.Join(base, name)
@@ -295,18 +301,34 @@ func sharedClaudeTmpDirs(workspace string) ([]string, error) {
 				"which the reviewer must not write; set TMPDIR to a directory outside it", workspace, dir)
 		}
 		// reviewDenyWrite also lists each dir's resolved spelling. A
-		// claude-<uid> that is a link to a dir holding the workspace would
-		// deny the review's own dirs beside it and break every command, so
-		// say why instead.
-		if r := resolvedOrSelf(dir); r != dir && slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, r) }) {
-			return nil, fmt.Errorf("refusing to build the review sandbox: Claude Code's shared temp dir %q is a link to %q, "+
-				"which holds the workspace %q; remove the link, or set TMPDIR to a directory outside it", dir, r, workspace)
+		// claude-<uid> that is a link to a dir holding the workspace or the
+		// private temp dir (a link to /tmp, say) would deny the review's own
+		// dirs and break every command, so say why instead.
+		if r := resolvedOrSelf(dir); r != dir {
+			for _, h := range holds {
+				if pathWithin(h.path, r) {
+					return nil, fmt.Errorf("refusing to build the review sandbox: Claude Code's shared temp dir %q is a link to %q, "+
+						"which holds %s %q; remove the link, or set TMPDIR to a directory outside it", dir, r, h.what, h.path)
+				}
+			}
 		}
 		if !slices.Contains(out, dir) {
 			out = append(out, dir)
 		}
 	}
 	return out, nil
+}
+
+// resolvedViaParent is p symlink-resolved, through its parent when p itself
+// does not exist yet: on macOS /var/folders is /private/var/folders, and a
+// link's target is always resolved, so containment must compare resolved
+// spellings on both sides.
+func resolvedViaParent(p string) string {
+	clean := filepath.Clean(p)
+	if r := resolvedOrSelf(clean); r != clean {
+		return r
+	}
+	return filepath.Join(resolvedOrSelf(filepath.Dir(clean)), filepath.Base(clean))
 }
 
 // pathWithin reports whether p is dir or below it.
