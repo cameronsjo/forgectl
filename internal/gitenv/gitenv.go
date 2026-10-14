@@ -331,6 +331,11 @@ var errCallerConfig = errors.New("gitenv: refusing a git call that sets config o
 //
 // It errs toward refusing: a single-dash bundle holding a 'c' anywhere is
 // refused, though a flag's attached value could be what holds it.
+//
+// It trusts the first "--" to be a real end-of-options marker and does not
+// look past it. An option that takes a value can swallow a "--" as that
+// value (`clone --template -- -c foo.bar=x …` writes foo.bar), so a caller
+// must never pass "--" as an option's value.
 func setsConfig(args []string) bool {
 	for _, a := range args {
 		if a == "--" {

@@ -257,6 +257,11 @@ func TestRunRefusingRejectsACallersConfig(t *testing.T) {
 	for _, args := range [][]string{
 		{"-C", "dir", "fetch", "origin"},
 		{"clone", "--bare", "--branch", "main", "--", "-c", "d"},
+		// The first "--" is trusted as the end of options, even where an
+		// option would swallow it as its value; setsConfig documents that
+		// callers must never pass "--" as one. This pins the assumption, so
+		// a change to it is a deliberate one.
+		{"clone", "--template", "--", "-c", "foo.bar=x", "src", "d"},
 	} {
 		f := &exec.FakeRunner{}
 		if _, err := RunRefusing(t.Context(), f, Transport, refuse, args...); err != nil {

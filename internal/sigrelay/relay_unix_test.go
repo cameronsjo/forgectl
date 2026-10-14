@@ -36,7 +36,11 @@ func TestGroupSignalCancelsAndCancelIsIdempotent(t *testing.T) {
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		t.Errorf("ctx.Err() = %v, want context.Canceled", ctx.Err())
 	}
-	<-own // the original delivery
+	select {
+	case <-own: // the original delivery
+	case <-time.After(5 * time.Second):
+		t.Fatal("the test's own listener never saw SIGHUP")
+	}
 	cancel()
 	cancel()
 	got := 0
