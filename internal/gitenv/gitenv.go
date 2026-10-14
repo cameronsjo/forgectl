@@ -85,9 +85,10 @@
 //     out. Not measured: an https remote whose credentials only an
 //     interactive prompt supplies, which GIT_TERMINAL_PROMPT=0 would refuse.
 //
-//   - Hooks. The Local calls that can run one (branch -D's
-//     reference-transaction, worktree add's post-checkout) run it in the
-//     operator's own repository.
+//   - Hooks. The Local call that can run one, branch -D's
+//     reference-transaction, runs it in the operator's own repository.
+//     worktree add's post-checkout goes through RunNoHooks, which switches
+//     every hook off.
 //
 // # Transport
 //
@@ -408,13 +409,15 @@ func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 // (cameronsjo/forgectl#977) and hooks switched off by both mechanisms git
 // has (cameronsjo/forgectl#1079, hooks.go): core.hooksPath=/dev/null for the
 // hooks directory, and hook.<name>.enabled=false for each hook configuration
-// defines (git 2.54+), with hook.<event>.enabled=false for every event. It
-// is for a call that can run a filter on the working tree and needs none:
-// status, whose racy or stat-dirty entries are re-hashed through the clean
-// filter (or the process filter) that .gitattributes names. A status that
-// refreshes the index fires post-index-change. Local cannot stop that by itself: no option turns
+// defines (git 2.54+). It is for a call that can run a filter on the
+// working tree and needs none: status, whose racy or stat-dirty entries are
+// re-hashed through the clean filter (or the process filter) that
+// .gitattributes names. Local cannot stop that by itself: no option turns
 // filters off, and the repository's own .gitattributes and .git/config
 // select and define them.
+//
+// A status that refreshes the index also fires post-index-change, which is
+// why the hooks are switched off as well.
 //
 // So it lists the drivers and configured hooks first, under Local, with one
 // `git config --get-regexp`, and the call then carries

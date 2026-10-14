@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -20,12 +23,21 @@ import (
 //     lists these apart from the hooks directory, so core.hooksPath does not
 //     reach them. Each name any configuration scope defines is switched off
 //     with hook.<name>.enabled=false, which git reads last from the command
-//     line; every event is switched off as well with
-//     hook.<event>.enabled=false (git 2.55 and later; an older git ignores
-//     the key).
+//     line. That per-name switch is the control this package relies on.
 //
-// A git older than 2.54 runs no configured hook, and ignores both kinds of
-// hook.* option.
+// Every documented event is also passed hook.<event>.enabled=false. Newer
+// git documents it as an event-wide switch; git 2.54 reads it only as the
+// per-name switch of a hook named after the event, so it stops nothing
+// there, and nothing here depends on it. It is harmless where unknown.
+//
+// RunNoHooks also reads every file an include or a conditional include
+// names (includeIf onbranch:, gitdir: and the rest), whatever its
+// condition: a call such as worktree add runs children under another
+// GIT_DIR and branch, for which a condition can hold that did not hold for
+// the listing.
+//
+// A git older than 2.54 runs no configured hook, and ignores every hook.*
+// option.
 
 // hookKeys matches every configuration key that defines a configured hook:
 // hook.<name>.command and hook.<name>.event. The name is a config
@@ -134,16 +146,27 @@ func listConfig(ctx context.Context, r Runner, bin, dir, keys, what string) (str
 }
 
 // RunNoHooks runs git with args in dir under Local, as Run would, with every
-// hook switched off: the hooks directory and every configured hook the
+// hook switched off: the hooks directory, and every configured hook the
 // configuration git reads in dir defines, whatever its scope. It is for a
-// call that would fire a hook a repository or a fetched branch could select,
-// such as `worktree add`, whose checkout fires post-checkout.
+// call that would fire a hook a repository or a fetched branch could
+// select, such as `worktree add`, whose checkout fires post-checkout.
 //
-// It lists the configured hooks first, and fails closed, running nothing,
-// when the listing fails or names a hook -c cannot switch off. dir "" lists
-// and runs in the current directory.
+// worktree add runs its children (the checkout's reset, symbolic-ref) with
+// GIT_DIR set to the new worktree's admin directory, on the new branch. A
+// conditional include whose condition holds for them (includeIf
+// "onbranch:<new branch>", includeIf "gitdir:**/worktrees/<id>") but not for
+// the listing in dir would define a hook the listing never saw. So the
+// hooks of every file any include names are switched off too, read without
+// evaluating its condition (includedHookNames).
+//
+// It fails closed, running nothing, when a listing fails, names a hook -c
+// cannot switch off, or names an include it cannot resolve or read. The
+// whole call, listings included, runs under Bounded. dir "" lists and runs
+// in the current directory.
 func RunNoHooks(ctx context.Context, r Runner, dir string, args ...string) (string, error) {
-	out, err := listConfig(ctx, r, Bin, dir, hookKeys, "configured hooks")
+	dctx, cancel := Bounded(ctx)
+	defer cancel()
+	out, err := listConfig(dctx, r, Bin, dir, hookKeys, "configured hooks")
 	if err != nil {
 		return "", err
 	}
@@ -157,5 +180,168 @@ func RunNoHooks(ctx context.Context, r Runner, dir string, args ...string) (stri
 	if err != nil {
 		return "", err
 	}
-	return Run(ctx, r, Local, append(append(NoHookArgs(names), atDir(dir)...), args...)...)
+	included, err := includedHookNames(dctx, r, Bin, dir)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range included {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return Run(dctx, r, Local, append(append(NoHookArgs(names), atDir(dir)...), args...)...)
+}
+
+// includeKeys matches the keys that name an include: include.path and
+// includeIf.<condition>.path.
+const includeKeys = `^(include\.path|includeif\..*\.path)$`
+
+// includedFileKeys matches what includedHookNames reads from each included
+// file: its hooks and its own includes.
+const includedFileKeys = `^(hook\..*\.(command|event)|include\.path|includeif\..*\.path)$`
+
+// maxIncludedFiles bounds how many included files includedHookNames reads.
+const maxIncludedFiles = 64
+
+var (
+	// errIncludeUnresolvable is returned for an include whose path cannot be
+	// resolved the way git would.
+	errIncludeUnresolvable = errors.New("a configuration include names a path that cannot be resolved; refusing to run with its hooks unread")
+	// errIncludeNotRegular is returned for an include that names something
+	// other than a regular file.
+	errIncludeNotRegular = errors.New("a configuration include names something other than a regular file; refusing to run with its hooks unread")
+	// errTooManyIncludes is returned past maxIncludedFiles.
+	errTooManyIncludes = errors.New("configuration includes name too many files; refusing to run with their hooks unread")
+)
+
+// includedHookNames returns the configured hook names every file an include
+// names defines, read whatever the include's condition, and the hooks of
+// the includes those files name in turn. It starts from the includes the
+// configuration git reads in dir lists, with the file each came from.
+func includedHookNames(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
+	out, err := runConfigList(ctx, r, bin, append(atDir(dir), "config", "-z", "--show-origin", "--get-regexp", includeKeys)...)
+	if err != nil {
+		return nil, fmt.Errorf("list the configuration includes: %w", err)
+	}
+	type include struct{ from, path string }
+	var queue []include
+	fields := strings.Split(out, "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		origin, entry := fields[i], fields[i+1]
+		_, value, ok := strings.Cut(entry, "\n")
+		if !ok {
+			return nil, errIncludeUnresolvable
+		}
+		from := ""
+		if f, isFile := strings.CutPrefix(origin, "file:"); isFile {
+			if !filepath.IsAbs(f) {
+				// git prints a path relative to where it ran: dir.
+				f = filepath.Join(dir, f)
+			}
+			from = f
+		}
+		queue = append(queue, include{from: from, path: value})
+	}
+	if len(fields)%2 == 0 && out != "" {
+		// -z output ends in a NUL, so a whole listing splits into an odd
+		// count of fields, the last one empty.
+		return nil, errIncludeUnresolvable
+	}
+
+	var names []string
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		file, err := resolveInclude(cur.from, cur.path)
+		if err != nil {
+			return nil, err
+		}
+		if seen[file] {
+			continue
+		}
+		seen[file] = true
+		if len(seen) > maxIncludedFiles {
+			return nil, errTooManyIncludes
+		}
+		fi, err := os.Stat(file) //nolint:gosec // G703: an include may name any path, as git allows; this only checks what is there
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// git skips an include that names no file.
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("%w: %w", errIncludeUnresolvable, err)
+		case !fi.Mode().IsRegular():
+			return nil, errIncludeNotRegular
+		}
+		body, err := runConfigList(ctx, r, bin, "config", "--file", file, "--no-includes", "-z", "--get-regexp", includedFileKeys)
+		if err != nil {
+			return nil, fmt.Errorf("read a configuration include: %w", err)
+		}
+		var hookKeyList []string
+		for _, entry := range strings.Split(body, "\x00") {
+			if entry == "" {
+				continue
+			}
+			key, value, _ := strings.Cut(entry, "\n")
+			if strings.HasPrefix(key, "hook.") {
+				hookKeyList = append(hookKeyList, key)
+				continue
+			}
+			queue = append(queue, include{from: file, path: value})
+		}
+		found, err := hookNames(hookKeyList)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range found {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+// resolveInclude resolves an include's path as git does: a leading "~/"
+// names the home directory, and a relative path is relative to the
+// directory of the file the include is in. A form this cannot resolve the
+// same way ("~user/", "%(prefix)/", a relative path from a source that is
+// not a file) is refused.
+func resolveInclude(from, path string) (string, error) {
+	switch {
+	case path == "":
+		return "", errIncludeUnresolvable
+	case path == "~" || strings.HasPrefix(path, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", errIncludeUnresolvable
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+	case strings.HasPrefix(path, "~"), strings.HasPrefix(path, "%("):
+		return "", errIncludeUnresolvable
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	if from == "" {
+		return "", errIncludeUnresolvable
+	}
+	return filepath.Join(filepath.Dir(from), path), nil
+}
+
+// runConfigList runs a `git config --get-regexp` listing under Local. git
+// exits 1, printing nothing, when no key matches; that is an empty listing.
+func runConfigList(ctx context.Context, r Runner, bin string, args ...string) (string, error) {
+	out, err := RunBin(ctx, r, bin, Local, args...)
+	if err != nil {
+		var ce *fexec.CommandError
+		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
+			return "", err
+		}
+		out = ""
+	}
+	return out, nil
 }

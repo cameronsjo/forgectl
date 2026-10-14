@@ -156,7 +156,8 @@ func refusal(v string) (string, bool) {
 // FilterListing reports whether args, a git argv as a fake Runner records it,
 // are one of gitenv.RunUnfiltered's or gitenv.RunNoHooks's listings ahead of
 // its call: the filter drivers and configured hooks, `[-C dir] config -z
-// --name-only --get-regexp ^(filter...` (or `^hook...`), or the submodules, `[-C dir] ls-files -z --stage -- :/`.
+// --name-only --get-regexp ^(filter...` (or RunNoHooks's `^hook...` and
+// `^(include...`), or the submodules, `[-C dir] ls-files -z --stage -- :/`.
 func FilterListing(args []string) bool {
 	return driverListing(args) || submoduleListing(args)
 }
@@ -172,7 +173,7 @@ func atStripped(args []string) []string {
 
 func driverListing(args []string) bool {
 	args = atStripped(args)
-	return len(args) >= 5 && args[0] == "config" && args[len(args)-2] == "--get-regexp" && (strings.HasPrefix(args[len(args)-1], `^filter\.`) || strings.HasPrefix(args[len(args)-1], `^(filter\.`) || strings.HasPrefix(args[len(args)-1], `^hook\.`))
+	return len(args) >= 5 && args[0] == "config" && args[len(args)-2] == "--get-regexp" && (strings.HasPrefix(args[len(args)-1], `^filter\.`) || strings.HasPrefix(args[len(args)-1], `^(filter\.`) || strings.HasPrefix(args[len(args)-1], `^hook\.`) || strings.HasPrefix(args[len(args)-1], `^(include\.`))
 }
 
 func submoduleListing(args []string) bool {

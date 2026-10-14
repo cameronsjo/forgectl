@@ -78,7 +78,7 @@ func TestRunUnfilteredRunsNoConfiguredHook(t *testing.T) {
 // the hooks directory and every event, ahead of -C dir and the call.
 func TestRunNoHooksBuildsTheCall(t *testing.T) {
 	f := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		if slices.Contains(args, "--get-regexp") {
+		if slices.Contains(args, `^hook\..*\.(command|event)$`) {
 			return "hook.a.b.command\x00hook.a.b.event\x00", nil
 		}
 		return "", nil
@@ -86,16 +86,20 @@ func TestRunNoHooksBuildsTheCall(t *testing.T) {
 	if _, err := gitenv.RunNoHooks(t.Context(), f, "/repo", "worktree", "add", "/repo/wt", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Calls) != 2 {
-		t.Fatalf("calls = %v, want the listing and the call", f.Calls)
+	if len(f.Calls) != 3 {
+		t.Fatalf("calls = %v, want the hook listing, the include listing and the call", f.Calls)
+	}
+	wantIncludes := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--show-origin", "--get-regexp", `^(include\.path|includeif\..*\.path)$`)
+	if !slices.Equal(f.Calls[1].Args, wantIncludes) {
+		t.Errorf("include listing = %v, want %v", f.Calls[1].Args, wantIncludes)
 	}
 	wantList := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--name-only", "--get-regexp", `^hook\..*\.(command|event)$`)
 	if !slices.Equal(f.Calls[0].Args, wantList) {
 		t.Errorf("listing = %v, want %v", f.Calls[0].Args, wantList)
 	}
 	want := append(append(gitenv.Args(gitenv.Local), gitenv.NoHookArgs([]string{"a.b"})...), "-C", "/repo", "worktree", "add", "/repo/wt", "main")
-	if !slices.Equal(f.Calls[1].Args, want) {
-		t.Errorf("call = %v, want %v", f.Calls[1].Args, want)
+	if !slices.Equal(f.Calls[2].Args, want) {
+		t.Errorf("call = %v, want %v", f.Calls[2].Args, want)
 	}
 }
 
