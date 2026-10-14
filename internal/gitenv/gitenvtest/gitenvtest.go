@@ -73,7 +73,8 @@ func WithoutLazyFetchPin(t testing.TB) {
 
 // Strip returns args without a leading gitenv profile's options, and
 // without the `-c protocol.<name>.allow=never` pairs gitenv.RunRefusing adds
-// after them, for a fake Runner that answers on git's subcommand. args is
+// after them or the `-c core.hooksPath=/dev/null` pin gitenv.RunUnfiltered
+// adds there, for a fake Runner that answers on git's subcommand. args is
 // returned unchanged when it does not begin with a profile's options. That a
 // call carries its profile and its refusals is gitenv's tests' and the
 // callers' own to prove, not every fake's.
@@ -110,6 +111,9 @@ func split(args []string) ([]string, []string) {
 					break
 				}
 				refused = append(refused, name)
+				rest = rest[2:]
+			}
+			if len(rest) >= 2 && rest[0] == "-c" && rest[1] == "core.hooksPath=/dev/null" {
 				rest = rest[2:]
 			}
 			return rest, refused
@@ -387,4 +391,66 @@ func NewSubmoduleFilterCanary(t testing.TB) FilterCanary {
 		}
 	}
 	return c
+}
+
+// HookCanary is a repository whose own .git/config sets core.hooksPath to a
+// directory holding a post-index-change hook that creates the file at Path.
+// Its committed x.txt is stat-dirty, so a status that refreshes the entry
+// rewrites the index and fires the hook (#1079).
+type HookCanary struct {
+	Dir  string
+	Path string
+}
+
+// NewHookCanary builds a HookCanary repository. Unix only: the hook is a
+// shell script.
+func NewHookCanary(t testing.TB) HookCanary {
+	t.Helper()
+	RequireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the hook canary's hook is an sh script")
+	}
+	dir := t.TempDir()
+	c := HookCanary{Dir: filepath.Join(dir, "repo"), Path: filepath.Join(dir, "canary")}
+	hooks := filepath.Join(dir, "hooks")
+	for _, d := range []string{c.Dir, hooks} {
+		if err := os.Mkdir(d, 0o750); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, "x.txt"), []byte("payload\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile x.txt: %v", err)
+	}
+	Git(t, c.Dir, "init", "-q", "-b", "main")
+	Git(t, c.Dir, "add", ".")
+	Git(t, c.Dir, "commit", "-q", "-m", "control")
+	// The hook is selected only after the commit, so committing ran none.
+	//nolint:gosec // G306: a hook must be executable to be a live control
+	if err := os.WriteFile(filepath.Join(hooks, "post-index-change"), []byte("#!/bin/sh\ntouch '"+c.Path+"'\n"), 0o750); err != nil {
+		t.Fatalf("WriteFile hook: %v", err)
+	}
+	Git(t, c.Dir, "config", "core.hooksPath", hooks)
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(c.Dir, "x.txt"), later, later); err != nil {
+		t.Fatalf("Chtimes x.txt: %v", err)
+	}
+	return c
+}
+
+// Ran reports whether the canary's hook ran.
+func (c HookCanary) Ran(t testing.TB) bool {
+	t.Helper()
+	return Canary{Path: c.Path}.Ran(t)
+}
+
+// AssertLive proves the fixture can fire: a git status with Local's options
+// and environment but no hook pin runs the hook. A test that asserts the
+// canary never ran calls this first, on a second HookCanary.
+func (c HookCanary) AssertLive(t testing.TB) {
+	t.Helper()
+	cmd := gitenv.Command(t.Context(), gitenv.Local, "-C", c.Dir, "status", "--porcelain")
+	_ = cmd.Run()
+	if !c.Ran(t) {
+		t.Fatal("a Local git status ran no hook; the fixture cannot fire, so a passing test would prove nothing")
+	}
 }

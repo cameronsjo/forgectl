@@ -239,7 +239,7 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 		t.Fatalf("git calls = %d (%v), want the two listings and one status probe", len(fake.Calls), fake.Calls)
 	}
 	probes := withoutListings(fake.Calls)
-	wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
+	wantArgs := append(gitenv.Args(gitenv.Local), "-c", "core.hooksPath=/dev/null", "-C", repo, "status", "--porcelain=v2", "--branch")
 	if len(probes) != 1 || probes[0].Name != "git" || !reflect.DeepEqual(probes[0].Args, wantArgs) {
 		t.Errorf("probes = %v, want one git %v", probes, wantArgs)
 	}
@@ -310,7 +310,7 @@ func TestGitStatus_CombinedCommandFailureIsUnknownWithoutFallback(t *testing.T) 
 			if len(calls) != 1 {
 				t.Fatalf("git calls = %d (%v), want exactly 1 attempted probe", len(calls), calls)
 			}
-			wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
+			wantArgs := append(gitenv.Args(gitenv.Local), "-c", "core.hooksPath=/dev/null", "-C", repo, "status", "--porcelain=v2", "--branch")
 			if !reflect.DeepEqual(calls[0].Args, wantArgs) {
 				t.Errorf("argv = %v, want %v", calls[0].Args, wantArgs)
 			}

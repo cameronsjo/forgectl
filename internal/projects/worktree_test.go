@@ -239,6 +239,12 @@ func TestWorktree_WorktreeAddFallback(t *testing.T) {
 	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" origin/feature/foo -b feature/foo") {
 		t.Errorf("expected the origin/<branch> -b <branch> fallback, calls: %+v", fake.Calls)
 	}
+	// Both adds run with hooks pinned off (#1049).
+	for _, tail := range []string{wantDir + " feature/foo", wantDir + " origin/feature/foo -b feature/foo"} {
+		if !hasCall(fake.Calls, "git", "-c core.hooksPath=/dev/null worktree add "+tail) {
+			t.Errorf("expected `worktree add %s` to pin core.hooksPath=/dev/null, calls: %+v", tail, fake.Calls)
+		}
+	}
 }
 
 func TestWorktree_RefusesExistingDir(t *testing.T) {

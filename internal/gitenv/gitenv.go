@@ -406,7 +406,8 @@ func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
-// (cameronsjo/forgectl#977). It is for a call that can run a filter on the
+// (cameronsjo/forgectl#977) and hooks pinned off with
+// core.hooksPath=/dev/null (cameronsjo/forgectl#1079). It is for a call that can run a filter on the
 // working tree and needs none: status, whose racy or stat-dirty entries are
 // re-hashed through the clean filter (or the process filter) that
 // .gitattributes names. Local cannot stop that by itself: no option turns
@@ -541,7 +542,8 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 	}
 	slices.Sort(names)
 	at := atDir(dir)
-	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
+	off := make([]string, 0, 2+2*len(filterDriverVars)*len(names)+len(at)+len(args))
+	off = append(off, noHooks...)
 	for _, name := range names {
 		for _, v := range filterDriverVars {
 			off = append(off, "-c", "filter."+name+"."+v+"=")
@@ -549,6 +551,14 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 	}
 	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
 }
+
+// noHooks is the option every RunUnfiltered call carries to run no hook
+// (cameronsjo/forgectl#1079). status that refreshes a stat-dirty entry
+// rewrites the index, which fires post-index-change, and worktree remove can
+// fire hooks too; the repository's config, or the operator's, selects them,
+// and they would run as the operator. A command-line core.hooksPath outranks
+// every configuration file, and /dev/null holds no hook.
+var noHooks = []string{"-c", "core.hooksPath=/dev/null"}
 
 // atDir is the -C option that points git at dir, or none for "".
 func atDir(dir string) []string {
@@ -686,10 +696,10 @@ func gitDirKey(sub string) (string, error) {
 }
 
 // readGitfile returns the path the gitfile at path names. It opens the file
-// without following a link or blocking (openGitfile), refuses a handle that
+// without following a link or blocking (OpenGitfile), refuses a handle that
 // is not a regular file, and reads at most maxGitfileBytes+1 bytes.
 func readGitfile(path string) (string, error) {
-	f, err := openGitfile(path)
+	f, err := OpenGitfile(path)
 	if err != nil {
 		return "", fmt.Errorf("open a submodule's gitfile: %w", err)
 	}

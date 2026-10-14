@@ -40,6 +40,23 @@ func TestRunUnfilteredRunsNoFilterDriver(t *testing.T) {
 	}
 }
 
+// RunUnfiltered runs a status that refreshes a stat-dirty entry, which
+// rewrites the index and would fire the post-index-change hook the
+// repository's own config selects, on real git, and the hook does not run
+// (#1079).
+// Mutation: drop noHooks from runUnfilteredAlso's call (the hook runs).
+func TestRunUnfilteredRunsNoHook(t *testing.T) {
+	gitenvtest.NewHookCanary(t).AssertLive(t)
+
+	c := gitenvtest.NewHookCanary(t)
+	if _, err := gitenv.RunUnfiltered(t.Context(), exec.OSRunner{}, gitenv.Bin, c.Dir, "status", "--porcelain"); err != nil {
+		t.Fatalf("RunUnfiltered status: %v", err)
+	}
+	if c.Ran(t) {
+		t.Fatal("a hook the repository selects ran during an unfiltered status")
+	}
+}
+
 // A driver name holding '=' cannot be overridden with -c, since git splits
 // the argument at its first '='. RunUnfiltered then refuses to run the call
 // at all, rather than run it with that driver live.
@@ -129,8 +146,9 @@ func mkRepoDir(t *testing.T, dir string) {
 }
 
 // The overrides precede the caller's -C and arguments, after Local's own
-// options, and the listings run in the same directory under Local. Every
-// listed driver is blanked, whatever scope defined it.
+// options, and the listings run in the same directory under Local. Hooks are
+// pinned off (#1079), and every listed driver is blanked, whatever scope
+// defined it.
 // Mutation: list without -C dir (the listing reads another repository).
 func TestRunUnfilteredBuildsTheCall(t *testing.T) {
 	f := listingFake(map[string]string{
@@ -151,6 +169,7 @@ func TestRunUnfilteredBuildsTheCall(t *testing.T) {
 		t.Errorf("submodule listing = %s %v, want /pinned/git %v", got.Name, got.Args, wantSubs)
 	}
 	want := append(gitenv.Args(gitenv.Local),
+		"-c", "core.hooksPath=/dev/null",
 		"-c", "filter.a.b.clean=", "-c", "filter.a.b.smudge=", "-c", "filter.a.b.process=",
 		"-c", "filter.lfs.clean=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
 		"-C", "/repo", "status", "--porcelain")
@@ -364,7 +383,7 @@ func TestRunUnfilteredAlsoListsTheWorkingTreesItReaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := f.Calls[len(f.Calls)-1].Args
-	want := append(gitenv.Args(gitenv.Local), "-c", "filter.wt.clean=", "-c", "filter.wt.smudge=", "-c", "filter.wt.process=", "worktree", "remove", "--", wt)
+	want := append(gitenv.Args(gitenv.Local), "-c", "core.hooksPath=/dev/null", "-c", "filter.wt.clean=", "-c", "filter.wt.smudge=", "-c", "filter.wt.process=", "worktree", "remove", "--", wt)
 	if !slices.Equal(last, want) {
 		t.Errorf("remove = %v, want %v", last, want)
 	}

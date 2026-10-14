@@ -71,7 +71,7 @@ func pinUsageLeaf(base string, create bool) (int, error) {
 // "unsafe" clauses.
 func strippedReason(err error) string {
 	msg := err.Error()
-	for _, sentinel := range []error{privdir.ErrUnsafe, privdir.ErrUnsupported} {
+	for _, sentinel := range []error{privdir.ErrUnsafe, privdir.ErrUnsafeFile, privdir.ErrUnsupported} {
 		if trimmed, ok := strings.CutPrefix(msg, sentinel.Error()+": "); ok {
 			return trimmed
 		}

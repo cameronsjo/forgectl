@@ -31,6 +31,10 @@ var (
 	// use. Its message is terminal-safe, because callers print it.
 	ErrUnsafe = errors.New("privdir: directory is unsafe")
 
+	// ErrUnsafeFile reports a file under a pinned directory that OpenFile
+	// declined to open. Its message is terminal-safe and names the file.
+	ErrUnsafeFile = errors.New("privdir: file is unsafe")
+
 	// ErrUnsupported reports a platform without the descriptor-relative
 	// primitives this package is built on.
 	ErrUnsupported = errors.New("privdir: not supported on this platform")
