@@ -69,7 +69,7 @@ type drainStatusView struct {
 	Holding   []string `json:"holding"`
 	// SlotsHold is the claude-slots hold on claude launches as the last tick
 	// left it, with HeldFor its length now in whole seconds. Absent when
-	// claude launches are not held.
+	// claude launches are not held, and when the drain is stopped or stale.
 	SlotsHold *drain.SlotsHold `json:"slots_hold,omitempty"`
 	HeldFor   int64            `json:"slots_held_seconds,omitempty"`
 	Error     string           `json:"error,omitempty"`
@@ -425,7 +425,9 @@ func runSurfaceDrainStatus(cmd *cobra.Command, asJSON bool) error {
 			HerdrSession: st.HerdrSession, StartedAt: timePtr(st.StartedAt), LastTick: timePtr(st.LastTick),
 			IntervalSeconds: st.IntervalSeconds, Seq: st.Seq, Error: st.Error,
 		}
-		if st.SlotsHold != nil && st.Status != drain.StatusStopped {
+		// Only a live drain holds anything: a stopped or stale one (crashed,
+		// killed) left its last hold behind, and its length would only grow.
+		if st.SlotsHold != nil && (view.Status == drain.StatusRunning || view.Status == drain.StatusPaused) {
 			view.SlotsHold = st.SlotsHold
 			view.HeldFor = int64(max(time.Since(st.SlotsHold.Since), 0) / time.Second)
 		}
@@ -525,7 +527,8 @@ it), oldest first: one event per row state change, pause, resume, drain start
 and stop, a row becoming unreadable, claude-slots holding launches
 (slots-held), a check that cannot answer for 15 minutes (slots-stuck), each
 needs-you notification attempt per channel (notify: state names the channel,
-macos, herdr or herdr-pane, and error says why it failed), a note such as
+macos, herdr or herdr-pane, error says why it failed, and note marks one
+herdr rate-limited), a note such as
 claude-slots missing, and with [surface.merge]
 mode auto the autopilot's merges (merged) and refusals (merge-refused, once
 per row, head and reasons). seq counts from 1 in each drain
@@ -533,7 +536,7 @@ process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 
 --json prints {"events":[{"v","ts","seq","kind","name","repo","state",
-"attempt","error"}]}.
+"attempt","error","note"}]}.
 
 Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 
@@ -545,7 +548,7 @@ Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 		},
 	}
 	cmd.Flags().Int64Var(&since, "since", 0, "print only the latest drain run's events after this seq")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error","note"}]} as JSON`)
 	return cmd
 }
 
@@ -594,6 +597,9 @@ func drainEventLine(e drain.Event) string {
 	}
 	if e.Error != "" {
 		line += ": " + termsafe.SafeLineMax(e.Error, 400)
+	}
+	if e.Note != "" {
+		line += " (" + termsafe.SafeLineMax(e.Note, 400) + ")"
 	}
 	return line
 }

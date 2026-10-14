@@ -46,6 +46,11 @@ func TestNotificationShowBuildsTheCommand(t *testing.T) {
 				exec.MustFixed("--sound"), exec.MustFixed("done")),
 		},
 		{
+			name: "herdr's reserved -h title is not read as its help",
+			n:    Notification{Title: "-h"},
+			want: notifyCmd(exec.Opaque(" -h")),
+		},
+		{
 			name: "a bare help title is not read as herdr's help",
 			n:    Notification{Title: "help"},
 			want: notifyCmd(exec.Opaque(" help")),
@@ -202,5 +207,59 @@ func TestNotificationShowCarriesHerdrsStderr(t *testing.T) {
 	}
 	if !errors.Is(err, exec.ErrNonzeroExit) {
 		t.Errorf("err = %v, want the seam's nonzero-exit error kept", err)
+	}
+}
+
+// TestNotificationShowScrubsItsOwnText: herdr echoes an operand it cannot
+// place, so the title and body never reach an error through its stderr.
+func TestNotificationShowScrubsItsOwnText(t *testing.T) {
+	n := Notification{Title: "deploy prod-db", Body: "rotate secret-ABC then restart"}
+	stderr := "unknown option: rotate secret-ABC then restart\nwhile showing deploy prod-db\n"
+	run := &exec.FakeSensitiveRunner{RunFunc: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{ExitCode: 2, Stderr: exec.BoundedOutputForTest([]byte(stderr), exec.OutputComplete)},
+			exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
+	}}
+	_, err := NotificationShow(t.Context(), run, testHerdrPath, n)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "secret-ABC") || strings.Contains(msg, "prod-db") {
+		t.Fatalf("err = %q, carries the notification's own text", msg)
+	}
+	if !strings.Contains(msg, "unknown option: [redacted]") {
+		t.Fatalf("err = %q, want herdr's words with the value scrubbed", msg)
+	}
+}
+
+func TestScrubValuesOverlapsAndShortValues(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		hide []string
+		want string
+	}{
+		{"x abcdef y", []string{"abcd", "cdef"}, "x [redacted] y"},
+		{"a ab abc", []string{"a", "ab"}, "a ab abc"},
+		{"no match", []string{"zzz"}, "no match"},
+		{"aaaa", []string{"aaa"}, "[redacted]"},
+	} {
+		if got := scrubValues(tc.s, tc.hide); got != tc.want {
+			t.Errorf("scrubValues(%q, %q) = %q, want %q", tc.s, tc.hide, got, tc.want)
+		}
+	}
+}
+
+// TestNotificationResultErr: every caller reads herdr's answer alike, and
+// rate_limited is a note, not a failure.
+func TestNotificationResultErr(t *testing.T) {
+	if (NotificationResult{Shown: true}).Err() != nil || (NotificationResult{Shown: true}).Note() != "" {
+		t.Error("a shown notification failed or carries a note")
+	}
+	rl := NotificationResult{Reason: ReasonRateLimited}
+	if rl.Err() != nil || !strings.Contains(rl.Note(), "rate_limited") {
+		t.Errorf("rate_limited: err %v, note %q; want no error and a note", rl.Err(), rl.Note())
+	}
+	if err := (NotificationResult{Reason: "busy"}).Err(); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Errorf("busy: err %v, want a failure naming it", err)
 	}
 }

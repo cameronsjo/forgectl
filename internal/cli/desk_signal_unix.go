@@ -132,7 +132,7 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 		res, err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest})
 		cancel()
 		if err == nil {
-			err = notShown(res)
+			err = res.Err()
 		}
 		if err != nil {
 			herdrFailed = true
@@ -165,16 +165,6 @@ func failureHint(setting string, err error) string {
 		return "osascript did not post it; check System Settings > Notifications"
 	}
 	return termsafe.SafeLineMax(err.Error(), deskSignalErrMax)
-}
-
-// notShown is the failure for a herdr notification herdr declined to show,
-// or nil. rate_limited is not one: herdr showed another notification moments
-// ago, so the operator was alerted.
-func notShown(r herdr.NotificationResult) error {
-	if r.Shown || r.Reason == "rate_limited" {
-		return nil
-	}
-	return fmt.Errorf("herdr did not show the notification: %s", r.Reason)
 }
 
 // cleanupPath is where herdr is for clearing a signal already raised. It does

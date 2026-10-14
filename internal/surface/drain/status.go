@@ -154,7 +154,8 @@ const (
 	EventSlotsStuck = "slots-stuck"
 	// EventNotify: one notification attempt on one channel, named in state
 	// (macos, herdr, herdr-pane); error says why it failed, and is empty when
-	// it went out. A macOS attempt that went out says only that osascript
+	// it went out. note marks one that is not a failure, such as herdr
+	// rate-limiting it after showing another moments ago. A macOS attempt that went out says only that osascript
 	// exited 0, which it does whether or not macOS displayed it.
 	EventNotify = "notify"
 	// EventNote: a notice that is neither a state change nor an error, such
@@ -181,6 +182,9 @@ type Event struct {
 	State   string    `json:"state,omitempty"`
 	Attempt int       `json:"attempt"`
 	Error   string    `json:"error,omitempty"`
+	// Note is a remark that is not an error, such as a notify attempt herdr
+	// rate-limited.
+	Note string `json:"note,omitempty"`
 }
 
 // ParseEvents reads events from the files' contents, oldest first. A line

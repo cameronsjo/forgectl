@@ -238,6 +238,7 @@ func (d *drainer) unclaim(q worker.QueueRow, why string) {
 // event records e, keeping the first write failure for drain.json.
 func (d *drainer) event(e drain.Event) {
 	e.Error = termsafe.SafeLineMax(e.Error, maxDrainErrorLen)
+	e.Note = termsafe.SafeLineMax(e.Note, maxDrainErrorLen)
 	if err := d.io.emit(e); err != nil {
 		d.lastErr = "events: " + err.Error()
 	}
@@ -499,7 +500,7 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 func (d *drainer) recordNotify(name, repo, state, what string, attempts []notifyAttempt) {
 	var failed []string
 	for _, a := range attempts {
-		e := drain.Event{Kind: drain.EventNotify, Name: name, Repo: repo, State: a.channel}
+		e := drain.Event{Kind: drain.EventNotify, Name: name, Repo: repo, State: a.channel, Note: a.note}
 		if a.err != nil {
 			e.Error = a.err.Error()
 			failed = append(failed, a.channel+": "+a.err.Error())

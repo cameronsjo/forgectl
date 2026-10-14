@@ -86,3 +86,22 @@ func TestNextHoldAndSlotsStuck(t *testing.T) {
 		t.Fatal("a full cap or no hold is never stuck")
 	}
 }
+
+// TestNextHoldFaultToFaultKeepsItsStart: a check alternating between
+// failures is one fault hold, so the slots-stuck timer runs on.
+func TestNextHoldFaultToFaultKeepsItsStart(t *testing.T) {
+	t0 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	h := NextHold(nil, DecideSlots(SlotsCheck{Need: 1, TimedOut: true}, ""), t0)
+	for i, c := range []SlotsCheck{{Need: 1, Exit: 2, Reason: "x"}, {Need: 1, TimedOut: true}, {Need: 1, Err: "gone"}} {
+		next := NextHold(h, DecideSlots(c, h.Cond), t0.Add(time.Duration(i+1)*time.Minute))
+		if next != h || !next.Since.Equal(t0) {
+			t.Fatalf("check %d: hold %+v, want the same hold since %s", i, next, t0)
+		}
+		if want := DecideSlots(c, "").Cond; next.Cond != want {
+			t.Fatalf("check %d: cond %q, want the latest %q", i, next.Cond, want)
+		}
+	}
+	if !SlotsStuck(h, t0.Add(SlotsStuckAfter)) {
+		t.Fatal("an alternating fault never got stuck")
+	}
+}

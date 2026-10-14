@@ -65,5 +65,5 @@ func (a *Adapter) Notify(ctx context.Context, n herdr.Notification) (herdr.Notif
 		return herdr.NotificationResult{}, err
 	}
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindHerdrNotify, args...))
-	return herdr.NotificationOutcome(res, err)
+	return herdr.NotificationOutcome(n, res, err)
 }

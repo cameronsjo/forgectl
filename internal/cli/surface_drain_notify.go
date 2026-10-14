@@ -19,15 +19,19 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// The drain's needs-you signal: one macOS notification naming the worker and
-// the reason, one herdr notification with the same text, and the worker's
-// own herdr pane put in herdr's needs-you state. Each is one attempt the
-// drain records as an event. osascript exits 0 whether or not macOS displays
-// the notification (Focus, or a notification permission turned off), so a
-// macOS attempt that succeeded says only that osascript ran; herdr's reply
-// says whether it showed its own (forgectl#1189). The pane comes from the worker's ledger ref on the drain's pinned
-// herdr session, never from the drain's own HERDR_PANE_ID: the drain runs
-// detached, and any pane it inherited is the operator's, not the worker's.
+// The drain's needs-you signal goes out on three channels, each one attempt
+// the drain records as a notify event: a macOS notification naming the worker
+// and the reason, a herdr notification with the same text, and the worker's
+// own herdr pane put in herdr's needs-you state.
+//
+// The pane comes from the worker's ledger ref on the drain's pinned herdr
+// session, never from the drain's own HERDR_PANE_ID: the drain runs detached,
+// and any pane it inherited is the operator's, not the worker's.
+//
+// Only herdr says whether a notification was seen. osascript exits 0 whether
+// or not macOS displays it (Focus, or a notification permission turned off),
+// so a macOS attempt that succeeded says only that osascript ran; herdr's
+// reply says whether it showed its own (forgectl#1189).
 
 // drainPaneTimeout bounds the herdr half: the ownership checks and the
 // pane-state change, together.
@@ -93,6 +97,9 @@ const (
 type notifyAttempt struct {
 	channel string
 	err     error
+	// note is a remark on an attempt that did not fail (herdr rate-limited
+	// it), recorded on its notify event.
+	note string
 }
 
 // NeedsYou sends the macOS and herdr notifications, then marks the worker's
@@ -114,30 +121,29 @@ func (n needsYouNotifier) Alert(ctx context.Context, title, body string) []notif
 	if n.mac != nil && n.mac.Supported() {
 		attempts = append(attempts, notifyAttempt{channel: channelMacOS, err: sendMacSignal(ctx, n.mac.Notify, title, body)})
 	}
-	return append(attempts, notifyAttempt{channel: channelHerdr, err: n.toast(ctx, title, body)})
+	note, err := n.toast(ctx, title, body)
+	return append(attempts, notifyAttempt{channel: channelHerdr, err: err, note: note})
 }
 
 // toast shows a herdr notification through an adapter pinned to the drain's
-// session. A notification herdr declined to show is a failure: its reply
-// says why (disabled, rate_limited, no_foreground_client, busy).
-func (n needsYouNotifier) toast(ctx context.Context, title, body string) error {
+// session. herdr's reply is read through NotificationResult.Err, as the
+// desk's signal reads it: a notification herdr did not show is a failure
+// naming its reason, except rate_limited, which comes back as a note.
+func (n needsYouNotifier) toast(ctx context.Context, title, body string) (string, error) {
 	p, err := n.panes()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if p.Session() != n.session {
-		return fmt.Errorf("the herdr adapter resolved session %q, expected the pinned %q", p.Session(), n.session)
+		return "", fmt.Errorf("the herdr adapter resolved session %q, expected the pinned %q", p.Session(), n.session)
 	}
 	c, cancel := context.WithTimeout(ctx, drainPaneTimeout)
 	defer cancel()
 	r, err := p.Notify(c, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest})
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !r.Shown {
-		return fmt.Errorf("herdr did not show it: %s", r.Reason)
-	}
-	return nil
+	return r.Note(), r.Err()
 }
 
 // Cleared releases the pane state NeedsYou set, when the row leaves
@@ -186,6 +192,7 @@ type notifyTestAttempt struct {
 	Channel string `json:"channel"`
 	OK      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // notifyTestResult is what `drain notify-test --json` prints. Additive
@@ -210,13 +217,14 @@ signal uses, the way the drain sends it, and prints each channel's result:
   herdr  herdr notification show, on the herdr session the drain would pin
          (resolved as drain start resolves it). herdr's reply says whether
          it showed the notification and, when not, why: disabled,
-         rate_limited, no_foreground_client, or busy.
+         no_foreground_client, or busy. rate_limited (herdr showed another
+         notification moments ago) is ok, with a note, as in the drain.
 
 It runs whatever [surface.drain] notify says, and needs no running drain.
 The worker pane's needs-you state has no worker to mark here and is not
 tested.
 
---json prints {"herdr_session","attempts":[{"channel","ok","error"}]}.
+--json prints {"herdr_session","attempts":[{"channel","ok","error","note"}]}.
 
 Exit 0: every channel went out. Exit 1: a channel failed or herdr did not
 show the notification.
@@ -232,7 +240,7 @@ show the notification.
 			return runDrainNotifyTest(cmd.Context(), cmd.OutOrStdout(), n, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"herdr_session","attempts":[{"channel","ok","error"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"herdr_session","attempts":[{"channel","ok","error","note"}]} as JSON`)
 	return cmd
 }
 
@@ -244,7 +252,7 @@ func runDrainNotifyTest(ctx context.Context, out io.Writer, n needsYouNotifier, 
 	res := notifyTestResult{HerdrSession: n.session, Attempts: []notifyTestAttempt{}}
 	failed := false
 	for _, a := range n.Alert(ctx, drainNotifyTestTitle, body) {
-		r := notifyTestAttempt{Channel: a.channel, OK: a.err == nil}
+		r := notifyTestAttempt{Channel: a.channel, OK: a.err == nil, Note: termsafe.SafeLineMax(a.note, maxDrainErrorLen)}
 		if a.err != nil {
 			failed = true
 			r.Error = termsafe.SafeLineMax(a.err.Error(), maxDrainErrorLen)
@@ -266,6 +274,8 @@ func runDrainNotifyTest(ctx context.Context, out io.Writer, n needsYouNotifier, 
 			switch {
 			case !a.OK:
 				line += "failed: " + a.Error
+			case a.Note != "":
+				line += "ok, but " + a.Note
 			case a.Channel == channelMacOS:
 				line += "osascript exited 0; macOS does not report whether it displayed the notification, so check that you saw it"
 			default:

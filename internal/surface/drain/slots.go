@@ -134,16 +134,25 @@ type SlotsHold struct {
 func (h SlotsHold) Fault() bool { return h.Cond != "held" }
 
 // NextHold is the hold after a check that decided d, from the hold before
-// it (nil when launches were free). A new condition starts a new hold at
-// now; the same condition keeps its start and first reason.
+// it (nil when launches were free). A hold starts at now when launches were
+// free or it crosses between a full cap and a fault; a fault that changes
+// kind (a timeout, then exit 2) is the same fault hold and keeps its start,
+// so a check that alternates between failures still reaches
+// SlotsStuckAfter. A hold that changes kind takes the new condition and
+// reason. The returned pointer equals prev exactly when the hold continues.
 func NextHold(prev *SlotsHold, d SlotsDecision, now time.Time) *SlotsHold {
 	if d.Cond == "" {
 		return nil
 	}
-	if prev != nil && prev.Cond == d.Cond {
+	next := SlotsHold{Cond: d.Cond, Reason: d.Reason, Since: now.UTC()}
+	if prev == nil || prev.Fault() != next.Fault() {
+		return &next
+	}
+	if prev.Cond == d.Cond {
 		return prev
 	}
-	return &SlotsHold{Cond: d.Cond, Reason: d.Reason, Since: now.UTC()}
+	prev.Cond, prev.Reason = d.Cond, d.Reason
+	return prev
 }
 
 // SlotsStuck reports whether h is a fault hold that has lasted

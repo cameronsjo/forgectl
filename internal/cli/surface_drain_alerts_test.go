@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -37,7 +38,7 @@ func TestNeedsYouShowsAHerdrNotification(t *testing.T) {
 		r := newNotifyRig(t)
 		r.panes.toast = herdr.NotificationResult{Reason: "no_foreground_client"}
 		err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"))
-		if err == nil || !strings.Contains(err.Error(), "herdr: herdr did not show it: no_foreground_client") {
+		if err == nil || !strings.Contains(err.Error(), "herdr: herdr did not show the notification: no_foreground_client") {
 			t.Fatalf("err = %v, want herdr's reason", err)
 		}
 		if len(r.panes.reported) != 1 || len(r.run.Calls) != 1 {
@@ -211,5 +212,106 @@ func TestDrainNotifyTest(t *testing.T) {
 	if json.Unmarshal([]byte(out.String()), &res) != nil || res.HerdrSession != drainTestSession || len(res.Attempts) != 1 ||
 		res.Attempts[0].Channel != "herdr" || res.Attempts[0].OK || !strings.Contains(res.Attempts[0].Error, "disabled") {
 		t.Fatalf("--json %s", out.String())
+	}
+}
+
+// TestDrainStatusDropsTheHoldOfADeadDrain: a stale (crashed or killed) or
+// stopped drain's last hold is not shown; its length would only grow.
+func TestDrainStatusDropsTheHoldOfADeadDrain(t *testing.T) {
+	files := drainCmdEnv(t)
+	lock, err := files.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close() //nolint:errcheck // test
+	since := time.Now().Add(-3 * time.Hour).UTC()
+	data, err := drain.EncodeStatus(drain.Status{Status: drain.StatusRunning, PID: 4242, StartedAt: since, LastTick: since, IntervalSeconds: 30,
+		SlotsHold: &drain.SlotsHold{Cond: "exit 2", Reason: "held: the session cap could not be checked", Since: since}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.WriteStatus(lock, data); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
+	var v drainStatusView
+	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.Status != drain.StatusStale || v.SlotsHold != nil || v.HeldFor != 0 {
+		t.Fatalf("status --json: %s, %v; want stale with no slots_hold", out, err)
+	}
+	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd())
+	if err != nil || strings.Contains(out, "claude launches held") {
+		t.Fatalf("status text: %q, %v; want no hold for a stale drain", out, err)
+	}
+}
+
+// TestDrainRateLimitedIsANoteNotAnError: herdr rate-limiting the needs-you
+// notification is a notify event with a note and no error event, as the
+// desk treats it.
+func TestDrainRateLimitedIsANoteNotAnError(t *testing.T) {
+	r := newNotifyRig(t)
+	r.panes.toast = herdr.NotificationResult{Reason: herdr.ReasonRateLimited}
+	attempts := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")
+	if err := failures(attempts); err != nil {
+		t.Fatalf("failures: %v; rate_limited is not one", err)
+	}
+	if attempts[1].channel != channelHerdr || !strings.Contains(attempts[1].note, "rate_limited") {
+		t.Fatalf("herdr attempt %+v, want a rate_limited note", attempts[1])
+	}
+
+	f, d, q := newFakeDrain(t)
+	d.io.notify = rateLimitedNotifier{f}
+	seedLive(t, q, "w", "/repo/a", worker.QueueLaunched, worker.StageLaunched)
+	f.probe = func(worker.QueueRow, worker.Row) drain.Probe {
+		return drain.Probe{State: drain.ProbeRead, Verdict: ready.Verdict{State: ready.StateBlocked, Blocking: "permission prompt"}}
+	}
+	d.tick(t.Context())
+	notes := eventsOfKind(f, drain.EventNotify)
+	if len(notes) != 1 || notes[0].Error != "" || !strings.Contains(notes[0].Note, "rate_limited") {
+		t.Fatalf("notify events %+v; want one with a rate_limited note and no error", notes)
+	}
+	if n := len(eventsOfKind(f, drain.EventError)); n != 0 {
+		t.Fatalf("%d error events for a rate-limited notification", n)
+	}
+	if line := drainEventLine(notes[0]); !strings.Contains(line, "(herdr did not show it: rate_limited") {
+		t.Fatalf("event line %q, want the note", line)
+	}
+
+	r = newNotifyRig(t)
+	r.n.mac = notify.New(r.run, notify.WithGOOS("linux"))
+	r.panes.toast = herdr.NotificationResult{Reason: herdr.ReasonRateLimited}
+	var out strings.Builder
+	if err := runDrainNotifyTest(t.Context(), &out, r.n, false); err != nil {
+		t.Fatalf("notify-test: %v; rate_limited is ok", err)
+	}
+	if !strings.Contains(out.String(), "herdr: ok, but herdr did not show it: rate_limited") {
+		t.Fatalf("notify-test output %q", out.String())
+	}
+}
+
+// rateLimitedNotifier answers NeedsYou with one herdr attempt herdr
+// rate-limited.
+type rateLimitedNotifier struct{ *fakeDrain }
+
+func (rateLimitedNotifier) NeedsYou(context.Context, worker.QueueRow, worker.Row, string) []notifyAttempt {
+	return []notifyAttempt{{channel: channelHerdr, note: herdr.NotificationResult{Reason: herdr.ReasonRateLimited}.Note()}}
+}
+
+// TestDrainSlotsAlternatingFaultsStillAlert: a check that alternates between
+// a timeout and exit 2 is one fault hold, so it still alerts once.
+func TestDrainSlotsAlternatingFaultsStillAlert(t *testing.T) {
+	f, d, q, _ := slotsDrain(t, drain.SlotsCheck{Exit: -1, TimedOut: true}, drain.SlotsCheck{Exit: 2, Reason: "x"},
+		drain.SlotsCheck{Exit: -1, TimedOut: true}, drain.SlotsCheck{Exit: 2, Reason: "x"}, drain.SlotsCheck{Exit: -1, TimedOut: true})
+	on := true
+	f.cfg.Surface.Drain.Notify = &on
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	for i := range 5 {
+		f.now = drainT0.Add(time.Duration(i) * (drain.SlotsStuckAfter / 3))
+		d.tick(t.Context())
+	}
+	if n := len(eventsOfKind(f, drain.EventSlotsStuck)); n != 1 || len(f.alerted) != 1 {
+		t.Fatalf("%d slots-stuck events, alerts %q; want one each", n, f.alerted)
+	}
+	if st := d.status(drain.Status{}, nil); st.SlotsHold == nil || !st.SlotsHold.Since.Equal(drainT0) {
+		t.Fatalf("slots_hold %+v; want the hold since the first failure", st.SlotsHold)
 	}
 }
