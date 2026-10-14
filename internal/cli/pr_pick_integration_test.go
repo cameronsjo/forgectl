@@ -200,6 +200,7 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	unsealOnCleanup(t, root)
 	t.Setenv("TMUX", "")
 	t.Setenv("TMUX_TMPDIR", root)
 	// os.TempDir() reads $TMPDIR on every call, and sandbox.Sandbox creates

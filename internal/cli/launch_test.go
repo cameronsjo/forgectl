@@ -64,12 +64,7 @@ func TestMain(m *testing.M) {
 	}
 
 	code := m.Run()
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
-		}
-		return nil
-	})
+	unsealTree(dir)
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

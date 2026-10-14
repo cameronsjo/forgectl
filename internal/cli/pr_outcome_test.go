@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,7 +87,28 @@ func localReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer)
 // workspace and prints nothing.
 func reviewTempRoot(t *testing.T) {
 	t.Helper()
-	t.Setenv("TMPDIR", t.TempDir())
+	root := t.TempDir()
+	unsealOnCleanup(t, root)
+	t.Setenv("TMPDIR", root)
+}
+
+// unsealOnCleanup makes every dir under root writable again before t's
+// earlier-registered cleanups remove it. A Claude dispatch seals the
+// reviewer's settings dir 0500 (forgectl#907), and a test that does not tear
+// its review down leaves one that RemoveAll cannot empty unless run as root.
+func unsealOnCleanup(t *testing.T, root string) {
+	t.Helper()
+	t.Cleanup(func() { unsealTree(root) })
+}
+
+// unsealTree chmods every dir under root 0700, best effort.
+func unsealTree(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
+		}
+		return nil
+	})
 }
 
 func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
