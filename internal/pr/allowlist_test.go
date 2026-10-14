@@ -288,3 +288,60 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestDenyLists_CarryNoMultiEdit: Claude Code reports a MultiEdit rule as
+// matching no known tool (forgectl#715 item 5).
+func TestDenyLists_CarryNoMultiEdit(t *testing.T) {
+	remote, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, list := range map[string][]string{
+		"remote": remote.Deny,
+		"local":  localProfile("/tmp/forgectl-findings-x").Deny,
+	} {
+		for _, rule := range list {
+			if strings.HasPrefix(rule, "MultiEdit") {
+				t.Errorf("%s deny list carries %q, which matches no tool", name, rule)
+			}
+		}
+	}
+}
+
+// TestProfiles_DenyReadsOfCredentialStores covers forgectl#715 item 2: both
+// modes deny reads of the operator's credential stores, and only a local
+// review, which runs no gh, denies gh's own config dir. A PR review's gh reads
+// authenticate from it, and a Read deny also reaches the sandbox.
+func TestProfiles_DenyReadsOfCredentialStores(t *testing.T) {
+	remote, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localProfile("/tmp/forgectl-findings-x")
+	for name, perms := range map[string]permissions{"remote": remote, "local": local} {
+		for _, want := range []string{"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.netrc)", "Read(~/.config/sops/**)"} {
+			if !contains(perms.Deny, want) {
+				t.Errorf("%s deny list missing %q", name, want)
+			}
+		}
+		for _, rule := range perms.Deny {
+			if strings.HasPrefix(rule, "Read(") && !strings.HasPrefix(rule, "Read(~/") {
+				t.Errorf("%s credential deny %q is not home-rooted", name, rule)
+			}
+		}
+		for _, rule := range perms.Allow {
+			for _, p := range reviewCredentialPaths("") {
+				if strings.Contains(rule, strings.TrimPrefix(p.path, "~/")) {
+					t.Errorf("%s allow rule %q reaches the credential path %s", name, rule, p.path)
+				}
+			}
+		}
+	}
+	const ghRule = "Read(~/.config/gh/**)"
+	if contains(remote.Deny, ghRule) {
+		t.Errorf("remote deny list carries %q, which would cut gh off from its stored token", ghRule)
+	}
+	if !contains(local.Deny, ghRule) {
+		t.Errorf("local deny list missing %q", ghRule)
+	}
+}

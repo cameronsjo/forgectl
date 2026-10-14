@@ -412,3 +412,31 @@ func TestReviewGitEnv_StopsARepoConfiguredFsmonitor(t *testing.T) {
 		t.Error("core.fsmonitor from the repository's config ran under the review window's git pins")
 	}
 }
+
+// TestReviewSandbox_DeniesReadsOfCredentialStores is the OS-enforced half of
+// TestProfiles_DenyReadsOfCredentialStores: the sandbox's denyRead names the
+// same paths, so a read no command text shows is refused too.
+func TestReviewSandbox_DeniesReadsOfCredentialStores(t *testing.T) {
+	ws := t.TempDir()
+	remote, err := reviewSandbox(ws, "github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := reviewSandbox(ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, sb := range map[string]sandboxSettings{"remote": remote, "local": local} {
+		for _, want := range []string{"~/.ssh", "~/.aws", "~/.gnupg", "~/.netrc", "~/.config/sops"} {
+			if !slices.Contains(sb.Filesystem.DenyRead, want) {
+				t.Errorf("%s sandbox denyRead missing %q: %v", name, want, sb.Filesystem.DenyRead)
+			}
+		}
+	}
+	if slices.Contains(remote.Filesystem.DenyRead, "~/.config/gh") {
+		t.Error("a PR review's sandbox denies gh's config dir, which its gh reads authenticate from")
+	}
+	if !slices.Contains(local.Filesystem.DenyRead, "~/.config/gh") {
+		t.Error("a local review's sandbox does not deny gh's config dir")
+	}
+}

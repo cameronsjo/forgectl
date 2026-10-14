@@ -15,7 +15,7 @@ package pr
 //       workspace, and keeps the forgectl-findings- prefix
 // localProfile (Classification: deny-by-default security control, broader than PR mode)
 //   [x] Denies every gh subcommand; grants none
-//   [x] Exactly one scoped Write(findingsDir/**) grant; no bare "Write" in deny
+//   [x] Exactly one scoped Edit(//findingsDir/**) grant; no bare "Write" in deny
 
 import (
 	"context"
@@ -349,19 +349,25 @@ func TestLocalProfile_FindingsDirIsOnlyWritablePath(t *testing.T) {
 
 	var writeGrants []string
 	for _, a := range perms.Allow {
-		if strings.HasPrefix(a, "Write") {
+		if strings.HasPrefix(a, "Write") || strings.HasPrefix(a, "Edit") || strings.HasPrefix(a, "MultiEdit") {
 			writeGrants = append(writeGrants, a)
 		}
 	}
 	if len(writeGrants) != 1 {
-		t.Fatalf("expected exactly one Write(...) grant, got %v", writeGrants)
+		t.Fatalf("expected exactly one scoped write grant, got %v", writeGrants)
 	}
-	want := "Write(" + dir + "/**)"
+	// An Edit rule, because Claude Code matches file writes only against
+	// Edit(path) rules (a Write rule is inert), and `//`-rooted, because a
+	// single leading `/` is relative to the settings file (forgectl#715).
+	want := "Edit(/" + dir + "/**)"
 	if writeGrants[0] != want {
-		t.Errorf("Write grant = %q, want %q", writeGrants[0], want)
+		t.Errorf("write grant = %q, want %q", writeGrants[0], want)
+	}
+	if !strings.HasPrefix(writeGrants[0], "Edit(//") {
+		t.Errorf("write grant %q is not //-rooted, so it would not name an absolute path", writeGrants[0])
 	}
 	if contains(perms.Deny, "Write") {
-		t.Error(`deny list must not contain bare "Write" — it would clobber the scoped Write(findingsDir/**) allow grant`)
+		t.Error(`deny list must not contain bare "Write" — it would risk clobbering the scoped findings grant`)
 	}
 }
 

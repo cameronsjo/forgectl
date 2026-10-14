@@ -50,7 +50,13 @@ func fakeWorkspace(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(ws) })
+	t.Cleanup(func() {
+		_ = os.RemoveAll(ws)
+		// A Claude launch makes the review's private temp dir beside it.
+		if tmp, err := reviewTmpDirFor(ws); err == nil {
+			_ = os.RemoveAll(tmp)
+		}
+	})
 	return ws
 }
 

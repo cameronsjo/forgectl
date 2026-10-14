@@ -58,12 +58,12 @@ func newDispatch(ref Ref, window tmux.WindowIdentity) Dispatch {
 // localReviewPrompt seeds a local (offline) review — there is no PR to post
 // to, so it directs findings to the writable escape-hatch dir (named
 // explicitly, since that path is the one thing tying the prompt to the
-// scoped Write(findingsDir/**) allowlist grant) instead of a PostReview
+// scoped Edit(//findingsDir/**) allowlist grant) instead of a PostReview
 // approval gate.
 //
 // writesEnforced says whether the harness actually confines writes to
 // findingsDir. Under agent A it does: the reviewer's allowlist (passed with
-// --settings) grants exactly one Write(findingsDir/**) rule, the sandbox
+// --settings) grants exactly one Edit(//findingsDir/**) rule, the sandbox
 // denies Bash writes to the workspace, and --add-dir is what makes that grant
 // reachable at all — so the prompt may state the restriction as fact. Under
 // Codex it does not: --add-dir adds a writable root ALONGSIDE an
@@ -621,10 +621,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	var perms permissions
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
-		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
+		// permission-scoped Edit(//<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all. It is also what
 		// makes the dir writable inside the sandbox, where it is the only
-		// writable root besides the per-user temp directory.
+		// writable root besides the review's private temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
 		perms = localProfile(sess.FindingsDir)
@@ -667,6 +667,31 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
+	// Give the window a private, 0700 temp dir of its own (forgectl#907).
+	// Claude Code's default one, claude-<uid> under the system temp dir, is
+	// shared with every other session the operator runs, and its sandbox
+	// leaves it writable, so a hostile review could plant files there for
+	// another session to read, among them the copy of an inline --settings
+	// document Claude Code keeps under a content hash. Pointed here, the
+	// shared dir becomes read-only to the reviewer's Bash (measured on Claude
+	// Code 2.1.296). The dir outlives this call with the review and goes with
+	// the workspace (teardownWorkspace); a refusal before the window opens
+	// removes it here.
+	tmpDir, err := createReviewTmpDir(sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	windowOpening := false
+	defer func() {
+		if windowOpening {
+			return
+		}
+		if rerr := removeReviewTmpDir(sess.Workspace); rerr != nil {
+			slog.Warn("Failed to remove the review's private temp dir after a refused dispatch.",
+				"dir", tmpDir, "error", rerr)
+		}
+	}()
+	windowEnv = pinReviewTmpEnv(windowEnv, tmpDir)
 	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
@@ -690,6 +715,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
 	command := append([]string{claudePath}, claudeArgs...)
+	// From here a window may exist even when the call below fails, and its
+	// claude would be using tmpDir, so it stays for teardown to remove.
+	windowOpening = true
 	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)

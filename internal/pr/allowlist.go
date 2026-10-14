@@ -51,9 +51,9 @@ type permissions struct {
 // (forgectl#694). Treat this list as what the reviewer may ASK to run. What
 // a run can then do is narrowed by the OS sandbox (reviewsandbox.go), and
 // only as far as that file says: its writes are denied in the workspace and
-// the shared git dir but still land in the findings dir and the per-user
-// temp dir, its network is limited to the PR's gh hosts, and its READS are
-// not narrowed at all.
+// the shared git dir but still land in the findings dir and the review's own
+// private temp dir, its network is limited to the PR's gh hosts, and its
+// READS are narrowed only by the credential paths credentialReadDeny names.
 //
 // Neither mode grants `rg`. ripgrep's `--pre COMMAND` runs COMMAND on every
 // searched file, so `rg --pre sh x file` executes a script straight out of a
@@ -179,9 +179,75 @@ var denyPosting = []string{
 	"Bash(wget:*)",
 	"Write",
 	"Edit",
-	"MultiEdit",
 	"NotebookEdit",
 	"WebFetch",
+}
+
+// credentialPath is one operator credential location, home-relative in the
+// `~/` spelling both Claude Code's permission rules and its sandbox paths
+// resolve against the home directory. dir says whether it is a directory,
+// whose whole subtree is denied, or a single file.
+type credentialPath struct {
+	path string
+	dir  bool
+}
+
+// credentialPaths are the credential stores a reviewer has no reason to read
+// (forgectl#715 item 2). The sandbox lets a command read anything the operator
+// can, and whatever it reads goes to the model provider as tool output, so a
+// prompt-injected review could otherwise lift a key. It is a list of the
+// common stores, not a proof that nothing else on the host is secret.
+//
+// gh's own config dir is not here: a PR review's gh reads authenticate from
+// its hosts.yml, and a Read deny rule is also applied to the sandbox's reads
+// (measured on Claude Code 2.1.296: `Read(~/.config/gh/**)` alone made a
+// sandboxed `gh config get` fall back to its defaults). ghConfigPath adds it
+// for a local review, which runs no gh at all.
+var credentialPaths = []credentialPath{
+	{"~/.ssh", true},
+	{"~/.gnupg", true},
+	{"~/.aws", true},
+	{"~/.azure", true},
+	{"~/.config/gcloud", true},
+	{"~/.kube", true},
+	{"~/.docker", true},
+	{"~/.config/sops", true},
+	{"~/.netrc", false},
+	{"~/.git-credentials", false},
+	{"~/.config/git/credentials", false},
+	{"~/.npmrc", false},
+	{"~/.pypirc", false},
+}
+
+// ghConfigPath is gh's config dir, holding its stored tokens. Only a local
+// review denies it; see credentialPaths.
+var ghConfigPath = credentialPath{"~/.config/gh", true}
+
+// reviewCredentialPaths are the credential paths a review denies reads of:
+// credentialPaths, plus gh's config dir for a local review (ghHost "").
+func reviewCredentialPaths(ghHost string) []credentialPath {
+	paths := append([]credentialPath{}, credentialPaths...)
+	if ghHost == "" {
+		paths = append(paths, ghConfigPath)
+	}
+	return paths
+}
+
+// credentialReadDeny renders paths as Read deny rules. Claude Code applies a
+// Read rule to the Read, Grep and Glob tools and to the paths an allowed Bash
+// reader such as `cat` or `ls` names; measured on 2.1.296, `cat` and `ls` of a
+// denied path were refused. The sandbox's denyRead (reviewSandbox) is the
+// OS-enforced half, for a read no command text shows.
+func credentialReadDeny(paths []credentialPath) []string {
+	rules := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p.dir {
+			rules = append(rules, "Read("+p.path+"/**)")
+		} else {
+			rules = append(rules, "Read("+p.path+")")
+		}
+	}
+	return rules
 }
 
 // remoteProfile builds the deny-by-default permission set for a PR review:
@@ -195,7 +261,7 @@ func remoteProfile(host string, ref Ref) (permissions, error) {
 	return permissions{
 		DefaultMode: "plan",
 		Allow:       append(append([]string{}, allowReadOnly...), ghReads...),
-		Deny:        denyPosting,
+		Deny:        append(append([]string{}, denyPosting...), credentialReadDeny(reviewCredentialPaths(host))...),
 	}, nil
 }
 
@@ -215,10 +281,12 @@ var localAllowReadOnly = append([]string{}, baseReadOnly...)
 // network CLI" requirement for an offline review, applied as defense-in-depth
 // on top of DefaultMode "plan" already blocking anything unlisted.
 //
-// Deliberately no bare "Write" here: Deny takes precedence over Allow, so a
-// blanket Write deny would clobber the scoped Write(findingsDir/**) grant
-// localProfile adds to Allow. Write is handled entirely by scoping to the
-// findings dir, not by omission-then-deny.
+// Deliberately no bare "Write" here: Claude Code checks a Write against Edit
+// path rules, and a blanket deny would risk clobbering the scoped
+// Edit(findingsDir/**) grant localProfile adds to Allow. Writes are handled
+// entirely by scoping to the findings dir. The bare "Edit" deny stays: it
+// refuses the Edit tool itself, and measured on Claude Code 2.1.296 it does
+// not stop the Write tool from creating a file the scoped grant covers.
 var localDenyNetwork = []string{
 	"Bash(gh:*)",
 	"Bash(git push:*)",
@@ -234,20 +302,33 @@ var localDenyNetwork = []string{
 	"Bash(scp:*)",
 	"Bash(nc:*)",
 	"Edit",
-	"MultiEdit",
 	"NotebookEdit",
 	"WebFetch",
 }
 
 // localProfile builds the deny-by-default permission set for a local review
-// session: baseReadOnly (no rg, no gh), plus exactly one scoped Write grant
+// session: baseReadOnly (no rg, no gh), plus exactly one scoped write grant
 // to findingsDir — the sole path outside the reviewed worktree the agent may
 // write to.
+//
+// The grant is an Edit rule, because Claude Code matches file writes only
+// against Edit(path) rules; a Write(path) rule is accepted and never matched
+// (forgectl#715 item 4). And the path takes the `//` prefix, because a
+// permission path with one leading `/` is relative to the settings file, not
+// the filesystem root. Measured on Claude Code 2.1.296: Edit(//dir/**) let
+// the Write tool create a file in dir, and both Write(//dir/**) and
+// Edit(/dir/**) left it needing a grant.
 func localProfile(findingsDir string) permissions {
-	allow := append(append([]string{}, localAllowReadOnly...), fmt.Sprintf("Write(%s/**)", findingsDir))
+	allow := append(append([]string{}, localAllowReadOnly...), findingsEditRule(findingsDir))
 	return permissions{
 		DefaultMode: "plan",
 		Allow:       allow,
-		Deny:        localDenyNetwork,
+		Deny:        append(append([]string{}, localDenyNetwork...), credentialReadDeny(reviewCredentialPaths(""))...),
 	}
+}
+
+// findingsEditRule is the scoped write grant for findingsDir, an absolute
+// path, in the `//`-rooted spelling a permission rule needs for one.
+func findingsEditRule(findingsDir string) string {
+	return fmt.Sprintf("Edit(/%s/**)", findingsDir)
 }

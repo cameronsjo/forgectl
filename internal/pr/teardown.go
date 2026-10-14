@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
-	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -24,7 +23,10 @@ import (
 // force it, since sandbox.Teardown's failures come from the filesystem rather
 // than from a Runner call. Tests must restore it and must not run in parallel
 // while overriding it. Mirrors the classifier seams in workspace_state.go.
-var sandboxTeardown = sandbox.Teardown
+//
+// Production also removes the review's private temp dir once the workspace is
+// gone (teardownWorkspace, forgectl#907).
+var sandboxTeardown = teardownWorkspace
 
 // staleMemberIsRegular is the mode-check seam. Production is exactly
 // FileInfo.Mode().IsRegular; the test override forces only that verdict after

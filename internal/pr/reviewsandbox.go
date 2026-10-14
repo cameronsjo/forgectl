@@ -46,9 +46,11 @@ const reviewSettingSources = ""
 // deny rule matches command text and cannot close that; the sandbox is
 // enforced by the OS on the running process. What it enforces is exactly
 // this block and no more — write denies on the workspace and a linked
-// worktree's shared git dir, and egress limited to the PR's gh hosts. It
-// does NOT narrow reads: a sandboxed command can read anything the operator
-// can, and what it reads reaches the model provider as tool output.
+// worktree's shared git dir, read denies on the operator's credential stores
+// (credentialPaths), and egress limited to the PR's gh hosts. Past those
+// read denies it does not narrow reads: a sandboxed command can read anything
+// else the operator can, and what it reads reaches the model provider as tool
+// output.
 //
 // Every field is emitted explicitly, false included: the posture must not
 // depend on a default Claude Code may change.
@@ -84,17 +86,26 @@ type sandboxSettings struct {
 }
 
 // sandboxFilesystem narrows the sandbox's default write set, which is the
-// working directory (the workspace), the per-user temp directory, and every
-// --add-dir root. DenyWrite takes the workspace back out.
+// working directory (the workspace), Claude Code's temp directory, and every
+// --add-dir root. DenyWrite takes the workspace back out. The temp directory
+// is the review's own private one (createReviewTmpDir, forgectl#907), not
+// the claude-<uid> dir every session of the operator's shares.
+//
+// DenyRead takes the credential stores out of the default read set, which is
+// the whole host. Paths are `~/`-rooted, which the sandbox resolves against
+// the home directory (measured on Claude Code 2.1.296 on Linux: `~/x`, `/x`
+// and `//x` spellings of the same directory each made a sandboxed read of a
+// file in it fail). A listed path that does not exist is accepted.
 //
 // Claude Code's built-in protected paths already refuse `.git/config` and
 // `.git/hooks`, but not the rest of the git directory, and git follows
 // pointers in it (`commondir`, for one) to configuration elsewhere. Writes
 // to the whole workspace are denied instead: a reviewer has nothing to
 // write there. What stays writable is the findings dir that `pr local` adds
-// with --add-dir, outside the workspace, and the per-user temp directory.
+// with --add-dir, outside the workspace, and the review's private temp dir.
 type sandboxFilesystem struct {
 	DenyWrite []string `json:"denyWrite"`
+	DenyRead  []string `json:"denyRead"`
 }
 
 // sandboxNetwork is the reviewer's egress. AllowedDomains names the hosts the
@@ -138,9 +149,19 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 		FailIfUnavailable:        true,
 		AllowUnsandboxedCommands: false,
 		AutoAllowBashIfSandboxed: false,
-		Filesystem:               sandboxFilesystem{DenyWrite: denyWrite},
+		Filesystem:               sandboxFilesystem{DenyWrite: denyWrite, DenyRead: credentialDenyRead(reviewCredentialPaths(ghHost))},
 		Network:                  sandboxNetwork{AllowedDomains: domains, StrictAllowlist: true},
 	}, nil
+}
+
+// credentialDenyRead renders paths as the sandbox's denyRead entries. A
+// directory entry covers its subtree.
+func credentialDenyRead(paths []credentialPath) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, p.path)
+	}
+	return out
 }
 
 // reviewSettingsJSON renders the reviewer's whole configuration — perms, the
