@@ -450,3 +450,65 @@ func TestOpenDeskDirFor_UnskipDoesNotReraiseWhenHerdrSignalIsOff(t *testing.T) {
 		t.Errorf("Unskip raised %d herdr calls with notify_herdr = false", n)
 	}
 }
+
+// TestDeskAdd_HerdrFailureNamesHerdrsReason: the warning carries herdr's own
+// stderr, not "run herdr by hand" (forgectl#1181), and a notification herdr
+// declined is a failed signal, except a rate-limited one.
+func TestDeskAdd_HerdrFailureNamesHerdrsReason(t *testing.T) {
+	notifyReply := func(reply string) func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return func(c exec.SensitiveCommand) (exec.SensitiveResult, error) {
+			if c.Kind != exec.KindHerdrNotify {
+				return exec.SensitiveResult{}, nil
+			}
+			return exec.SensitiveResult{Stdout: exec.BoundedOutputForTest([]byte(reply), exec.OutputComplete)}, nil
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(exec.SensitiveCommand) (exec.SensitiveResult, error)
+		want string // "" wants no warning
+	}{
+		{
+			name: "usage error",
+			run: func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+				return exec.SensitiveResult{ExitCode: 2, Stderr: exec.BoundedOutputForTest([]byte("unknown option: x\n"), exec.OutputComplete)},
+					exec.SensitiveErrorForTest(exec.KindHerdrNotify, exec.OutcomeExit)
+			},
+			want: "herdr said: unknown option: x",
+		},
+		{
+			name: "not shown",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":false,"reason":"no_foreground_client"}}`),
+			want: "herdr did not show the notification: no_foreground_client",
+		},
+		{
+			name: "rate limited",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":false,"reason":"rate_limited"}}`),
+		},
+		{
+			name: "shown",
+			run:  notifyReply(`{"result":{"type":"notification_show","shown":true,"reason":"shown"}}`),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newDeskDir(t)
+			inHerdr(t, "w1:p9")
+			rig := newSignalRig(t, config.DeskConfig{})
+			rig.herdr.RunFunc = tc.run
+			errOut, err := addItem(t, rig, "merge")
+			wantExit(t, err, 0)
+			if tc.want == "" {
+				if strings.Contains(errOut, "operator signal failed") {
+					t.Errorf("stderr = %q, want no failed signal", errOut)
+				}
+				return
+			}
+			if !strings.Contains(errOut, tc.want) {
+				t.Errorf("stderr = %q, want %q", errOut, tc.want)
+			}
+			if strings.Contains(errOut, "run herdr by hand") {
+				t.Errorf("stderr = %q still sends the operator to run herdr by hand", errOut)
+			}
+		})
+	}
+}

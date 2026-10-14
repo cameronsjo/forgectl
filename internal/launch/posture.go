@@ -2,6 +2,7 @@ package launch
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -214,4 +215,54 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		return Profile{}, nil, nil, fmt.Errorf("worker profile: %w", err)
 	}
 	return p, values, notes, nil
+}
+
+// WorkerPosture is the posture a worker launched in a directory gets, for
+// display by `forgectl launch which` (forgectl#1125).
+type WorkerPosture struct {
+	// Harness is the worker's harness: the launch profile's, as no --harness
+	// override is known here.
+	Harness string
+	// Values names each posture field the harness takes, with its source. A pi
+	// worker has none.
+	Values []PostureValue
+	// Notes are the [launch.defaults] values that no longer bind a worker.
+	Notes []string
+	// Refused is the worker floor's (or the worker profile's) refusal, or ""
+	// when a worker may start with this posture.
+	Refused string
+}
+
+// ResolveWorkerPosture resolves the worker posture for cwd through the same
+// path a worker launch takes: the matched profile, then applyWorkerProfile,
+// then applyWorkerFloor. A posture the floor refuses is reported in Refused,
+// not as an error, so a display surface can still show it; the error is only
+// a profile that cannot resolve at all (ErrHomeUnresolved).
+func ResolveWorkerPosture(lc config.LaunchConfig, cwd string) (WorkerPosture, error) {
+	p, proj, err := resolveMatched(lc, cwd, os.UserHomeDir)
+	if err != nil {
+		return WorkerPosture{}, err
+	}
+	return workerPosture(p, lc, proj), nil
+}
+
+// DefaultWorkerPosture is the worker posture with no project block matched,
+// for `forgectl config`, which shows no directory's profile. Home is not
+// needed: no posture field is a path.
+func DefaultWorkerPosture(lc config.LaunchConfig) WorkerPosture {
+	return workerPosture(defaultsProfile(lc.Defaults, ""), lc, nil)
+}
+
+func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) WorkerPosture {
+	w := WorkerPosture{Harness: p.Harness}
+	p, values, notes, err := applyWorkerProfile(p, lc, proj)
+	if err != nil {
+		w.Refused = err.Error()
+		return w
+	}
+	w.Values, w.Notes = values, notes
+	if _, err := applyWorkerFloor(p); err != nil {
+		w.Refused = err.Error()
+	}
+	return w
 }

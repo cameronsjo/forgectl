@@ -5,7 +5,6 @@ package desk
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -243,7 +242,6 @@ use after=token -- env | grep "^OUT_"; echo "again $OUT_token_tok"; printf "s3cr
 
 // A timeout signals the step's whole process group: the shell and the
 // background sleep it started both die.
-// In a container it needs a zombie reaper (docker run --init).
 func TestBatchTimeoutKillsTheStepsWholeGroup(t *testing.T) {
 	t.Parallel()
 	o := runBatch(t, "t timeout=1 -- echo $$ > \"$RUN_BATCH_DIR/t.pid\"; sleep 30 & wait\n", BatchOptions{}, nil)
@@ -254,13 +252,33 @@ func TestBatchTimeoutKillsTheStepsWholeGroup(t *testing.T) {
 		t.Errorf("no timeout STEP-END: %q", o.events)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(o.file(t, "t.pid")))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || pid <= 0 {
+		t.Fatalf("t.pid: %d, %v", pid, err)
 	}
-	if err := unix.Kill(-pid, 0); !errors.Is(err, unix.ESRCH) {
+	if !groupGone(pid, groupGoneWithin) {
 		_ = unix.Kill(-pid, unix.SIGKILL)
-		t.Errorf("processes survived in group %d (kill -0: %v)", pid, err)
+		t.Errorf("processes survived in group %d", pid)
 	}
+}
+
+// groupGoneWithin bounds the wait for a killed group's members to exit. It
+// is far below the 30s sleep a survivor would be running, so a group the
+// runner failed to kill still fails the test.
+const groupGoneWithin = 10 * time.Second
+
+// groupGone polls until group pgid has no live member, up to limit. Exit and
+// reaping are asynchronous to the kill: on a loaded host, or in a container
+// whose pid 1 reaps orphans slowly, a single probe right after the kill can
+// still find the group (forgectl#1183).
+func groupGone(pgid int, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for groupHasLiveMember(pgid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return true
 }
 
 func TestBatchFailFastLaunchesNothingNew(t *testing.T) {
@@ -303,8 +321,13 @@ func TestBatchInterruptCancelsEverything(t *testing.T) {
 		}
 	}
 	for _, f := range []string{"a.pid", "b.pid"} {
-		pid, _ := strconv.Atoi(strings.TrimSpace(o.file(t, f)))
-		if err := unix.Kill(-pid, 0); !errors.Is(err, unix.ESRCH) {
+		pid, err := strconv.Atoi(strings.TrimSpace(o.file(t, f)))
+		if err != nil || pid <= 0 {
+			// Never probe or kill group 0: that is this test's own group.
+			t.Errorf("%s = %q: no step pid", f, o.file(t, f))
+			continue
+		}
+		if !groupGone(pid, groupGoneWithin) {
 			_ = unix.Kill(-pid, unix.SIGKILL)
 			t.Errorf("step group %d survived", pid)
 		}
