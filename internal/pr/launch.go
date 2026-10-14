@@ -645,8 +645,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 			return Dispatch{}, err
 		}
 	}
-	// The reviewer's whole configuration travels on the command line, and it
-	// loads no settings file at all (--setting-sources ""): the workspace is
+	// The reviewer's whole configuration is this one document, and it loads
+	// no settings source besides it (--setting-sources ""): the workspace is
 	// the PR head, so any settings file in it is PR-authored, and Claude Code
 	// merges settings arrays and runs hooks from every source it loads. See
 	// reviewSettingSources.
@@ -678,7 +678,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// shared with every other session the operator runs, and its sandbox
 	// leaves it writable, so a hostile review could plant files there for
 	// another session to read, among them the copy of an inline --settings
-	// document Claude Code keeps under a content hash. Pointed here, the
+	// document Claude Code keeps under a content hash (the reviewer's own
+	// document is a file, so it gets no such copy; see below). Pointed here, the
 	// shared dir becomes read-only to the reviewer's Bash (measured on Claude
 	// Code 2.1.296). The dir outlives this call with the review and goes with
 	// the workspace (teardownWorkspace); a refusal before the window opens
@@ -701,12 +702,29 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// an allowed `cat /proc/self/environ` cannot print the window's
 	// credentials into the transcript (reviewEnvScrub).
 	windowEnv = pinReviewClaudeEnv(windowEnv, tmpDir)
-	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
+	// Pin every credential-store variable the denies followed, so the window
+	// cannot inherit a different store from the tmux server
+	// (reviewRelocationEnv). The unset ones are unset for real, below.
+	relocSet, relocUnset := reviewRelocationEnv()
+	windowEnv = pinEnv(windowEnv, relocSet, relocUnset)
+	// The document goes to claude as a file forgectl writes 0400 in the
+	// private temp dir, beside claude-<uid> rather than in it. Passed inline,
+	// Claude Code keeps a copy at claude-<uid>/claude-settings-<hash>.json,
+	// inside the one dir the reviewer's Bash may write. That copy was
+	// mounted read-only to it (measured on 2.1.296), but a file outside every
+	// writable root leaves no copy to ask about: with it, no settings copy
+	// appeared, and the reviewer's writes, replace and unlink of the file
+	// all failed.
+	settingsPath, err := writeReviewSettings(tmpDir, settingsJSON)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsPath, windowEnv); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{
 		"--setting-sources", reviewSettingSources,
-		"--settings", settingsJSON,
+		"--settings", settingsPath,
 		"-p", prompt,
 	})
 
@@ -723,7 +741,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	}
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
-	command := append([]string{claudePath}, claudeArgs...)
+	command, err := unsetEnvCommand(relocUnset, append([]string{claudePath}, claudeArgs...))
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
 	// From here a window may exist even when the call below fails, and its
 	// claude would be using tmpDir, so it stays for teardown to remove.
 	windowOpening = true

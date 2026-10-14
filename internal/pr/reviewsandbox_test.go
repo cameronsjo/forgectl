@@ -255,7 +255,24 @@ func settingsFlagFrom(t *testing.T, args []string) (reviewSettings, map[string]a
 	if i < 0 || i+1 >= len(args) {
 		t.Fatalf("claude argv carries no --settings: %v", args)
 	}
-	return decodeSettings(t, args[i+1])
+	// The document is a 0400 file in the review's private temp dir, outside
+	// claude-<uid>, so Claude Code keeps no writable-dir copy of it.
+	path := args[i+1]
+	if filepath.Base(path) != reviewSettingsFile || !strings.HasPrefix(filepath.Base(filepath.Dir(path)), reviewTmpPrefix) {
+		t.Fatalf("--settings %q is not the settings file in the review's private temp dir", path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("the settings file is gone: %v", err)
+	}
+	if perm := info.Mode().Perm(); !info.Mode().IsRegular() || perm != 0o400 {
+		t.Errorf("settings file mode = %v, want a 0400 regular file", info.Mode())
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the path the test's own Launch wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decodeSettings(t, string(data))
 }
 
 // assertNoWorkspaceClaudeDir: the reviewer's configuration must never be
@@ -264,7 +281,7 @@ func settingsFlagFrom(t *testing.T, args []string) (reviewSettings, map[string]a
 func assertNoWorkspaceClaudeDir(t *testing.T, ws string) {
 	t.Helper()
 	if _, err := os.Lstat(filepath.Join(ws, ".claude")); err == nil {
-		t.Errorf("forgectl wrote %s/.claude; the reviewer's settings belong on its command line only", ws)
+		t.Errorf("forgectl wrote %s/.claude; the reviewer's settings belong outside the workspace", ws)
 	}
 }
 

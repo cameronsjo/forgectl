@@ -122,7 +122,7 @@ func probeEnv(base, windowEnv []string, tmpDir string) []string {
 //     keys it does not know, which no validation reports.
 //   - `claude --setting-sources "" --settings <doc> doctor` lists nothing under
 //     "Invalid settings". This validates the exact document, in the exact
-//     argv form, the reviewer is given. It runs in an empty scratch directory
+//     form (the same settings file), the reviewer is given. It runs in an empty scratch directory
 //     so no workspace file is read, and a known-bad document must be flagged
 //     first, or the check could not see a rejection at all.
 //

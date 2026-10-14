@@ -200,3 +200,73 @@ func pinReviewClaudeEnv(env []string, dir string) []string {
 	}
 	return append(out, reviewEnvScrub)
 }
+
+// reviewSettingsFile is the name of the reviewer's settings document in its
+// private temp dir.
+const reviewSettingsFile = "review-settings.json"
+
+// writeReviewSettings writes doc to tmpDir as the reviewer's settings file,
+// owner-read-only, and returns its path. It refuses a file already there.
+func writeReviewSettings(tmpDir, doc string) (string, error) {
+	path := filepath.Join(tmpDir, reviewSettingsFile)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400) //nolint:gosec // G304: path is the private temp dir forgectl just made, plus a constant name
+	if err != nil {
+		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+	}
+	if _, err := f.WriteString(doc); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("write the reviewer's settings file: %w", err)
+	}
+	return path, nil
+}
+
+// pinEnv returns env with set applied and every unset variable removed: any
+// entry env carries for a variable in either list is dropped first. A tmux
+// window cannot unset a variable, so the removal itself is unsetEnvCommand's.
+func pinEnv(env, set, unset []string) []string {
+	drop := make(map[string]bool, len(set)+len(unset))
+	for _, e := range set {
+		key, _, _ := strings.Cut(e, "=")
+		drop[key] = true
+	}
+	for _, k := range unset {
+		drop[k] = true
+	}
+	out := make([]string, 0, len(env)+len(set))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if !drop[key] {
+			out = append(out, e)
+		}
+	}
+	return append(out, set...)
+}
+
+// envBinary is the env(1) that unsetEnvCommand runs the reviewer under. A
+// seam for tests.
+var envBinary = "/usr/bin/env"
+
+// unsetEnvCommand wraps command so it runs with every variable in unset
+// removed from its environment, inherited from the tmux server or not:
+// `env -u NAME ... -- command`. tmux new-window can set a variable but not
+// unset one, and an empty value is not the same thing to every consumer (an
+// empty CLAUDE_CONFIG_DIR makes Claude Code use the working directory). env
+// execs command, so the pane still runs claude itself.
+func unsetEnvCommand(unset, command []string) ([]string, error) {
+	if len(unset) == 0 {
+		return command, nil
+	}
+	if _, err := os.Stat(envBinary); err != nil {
+		return nil, fmt.Errorf("the review window needs %s to unset credential-store variables: %w", envBinary, err)
+	}
+	out := make([]string, 0, 2+2*len(unset)+len(command))
+	out = append(out, envBinary)
+	for _, k := range unset {
+		out = append(out, "-u", k)
+	}
+	out = append(out, "--")
+	return append(out, command...), nil
+}

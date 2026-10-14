@@ -346,3 +346,98 @@ func TestLaunchInline_FailedNewWindowLeavesTheTmpDirForTeardown(t *testing.T) {
 		t.Errorf("teardown left the private dir behind (%v)", err)
 	}
 }
+
+// stubCredentialEnv makes credentialEnv answer from env alone.
+func stubCredentialEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	orig := credentialEnv
+	credentialEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	t.Cleanup(func() { credentialEnv = orig })
+}
+
+func TestReviewRelocationEnv_SetsUsableValuesAndUnsetsTheRest(t *testing.T) {
+	stubCredentialEnv(t, map[string]string{
+		"CODEX_HOME":        "/data/codex",
+		"KUBECONFIG":        "/k/a" + string(os.PathListSeparator) + "/k/b",
+		"CLAUDE_CONFIG_DIR": "relative",
+		"GNUPGHOME":         "",
+	})
+	set, unset := reviewRelocationEnv()
+	for _, want := range []string{"CODEX_HOME=/data/codex", "KUBECONFIG=/k/a" + string(os.PathListSeparator) + "/k/b"} {
+		if !slices.Contains(set, want) {
+			t.Errorf("set %v missing %q", set, want)
+		}
+	}
+	for _, want := range []string{"CLAUDE_CONFIG_DIR", "GNUPGHOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "SOPS_AGE_KEY_FILE"} {
+		if !slices.Contains(unset, want) {
+			t.Errorf("unset %v missing %q", unset, want)
+		}
+	}
+	seen := map[string]bool{}
+	for _, e := range set {
+		k, _, _ := strings.Cut(e, "=")
+		seen[k] = true
+	}
+	for _, k := range unset {
+		if seen[k] {
+			t.Errorf("%s is both set and unset", k)
+		}
+		seen[k] = true
+	}
+	for _, r := range relocations {
+		if !seen[r.variable] {
+			t.Errorf("%s is followed by the denies but neither set nor unset in the window", r.variable)
+		}
+	}
+}
+
+func TestUnsetEnvCommand(t *testing.T) {
+	got, err := unsetEnvCommand([]string{"A", "B"}, []string{"/bin/claude", "-p", "x"})
+	if err != nil {
+		t.Skipf("no %s here: %v", envBinary, err)
+	}
+	want := []string{envBinary, "-u", "A", "-u", "B", "--", "/bin/claude", "-p", "x"}
+	if !slices.Equal(got, want) {
+		t.Errorf("unsetEnvCommand = %v, want %v", got, want)
+	}
+	if got, _ := unsetEnvCommand(nil, []string{"/bin/claude"}); !slices.Equal(got, []string{"/bin/claude"}) {
+		t.Errorf("with nothing to unset = %v, want the command alone", got)
+	}
+}
+
+// TestLaunchInline_PinsTheRelocationsTheDeniesFollowed is forgectl#715's
+// window/deny agreement: a tmux server holding CODEX_HOME=/data/codex must not
+// reach a reviewer whose denies were built with CODEX_HOME unset, and a value
+// forgectl does hold reaches both.
+func TestLaunchInline_PinsTheRelocationsTheDeniesFollowed(t *testing.T) {
+	if _, err := os.Stat(envBinary); err != nil {
+		t.Skipf("no %s here", envBinary)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", fakeHarnessBin(t, "claude"))
+	stubCredentialEnv(t, map[string]string{"AWS_CONFIG_FILE": "/data/aws/config"})
+	fake := successfulLaunchRunner()
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	if !argPair(args, "-e", "AWS_CONFIG_FILE=/data/aws/config") {
+		t.Errorf("the followed AWS_CONFIG_FILE is not pinned into the window: %v", args)
+	}
+	term := slices.Index(args, "--")
+	if term < 0 || term+1 >= len(args) || args[term+1] != envBinary {
+		t.Fatalf("the window command does not start with %s: %v", envBinary, args)
+	}
+	cmd := args[term+1:]
+	if !argPair(cmd, "-u", "CODEX_HOME") || !argPair(cmd, "-u", "CLAUDE_CONFIG_DIR") {
+		t.Errorf("the window command does not unset the relocations forgectl lacks: %v", cmd)
+	}
+	if argPair(cmd, "-u", "AWS_CONFIG_FILE") {
+		t.Errorf("the window command unsets a relocation it also pins: %v", cmd)
+	}
+	s, _ := settingsFlagFrom(t, args)
+	if !slices.Contains(s.Permissions.Deny, "Read(//data/aws/config)") || !slices.Contains(s.Sandbox.Filesystem.DenyRead, "/data/aws/config") {
+		t.Errorf("the pinned AWS_CONFIG_FILE is not denied: %v / %v", s.Permissions.Deny, s.Sandbox.Filesystem.DenyRead)
+	}
+}

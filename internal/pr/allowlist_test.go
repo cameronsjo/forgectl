@@ -9,6 +9,7 @@ package pr
 //   [x] Never grants gh pr review/comment/merge under allow
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -405,5 +406,40 @@ func TestReviewCredentialPaths_FollowRelocations(t *testing.T) {
 	}
 	if !slices.Contains(sb.Filesystem.DenyRead, "/srv/gh") || !slices.Contains(sb.Filesystem.DenyRead, "/srv/aws/credentials") {
 		t.Errorf("sandbox denyRead misses the relocated stores: %v", sb.Filesystem.DenyRead)
+	}
+}
+
+func TestReviewCredentialPaths_FollowTheWiderRelocations(t *testing.T) {
+	orig := credentialEnv
+	t.Cleanup(func() { credentialEnv = orig })
+	sep := string(filepath.ListSeparator)
+	env := map[string]string{ //nolint:gosec // G101: credential-path variable names and fake paths, no secret
+		"KUBECONFIG":            "/k/one" + sep + "/k/two",
+		"AWS_CONFIG_FILE":       "/a/config",
+		"GNUPGHOME":             "/g",
+		"DOCKER_CONFIG":         "/d",
+		"AZURE_CONFIG_DIR":      "/az",
+		"PASSWORD_STORE_DIR":    "/ps",
+		"PGPASSFILE":            "/pg/pass",
+		"NPM_CONFIG_USERCONFIG": "/n/npmrc",
+		"CARGO_HOME":            "/c",
+		"TF_CLI_CONFIG_FILE":    "/tf/rc",
+		"SOPS_AGE_KEY_FILE":     "/s/keys.txt",
+		"XDG_DATA_HOME":         "/xd",
+	}
+	credentialEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	remote, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Read(//k/one)", "Read(//k/two)", "Read(//a/config)", "Read(//g/**)", "Read(//d/**)", "Read(//az/**)",
+		"Read(//ps/**)", "Read(//pg/pass)", "Read(//n/npmrc)", "Read(//c/credentials)", "Read(//c/credentials.toml)",
+		"Read(//tf/rc)", "Read(//s/keys.txt)", "Read(//xd/keyrings/**)",
+		"Read(~/Library/Application Support/sops/age/keys.txt)",
+	} {
+		if !contains(remote.Deny, want) {
+			t.Errorf("deny list missing %q", want)
+		}
 	}
 }

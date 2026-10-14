@@ -155,8 +155,8 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 }
 
 // reviewSettingsJSON renders the reviewer's whole configuration — perms, the
-// sandbox block, and disableAllHooks — as the inline JSON `claude --settings`
-// takes. It is passed with --setting-sources reviewSettingSources, so nothing
+// sandbox block, and disableAllHooks — as the JSON document `claude
+// --settings` takes. launchInline writes it to a file (writeReviewSettings). It is passed with --setting-sources reviewSettingSources, so nothing
 // else is merged into it but managed settings; see reviewSettingSources.
 //
 // A value of the wrong type anywhere in it voids the whole document (see

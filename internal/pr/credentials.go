@@ -60,25 +60,57 @@ var credentialPaths = []credentialPath{
 	{"~/.gem/credentials", false},
 	{"~/.claude/.credentials.json", false},
 	{"~/.codex/auth.json", false},
+	{"~/Library/Application Support/sops/age/keys.txt", false},
 }
 
 // ghConfigPath is gh's config dir, holding its stored tokens. Only a local
 // review denies it; see credentialPaths.
 var ghConfigPath = credentialPath{"~/.config/gh", true}
 
-// xdgConfigCredentials are the credentialPaths entries under ~/.config, as
-// paths relative to it, so a relocated XDG_CONFIG_HOME is followed.
-var xdgConfigCredentials = []credentialPath{
-	{"gcloud", true},
-	{"sops", true},
-	{"hub", true},
-	{"rclone", true},
-	{"op", true},
-	{"git/credentials", false},
+// relocation is one environment variable that moves a credential store, and
+// the paths under its value a review denies: suffix "" is the value itself.
+// list marks a PATH-style list (KUBECONFIG), each element of which is
+// denied. localOnly marks gh's config, which only a local review denies (see
+// credentialPaths).
+type relocation struct {
+	variable  string
+	targets   []credentialPath
+	list      bool
+	localOnly bool
+}
+
+// relocations are the variables reviewCredentialPaths follows. Every one of
+// them is also pinned into the review window (reviewRelocationEnv), so the
+// value the denies were built from is the value the reviewer's process tree
+// sees.
+var relocations = []relocation{
+	{variable: "XDG_CONFIG_HOME", targets: []credentialPath{
+		{"gcloud", true}, {"sops", true}, {"hub", true}, {"rclone", true}, {"op", true}, {"git/credentials", false},
+	}},
+	{variable: "XDG_CONFIG_HOME", targets: []credentialPath{{"gh", true}}, localOnly: true},
+	{variable: "XDG_DATA_HOME", targets: []credentialPath{{"keyrings", true}}},
+	{variable: "GH_CONFIG_DIR", targets: []credentialPath{{"", true}}, localOnly: true},
+	{variable: "CLOUDSDK_CONFIG", targets: []credentialPath{{"", true}}},
+	{variable: "AWS_SHARED_CREDENTIALS_FILE", targets: []credentialPath{{"", false}}},
+	{variable: "AWS_CONFIG_FILE", targets: []credentialPath{{"", false}}},
+	{variable: "AZURE_CONFIG_DIR", targets: []credentialPath{{"", true}}},
+	{variable: "KUBECONFIG", targets: []credentialPath{{"", false}}, list: true},
+	{variable: "GNUPGHOME", targets: []credentialPath{{"", true}}},
+	{variable: "DOCKER_CONFIG", targets: []credentialPath{{"", true}}},
+	{variable: "PASSWORD_STORE_DIR", targets: []credentialPath{{"", true}}},
+	{variable: "PGPASSFILE", targets: []credentialPath{{"", false}}},
+	{variable: "NPM_CONFIG_USERCONFIG", targets: []credentialPath{{"", false}}},
+	{variable: "CARGO_HOME", targets: []credentialPath{{"credentials", false}, {"credentials.toml", false}}},
+	{variable: "TF_CLI_CONFIG_FILE", targets: []credentialPath{{"", false}}},
+	{variable: "SOPS_AGE_KEY_FILE", targets: []credentialPath{{"", false}}},
+	{variable: "CLAUDE_CONFIG_DIR", targets: []credentialPath{{".credentials.json", false}}},
+	{variable: "CODEX_HOME", targets: []credentialPath{{"auth.json", false}}},
 }
 
 // credentialEnv is how the relocation variables are read: forgectl's own
-// environment, which the review window's is resolved from. A seam for tests.
+// environment. reviewRelocationEnv pins the same values into the review
+// window, which would otherwise inherit the tmux server's, so the two cannot
+// disagree. A seam for tests.
 var credentialEnv = os.LookupEnv
 
 // permissionPathMeta are the characters a permission rule or sandbox path
@@ -86,6 +118,34 @@ var credentialEnv = os.LookupEnv
 // holding one is not denied as spelled, so it is left out rather than
 // written as a rule that means something else.
 const permissionPathMeta = "*?[]{}()!\\"
+
+// relocationValues are the usable values of variable in forgectl's
+// environment: one, or a list's elements, each absolute and free of
+// pattern characters. ok is false when the variable is unset or empty, or
+// when any value is unusable; the window then gets it unset (see
+// reviewRelocationEnv), so nothing reads a store the denies do not name.
+func relocationValues(r relocation) (values []string, ok bool) {
+	v, set := credentialEnv(r.variable)
+	if !set || v == "" {
+		return nil, false
+	}
+	parts := []string{v}
+	if r.list {
+		parts = filepath.SplitList(v)
+	}
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if !filepath.IsAbs(part) || strings.ContainsAny(part, permissionPathMeta) {
+			slog.Warn("Unsetting a credential-store variable in the review window: its path is not absolute or holds a pattern character, so it cannot be denied.",
+				"variable", r.variable)
+			return nil, false
+		}
+		values = append(values, filepath.Clean(part))
+	}
+	return values, len(values) > 0
+}
 
 // reviewCredentialPaths are the credential paths a review denies reads of:
 // credentialPaths, the same stores where an environment variable moved
@@ -96,34 +156,52 @@ func reviewCredentialPaths(ghHost string) []credentialPath {
 	if local {
 		paths = append(paths, ghConfigPath)
 	}
-	add := func(variable, suffix string, dir bool) {
-		v, ok := credentialEnv(variable)
-		if !ok || v == "" {
-			return
+	for _, r := range relocations {
+		if r.localOnly && !local {
+			continue
 		}
-		if !filepath.IsAbs(v) || strings.ContainsAny(v, permissionPathMeta) {
-			slog.Warn("Not denying the reviewer reads of a relocated credential store: the path is not absolute or holds a pattern character.",
-				"variable", variable)
-			return
+		values, ok := relocationValues(r)
+		if !ok {
+			continue
 		}
-		p := filepath.Clean(v)
-		if suffix != "" {
-			p = filepath.Join(p, suffix)
+		for _, v := range values {
+			for _, t := range r.targets {
+				p := v
+				if t.path != "" {
+					p = filepath.Join(v, t.path)
+				}
+				paths = append(paths, credentialPath{p, t.dir})
+			}
 		}
-		paths = append(paths, credentialPath{p, dir})
 	}
-	for _, c := range xdgConfigCredentials {
-		add("XDG_CONFIG_HOME", c.path, c.dir)
-	}
-	if local {
-		add("XDG_CONFIG_HOME", "gh", true)
-		add("GH_CONFIG_DIR", "", true)
-	}
-	add("CLOUDSDK_CONFIG", "", true)
-	add("AWS_SHARED_CREDENTIALS_FILE", "", false)
-	add("CLAUDE_CONFIG_DIR", ".credentials.json", false)
-	add("CODEX_HOME", "auth.json", false)
 	return paths
+}
+
+// reviewRelocationEnv is how the review window carries every relocation
+// variable: set holds `KEY=VALUE` for each one forgectl has a usable value
+// for, and unset names the rest. A tmux window otherwise inherits the tmux
+// server's environment, which can name a store forgectl never saw: with
+// CODEX_HOME=/data/codex in the server and unset in forgectl, only
+// ~/.codex/auth.json would be denied and /data/codex/auth.json read freely.
+//
+// unset is a real unset (launchInline runs claude under `env -u`), not an
+// empty value: an empty CLAUDE_CONFIG_DIR makes Claude Code use the working
+// directory, the PR head, as its config dir (measured on 2.1.296).
+func reviewRelocationEnv() (set, unset []string) {
+	seen := map[string]bool{}
+	for _, r := range relocations {
+		if seen[r.variable] {
+			continue
+		}
+		seen[r.variable] = true
+		v, isSet := credentialEnv(r.variable)
+		if _, ok := relocationValues(r); ok && isSet {
+			set = append(set, r.variable+"="+v)
+		} else {
+			unset = append(unset, r.variable)
+		}
+	}
+	return set, unset
 }
 
 // rulePath is p as a permission rule spells it: `~/` paths as given, and an
