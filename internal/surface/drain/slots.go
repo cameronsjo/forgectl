@@ -164,8 +164,8 @@ func SlotsStuck(h *SlotsHold, now time.Time) bool {
 // HeldFor renders how long a hold has lasted: whole minutes ("15m",
 // "1h5m", "2h"), or whole seconds under a minute.
 func HeldFor(d time.Duration) string {
-	if d < time.Minute {
-		return max(d, 0).Round(time.Second).String()
+	if d = max(d, 0).Round(time.Second); d < time.Minute {
+		return d.String()
 	}
 	s := strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
 	if strings.HasSuffix(s, "h0m") {

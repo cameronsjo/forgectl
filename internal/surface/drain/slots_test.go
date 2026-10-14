@@ -110,6 +110,7 @@ func TestHeldFor(t *testing.T) {
 	for d, want := range map[time.Duration]string{
 		0: "0s", 42 * time.Second: "42s", 15 * time.Minute: "15m", 15*time.Minute + 20*time.Second: "15m",
 		time.Hour + 5*time.Minute: "1h5m", 2 * time.Hour: "2h", -time.Second: "0s",
+		59*time.Second + 500*time.Millisecond: "1m",
 	} {
 		if got := HeldFor(d); got != want {
 			t.Errorf("HeldFor(%s) = %q, want %q", d, got, want)
