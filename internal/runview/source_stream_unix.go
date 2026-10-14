@@ -265,13 +265,13 @@ func (s *StreamSource) runOnce(ctx context.Context, command string, restart bool
 	g := &procGroup{pgid: cmd.Process.Pid}
 	waited := make(chan error, 1)
 	go func() {
-		err := cmd.Wait()
-		g.reaped()
-		waited <- err
+		waited <- cmd.Wait()
 	}()
+	// disarm runs last: once runOnce is done with the command, nothing
+	// signals its group again or closes pr behind it.
+	defer g.disarm()
 	stopKill := context.AfterFunc(ctx, func() { g.stop(pr) })
 	defer stopKill()
-	defer g.disarm()
 
 	wrote, readErr := s.pump(pr, restart)
 	err = <-waited
@@ -290,12 +290,16 @@ func (s *StreamSource) runOnce(ctx context.Context, command string, restart bool
 	return wrote, err
 }
 
-// procGroup signals a command's process group until the command is reaped:
-// after that its pid, and so the group id, may belong to another process.
+// procGroup signals a command's process group while runOnce still reads
+// it. The command runs in a session of its own, so the group id is the
+// shell's pid, and it is not reused while any member of the group is left,
+// even after the shell is reaped: a descendant that outlives the shell (a
+// command run with &) is still signalled, and an empty group only answers
+// ESRCH. Once runOnce is done (disarm), the group is never signalled again.
 type procGroup struct {
 	mu    sync.Mutex
 	pgid  int
-	done  bool        // Wait reaped the command: never signal the group again
+	done  bool        // runOnce is done with the command
 	timer *time.Timer // the SIGKILL that follows a SIGTERM
 }
 
@@ -307,28 +311,27 @@ func (g *procGroup) signal(sig unix.Signal) {
 	}
 }
 
-func (g *procGroup) reaped() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.done = true
-}
-
 // stop sends the group SIGTERM, and after streamStopGrace SIGKILL, then cuts
 // off the read of r, which a descendant out of reach may still hold open.
 func (g *procGroup) stop(r *os.File) {
 	g.signal(unix.SIGTERM)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.done {
+		return
+	}
 	g.timer = time.AfterFunc(streamStopGrace, func() {
 		g.signal(unix.SIGKILL)
 		_ = r.Close()
 	})
 }
 
-// disarm cancels a pending SIGKILL once runOnce is done with the command.
+// disarm ends the watch once runOnce is done with the command: a pending
+// SIGKILL is cancelled and no later stop arms another.
 func (g *procGroup) disarm() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.done = true
 	if g.timer != nil {
 		g.timer.Stop()
 	}

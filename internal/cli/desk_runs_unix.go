@@ -10,13 +10,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -378,13 +375,21 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 	if o.live && termIsDumb() {
 		return WithExitCode(tui.DumbTerminalError("desk show --live", "desk show without --live for one printed view"), deskExitUsage)
 	}
-	// A signal must stop a --follow-cmd command, not leave it running in
-	// its own session: the context ends, and the deferred close stops it.
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
+	// A signal must stop a stream's command, not leave it running in its
+	// own session: the context ends, the deferred close stops the command,
+	// then the signal is raised again and ends forgectl.
+	ctx, signalled := cmd.Context(), func() bool { return false }
+	if log.followCmd != "" || logOnStdin {
+		var stop func()
+		ctx, signalled, stop = deskInterruptible(ctx)
+		defer stop()
+	}
 	srcs, closeAll, failed := deskRunSources(ctx, cmd, deps, dirFlag, log, name == "", o.live)
 	defer closeAll()
 	if len(failed) > 0 {
+		if signalled() {
+			return nil // stop re-raises the signal
+		}
 		return errors.Join(failed...)
 	}
 	src := srcs[0]
@@ -419,6 +424,9 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 		})
 		if errors.Is(err, tui.ErrRunWatchNoRun) {
 			return WithExitCode(err, exitFailed)
+		}
+		if err != nil && signalled() {
+			return nil // the view was killed by the signal stop re-raises
 		}
 		return err
 	}

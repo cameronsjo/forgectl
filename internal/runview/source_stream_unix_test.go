@@ -6,6 +6,7 @@ package runview
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,5 +340,58 @@ func TestCommandName(t *testing.T) {
 		if got := commandName(cmd); got != want {
 			t.Errorf("commandName(%q) = %q, want %q", cmd, got, want)
 		}
+	}
+}
+
+// A descendant that outlives the shell is still stopped: the shell's group
+// is signalled while the source reads it, whether the shell already exited
+// or dies on the SIGTERM its child ignores.
+func TestCommandSourceStopsADescendantThatOutlivesTheShell(t *testing.T) {
+	old := streamStopGrace
+	streamStopGrace = 100 * time.Millisecond
+	t.Cleanup(func() { streamStopGrace = old })
+	for name, script := range map[string]string{
+		"the shell exits first":         `sleep 1000 & echo $! > PID`,
+		"the shell dies on SIGTERM":     `(trap '' TERM; sleep 1000) & echo $! > PID; wait`,
+		"the child ignores SIGTERM too": `trap '' TERM; (sleep 1000) & echo $! > PID; wait`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "pid")
+			s, err := NewCommandSource(t.Context(), strings.ReplaceAll(script, "PID", pidFile), true, nil, DefaultLogKeys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid := readPid(t, pidFile)
+			time.Sleep(50 * time.Millisecond) // let the first shell exit or settle into wait
+			closed := make(chan struct{})
+			go func() { s.Close(); close(closed) }()
+			select {
+			case <-closed:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Close hung")
+			}
+			if !gone(t, pid) {
+				t.Errorf("the descendant %s outlived Close", pid)
+			}
+		})
+	}
+}
+
+// After runOnce is done, a late stop arms no SIGKILL.
+func TestProcGroupDisarmedArmsNoKill(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()                //nolint:errcheck // test
+	g := &procGroup{pgid: 1 << 30} // a group that does not exist
+	g.disarm()
+	g.stop(r)
+	if g.timer != nil {
+		t.Error("a stop after disarm armed a SIGKILL")
+	}
+	time.Sleep(2 * streamStopGrace / 10)
+	if err := r.Close(); errors.Is(err, os.ErrClosed) {
+		t.Error("a stop after disarm closed the pipe")
 	}
 }
