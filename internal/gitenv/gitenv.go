@@ -293,6 +293,9 @@ func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args
 // RunBinRefusing is RunRefusing with the git executable named, as RunBin is
 // Run's: internal/projects pulls through the absolute path it resolved.
 func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse []string, args ...string) (string, error) {
+	if setsProtocolAllow(args) {
+		return "", errCallerProtocolAllow
+	}
 	overrides, unset := filter(p, os.Environ())
 	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
 		if overrides == nil {
@@ -305,6 +308,44 @@ func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse
 		pre = append(pre, "-c", "protocol."+name+".allow=never")
 	}
 	return r.RunWithEnvFiltered(ctx, overrides, unset, bin, append(pre, args...)...)
+}
+
+// errCallerProtocolAllow is RunBinRefusing's refusal of a call whose own
+// args set a protocol allow key (#1020).
+var errCallerProtocolAllow = errors.New("gitenv: refusing a git call whose own config sets a protocol allow key: it would override the refused transports")
+
+// setsProtocolAllow reports whether args set protocol.allow or any
+// protocol.<name>.allow through a config option: git's global -c and
+// --config-env, or clone's -c/--config, in the separate, attached and "="
+// spellings. git keeps the last value given for a key, and the refusing -c
+// options come first, so a caller's own `-c protocol.ext.allow=always`
+// would cancel the refusal (#1020). Any such key is refused, whichever
+// transport it names, so the check does not depend on refuse's contents.
+func setsProtocolAllow(args []string) bool {
+	for i, a := range args {
+		var kv string
+		switch {
+		case a == "-c" || a == "--config" || a == "--config-env":
+			if i+1 >= len(args) {
+				continue
+			}
+			kv = args[i+1]
+		case strings.HasPrefix(a, "--config="):
+			kv = strings.TrimPrefix(a, "--config=")
+		case strings.HasPrefix(a, "--config-env="):
+			kv = strings.TrimPrefix(a, "--config-env=")
+		case strings.HasPrefix(a, "-c") && len(a) > 2:
+			kv = a[2:]
+		default:
+			continue
+		}
+		key, _, _ := strings.Cut(kv, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "protocol.allow" || (strings.HasPrefix(key, "protocol.") && strings.HasSuffix(key, ".allow")) {
+			return true
+		}
+	}
+	return false
 }
 
 // allowProtocolVar is git's transport allowlist variable.
@@ -396,7 +437,16 @@ var repoDeadline = 30 * time.Second
 // signal, so forgectl stops as it did when git shared its group rather
 // than carrying on to the next repository.
 func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
-	dctx, cancel := context.WithTimeout(ctx, repoDeadline)
+	return BoundedFor(ctx, repoDeadline)
+}
+
+// BoundedFor is Bounded with the deadline named, for a caller that budgets
+// its own children: audit secrets' per-repo git status and gitleaks runs and
+// the gitleaks version probe (#1020). Each starts its child in a group of its
+// own, so without the relay a Ctrl-C ended forgectl and left the child
+// running. The caller defers cancel.
+func BoundedFor(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithTimeout(ctx, d)
 	ictx, stop := interruptible(dctx)
 	return fexec.WithProcessGroup(ictx), func() {
 		stop()

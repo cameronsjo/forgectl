@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/audit"
-	fexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
@@ -79,7 +78,8 @@ const RepoTimeout = DefaultTimeout
 // Func binds Status to a budget context and runner as an
 // audit.GitStatusFunc. ctx carries the whole scan's budget (its deadline);
 // each repo gets a slice of it, min(perRepo, what is left), in a process
-// group of its own, killed whole when the slice ends. Once the budget is
+// group of its own, killed whole when the slice ends or when a Ctrl-C
+// reaches forgectl (gitenv.BoundedFor, #1020). Once the budget is
 // spent, a repo is answered with audit.ErrBudgetExhausted and no git is
 // started; a call the budget's own deadline cut short is answered the same
 // way. A repo that only overran perRepo gets git's error.
@@ -91,7 +91,7 @@ func Func(ctx context.Context, r gitenv.Runner, perRepo time.Duration) audit.Git
 		if ctx.Err() != nil {
 			return nil, audit.ErrBudgetExhausted
 		}
-		rctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), perRepo)
+		rctx, cancel := gitenv.BoundedFor(ctx, perRepo)
 		defer cancel()
 		states, err := Status(rctx, r, repo, rels)
 		if err != nil && ctx.Err() != nil {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	fexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
 // RepoTimeout caps one repo's scan. The scan budget (Scan's ctx) bounds the
@@ -150,7 +150,9 @@ scan:
 			continue
 		}
 		removeReport(tmp)
-		rctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), perRepo)
+		// Its own process group, with a Ctrl-C passed on to it: the terminal
+		// sends one to forgectl's group only (#1020).
+		rctx, cancel := gitenv.BoundedFor(ctx, perRepo)
 		_, runErr := r.RunWithEnvFiltered(rctx, nil, UnsetEnv(), bin, Args(repo, tmp)...)
 		repoTimedOut := rctx.Err() != nil
 		cancel()
