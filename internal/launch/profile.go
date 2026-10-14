@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -155,13 +156,53 @@ func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string,
 		return Profile{}, nil, err
 	}
 	norm := normalizeCWD(cwd)
-	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
+	rl := withResolvedMatches(lc, home)
+	p := resolve(rl, norm, home)
+	i := matchProjectIndex(rl, norm, home)
+	if i < 0 {
+		return p, nil, nil
+	}
+	// The match was compared in its resolved form; report it as written.
+	p.Match = lc.Projects[i].Match
+	return p, &lc.Projects[i], nil
+}
+
+// withResolvedMatches returns lc with each project match tilde-expanded and
+// its symlinks resolved best effort, as normalizeCWD resolves the cwd. A match
+// written through a symlink otherwise never equals the resolved cwd, and the
+// launch silently falls back to [launch.defaults] (forgectl#1042). A match
+// that does not resolve (a directory not created yet) is left as written. The
+// projects slice is copied, so lc is not changed.
+func withResolvedMatches(lc config.LaunchConfig, home string) config.LaunchConfig {
+	if len(lc.Projects) == 0 {
+		return lc
+	}
+	projects := slices.Clone(lc.Projects)
+	for i := range projects {
+		if projects[i].Match == "" {
+			continue
+		}
+		m := filepath.Clean(expandTilde(projects[i].Match, home))
+		if r, err := filepath.EvalSymlinks(m); err == nil {
+			m = r
+		}
+		projects[i].Match = m
+	}
+	lc.Projects = projects
+	return lc
 }
 
 // matchProject is the longest project match for an already normalized cwd.
 func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
-	best := -1
-	var win *config.LaunchProject
+	if i := matchProjectIndex(lc, cwd, home); i >= 0 {
+		return &lc.Projects[i]
+	}
+	return nil
+}
+
+// matchProjectIndex is matchProject as an index into lc.Projects, or -1.
+func matchProjectIndex(lc config.LaunchConfig, cwd, home string) int {
+	best, win := -1, -1
 	for i := range lc.Projects {
 		if lc.Projects[i].Match == "" {
 			continue
@@ -170,7 +211,7 @@ func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProjec
 		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
 			if len(m) > best {
 				best = len(m)
-				win = &lc.Projects[i]
+				win = i
 			}
 		}
 	}

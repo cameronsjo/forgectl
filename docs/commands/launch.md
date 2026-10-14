@@ -50,7 +50,7 @@ env             = { OTEL_EXPORTER = "otlp" }
 add_dir         = ["~/Projects/minute/shared"]
 ```
 
-Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. Inspect the result with `forgectl launch which`.
+Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. A `match` written through a symlink is resolved the same way, so it matches its directory however the path is spelled. Inspect the result with `forgectl launch which`.
 
 **Effort is the exception to "scalars merge like the others."** It resolves *last*, against the **final** model:
 
@@ -276,6 +276,8 @@ permission_mode = "acceptEdits"   # claude workers; built-in value acceptEdits
 sandbox         = "workspace-write" # codex workers; built-in value workspace-write
 approval_policy = "on-request"    # codex workers; built-in value on-request
 ```
+
+`forgectl launch which` shows what a worker started in the current directory gets: a `worker` row names each field, its value and its source (`default`, `launch.worker`, or `repo-profile`), and says when the worker floor would refuse it. `--json` carries the same as `worker`. `forgectl config` shows the posture with no project block matched.
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 

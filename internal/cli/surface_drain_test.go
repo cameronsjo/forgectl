@@ -623,6 +623,7 @@ func TestClassifyLaunchError(t *testing.T) {
 		"surface launch error":       {&surface.LaunchError{}, drain.ErrOther},
 		"run directory":              {fmt.Errorf("launch: %w: base is not absolute", surface.ErrRunDir), drain.ErrLaunchConfig},
 		"socket path too long":       {fmt.Errorf("launch: %w: set TMPDIR shorter", surface.ErrSocketPathTooLong), drain.ErrLaunchConfig},
+		"untrusted folder":           {fmt.Errorf("%w: /repo", errUntrustedFolder), drain.ErrRowInvalid},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

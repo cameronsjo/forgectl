@@ -946,6 +946,10 @@ func classifyLaunchError(err error) drain.ErrClass {
 		// The branch is there before the launch made anything; a retry
 		// would find it again.
 		return drain.ErrRowInvalid
+	case errors.Is(err, errUntrustedFolder):
+		// Refused before anything was created, and a retry is refused the
+		// same way until the operator trusts the repository by hand.
+		return drain.ErrRowInvalid
 	case launchConfigFailure(err):
 		return drain.ErrLaunchConfig
 	case herdrUnavailable(err):

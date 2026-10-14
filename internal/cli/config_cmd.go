@@ -129,6 +129,10 @@ type launchResolvedView struct {
 	// defaults or project add_dir, or a project match) cannot be expanded
 	// because the home directory is unresolved.
 	HomeNote string `json:"home_note,omitempty"`
+	// Worker is the posture a worker gets with no project block matched: a
+	// worker reads [launch.worker], not [launch.defaults] (forgectl#1125).
+	// `forgectl launch which` shows it for a directory.
+	Worker *launchWhichWorkerJSON `json:"worker"`
 }
 
 // configReport is the --json document. It is the stable surface: the human
@@ -469,6 +473,7 @@ func resolveLaunchView(cfg config.Config) launchResolvedView {
 	if homeErr != nil {
 		view.HomeNote = homeErr.Error()
 	}
+	view.Worker = buildLaunchWhichWorkerJSON(launch.DefaultWorkerPosture(cfg.Launch))
 
 	var bin string
 	var err error
@@ -583,6 +588,12 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	// path, and a middle cut would drop the error's own words.
 	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeText(resolved.BinaryPath))
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
+	if w := resolved.Worker; w != nil {
+		_, _ = fmt.Fprintf(out, "  launch.worker        %s  (no project matched; launch which shows a directory's)\n", safeText(workerPostureSummary(w)))
+		if w.Refused != "" {
+			_, _ = fmt.Fprintf(out, "                       refused: %s\n", safeText(w.Refused))
+		}
+	}
 	if resolved.HomeNote != "" {
 		_, _ = fmt.Fprintf(out, "  launch.home          (unresolved: %s; ~ paths in [launch] are not expanded)\n", safeText(resolved.HomeNote))
 	}

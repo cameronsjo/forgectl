@@ -235,6 +235,9 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 	if err != nil {
 		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
+	if err := checkWorkerFolderTrust(deps.Cfg.Launch, top, spec); err != nil {
+		return workerSetup{}, err
+	}
 	led, err := worker.Open(top, namer.Session())
 	if err != nil {
 		return workerSetup{}, err
@@ -404,6 +407,35 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	_, err = fmt.Fprintln(out, safePath(attempt.launched.worktree))
 	return err
+}
+
+// checkWorkerFolderTrust refuses a claude worker whose repository Claude Code
+// has not trusted for the account the worker runs as (forgectl#1240). It runs
+// before the worktree or ledger row exists. The repository root is checked:
+// the worktree under <repo>/.claude/worktrees/ does not exist yet, and it
+// inherits the root's trust. The account is --profile's config dir, else the
+// CLAUDE_CONFIG_DIR the worker inherits (the profile's env, else this
+// process's).
+func checkWorkerFolderTrust(lc config.LaunchConfig, top string, spec workerSpec) error {
+	p, err := launch.Resolve(lc, worker.WorktreePath(top, spec.name))
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	harness := spec.harness
+	if harness == "" {
+		harness = p.Harness
+	}
+	if harness != "claude" {
+		return nil
+	}
+	configDir := spec.configDir
+	if configDir == "" {
+		configDir = p.Env["CLAUDE_CONFIG_DIR"]
+	}
+	if configDir == "" {
+		configDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+	return checkClaudeFolderTrust(top, configDir)
 }
 
 // errProfileNotClaude refuses --profile for a worker that is not claude.
