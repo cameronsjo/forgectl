@@ -176,7 +176,8 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 
 	// Nothing is written into the workspace for any reviewer. The Claude
 	// reviewer's whole profile goes to it at dispatch as a settings file in
-	// its private temp dir, outside the workspace (launchInline); Codex gets its posture from its
+	// a sealed settings dir beside the workspace, outside the reviewer's
+	// private temp dir (writeReviewSettings); Codex gets its posture from its
 	// own flags (launchCodex) and receives no settings document at all.
 
 	bc := Breadcrumb{
