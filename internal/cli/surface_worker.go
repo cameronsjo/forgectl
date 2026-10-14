@@ -49,6 +49,10 @@ type workerSteps struct {
 	// launchID is the queue claim the launch is for, written with the
 	// pending row; empty for a CLI launch.
 	launchID string
+	// showName, when set, runs once the launched row is recorded: it shows
+	// the worker's name in herdr's sidebar (forgectl#1047). It is cosmetic
+	// and reports its own failure, so it returns nothing.
+	showName func(ctx context.Context, ref backend.Ref)
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -151,6 +155,9 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		// than report a launch failure the operator would retry.
 		return workerLaunched{ref: ref, worktree: wt.Path},
 			fmt.Errorf("the worker started but its ledger row could not be completed: %w", err)
+	}
+	if s.showName != nil {
+		s.showName(ctx, ref)
 	}
 	return workerLaunched{ref: ref, worktree: wt.Path}, nil
 }
@@ -282,6 +289,33 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 		now:      time.Now,
 		brief:    brief,
 		launchID: spec.launchID,
+		showName: func(ctx context.Context, ref backend.Ref) {
+			showWorkerName(ctx, s.adapter, ref, spec.name, warn)
+		},
+	}
+}
+
+// workerNameShower is implemented by the herdr adapter.
+type workerNameShower interface {
+	ShowWorkerName(ctx context.Context, ref backend.Ref, name string) error
+}
+
+// showNameTimeout bounds the sidebar-name report after a launch.
+const showNameTimeout = 10 * time.Second
+
+// showWorkerName sets the worker's name as its herdr workspace's "worker"
+// token. The workspace label stays the ownership marker, which close, probe
+// and reconcile match exactly. A failure is a note on warn: the worker is
+// running and only the sidebar text is missing.
+func showWorkerName(ctx context.Context, adapter backend.Adapter, ref backend.Ref, name string, warn io.Writer) {
+	shower, ok := adapter.(workerNameShower)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, showNameTimeout)
+	defer cancel()
+	if err := shower.ShowWorkerName(ctx, ref, name); err != nil {
+		_, _ = fmt.Fprintln(warn, "forgectl: note: herdr's sidebar will not show the worker name: "+termsafe.SafeLineMax(err.Error(), 300))
 	}
 }
 
@@ -399,6 +433,9 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 
 	out := cmd.OutOrStdout()
+	if opts.JSON {
+		return writeJSON(out, workerLaunchResult(ctx, setup.adapter, attempt, setup.top))
+	}
 	if _, err := fmt.Fprintln(out, safeTitle(attempt.launched.ref.String())); err != nil {
 		return err
 	}

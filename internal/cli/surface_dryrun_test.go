@@ -390,13 +390,8 @@ func TestSurfaceLaunchDryRunNeverCallsTheBackend(t *testing.T) {
 		t.Errorf("keys = %v (a plain launch has no worker key)", keys)
 	}
 
-	// --json prints the preview; without --dry-run there is none.
-	_, err = run(project, "--surface", "tmux", "--json")
-	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--dry-run") {
-		t.Errorf("--json without --dry-run: err = %v (exit %d), want a usage error naming --dry-run", err, ExitCode(err))
-	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("a refused call reached tmux: %v", err)
+		t.Errorf("the dry run --json called tmux: %v", err)
 	}
 }
 

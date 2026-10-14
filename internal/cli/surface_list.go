@@ -68,6 +68,11 @@ type listRow struct {
 	Marker          string    `json:"marker,omitempty"`
 	Failure         string    `json:"failure,omitempty"`
 	Recovery        string    `json:"recovery,omitempty"`
+
+	// TerminalID is herdr's terminal_id for the pane, which survives a pane
+	// move where pane_id renumbers. Read for a present worker under --json
+	// only, and absent when that read fails.
+	TerminalID string `json:"terminal_id,omitempty"`
 }
 
 type listOptions struct {
@@ -103,7 +108,7 @@ error, such as a ledger that cannot be read.
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the workers were launched from (project name or path)")
 	cmd.Flags().BoolVar(&opts.Orphans, "orphans", false, "show only workers whose workspace is gone or whose launch never finished")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery"}]} as JSON`)
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","terminal_id"}]} as JSON`)
 	return cmd
 }
 
@@ -163,6 +168,9 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
+		if opts.JSON && row.State == workerPresent {
+			row.TerminalID = rowTerminalID(ctx, w.herdr, r)
+		}
 		res.Workers = append(res.Workers, row)
 	}
 	return reportList(cmd, res, opts.JSON)
@@ -189,6 +197,21 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 	// would refuse it.
 	row.Orphan = !launchInFlight(r, now) && (row.State == workerGone || r.Stage != worker.StageLaunched)
 	return row
+}
+
+// rowTerminalID reads the terminal_id of a present worker's pane, or "" when
+// it cannot be read: the id is a convenience, and the row was already
+// proved present by the probe.
+func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) string {
+	ref, err := backend.DecodeRef(r.Ref)
+	if err != nil {
+		return ""
+	}
+	id, err := tr.TerminalID(ctx, ref)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // probeWorkspace probes the row's workspace. A row with no reference never

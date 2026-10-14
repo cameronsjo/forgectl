@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	osexec "os/exec"
 	"strings"
 	"time"
 
@@ -20,14 +23,15 @@ import (
 
 const defaultSpendDays = 30
 
-func newSurfaceUsageCmd(_ module.Deps) *cobra.Command {
+func newSurfaceUsageCmd(deps module.Deps) *cobra.Command {
 	var (
 		asJSON bool
 		days   int
+		repo   string
 	)
 	cmd := &cobra.Command{
-		Use:   "usage",
-		Short: "Sum what the drain's workers cost over the last N days",
+		Use:   "usage [name]",
+		Short: "Sum what the drain's workers cost over the last N days, or price one worker",
 		Long: `usage sums the cost of the drain's workers by UTC day: the lines surface
 prune wrote to usage-daily.jsonl, plus the queue rows that carry a cost_usd
 and have not been pruned yet. A row is counted once by (name, launch_id); when
@@ -47,10 +51,35 @@ can differ by a cent from the sum of the rounded days.
 Exit 0: summed. Exit 1: the queue or usage file could not be read. Exit 2: a
 --days out of range.
 
+With a worker name, usage prices that worker's session instead: it reads the
+worker's ledger row (in --repo's ledger for this herdr session) and runs
+"cadence-hooks metrics price" over the transcript the row records. Nothing is
+asked of GitHub, so it works for a worker in a repository with no GitHub
+remote. --json prints {"name","repo","harness","transcript","usage","reason"},
+where usage is {"costUsd","byModel","priced","unpricedModels"} as in surface
+status, or null with reason saying why. A codex or pi worker records no
+transcript, so it has no usage here. --days does not apply.
+
+Exit 0: priced (priced is false when a model had no price, and costUsd then
+covers only the priced models). Exit 1: not priced; the reason says why.
+Exit 2: a usage error (no such worker, --days with a name).
+
   forgectl surface usage
-  forgectl surface usage --days 7 --json`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+  forgectl surface usage --days 7 --json
+  forgectl surface usage fix-login --json`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if cmd.Flags().Changed("days") {
+					return WithExitCode(errors.New("--days sums the drain by day; it does not apply to one worker"), exitUsage)
+				}
+				return runWorkerUsage(cmd, deps, repo, args[0], asJSON, func(ctx context.Context, transcript string) *statusUsage {
+					return priceTranscript(ctx, deps.Runner, osexec.LookPath, transcript)
+				})
+			}
+			if cmd.Flags().Changed("repo") {
+				return WithExitCode(errors.New("--repo names a worker's ledger; give the worker's name"), exitUsage)
+			}
 			if days < 1 || days > drain.MaxSpendDays {
 				return WithExitCode(fmt.Errorf("--days must be 1-%d, not %d", drain.MaxSpendDays, days), exitUsage)
 			}
@@ -63,8 +92,9 @@ Exit 0: summed. Exit 1: the queue or usage file could not be read. Exit 2: a
 			return reportSpend(cmd.OutOrStdout(), drain.SumSpend(usage, rows, time.Now(), days), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped","unpriced"} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"days","total_usd","by_day":[{"day","usd","rows"}],"skipped","unpriced"}, or with a name {"name","repo","harness","transcript","usage","reason"}, as JSON`)
 	cmd.Flags().IntVar(&days, "days", defaultSpendDays, "window in UTC days, counting today (1-365)")
+	cmd.Flags().StringVar(&repo, "repo", ".", "with a name: repository the worker was launched from (project name or path)")
 	return cmd
 }
 
@@ -106,5 +136,79 @@ func reportSpend(out io.Writer, s drain.Spend, asJSON bool) error {
 		fmt.Fprintf(&b, "skipped %s of usage state that did not parse or was out of range\n", plural(s.Skipped, "entry", "entries"))
 	}
 	_, err := io.WriteString(out, b.String())
+	return err
+}
+
+// workerUsageResult is what `surface usage <name> --json` prints. Additive
+// changes only (ADR-0008 rule 2).
+type workerUsageResult struct {
+	Name       string       `json:"name"`
+	Repo       string       `json:"repo"`
+	Harness    string       `json:"harness"`
+	Transcript string       `json:"transcript"`
+	Usage      *statusUsage `json:"usage"`
+	Reason     string       `json:"reason,omitempty"`
+}
+
+// runWorkerUsage prices one worker's transcript from its ledger row. It asks
+// nothing of GitHub (forgectl#1241).
+func runWorkerUsage(cmd *cobra.Command, deps module.Deps, repo, name string, asJSON bool, price func(context.Context, string) *statusUsage) error {
+	if err := worker.ValidName(name); err != nil {
+		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
+	}
+	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, repo)
+	if err != nil {
+		return err
+	}
+	rows, err := w.led.Rows()
+	if err != nil {
+		return WithExitCode(err, exitUsage)
+	}
+	row, ok := findRow(rows, name)
+	if !ok {
+		return WithExitCode(fmt.Errorf("no worker named %q in %s's ledger", name, w.top), exitUsage)
+	}
+	return reportWorkerUsage(cmd, priceWorker(cmd.Context(), row, w.top, price), asJSON)
+}
+
+// priceWorker prices row's transcript, or says why it cannot.
+func priceWorker(ctx context.Context, row worker.Row, top string, price func(context.Context, string) *statusUsage) workerUsageResult {
+	res := workerUsageResult{Name: row.Name, Repo: top, Harness: row.Harness, Transcript: row.Transcript}
+	switch {
+	case row.Transcript == "" && row.Harness != "" && row.Harness != "claude":
+		res.Reason = "a " + row.Harness + " worker records no transcript forgectl can price"
+	case row.Transcript == "":
+		res.Reason = "the worker's ledger row records no transcript"
+	default:
+		if res.Usage = price(ctx, row.Transcript); res.Usage == nil {
+			res.Reason = "the transcript could not be priced: cadence-hooks is not on PATH, its metrics price failed, or it answered in an unexpected shape"
+		}
+	}
+	return res
+}
+
+// reportWorkerUsage prints res and exits 1 when nothing was priced. With
+// --json the object on stdout is the whole answer.
+func reportWorkerUsage(cmd *cobra.Command, res workerUsageResult, asJSON bool) error {
+	out := cmd.OutOrStdout()
+	if asJSON {
+		if err := writeJSON(out, res); err != nil {
+			return err
+		}
+		if res.Usage == nil {
+			return newSilentCodedError(exitFailed)
+		}
+		return nil
+	}
+	if res.Usage == nil {
+		return WithExitCode(fmt.Errorf("worker %s: no usage: %s", res.Name, res.Reason), exitFailed)
+	}
+	u := res.Usage
+	if u.Priced {
+		_, err := fmt.Fprintf(out, "%s: $%.2f\n", res.Name, u.CostUSD)
+		return err
+	}
+	_, err := fmt.Fprintf(out, "%s: partial, $%.2f for the priced models only; no price for %s\n",
+		res.Name, u.CostUSD, strings.Join(u.UnpricedModels, ", "))
 	return err
 }
