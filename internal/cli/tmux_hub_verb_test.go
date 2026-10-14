@@ -156,3 +156,33 @@ func TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub(t *testing.T) {
 		t.Fatalf("err = %v, want a terminal-required message naming the plain forms", err)
 	}
 }
+
+// tmuxDispatchKey marks which dispatch a context belongs to.
+type tmuxDispatchKey struct{}
+
+// TestTmux_ASecondDispatchGetsItsOwnContext: cobra sets a subcommand's
+// context only while it is nil, so a second dispatch of `forgectl tmux` in
+// one process would hand the hub the first dispatch's context (#1018 item 2).
+// Mutation that turns it red: pass cmd.Context() to the hub again.
+func TestTmux_ASecondDispatchGetsItsOwnContext(t *testing.T) {
+	stubInteractiveTTY(t, true)
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	var seen []any
+	hub := func(ctx context.Context, _ *tmux.Client, _ tui.RunOptions) (tui.Action, error) {
+		seen = append(seen, ctx.Value(tmuxDispatchKey{}))
+		return tui.Action{}, nil
+	}
+	root := &cobra.Command{Use: "forgectl", SilenceUsage: true}
+	root.AddCommand(newTmuxCmdWith(deps, tmux.New(deps.Runner), hub))
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	for _, id := range []string{"first", "second"} {
+		ctx := context.WithValue(context.Background(), tmuxDispatchKey{}, id)
+		if err := execDispatch(ctx, deps, root, []string{"tmux"}, theme.Theme{}); err != nil {
+			t.Fatalf("dispatch %s: %v", id, err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != "first" || seen[1] != "second" {
+		t.Errorf("the hub saw dispatch contexts %v, want [first second]", seen)
+	}
+}

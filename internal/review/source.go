@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 )
 
 // Source enumerates open work items from one tracker host. Items returns the
@@ -16,9 +17,8 @@ type Source interface {
 	Items(ctx context.Context) ([]Item, []string, error)
 }
 
-// sourceResult carries one source's outcome across the Aggregate fan-out
-// channel (the Inventory model: buffered channel, degrade-to-note, fixed
-// receive loop).
+// sourceResult carries one source's outcome out of the Aggregate fan-out,
+// in that source's indexed slot.
 type sourceResult struct {
 	name  string
 	items []Item
@@ -37,13 +37,20 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 		return nil, nil, fmt.Errorf("review: no sources configured")
 	}
 
-	ch := make(chan sourceResult, len(sources))
-	for _, src := range sources {
+	// Each source writes its own indexed slot, and the slots are read in
+	// source order, so the notes come out in the same order on every run
+	// rather than in arrival order (#1018).
+	results := make([]sourceResult, len(sources))
+	var wg sync.WaitGroup
+	for i, src := range sources {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			items, notes, err := src.Items(ctx)
-			ch <- sourceResult{src.Name(), items, notes, err}
+			results[i] = sourceResult{src.Name(), items, notes, err}
 		}()
 	}
+	wg.Wait()
 
 	var (
 		notes       []string
@@ -52,8 +59,7 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 		sawCanceled bool
 	)
 	byKey := make(map[string]Item)
-	for range sources {
-		res := <-ch
+	for _, res := range results {
 		notes = append(notes, res.notes...)
 		if res.err != nil {
 			// The source error is LOGGED but never rendered or returned: a
