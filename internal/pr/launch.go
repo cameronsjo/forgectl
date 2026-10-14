@@ -682,10 +682,11 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// document Claude Code keeps under a content hash (the reviewer's own
 	// document is a file, so it gets no such copy; see below). Pointed here,
 	// the reviewer's Bash gets the claude-<uid> dir inside this one as its
-	// TMPDIR (measured on Linux, Claude Code 2.1.299). That pin alone is not
-	// what keeps the shared dir out of reach: on macOS (2.1.289) the
-	// reviewer's Bash still got the shared dir. The sandbox's write denies on
-	// it do that (sharedClaudeTmpDirs). The dir outlives this call with the review and goes with
+	// TMPDIR, provided that path fits claudeTmpDirMax, which
+	// createReviewTmpDir sees to (measured on Linux, Claude Code 2.1.299; on
+	// macOS 2.1.289 a longer one fell back to the shared dir). The sandbox's
+	// write denies on the shared dirs back that up (sharedClaudeTmpDirs). The
+	// dir outlives this call with the review and goes with
 	// the workspace (teardownWorkspace); a refusal before the window opens
 	// removes it, and the settings dir below, here. That removal names only
 	// the dirs this call made, never an entry it merely found under a

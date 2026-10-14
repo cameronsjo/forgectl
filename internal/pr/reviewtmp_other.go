@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+// reviewShortTmpBase off Unix is none: the private temp dir goes in the
+// workspace root, and there is no uid for claudeTmpDirFits to count.
+var reviewShortTmpBase = ""
+
 // ownedByOperator off Unix accepts every entry: there is no uid to compare,
 // and no shipped binary runs off Unix (goreleaser builds linux and darwin).
 func ownedByOperator(fs.FileInfo) bool { return true }

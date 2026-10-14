@@ -16,6 +16,7 @@ import (
 //   [x] macOS: an operator SSL_CERT_FILE naming a readable file wins
 //   [x] macOS: an unusable operator value falls back to the system bundle
 //   [x] macOS: no usable bundle unsets SSL_CERT_FILE in the window
+//   [x] macOS: SSL_CERT_DIR is pinned to a usable operator dir, else unset
 
 func stubCertPlatform(t *testing.T, goos, def string) {
 	t.Helper()
@@ -35,17 +36,20 @@ func TestReviewCertEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name, goos, def, env string
-		want, wantUnset      []string
+		name, goos, def, env, dirEnv string
+		want, wantUnset              []string
 	}{
-		{"linux", "linux", system, operator, nil, nil},
-		{"darwin, operator file", "darwin", system, operator, []string{"SSL_CERT_FILE=" + operator}, nil},
-		{"darwin, unset", "darwin", system, "", []string{"SSL_CERT_FILE=" + system}, nil},
-		{"darwin, missing operator file", "darwin", system, filepath.Join(dir, "gone.pem"), []string{"SSL_CERT_FILE=" + system}, nil},
-		{"darwin, relative operator file", "darwin", system, "corp.pem", []string{"SSL_CERT_FILE=" + system}, nil},
-		{"darwin, operator dir", "darwin", system, dir, []string{"SSL_CERT_FILE=" + system}, nil},
-		{"darwin, no bundle", "darwin", filepath.Join(dir, "none.pem"), "", nil, []string{"SSL_CERT_FILE"}},
-		{"darwin, no bundle, unusable operator file", "darwin", filepath.Join(dir, "none.pem"), "corp.pem", nil, []string{"SSL_CERT_FILE"}},
+		{"linux", "linux", system, operator, dir, nil, nil},
+		{"darwin, operator file", "darwin", system, operator, "", []string{"SSL_CERT_FILE=" + operator}, []string{"SSL_CERT_DIR"}},
+		{"darwin, unset", "darwin", system, "", "", []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
+		{"darwin, missing operator file", "darwin", system, filepath.Join(dir, "gone.pem"), "", []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
+		{"darwin, relative operator file", "darwin", system, "corp.pem", "", []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
+		{"darwin, operator dir as file", "darwin", system, dir, "", []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
+		{"darwin, no bundle", "darwin", filepath.Join(dir, "none.pem"), "", "", nil, []string{"SSL_CERT_FILE", "SSL_CERT_DIR"}},
+		{"darwin, no bundle, unusable operator file", "darwin", filepath.Join(dir, "none.pem"), "corp.pem", "", nil, []string{"SSL_CERT_FILE", "SSL_CERT_DIR"}},
+		{"darwin, operator cert dir", "darwin", system, "", dir, []string{"SSL_CERT_FILE=" + system, "SSL_CERT_DIR=" + dir}, nil},
+		{"darwin, relative cert dir", "darwin", system, "", "certs", []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
+		{"darwin, cert dir is a file", "darwin", system, "", operator, []string{"SSL_CERT_FILE=" + system}, []string{"SSL_CERT_DIR"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,6 +57,10 @@ func TestReviewCertEnv(t *testing.T) {
 			t.Setenv("SSL_CERT_FILE", tc.env)
 			if tc.env == "" {
 				_ = os.Unsetenv("SSL_CERT_FILE")
+			}
+			t.Setenv("SSL_CERT_DIR", tc.dirEnv)
+			if tc.dirEnv == "" {
+				_ = os.Unsetenv("SSL_CERT_DIR")
 			}
 			got, unset := reviewCertEnv()
 			if !slices.Equal(got, tc.want) || !slices.Equal(unset, tc.wantUnset) {
@@ -109,7 +117,7 @@ func TestLaunchInline_UnsetsAStaleCertBundleOnMacOS(t *testing.T) {
 	if argPair(args, "-e", "SSL_CERT_FILE=/stale.pem") {
 		t.Errorf("the stale SSL_CERT_FILE reached the window: %v", args)
 	}
-	if _, err := unsetEnvCommand(nil, nil); err == nil && !argPair(args, "-u", "SSL_CERT_FILE") {
+	if !argPair(args, "-u", "SSL_CERT_FILE") {
 		t.Errorf("claude does not run with SSL_CERT_FILE unset: %v", args)
 	}
 }

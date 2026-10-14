@@ -10,6 +10,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// reviewShortTmpBase is where a review's private temp dir goes when the
+// workspace root is too long for it (claudeTmpDirMax): /tmp, which is short
+// on every Unix. A seam for tests.
+var reviewShortTmpBase = "/tmp"
+
 // reviewSiblingOwner is the uid a review sibling must belong to for forgectl
 // to treat it as one it made, a seam so a test can stand in for another user
 // without root.

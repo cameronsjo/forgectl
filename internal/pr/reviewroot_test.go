@@ -90,10 +90,15 @@ func TestReviewDirs_InsideAClaudeSessionStayOutOfTheSharedDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{ws, tmp, settingsDir} {
+	for _, p := range []string{ws, settingsDir} {
 		if filepath.Dir(p) != base {
 			t.Errorf("%s is not in %s, outside the shared dir", p, base)
 		}
+	}
+	// The private temp dir goes wherever Claude Code will use it, which is
+	// never inside the shared dir.
+	if pathWithin(tmp, shared) {
+		t.Errorf("private temp dir %s is inside the shared dir %s", tmp, shared)
 	}
 	deny, err := reviewDenyWrite(ws)
 	if err != nil {

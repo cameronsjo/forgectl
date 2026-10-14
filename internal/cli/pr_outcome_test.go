@@ -34,6 +34,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -92,13 +93,32 @@ func reviewTempRoot(t *testing.T) {
 	t.Setenv("TMPDIR", root)
 }
 
-// unsealOnCleanup makes every dir under root writable again before t's
-// earlier-registered cleanups remove it. A Claude dispatch seals the
-// reviewer's settings dir 0500 (forgectl#907), and a test that does not tear
-// its review down leaves one that RemoveAll cannot empty unless run as root.
+// unsealOnCleanup releases every review under root before t's
+// earlier-registered cleanups remove it (releaseReviews).
 func unsealOnCleanup(t *testing.T, root string) {
 	t.Helper()
-	t.Cleanup(func() { unsealTree(root) })
+	t.Cleanup(func() { releaseReviews(root) })
+}
+
+// releaseReviews removes the review dirs of every workspace under root and
+// makes every dir under it writable again, best effort. A Claude dispatch
+// makes a private temp dir that can sit outside root, in /tmp, when root is
+// too long for Claude Code's 44-byte temp dir limit, and seals the
+// reviewer's settings dir 0500 (forgectl#907); a test that does not tear its
+// review down would leak the one and leave the other that RemoveAll cannot
+// empty unless run as root.
+func releaseReviews(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), sandbox.WorkspacePrefix) {
+			_ = pr.RemoveReviewDirs(path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	unsealTree(root)
 }
 
 // unsealTree chmods every dir under root 0700, best effort.

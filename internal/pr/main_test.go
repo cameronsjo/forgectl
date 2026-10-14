@@ -33,16 +33,25 @@ func runInPrivateTempRoot(m *testing.M) int {
 		panic("create temp root: " + err.Error())
 	}
 	defer func() {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err == nil && d.IsDir() {
-				_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
-			}
-			return nil
-		})
+		unsealTestTree(root)
 		_ = os.RemoveAll(root)
 	}()
 	if err := os.Setenv("TMPDIR", root); err != nil {
 		panic("set TMPDIR: " + err.Error())
+	}
+	// A review's private temp dir must stay short (claudeTmpDirMax), and the
+	// root above is too long for it, so it falls back to reviewShortTmpBase:
+	// a short dir of the run's own rather than the real /tmp.
+	if reviewShortTmpBase != "" {
+		short, err := os.MkdirTemp(reviewShortTmpBase, "fp")
+		if err != nil {
+			panic("create the short temp base: " + err.Error())
+		}
+		reviewShortTmpBase = short
+		defer func() {
+			unsealTestTree(short)
+			_ = os.RemoveAll(short)
+		}()
 	}
 	return m.Run()
 }
@@ -71,4 +80,15 @@ func fakeClaudeAnswer(version string, rejectAll bool, args []string) string {
 		report += "Invalid settings\n- /tmp/claude-settings-x.json \u203a sandbox.enabled: Expected boolean, but received string\n\n"
 	}
 	return report + doctorFooter + "\n"
+}
+
+// unsealTestTree makes every dir under root writable again, best effort, so
+// RemoveAll can empty a sealed settings dir without root.
+func unsealTestTree(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
+		}
+		return nil
+	})
 }

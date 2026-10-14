@@ -29,6 +29,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -207,9 +208,23 @@ func TestReviewDenyWrite_LinkedWorktreeDeniesTheSharedGitDir(t *testing.T) {
 	}
 }
 
+// TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace runs under a symlinked
+// temp root holding an existing claude-<uid> dir, the macOS shape (/tmp is a
+// symlink to /private/tmp): reviewDenyWrite lists each shared dir's resolved
+// spelling too, and that is not an extra.
 func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
-	ws := t.TempDir()
-	if err := os.Mkdir(filepath.Join(ws, ".git"), 0o700); err != nil {
+	realDir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "tmp")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if uid := reviewUID(); uid >= 0 {
+		if err := os.Mkdir(filepath.Join(realDir, "claude-"+strconv.Itoa(uid)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws := filepath.Join(link, sandboxPrefix+"1")
+	if err := os.MkdirAll(filepath.Join(ws, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	got, err := reviewDenyWrite(ws)
@@ -220,9 +235,22 @@ func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowed := []string{ws, resolvedOrSelf(ws)}
+	for _, d := range shared {
+		allowed = append(allowed, d, resolvedOrSelf(d))
+	}
 	for _, p := range got {
-		if p != ws && p != resolvedOrSelf(ws) && !slices.Contains(shared, p) {
+		if !slices.Contains(allowed, p) {
 			t.Errorf("a clone's denyWrite should hold only the workspace and the shared temp dirs, got extra %s", p)
+		}
+	}
+	if uid := reviewUID(); uid >= 0 {
+		resolvedShared := filepath.Join(realDir, "claude-"+strconv.Itoa(uid))
+		if r, err := filepath.EvalSymlinks(resolvedShared); err == nil {
+			resolvedShared = r
+		}
+		if !slices.Contains(got, resolvedShared) {
+			t.Errorf("denyWrite %v misses the shared dir's resolved spelling %s", got, resolvedShared)
 		}
 	}
 }
@@ -263,15 +291,26 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 		t.Errorf("a workspace inside the shared dir got denies %v, want a refusal", got)
 	}
 
-	// Another user's symlink at a shared dir's path, pointing at the dir that
-	// holds the workspace, must not switch the deny off.
+	// A symlink at a shared dir's path, pointing at the dir that holds the
+	// workspace, must neither switch the deny off nor deny the workspace's
+	// parent: it refuses with a message that names the link.
 	linked := t.TempDir()
 	t.Setenv("TMPDIR", linked)
 	if err := os.Symlink(linked, filepath.Join(linked, "claude-501")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1"))
-	if err != nil || !slices.Contains(got, filepath.Join(linked, "claude-501")) {
+	if got, err := sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1")); err == nil || !strings.Contains(err.Error(), "is a link to") {
+		t.Errorf("with a shared dir linked to the workspace's parent: sharedClaudeTmpDirs = %v, %v, want a refusal naming the link", got, err)
+	}
+	// A link pointing anywhere else stays denied.
+	elsewhere := t.TempDir()
+	other := t.TempDir()
+	t.Setenv("TMPDIR", other)
+	if err := os.Symlink(elsewhere, filepath.Join(other, "claude-501")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = sharedClaudeTmpDirs(filepath.Join(other, "forgectl-workflow-1"))
+	if err != nil || !slices.Contains(got, filepath.Join(other, "claude-501")) {
 		t.Errorf("with a symlinked shared dir: sharedClaudeTmpDirs = %v, %v, want it denied", got, err)
 	}
 

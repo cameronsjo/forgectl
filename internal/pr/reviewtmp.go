@@ -2,23 +2,46 @@ package pr
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
-// reviewTmpPrefix names the private temp directory each Claude review window
-// gets (forgectl#907). It is deliberately not sandbox.WorkspacePrefix, so
-// nothing that recognizes a workspace by its prefix mistakes this for one.
-const reviewTmpPrefix = "forgectl-rtmp-"
+// reviewTmpPrefix starts the name of the private temp directory each Claude
+// review window gets (forgectl#907): reviewTmpPrefix, then 6 hex digits of
+// the workspace path's SHA-256, then reviewTmpRandLen random characters. It
+// is short on purpose (see claudeTmpDirMax) and deliberately not
+// sandbox.WorkspacePrefix, so nothing that recognizes a workspace by its
+// prefix mistakes this for one.
+const reviewTmpPrefix = "fr"
+
+// reviewTmpRandLen is the length of the random tail of a private temp dir's
+// name.
+const reviewTmpRandLen = 5
+
+// claudeTmpDirMax is the longest per-uid temp dir, CLAUDE_CODE_TMPDIR plus
+// "/claude-<uid>", that Claude Code gives the sandboxed Bash as its TMPDIR.
+// A longer one is too long for its AF_UNIX sockets, and Claude Code silently
+// falls back: read from the 2.1.299 bundle, `if(Buffer.byteLength(n)<=gMr)
+// return n` with gMr=44, else the claude-<uid> dir under os.tmpdir(), with
+// the debug-log warning "CLAUDE_CODE_TMPDIR makes the per-uid temp dir N
+// bytes, too long for AF_UNIX sockets; child-process $TMPDIR falls back to
+// ...". Measured on Linux (2.1.299): a 54-byte per-uid dir with TMPDIR=/tmp
+// gave the reviewer's Bash TMPDIR=/tmp/claude-0, the shared dir; a 35-byte
+// one gave it the private dir. On macOS (2.1.289) the long private dir beside
+// a /var/folders workspace fell back to /tmp/claude-501.
+const claudeTmpDirMax = 44
 
 // reviewTmpEnvKeys are the variables a review window's temp directory is
 // pinned through. Claude Code keeps its per-user temp dir (claude-<uid>), its
@@ -44,20 +67,23 @@ var reviewTmpEnvKeys = []string{"TMPDIR", "CLAUDE_CODE_TMPDIR"}
 // grant, since there is nobody to ask.
 const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 
-// A review's private temp dir and its settings dir are siblings of its
-// workspace, named prefix + the workspace's own random suffix + "-" + a fresh
-// random part os.MkdirTemp picks (reviewSiblingName). The workspace suffix
-// lets every teardown path find them again from the breadcrumb's workspace
-// field alone; the fresh part means nobody who can see the workspace's name
-// in a shared temp dir can predict theirs and make it first.
+// A review's settings dir is a sibling of its workspace, named prefix + the
+// workspace's own random suffix + "-" + a fresh random part os.MkdirTemp
+// picks (reviewSiblingName). Its private temp dir is made in the first of
+// the workspace root and reviewShortTmpBase whose path keeps Claude Code's
+// per-uid dir within claudeTmpDirMax, named from a hash of the workspace path
+// (reviewTmpName). Both derive from the workspace path alone, so every
+// teardown path finds them again from the breadcrumb's workspace field; the
+// fresh random part means nobody who can see the workspace's name in a shared
+// temp dir can predict theirs and make it first, and a name someone made
+// first is never reused (it fails EEXIST).
 //
 // Teardown matches by name, so it can meet an entry someone else made under a
 // matching name. It removes only a real directory the operator owns, opened
 // without following a symlink (openOwnReviewSibling); anything else under a
-// matching name is left alone. A symlinked workspace finds its siblings
-// beside the link, where they were made: the name derives from the workspace
-// path as spelled, unresolved, which is the string the dispatch made them
-// from, every teardown path holds, and sandbox.Teardown removes.
+// matching name is left alone. The names derive from the workspace path as
+// spelled, unresolved, which is the string the dispatch made them from,
+// every teardown path holds, and sandbox.Teardown removes.
 //
 // They sit outside the workspace on purpose. The sandbox denies writes to the
 // whole workspace, and a deny there outranks any grant below it.
@@ -71,11 +97,53 @@ const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
 // own settings.
 const reviewSettingsPrefix = "forgectl-rset-"
 
-// reviewSiblingPrefixes are the prefixes of every sibling a review makes, with
-// what each holds, in the order teardown removes them.
-var reviewSiblingPrefixes = []struct{ prefix, what string }{
-	{reviewTmpPrefix, "private temp dir"},
-	{reviewSettingsPrefix, "settings dir"},
+// reviewTmpName returns the name prefix of workspace's private temp dir:
+// reviewTmpPrefix and 6 hex digits of the SHA-256 of the workspace path as
+// spelled. A workspace without the sandbox prefix has none.
+func reviewTmpName(workspace string) (string, error) {
+	if _, _, err := reviewSiblingName(workspace, reviewTmpPrefix); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(workspace)))
+	return reviewTmpPrefix + hex.EncodeToString(sum[:3]), nil
+}
+
+// isReviewTmpName reports whether name is a private temp dir name for name
+// prefix.
+func isReviewTmpName(name, prefix string) bool {
+	return strings.HasPrefix(name, prefix) && len(name) == len(prefix)+reviewTmpRandLen
+}
+
+// reviewTmpBases are the directories workspace's private temp dir may be in,
+// for teardown to look through: the workspace's own parent (the workspace
+// root it was made in, whatever TMPDIR is now), the workspace root by
+// today's TMPDIR, and reviewShortTmpBase.
+func reviewTmpBases(workspace string) []string {
+	bases := []string{filepath.Dir(filepath.Clean(workspace))}
+	if root, err := reviewWorkspaceRoot(); err == nil {
+		bases = append(bases, root)
+	}
+	if reviewShortTmpBase != "" {
+		bases = append(bases, reviewShortTmpBase)
+	}
+	var out []string
+	for _, b := range bases {
+		if b = filepath.Clean(b); !slices.Contains(out, b) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// claudeTmpDirFits reports whether a private temp dir made in base keeps
+// Claude Code's per-uid dir inside it within claudeTmpDirMax.
+func claudeTmpDirFits(base string) bool {
+	uid := reviewUID()
+	if uid < 0 {
+		return true
+	}
+	perUID := len(filepath.Clean(base)) + 1 + len(reviewTmpPrefix) + 6 + reviewTmpRandLen + len("/claude-") + len(strconv.Itoa(uid))
+	return perUID <= claudeTmpDirMax
 }
 
 // reviewSiblingName returns the directory workspace's siblings are made in and
@@ -137,20 +205,61 @@ func makeReviewSibling(workspace, prefix string) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return openMadeReviewDir(dir)
+}
+
+// openMadeReviewDir opens dir, which this call just made, and makes it 0700
+// through the handle. The made dir's mode is filtered by the umask, which can
+// only remove bits, so the chmod is a no-op unless something unusual is in
+// play, and then it is the fix.
+func openMadeReviewDir(dir string) (*os.File, string, error) {
 	f, err := openOwnReviewSibling(dir)
 	if err != nil {
 		_ = os.Remove(dir)
 		return nil, "", err
 	}
-	// MkdirTemp's 0700 is filtered by the umask, which can only remove bits,
-	// so this is a no-op unless something unusual is in play, and then it is
-	// the fix.
 	if err := f.Chmod(0o700); err != nil {
 		_ = f.Close()
 		_ = os.Remove(dir)
 		return nil, "", err
 	}
 	return f, dir, nil
+}
+
+// reviewTmpAlphabet is what the random tail of a private temp dir's name is
+// drawn from.
+const reviewTmpAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// makeReviewTmpDir makes a new dir named prefix plus a random tail in base,
+// 0700, never reusing one that exists.
+func makeReviewTmpDir(base, prefix string) (string, error) {
+	for range 64 {
+		var b [reviewTmpRandLen]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = reviewTmpAlphabet[int(b[i])%len(reviewTmpAlphabet)]
+		}
+		dir := filepath.Join(base, prefix+string(b[:]))
+		err := os.Mkdir(dir, 0o700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		f, dir, err := openMadeReviewDir(dir)
+		if err != nil {
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			_ = removeReviewSibling(dir)
+			return "", err
+		}
+		return dir, nil
+	}
+	return "", fmt.Errorf("no free private temp dir name in %q", base)
 }
 
 // removeReviewSibling removes dir, a sibling this operator made. The settings
@@ -176,57 +285,46 @@ func removeReviewSibling(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-// reviewTmpGOOS is the platform checkReviewTmpDirLength judges, a seam for
-// its tests. It is not sandboxGOOS, which TestMain pins to linux for every
-// test: on a macOS host the long system temp dir would then fail a check
-// meant only for Linux.
-var reviewTmpGOOS = runtime.GOOS
-
-// unixSocketPathMax is the longest Unix socket path Linux accepts (sun_path
-// is 108 bytes with its terminating NUL).
-const unixSocketPathMax = 107
-
-// claudeSocksSocketName is the longest socket name Claude Code's Linux sandbox
-// creates directly in its temp directory: the socat bridge
-// claude-socks-<16 hex>.sock.
-const claudeSocksSocketName = "claude-socks-0123456789abcdef.sock"
-
-// checkReviewTmpDirLength reports a private temp dir too long to hold the
-// Linux sandbox's bridge sockets. Measured on Claude Code 2.1.296: with an
-// 80-byte CLAUDE_CODE_TMPDIR, every sandboxed command failed with "Failed to
-// create bridge sockets". failIfUnavailable makes that fail closed (the
-// reviewer's Bash refuses to run, nothing runs unsandboxed), but inside a
-// detached window nobody reads, so createReviewTmpDir logs this instead. It
-// does not refuse: the dir sits beside the workspace, which already lives in
-// the operator's TMPDIR, and a long TMPDIR was close to the limit before the
-// private dir existed. The macOS sandbox has no socat bridge, and its socket
-// names there are unverified, so it is not checked.
-func checkReviewTmpDirLength(dir string) error {
-	if reviewTmpGOOS != "linux" {
-		return nil
-	}
-	if len(dir)+1+len(claudeSocksSocketName) > unixSocketPathMax {
-		return fmt.Errorf("the review's private temp dir %q is too long for the sandbox's socket paths; "+
-			"set TMPDIR to a shorter directory", dir)
-	}
-	return nil
-}
-
 // createReviewTmpDir makes workspace's private temp directory, 0700, under a
-// name nobody could have made first (reviewSiblingName), and returns it.
+// name nobody could have made first, and returns it. It goes in the
+// workspace root when Claude Code's per-uid dir inside it fits
+// claudeTmpDirMax, else in reviewShortTmpBase. When neither fits, the review
+// is refused: Claude Code would hand the reviewer's Bash a temp dir outside
+// the private one, which the sandbox denies (sharedClaudeTmpDirs), and every
+// command would fail.
 func createReviewTmpDir(workspace string) (string, error) {
-	f, dir, err := makeReviewSibling(workspace, reviewTmpPrefix)
+	name, err := reviewTmpName(workspace)
 	if err != nil {
 		return "", fmt.Errorf("make the review's private temp dir: %w", err)
 	}
-	if err := f.Close(); err != nil {
-		_ = removeReviewSibling(dir)
+	base, err := reviewTmpHome()
+	if err != nil {
+		return "", err
+	}
+	dir, err := makeReviewTmpDir(base, name)
+	if err != nil {
 		return "", fmt.Errorf("make the review's private temp dir: %w", err)
 	}
-	if err := checkReviewTmpDirLength(dir); err != nil {
-		slog.Warn("The review's sandboxed commands will likely fail to start.", "error", err)
-	}
 	return dir, nil
+}
+
+// reviewTmpHome is the directory a new private temp dir goes in: the
+// workspace root when it fits claudeTmpDirMax, else reviewShortTmpBase.
+func reviewTmpHome() (string, error) {
+	var bases []string
+	if root, err := reviewWorkspaceRoot(); err == nil {
+		bases = append(bases, root)
+	}
+	if reviewShortTmpBase != "" {
+		bases = append(bases, reviewShortTmpBase)
+	}
+	for _, base := range bases {
+		if claudeTmpDirFits(base) {
+			return base, nil
+		}
+	}
+	return "", fmt.Errorf("refusing to make the review's private temp dir: none of %q is short enough "+
+		"for Claude Code to use it (its per-user temp dir must fit %d bytes)", bases, claudeTmpDirMax)
 }
 
 // removeReviewTmpDir removes workspace's private temp and settings dirs, every
@@ -236,25 +334,40 @@ func createReviewTmpDir(workspace string) (string, error) {
 // user's, or not a directory is not forgectl's: it is left alone, with a
 // warning for another user's and an error for the rest.
 func removeReviewTmpDir(workspace string) error {
+	tmpName, err := reviewTmpName(workspace)
+	if err != nil {
+		// No prefix, no siblings: nothing of ours to remove.
+		return nil
+	}
+	settingsParent, settingsName, err := reviewSiblingName(workspace, reviewSettingsPrefix)
+	if err != nil {
+		return nil
+	}
+	type place struct {
+		parent, what string
+		match        func(string) bool
+	}
+	var places []place
+	for _, base := range reviewTmpBases(workspace) {
+		places = append(places, place{base, "private temp dir", func(n string) bool { return isReviewTmpName(n, tmpName) }})
+	}
+	places = append(places, place{settingsParent, "settings dir", func(n string) bool { return strings.HasPrefix(n, settingsName) }})
+
 	var errs []error
-	for _, sib := range reviewSiblingPrefixes {
-		parent, name, err := reviewSiblingName(workspace, sib.prefix)
-		if err != nil {
-			// No prefix, no siblings: nothing of ours to remove.
-			return nil
-		}
-		entries, err := os.ReadDir(parent)
+	for _, p := range places {
+		entries, err := os.ReadDir(p.parent)
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			continue
 		}
 		if err != nil {
-			return fmt.Errorf("list the review's %s: %w", sib.what, err)
+			errs = append(errs, fmt.Errorf("list the review's %s: %w", p.what, err))
+			continue
 		}
 		for _, e := range entries {
-			if !strings.HasPrefix(e.Name(), name) {
+			if !p.match(e.Name()) {
 				continue
 			}
-			dir := filepath.Join(parent, e.Name())
+			dir := filepath.Join(p.parent, e.Name())
 			err := removeReviewSibling(dir)
 			if err == nil {
 				continue
@@ -267,10 +380,18 @@ func removeReviewTmpDir(workspace string) error {
 				errs = append(errs, fmt.Errorf("refusing to remove %q: it is not a directory forgectl made", dir))
 				continue
 			}
-			errs = append(errs, fmt.Errorf("remove the review's %s: %w", sib.what, err))
+			errs = append(errs, fmt.Errorf("remove the review's %s: %w", p.what, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RemoveReviewDirs removes the private temp dir and settings dir a Claude
+// dispatch made for workspace, as teardown does, without touching the
+// workspace itself. It is for a caller left holding a workspace path whose
+// session was never torn down, such as a test harness.
+func RemoveReviewDirs(workspace string) error {
+	return removeReviewTmpDir(workspace)
 }
 
 // workspaceTeardown is sandbox.Teardown, a seam so a test can stage a

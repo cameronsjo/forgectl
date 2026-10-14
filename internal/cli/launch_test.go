@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -68,22 +69,40 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(dir)
 	// The settings dir is left 0500, which RemoveAll cannot empty unless
 	// run as root.
-	unsealTree(tmp)
+	releaseReviews(tmp)
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
 }
 
 // shortTempRoot makes the package's temp root directly in a short system temp
-// dir. The drain tests bind Unix sockets under TMPDIR, and macOS's per-user
-// /var/folders/.../T/ already uses half of the 104-byte sun_path there, so on
+// dir, under a short name. The drain tests bind Unix sockets under TMPDIR,
+// and a Claude review's private temp dir must keep Claude Code's per-uid dir
+// inside it within 44 bytes, or it is made in /tmp instead and outlives the
+// run. macOS's per-user /var/folders/.../T/ is too long for either, so on
 // macOS the root goes under /private/tmp: /tmp itself is a symlink to it, and
 // the drain refuses a symlinked TMPDIR.
 func shortTempRoot() (string, error) {
-	base := ""
+	base := os.TempDir()
 	if runtime.GOOS == "darwin" {
 		base = "/private/tmp"
 	}
-	return os.MkdirTemp(base, "fc-")
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for range 64 {
+		var b [4]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = alphabet[int(b[i])%len(alphabet)]
+		}
+		dir := filepath.Join(base, "f"+string(b[:]))
+		err := os.Mkdir(dir, 0o700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return dir, err
+	}
+	return "", errors.New("no free temp root name")
 }
 
 // stubSandboxDeps writes no-op bwrap and socat executables into a directory

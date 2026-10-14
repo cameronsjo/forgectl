@@ -249,19 +249,21 @@ var reviewUID = os.Getuid
 // beside the shared dir when TMPDIR was inside it), the one under forgectl's
 // own TMPDIR, the one under /tmp, and on macOS the /private/tmp spelling
 // Seatbelt compares. The review's own claude-<uid> dir sits inside its private
-// temp dir, beside the workspace, so none of these covers it.
+// temp dir (createReviewTmpDir), whose name none of these covers.
 //
-// The private dir alone did not keep the reviewer out of the shared one: on
-// macOS (Claude Code 2.1.289) the reviewer's Bash saw TMPDIR=/tmp/claude-501
-// and wrote there. Claude Code falls back to /tmp on macOS and to TMPDIR on
-// Linux whenever CLAUDE_CODE_TMPDIR does not reach it. With these denies, a
-// write to the shared dir fails even then: measured on Linux (2.1.299) with
+// On macOS (Claude Code 2.1.289) the reviewer's Bash saw
+// TMPDIR=/tmp/claude-501 and wrote there: the private dir sat under the long
+// /var/folders temp dir, past claudeTmpDirMax, so Claude Code fell back to a
+// claude-<uid> dir of its own choosing. createReviewTmpDir now keeps the
+// private dir short enough, and these denies make a write to a shared dir
+// fail even if Claude Code falls back again (the reviewer's commands then
+// fail rather than write there): measured on Linux (2.1.299) with
 // CLAUDE_CODE_TMPDIR unset and the dir granted by --add-dir, the write failed
 // read-only, and with the pin in place the private claude-<uid> dir stayed
 // writable. A listed dir that does not exist is accepted.
 //
 // A workspace inside one of these refuses the review: denying that dir would
-// deny the review's own temp dir beside the workspace, and leaving it out
+// deny the review's settings dir beside the workspace, and leaving it out
 // would let the reviewer write the shared one. reviewWorkspaceRoot keeps
 // workspaces out of them, so this is a backstop. Containment is judged
 // against each dir as spelled, not resolved: a symlink someone else put at
@@ -284,6 +286,14 @@ func sharedClaudeTmpDirs(workspace string) ([]string, error) {
 		if slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, dir) }) {
 			return nil, fmt.Errorf("refusing to build the review sandbox: the workspace %q is inside Claude Code's shared temp dir %q, "+
 				"which the reviewer must not write; set TMPDIR to a directory outside it", workspace, dir)
+		}
+		// reviewDenyWrite also lists each dir's resolved spelling. A
+		// claude-<uid> that is a link to a dir holding the workspace would
+		// deny the review's own dirs beside it and break every command, so
+		// say why instead.
+		if r := resolvedOrSelf(dir); r != dir && slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, r) }) {
+			return nil, fmt.Errorf("refusing to build the review sandbox: Claude Code's shared temp dir %q is a link to %q, "+
+				"which holds the workspace %q; remove the link, or set TMPDIR to a directory outside it", dir, r, workspace)
 		}
 		if !slices.Contains(out, dir) {
 			out = append(out, dir)

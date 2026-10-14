@@ -44,12 +44,12 @@ import (
 )
 
 func TestReviewSiblingName_DerivesFromTheWorkspaceSuffix(t *testing.T) {
-	parent, name, err := reviewSiblingName("/tmp/"+sandbox.WorkspacePrefix+"123", reviewTmpPrefix)
+	parent, name, err := reviewSiblingName("/tmp/"+sandbox.WorkspacePrefix+"123", reviewSettingsPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parent != "/tmp" || name != reviewTmpPrefix+"123-" {
-		t.Errorf("reviewSiblingName = %q, %q, want /tmp, %s123-", parent, name, reviewTmpPrefix)
+	if parent != "/tmp" || name != reviewSettingsPrefix+"123-" {
+		t.Errorf("reviewSiblingName = %q, %q, want /tmp, %s123-", parent, name, reviewSettingsPrefix)
 	}
 	if strings.HasPrefix(name, sandbox.WorkspacePrefix) {
 		t.Errorf("%q carries the workspace prefix, so it would read as a workspace", name)
@@ -62,9 +62,29 @@ func TestReviewSiblingName_DerivesFromTheWorkspaceSuffix(t *testing.T) {
 }
 
 // reviewSiblings lists ws's siblings for prefix: every entry under the name
-// reviewSiblingName gives, whoever made it.
+// reviewSiblingName (or, for the private temp dir, reviewTmpName) gives,
+// whoever made it.
 func reviewSiblings(t *testing.T, ws, prefix string) []string {
 	t.Helper()
+	if prefix == reviewTmpPrefix {
+		name, err := reviewTmpName(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, base := range reviewTmpBases(ws) {
+			entries, err := os.ReadDir(base)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if isReviewTmpName(e.Name(), name) {
+					out = append(out, filepath.Join(base, e.Name()))
+				}
+			}
+		}
+		return out
+	}
 	parent, name, err := reviewSiblingName(ws, prefix)
 	if err != nil {
 		t.Fatal(err)
@@ -92,10 +112,25 @@ func onlyReviewSibling(t *testing.T, ws, prefix string) string {
 	return got[0]
 }
 
-// plantedSibling makes an entry under ws's sibling name for prefix, as a
-// stranger could before or during a review, and returns its path.
+// plantedSibling returns a path under ws's sibling name for prefix, where a
+// stranger could make an entry before or during a review. A private temp
+// dir's tail must be reviewTmpRandLen long to match.
 func plantedSibling(t *testing.T, ws, prefix, tail string) string {
 	t.Helper()
+	if prefix == reviewTmpPrefix {
+		if len(tail) != reviewTmpRandLen {
+			t.Fatalf("a private temp dir tail is %d characters, not %q", reviewTmpRandLen, tail)
+		}
+		name, err := reviewTmpName(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base, err := reviewTmpHome()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(base, name+tail)
+	}
 	parent, name, err := reviewSiblingName(ws, prefix)
 	if err != nil {
 		t.Fatal(err)
@@ -103,14 +138,11 @@ func plantedSibling(t *testing.T, ws, prefix, tail string) string {
 	return filepath.Join(parent, name+tail)
 }
 
-// fakeWorkspaceIn makes a workspace-shaped dir under parent. A t.TempDir()
-// parent is longer than the Linux socket budget allows, so the length check
-// (tested on its own) is switched off to keep its warning out of the log.
+// fakeWorkspaceIn makes a workspace-shaped dir under parent. Its private
+// temp dir goes in reviewShortTmpBase, which TestMain points at a short dir
+// of its own, because a t.TempDir() parent is too long for claudeTmpDirMax.
 func fakeWorkspaceIn(t *testing.T, parent string) string {
 	t.Helper()
-	orig := reviewTmpGOOS
-	reviewTmpGOOS = "none"
-	t.Cleanup(func() { reviewTmpGOOS = orig })
 	ws, err := os.MkdirTemp(parent, sandbox.WorkspacePrefix+"*")
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +238,7 @@ func TestCreateReviewTmpDir_MakesAPrivateDir(t *testing.T) {
 func TestCreateReviewTmpDir_IgnoresEntriesUnderAMatchingName(t *testing.T) {
 	parent := t.TempDir()
 	ws := fakeWorkspaceIn(t, parent)
-	planted := plantedSibling(t, ws, reviewTmpPrefix, "planted")
+	planted := plantedSibling(t, ws, reviewTmpPrefix, "plant")
 	if err := os.Mkdir(planted, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +250,7 @@ func TestCreateReviewTmpDir_IgnoresEntriesUnderAMatchingName(t *testing.T) {
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	link := plantedSibling(t, ws, reviewTmpPrefix, "link")
+	link := plantedSibling(t, ws, reviewTmpPrefix, "link0")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
@@ -237,24 +269,53 @@ func TestCreateReviewTmpDir_IgnoresEntriesUnderAMatchingName(t *testing.T) {
 	}
 }
 
-func TestCheckReviewTmpDirLength(t *testing.T) {
-	orig := reviewTmpGOOS
-	t.Cleanup(func() { reviewTmpGOOS = orig })
-
-	// 80 bytes: the length measured to break the Linux sandbox's sockets.
-	long := "/" + strings.Repeat("d", 79)
-	short := "/tmp/" + reviewTmpPrefix + "1234567890"
-
-	reviewTmpGOOS = "linux"
-	if err := checkReviewTmpDirLength(long); err == nil || !strings.Contains(err.Error(), "TMPDIR") {
-		t.Errorf("an 80-byte dir on Linux = %v, want a refusal naming TMPDIR", err)
+// TestClaudeTmpDirFits: Claude Code's per-uid dir inside a private temp dir
+// must fit claudeTmpDirMax, or Claude Code hands the reviewer's Bash a temp
+// dir outside it.
+func TestClaudeTmpDirFits(t *testing.T) {
+	stubReviewUID(t, 501)
+	// "/claude-501" is 11 bytes and the name 13, so a base of up to 19 fits.
+	if !claudeTmpDirFits("/tmp") {
+		t.Error("/tmp does not fit")
 	}
-	if err := checkReviewTmpDirLength(short); err != nil {
-		t.Errorf("a /tmp dir on Linux was refused: %v", err)
+	if !claudeTmpDirFits("/" + strings.Repeat("d", 18)) {
+		t.Error("a 19-byte base does not fit")
 	}
-	reviewTmpGOOS = "darwin"
-	if err := checkReviewTmpDirLength(long); err != nil {
-		t.Errorf("macOS is not checked, but got %v", err)
+	if claudeTmpDirFits("/" + strings.Repeat("d", 19)) {
+		t.Error("a 20-byte base fits")
+	}
+	if claudeTmpDirFits("/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T") {
+		t.Error("macOS's per-user temp dir fits")
+	}
+	stubReviewUID(t, -1)
+	if !claudeTmpDirFits("/" + strings.Repeat("d", 200)) {
+		t.Error("without a uid nothing can be measured, so everything fits")
+	}
+}
+
+// TestCreateReviewTmpDir_GoesWhereClaudeCodeWillUseIt: a workspace root too
+// long for claudeTmpDirMax sends the dir to reviewShortTmpBase, and with no
+// base short enough the review is refused rather than handed a temp dir the
+// reviewer's Bash would not get.
+func TestCreateReviewTmpDir_GoesWhereClaudeCodeWillUseIt(t *testing.T) {
+	stubReviewUID(t, 501)
+	ws := fakeWorkspaceIn(t, t.TempDir())
+	dir, err := createReviewTmpDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dir) != reviewShortTmpBase {
+		t.Errorf("private dir %s is not in the short base %s", dir, reviewShortTmpBase)
+	}
+	if per := len(filepath.Join(dir, "claude-501")); per > claudeTmpDirMax {
+		t.Errorf("Claude Code's per-uid dir %d bytes > %d", per, claudeTmpDirMax)
+	}
+
+	orig := reviewShortTmpBase
+	reviewShortTmpBase = "/" + strings.Repeat("d", 40)
+	t.Cleanup(func() { reviewShortTmpBase = orig })
+	if got, err := createReviewTmpDir(ws); err == nil {
+		t.Errorf("createReviewTmpDir = %s with no short base, want a refusal", got)
 	}
 }
 
@@ -423,7 +484,7 @@ func TestLaunchInline_RefusedDispatchRemovesThePrivateTmpDir(t *testing.T) {
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
 	// An entry a stranger made under a sibling name is not the dispatch's to
 	// remove when it backs out.
-	planted := plantedSibling(t, sess.Workspace, reviewTmpPrefix, "planted")
+	planted := plantedSibling(t, sess.Workspace, reviewTmpPrefix, "plant")
 	if err := os.Mkdir(planted, 0o700); err != nil {
 		t.Fatal(err)
 	}

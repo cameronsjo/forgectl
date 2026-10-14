@@ -9,9 +9,10 @@ import (
 )
 
 // reviewSettings is the whole Claude Code settings document the clean-room
-// reviewer (agent A) runs under, written to a read-only file in the review's
-// private temp dir and passed with --settings (reviewSettingsJSON,
-// writeReviewSettings). It is DENY-BY-DEFAULT: the agent may only read and
+// reviewer (agent A) runs under, written to a read-only file in a sealed
+// settings dir of its own beside the workspace, outside the private temp dir
+// and every root the sandbox can write, and passed with --settings
+// (reviewSettingsJSON, writeReviewSettings). It is DENY-BY-DEFAULT: the agent may only read and
 // run the listed inspection commands. It has NO permission to post a review,
 // comment, merge, or push — posting is gated exclusively by forgectl's human
 // approval gate, never by the agent itself.
