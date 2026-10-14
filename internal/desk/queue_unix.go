@@ -36,6 +36,14 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 	}()
 
+	// running/ is listed before pending/, so a waiting item whose name a run
+	// holds is seen as such (forgectl#1157), and again after it, so an item
+	// claimed between the two listings is still shown, as running.
+	inRunning, err := d.runningNames()
+	if err != nil {
+		return nil, err
+	}
+
 	pending, err := d.list(DirPending)
 	if err != nil {
 		return nil, err
@@ -51,23 +59,35 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 		if gone {
 			changed = append(changed, it.Meta)
-		} else {
-			snap.Pending = append(snap.Pending, it)
+			continue
 		}
+		if it.State == StateWaiting {
+			d.hold(&it, inRunning[name])
+		}
+		snap.Pending = append(snap.Pending, it)
 	}
 
+	afterPendingScan()
 	running, err := d.list(DirRunning)
 	if err != nil {
 		return nil, err
 	}
-	inRunning := map[string]bool{}
+	claimedSince := map[string]bool{}
 	for _, e := range running {
 		name, kind, ok := kindOfFile(e.Name())
 		if !ok {
 			continue
 		}
+		if !inRunning[name] {
+			claimedSince[name] = true
+		}
 		inRunning[name] = true
 		snap.Running = append(snap.Running, d.runningItem(name, kind))
+	}
+	// An item claimed after it was read from pending/ is listed once, as
+	// running.
+	if len(claimedSince) > 0 {
+		snap.Pending = slices.DeleteFunc(snap.Pending, func(it Item) bool { return claimedSince[it.Name] })
 	}
 
 	if snap.Done, err = d.doneItems(inRunning); err != nil {
@@ -108,6 +128,112 @@ func (d *Desk) Scan() (*Snapshot, error) {
 	})
 	return snap, nil
 }
+
+// Known reports whether the desk has an item called name that an AFTER line
+// can wait on: one in pending/ or running/, or a run in done/. A name it
+// does not know (a typo, a skipped item) holds an item for ever.
+func (d *Desk) Known(name string) bool {
+	if !ValidName(name) {
+		return false
+	}
+	for _, sub := range [...]string{DirPending, DirRunning} {
+		if _, err := d.findKind(sub, name); err == nil {
+			return true
+		}
+	}
+	// A run in done/ counts only with the exit code the desk recorded: a
+	// legacy run (an EXIT= line in its log, no meta) never satisfies AFTER.
+	_, ok := d.doneExit(name)
+	return ok
+}
+
+// runningNames is the set of item names in running/.
+func (d *Desk) runningNames() (map[string]bool, error) {
+	entries, err := d.list(DirRunning)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		if name, _, ok := kindOfFile(e.Name()); ok {
+			names[name] = true
+		}
+	}
+	return names, nil
+}
+
+// refusedNameTaken is the refusal of a pending item whose name a run already
+// holds, in running/ or done/: claiming it would rename over that run's
+// record, or its run would be skipped as name-reused once approved. It stays
+// refused while that name is in running/ or done/; the operator skips it and
+// it is queued again under a new number.
+const refusedNameTaken = "another item already uses this name"
+
+// hold sets a waiting item's state when it cannot be claimed: refused when
+// its name is taken by a run (in running/ or done/) or its "# AFTER:" line
+// can never be met, held (it clears on its own) while an item its AFTER line
+// names has not finished with exit 0. Either way it stays in pending/.
+func (d *Desk) hold(it *Item, running bool) {
+	if running || d.doneTaken(it.Name) {
+		it.State, it.Refusal = StateRefused, refusedNameTaken
+		return
+	}
+	why, permanent := d.unmetAfter(it.Name, it.After)
+	switch {
+	case why == "":
+	case permanent:
+		it.State, it.Refusal = StateRefused, why
+	default:
+		it.State, it.Hold = StateHeld, why
+	}
+}
+
+// unmetAfter checks an item's AFTER names, in order, and says which one is
+// not yet done with exit 0, or "" when all are. permanent is set for an AFTER
+// line that can never be met (a bad name, the item itself, too many names).
+func (d *Desk) unmetAfter(name string, after []string) (why string, permanent bool) {
+	if len(after) > MaxAfter {
+		return fmt.Sprintf("its AFTER line names more than %d items", MaxAfter), true
+	}
+	for _, a := range after {
+		if !ValidName(a) {
+			return "its AFTER line names " + strconv.Quote(describe(a)) + ", which is not an item name", true
+		}
+		if a == name {
+			return "its AFTER line names the item itself", true
+		}
+	}
+	for _, a := range after {
+		if _, err := d.findKind(DirRunning, a); err == nil {
+			return "waits on " + a + ", which is still running", false
+		}
+		rc, ok := d.doneExit(a)
+		switch {
+		case !ok:
+			return "waits on " + a + ", which has not finished", false
+		case rc != 0:
+			return "waits on " + a + ", which finished with exit " + strconv.Itoa(rc) + ", not 0", false
+		}
+	}
+	return "", false
+}
+
+// doneExit returns the exit code the desk recorded for the finished run
+// called name: meta.exit_code in done/, written by the run's owner. ok is
+// false when there is none. The log's EXIT= line is never read here: the
+// script writes the log, so a run could print the line that releases the
+// items after it.
+func (d *Desk) doneExit(name string) (rc int, ok bool) {
+	meta, found, err := d.readMeta(DirDone, name)
+	if err != nil || !found || meta.ExitCode == nil {
+		return 0, false
+	}
+	return *meta.ExitCode, true
+}
+
+// afterPendingScan runs between Scan's read of pending/ and its second
+// listing of running/. Tests replace it to claim an item in that window.
+var afterPendingScan = func() {}
 
 func newItem(name string, kind Kind, state State) Item {
 	n, stem := SplitName(name)
