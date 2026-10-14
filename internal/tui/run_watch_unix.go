@@ -34,13 +34,19 @@ type RunWatchOptions struct {
 	// Poll is how often the run is re-read; 0 means deskPollEvery.
 	Poll  time.Duration
 	ASCII bool
+	// LogOnStdin is set when stdin carries the log (desk show --log -): only
+	// stdout must be a terminal, and the keys are read from the controlling
+	// terminal.
+	LogOnStdin bool
+	// Flowchart draws the steps as a top-down flowchart (--layout flow).
+	Flowchart bool
 }
 
 // RunWatch opens the run view full screen on one run of src, without the
 // dashboard around it: the same flow, timeline, replay and keys as the
 // dashboard's r. It follows the run live until q.
 func RunWatch(ctx context.Context, src runview.Source, opts RunWatchOptions) error {
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !runWatchHasTerminal(opts.LogOnStdin) {
 		return ErrRunWatchNeedsTerminal
 	}
 	final, err := tea.NewProgram(newRunWatchModel(ctx, src, opts), keymap.ProgramOptions(ctx)...).Run()
@@ -51,6 +57,24 @@ func RunWatch(ctx context.Context, src runview.Source, opts RunWatchOptions) err
 		return fmt.Errorf("%w: %s", ErrRunWatchNoRun, safeMessage(opts.Name))
 	}
 	return nil
+}
+
+// runWatchHasTerminal reports whether the view can draw and read keys: a
+// terminal on stdout, and on stdin unless stdin carries the log, when the
+// controlling terminal must open instead (Bubble Tea reads keys from it).
+func runWatchHasTerminal(logOnStdin bool) bool {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return false
+	}
+	if !logOnStdin {
+		return term.IsTerminal(int(os.Stdin.Fd()))
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
 }
 
 // runWatchModel hosts the dashboard's run view alone. It holds a deskModel
@@ -69,7 +93,7 @@ func newRunWatchModel(ctx context.Context, src runview.Source, opts RunWatchOpti
 	}
 	m := deskModel{ctx: ctx, theme: opts.Theme, poll: poll, runs: src, opts: DeskOptions{ASCII: opts.ASCII}}
 	m.runGen++
-	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true, ascii: opts.ASCII, want: opts.Name}
+	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true, ascii: opts.ASCII, want: opts.Name, flowchart: opts.Flowchart}
 	return runWatchModel{m: m}
 }
 

@@ -90,8 +90,16 @@ func readLines(f *os.File, st *unix.Stat_t, cur *Cursor, line func(seq int, b []
 	if err != nil && !errors.Is(err, io.EOF) {
 		return capped, err
 	}
-	cur.Offset += int64(n)
-	for data := buf[:n]; len(data) > 0; {
+	scanLines(cur, buf[:n], line)
+	return capped, nil
+}
+
+// scanLines reads data, the bytes that follow cur.Offset, and calls line for
+// each line it completes, as readLines describes. It advances cur.Offset past
+// data.
+func scanLines(cur *Cursor, data []byte, line func(seq int, b []byte)) {
+	cur.Offset += int64(len(data))
+	for len(data) > 0 {
 		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
 			hold(cur, data)
@@ -111,7 +119,6 @@ func readLines(f *os.File, st *unix.Stat_t, cur *Cursor, line func(seq int, b []
 		}
 		line(cur.lines, seg)
 	}
-	return capped, nil
 }
 
 // hold keeps the start of a line whose newline has not arrived, up to

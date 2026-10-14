@@ -28,13 +28,15 @@ import (
 )
 
 // Unix-only seams: whether the process has a terminal on stdin and stdout
-// (for the dashboard), and on stdin alone (for `add -`).
+// (for the dashboard), on stdin alone (for `add -`), and on stdout alone
+// (for `show --log - --live`, which reads its keys from the terminal).
 var (
 	deskHasTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	}
-	deskStdinIsTerminal           = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
-	deskStdin           io.Reader = os.Stdin
+	deskStdinIsTerminal             = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	deskStdoutHasTerminal           = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
+	deskStdin             io.Reader = os.Stdin
 )
 
 const (

@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -92,39 +93,79 @@ func (r *loadedRun) progress() (total, done, failed int) {
 
 // deskRunSources opens the sources `desk runs` and `desk show` read: the
 // desk unless skipDesk, and the log when one is named. A source that cannot
-// be opened is returned as a failure beside the ones that could.
-func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk bool) (srcs []runview.Source, closeAll func(), failed []error) {
-	closeAll = func() {}
+// be opened is returned as a failure beside the ones that could. follow is
+// the live view's: a stream is followed rather than read to its end, and a
+// command is restarted when it exits.
+func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk, follow bool) (srcs []runview.Source, closeAll func(), failed []error) {
+	var closers []func()
+	closeAll = func() {
+		for _, c := range closers {
+			c()
+		}
+	}
 	if !skipDesk {
 		d, err := openDeskDirFor(cmd, deps, dirFlag)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
 			srcs = append(srcs, runview.NewDeskSource(d))
-			closeAll = func() { _ = d.Close() }
+			closers = append(closers, func() { _ = d.Close() })
 		}
 	}
-	if log.path != "" {
-		src, err := openLogSource(log)
+	if log.named() {
+		src, closeLog, err := openLogSource(cmd.Context(), log, follow)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
 			srcs = append(srcs, src)
+			closers = append(closers, closeLog)
 		}
 	}
 	return srcs, closeAll, failed
 }
 
-func openLogSource(log deskLogOpts) (runview.Source, error) {
+// openLogSource opens the log named: a file, stdin (--log -), or a
+// command's stdout (--follow-cmd). Unless follow is set, a stream is read to
+// its end before this returns, so one Load reads all of it. The close func
+// stops a command still running.
+func openLogSource(ctx context.Context, log deskLogOpts, follow bool) (runview.Source, func(), error) {
+	var lens *runview.Lens
+	if log.lens != "" {
+		l, err := loadLens(log.lens)
+		if err != nil {
+			return nil, nil, err
+		}
+		lens = l
+	}
+	var s *runview.StreamSource
+	var err error
+	switch {
+	case log.followCmd != "":
+		s, err = runview.NewCommandSource(ctx, log.followCmd, follow, lens, log.keys())
+	case log.path == deskStdinLog:
+		s, err = runview.NewReaderSource("stdin", deskStdin, lens, log.keys())
+	default:
+		src, err := openLogFile(log, lens)
+		return src, func() {}, err
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if !follow {
+		if err := s.Wait(ctx); err != nil {
+			s.Close()
+			return nil, nil, fmt.Errorf("desk: reading the log: %w", err)
+		}
+	}
+	return s, s.Close, nil
+}
+
+func openLogFile(log deskLogOpts, lens *runview.Lens) (runview.Source, error) {
 	abs, err := filepath.Abs(log.path)
 	if err != nil {
 		return nil, fmt.Errorf("desk: --log: %w", err)
 	}
-	if log.lens != "" {
-		lens, err := loadLens(log.lens)
-		if err != nil {
-			return nil, err
-		}
+	if lens != nil {
 		return runview.NewLensSource(abs, lens)
 	}
 	return runview.NewLogSource(abs, log.keys())
@@ -188,7 +229,7 @@ func reportRunFailures(w io.Writer, failed []error) error {
 }
 
 func runDeskRuns(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, asJSON bool) error {
-	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, false)
+	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, false, false)
 	defer closeAll()
 	var runs []*loadedRun
 	for _, src := range srcs {
@@ -312,10 +353,11 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 			return err
 		}
 	}
-	if o.live && !deskHasTerminal() {
+	logOnStdin := log.path == deskStdinLog
+	if o.live && !deskHasTerminal() && (!logOnStdin || !deskStdoutHasTerminal()) {
 		return WithExitCode(tui.ErrRunWatchNeedsTerminal, deskExitUsage)
 	}
-	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "")
+	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "", o.live)
 	defer closeAll()
 	if len(failed) > 0 {
 		return errors.Join(failed...)
@@ -346,7 +388,10 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 		return err
 	}
 	if o.live {
-		err := tui.RunWatch(cmd.Context(), src, tui.RunWatchOptions{Theme: deps.Theme, Name: r.ref.Name, ASCII: deskNoIcons(cmd, deps)})
+		err := tui.RunWatch(cmd.Context(), src, tui.RunWatchOptions{
+			Theme: deps.Theme, Name: r.ref.Name, ASCII: deskNoIcons(cmd, deps),
+			LogOnStdin: logOnStdin, Flowchart: o.layout == deskLayoutFlow,
+		})
 		if errors.Is(err, tui.ErrRunWatchNoRun) {
 			return WithExitCode(err, exitFailed)
 		}

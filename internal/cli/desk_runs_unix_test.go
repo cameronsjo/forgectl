@@ -369,3 +369,52 @@ func TestDeskLogKeyFlagsNeedALog(t *testing.T) {
 		wantExit(t, err, 2)
 	}
 }
+
+// --log - reads the log from stdin, to its end, and shows it as a file's.
+func TestDeskShow_LogFromStdin(t *testing.T) {
+	newDeskDir(t)
+	prev := deskStdin
+	t.Cleanup(func() { deskStdin = prev })
+	deskStdin = strings.NewReader(`{"event":"a"}` + "\n" + `{"event":"b"}`)
+	out, _, err := deskRun(t, deskDeps(), "show", "--log", "-", "--events")
+	wantExit(t, err, 0)
+	for _, want := range []string{"log/stdin · log", "#1    a", "#2    b", "2 events"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show --log - is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no newline yet") {
+		t.Errorf("a stream that ended has no line still to come:\n%s", out)
+	}
+}
+
+// --follow-cmd reads a command's stdout; a printed view runs it once, to its
+// exit, and a failed command exits 1 with its stderr named.
+func TestDeskShow_FollowCmd(t *testing.T) {
+	newDeskDir(t)
+	out, _, err := deskRun(t, deskDeps(), "show", "--follow-cmd", `printf '{"event":"a"}\n'`, "--events")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "#1    a") || !strings.Contains(out, "1 event") {
+		t.Errorf("show --follow-cmd did not read the command's output:\n%s", out)
+	}
+	out, _, err = deskRun(t, deskDeps(), "show", "--follow-cmd", `echo '{"event":"a"}'; echo 'no such pod' >&2; exit 4`)
+	wantExit(t, err, 1)
+	if !strings.Contains(out, "no such pod") || !strings.Contains(out, "exit status 4") {
+		t.Errorf("a failed command should be named with its stderr:\n%s", out)
+	}
+}
+
+func TestDeskShow_StreamAndLayoutUsage(t *testing.T) {
+	newDeskDir(t)
+	p := writeTemp(t, "e.jsonl", "{}\n")
+	for _, args := range [][]string{
+		{"show", "--log", p, "--follow-cmd", "true"},
+		{"show", "01-x", "--follow-cmd", "true"},
+		{"show", "--follow-cmd", " "},
+		{"show", "--log", p, "--layout", "flow"},
+		{"show", "--log", p, "--live", "--layout", "grid"},
+	} {
+		_, _, err := deskRun(t, deskDeps(), args...)
+		wantExit(t, err, 2)
+	}
+}

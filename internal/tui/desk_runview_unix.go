@@ -62,6 +62,9 @@ type deskRunView struct {
 	// raw shows each line as the log wrote it rather than as a lens's say
 	// rewrote it (o); rewrites is set once any event was rewritten.
 	raw, rewrites bool
+	// flowchart draws the steps as a top-down flowchart beside the
+	// timeline (desk show --live --layout flow) rather than the flow above it.
+	flowchart bool
 	// clock is the time a running step is counted from; nil is time.Now.
 	clock func() time.Time
 	err   error
@@ -300,7 +303,7 @@ func (m deskModel) switchRun(step int) (tea.Model, tea.Cmd) {
 	}
 	idx := (v.idx + step + len(v.refs)) % len(v.refs)
 	m.runGen++
-	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true, ascii: v.ascii}
+	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true, ascii: v.ascii, flowchart: v.flowchart}
 	return m, loadRunCmd(m.runs, m.rv.gen, "", m.rv.ref(), nil)
 }
 
@@ -459,6 +462,8 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		lines = append(lines, st.Muted.Render(" loading…"))
 	case v.err != nil && !v.loaded:
 		lines = append(lines, cut(" "+st.Danger.Render(safeMessage(v.err.Error())), width))
+	case v.flowchart:
+		lines = append(lines, v.flowchartBody(st, g, s, width, max(body, 1))...)
 	default:
 		flowRows := max(min(body/2, 12), 1)
 		flow := runFlow(st, g, s, v.timing(), width, flowRows)
