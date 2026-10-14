@@ -42,6 +42,33 @@ func unsafe(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrUnsafe, termsafe.SafeLineMax(fmt.Sprintf(format, args...), reasonMaxRunes))
 }
 
+// unsafeFile is unsafe for a file OpenFile refuses: the reason goes under
+// ErrUnsafeFile, terminal-safe and bounded.
+func unsafeFile(format string, args ...any) error {
+	for i, arg := range args {
+		if err, ok := arg.(error); ok {
+			args[i] = termsafe.Error(err)
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrUnsafeFile, termsafe.SafeLineMax(fmt.Sprintf(format, args...), reasonMaxRunes))
+}
+
+// validName refuses a file name OpenFile cannot resolve against its
+// directory alone: an empty, "." or ".." name, an absolute or multi-segment
+// one (openat ignores the descriptor for an absolute path), or one with a
+// NUL.
+func validName(name string) error {
+	switch {
+	case name == "", name == ".", name == "..":
+		return fmt.Errorf("%w: a file name must be a single path component", ErrUnsafeFile)
+	case strings.ContainsRune(name, filepath.Separator):
+		return fmt.Errorf("%w: a file name must not contain a path separator", ErrUnsafeFile)
+	case strings.ContainsRune(name, 0):
+		return fmt.Errorf("%w: a file name must not contain a NUL", ErrUnsafeFile)
+	}
+	return nil
+}
+
 // Pin returns a descriptor on the spec's leaf directory.
 //
 // After this returns, every file beneath the leaf must be opened with openat

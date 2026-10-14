@@ -126,6 +126,10 @@ func TestLedgerRefusesASymlinkedFile(t *testing.T) {
 
 	if _, err := l.Rows(); !errors.Is(err, ErrLedgerUnreadable) {
 		t.Errorf("Rows through a symlink: err = %v, want ErrLedgerUnreadable", err)
+	} else if want := ErrLedgerUnreadable.Error() + ": " + filepath.Base(data) + " is a symlink"; err.Error() != want {
+		// The reason reads as it did before the check moved to privdir, with
+		// no stacked "privdir: file is unsafe" clause.
+		t.Errorf("Rows through a symlink: err = %q, want %q", err, want)
 	}
 	if err := l.Begin(Row{Name: "w2", Branch: "y"}); !errors.Is(err, ErrLedgerUnreadable) {
 		t.Errorf("Begin through a symlink: err = %v, want ErrLedgerUnreadable", err)

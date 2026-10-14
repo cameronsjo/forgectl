@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
@@ -114,11 +116,11 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// worktree's .gitattributes names, and the worktree is the worker's to
 	// write; RunUnfiltered blanks every driver so none runs as the operator.
 	// Refreshing a stat-dirty entry rewrites the index, which fires
-	// post-index-change, so hooks are pinned off as well. --no-optional-locks
+	// post-index-change; RunUnfiltered pins hooks off as well. --no-optional-locks
 	// (GIT_OPTIONAL_LOCKS=0) stops status from taking index.lock to write that
 	// refresh back: this inspection also backs `surface close --dry-run`, which
 	// must change nothing, and the answer needs no refreshed index.
-	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "-c", "core.hooksPath=/dev/null", "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
+	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
@@ -165,30 +167,38 @@ func RemoveWorktree(ctx context.Context, run GitRunner, top, path string) error 
 		return fmt.Errorf("%w: %s is not directly under %s", ErrUnsafeWorktreeRoot, path, filepath.Join(append([]string{top}, worktreeDirs...)...))
 	}
 	// worktree remove runs its own dirty check in path, so path's filter
-	// drivers are blanked too.
-	if _, err := gitenv.RunUnfilteredAlso(ctx, run, gitenv.Bin, top, []string{path}, "-c", "core.hooksPath=/dev/null", "worktree", "remove", "--", path); err != nil {
+	// drivers are blanked too. RunUnfilteredAlso pins hooks off.
+	if _, err := gitenv.RunUnfilteredAlso(ctx, run, gitenv.Bin, top, []string{path}, "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("worker: git worktree remove %s: %w", path, err)
 	}
 	return nil
 }
 
+// maxGitFileBytes bounds the gitfile checkGitFile reads: "gitdir: " and a
+// path under the common git dir.
+const maxGitFileBytes = 4096
+
 // checkGitFile refuses a worktree whose .git is not the gitfile git wrote:
 // a regular file naming a directory under <common git dir>/worktrees. The worktree
 // is the worker's to write, and a .git it pointed elsewhere would hand git a
 // config the worker wrote.
+//
+// The read never follows a symbolic link and never blocks (gitenv.OpenGitfile),
+// is checked on the open handle, and stops after maxGitFileBytes+1 bytes: a
+// process that outlives the workspace could swap a FIFO or an endless file in
+// after the Lstat, and close must refuse it rather than hang (#1079).
 func checkGitFile(common, path string) error {
 	gitfile := filepath.Join(path, ".git")
 	info, err := os.Lstat(gitfile)
 	if err != nil {
 		return fmt.Errorf("worker: check %s: %w", gitfile, err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > 4096 {
+	if !info.Mode().IsRegular() || info.Size() > maxGitFileBytes {
 		return fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
 	}
-	//nolint:gosec // G304: gitfile is WorktreePath(top, a ValidName) plus .git, just checked to be a small regular file
-	data, err := os.ReadFile(gitfile)
+	data, err := readGitFile(gitfile)
 	if err != nil {
-		return fmt.Errorf("worker: read %s: %w", gitfile, err)
+		return err
 	}
 	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
 	if ok && !filepath.IsAbs(dir) {
@@ -205,6 +215,40 @@ func checkGitFile(common, path string) error {
 		return fmt.Errorf("%w: %s points outside %s", ErrUnsafeWorktreeRoot, gitfile, admin)
 	}
 	return nil
+}
+
+// readGitFile reads the gitfile at gitfile, already found a small regular
+// file by Lstat, through a no-follow, non-blocking open, and refuses it
+// unless the open handle is still a regular file of at most maxGitFileBytes.
+func readGitFile(gitfile string) ([]byte, error) {
+	f, err := gitenv.OpenGitfile(gitfile)
+	switch {
+	case errors.Is(err, syscall.ELOOP):
+		// A symbolic link swapped in after the Lstat. A FIFO opens without
+		// blocking and is refused by the mode check below.
+		return nil, fmt.Errorf("%w: %s is a symbolic link, not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+	case err != nil:
+		// Removed after the Lstat, unreadable, or any other open failure: no
+		// gitfile was read, so the worktree is kept, but nothing says the
+		// worktree is hostile.
+		return nil, fmt.Errorf("worker: open %s: %w", gitfile, err)
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("worker: check %s: %w", gitfile, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxGitFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("worker: read %s: %w", gitfile, err)
+	}
+	if len(data) > maxGitFileBytes {
+		return nil, fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+	}
+	return data, nil
 }
 
 // ListedWorktrees returns the paths `git worktree list --porcelain` names.

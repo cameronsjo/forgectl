@@ -6,6 +6,7 @@ package gitenvtest
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,23 @@ func RequireGit(t testing.TB) string {
 		t.Skipf("git is not on PATH: %v", err)
 	}
 	return path
+}
+
+// RequireGitVersion skips t unless git on PATH is at least major.minor.
+func RequireGitVersion(t testing.TB, major, minor int) {
+	t.Helper()
+	RequireGit(t)
+	out, err := exec.CommandContext(t.Context(), gitenv.Bin, "version").Output() //nolint:gosec // G204: git version
+	if err != nil {
+		t.Skipf("git version: %v", err)
+	}
+	var mjr, mnr int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(strings.TrimSpace(string(out)), "git version "), "%d.%d", &mjr, &mnr); err != nil {
+		t.Skipf("cannot read %q as a git version", out)
+	}
+	if mjr < major || (mjr == major && mnr < minor) {
+		t.Skipf("needs git %d.%d or later; this is %d.%d", major, minor, mjr, mnr)
+	}
 }
 
 // OperatorAllowsExt points git at a global config that admits the ext::
@@ -73,7 +91,7 @@ func WithoutLazyFetchPin(t testing.TB) {
 
 // Strip returns args without a leading gitenv profile's options, and
 // without the `-c protocol.<name>.allow=never` pairs gitenv.RunRefusing adds
-// after them, for a fake Runner that answers on git's subcommand. args is
+// after them or the hook switches gitenv.NoHookArgs puts there, for a fake Runner that answers on git's subcommand. args is
 // returned unchanged when it does not begin with a profile's options. That a
 // call carries its profile and its refusals is gitenv's tests' and the
 // callers' own to prove, not every fake's.
@@ -112,6 +130,12 @@ func split(args []string) ([]string, []string) {
 				refused = append(refused, name)
 				rest = rest[2:]
 			}
+			if pin := gitenv.NoHookArgs(nil); len(rest) >= len(pin) && slices.Equal(rest[:len(pin)], pin) {
+				rest = rest[len(pin):]
+				for len(rest) >= 2 && rest[0] == "-c" && strings.HasPrefix(rest[1], "hook.") && strings.HasSuffix(rest[1], ".enabled=false") {
+					rest = rest[2:]
+				}
+			}
 			return rest, refused
 		}
 	}
@@ -130,9 +154,10 @@ func refusal(v string) (string, bool) {
 }
 
 // FilterListing reports whether args, a git argv as a fake Runner records it,
-// are one of gitenv.RunUnfiltered's listings ahead of its call: the filter
-// drivers, `[-C dir] config -z --name-only --get-regexp
-// ^filter...`, or the submodules, `[-C dir] ls-files -z --stage -- :/`.
+// are one of gitenv.RunUnfiltered's or gitenv.RunNoHooks's listings ahead of
+// its call: the filter drivers and configured hooks, `[-C dir] config -z
+// --name-only --get-regexp ^(filter...` (or RunNoHooks's `^hook...` and
+// `^(include...`), or the submodules, `[-C dir] ls-files -z --stage -- :/`.
 func FilterListing(args []string) bool {
 	return driverListing(args) || submoduleListing(args)
 }
@@ -148,7 +173,7 @@ func atStripped(args []string) []string {
 
 func driverListing(args []string) bool {
 	args = atStripped(args)
-	return len(args) >= 5 && args[0] == "config" && args[len(args)-2] == "--get-regexp" && strings.HasPrefix(args[len(args)-1], `^filter\.`)
+	return len(args) >= 5 && args[0] == "config" && args[len(args)-2] == "--get-regexp" && (strings.HasPrefix(args[len(args)-1], `^filter\.`) || strings.HasPrefix(args[len(args)-1], `^(filter\.`) || strings.HasPrefix(args[len(args)-1], `^hook\.`) || strings.HasPrefix(args[len(args)-1], `^(include\.`))
 }
 
 func submoduleListing(args []string) bool {
@@ -387,4 +412,93 @@ func NewSubmoduleFilterCanary(t testing.TB) FilterCanary {
 		}
 	}
 	return c
+}
+
+// HookCanary is a repository whose own .git/config sets core.hooksPath to a
+// directory holding a post-index-change hook that creates the file at Path.
+// Its committed x.txt is stat-dirty, so a status that refreshes the entry
+// rewrites the index and fires the hook (#1079).
+type HookCanary struct {
+	Dir  string
+	Path string
+}
+
+// NewHookCanary builds a HookCanary repository. Unix only: the hook is a
+// shell script.
+func NewHookCanary(t testing.TB) HookCanary {
+	t.Helper()
+	RequireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the hook canary's hook is an sh script")
+	}
+	dir := t.TempDir()
+	c := HookCanary{Dir: filepath.Join(dir, "repo"), Path: filepath.Join(dir, "canary")}
+	hooks := filepath.Join(dir, "hooks")
+	for _, d := range []string{c.Dir, hooks} {
+		if err := os.Mkdir(d, 0o750); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, "x.txt"), []byte("payload\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile x.txt: %v", err)
+	}
+	Git(t, c.Dir, "init", "-q", "-b", "main")
+	Git(t, c.Dir, "add", ".")
+	Git(t, c.Dir, "commit", "-q", "-m", "control")
+	// The hook is selected only after the commit, so committing ran none.
+	//nolint:gosec // G306: a hook must be executable to be a live control
+	if err := os.WriteFile(filepath.Join(hooks, "post-index-change"), []byte("#!/bin/sh\ntouch '"+c.Path+"'\n"), 0o750); err != nil {
+		t.Fatalf("WriteFile hook: %v", err)
+	}
+	Git(t, c.Dir, "config", "core.hooksPath", hooks)
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(c.Dir, "x.txt"), later, later); err != nil {
+		t.Fatalf("Chtimes x.txt: %v", err)
+	}
+	return c
+}
+
+// Ran reports whether the canary's hook ran.
+func (c HookCanary) Ran(t testing.TB) bool {
+	t.Helper()
+	return Canary{Path: c.Path}.Ran(t)
+}
+
+// AssertLive proves the fixture can fire: a git status with Local's options
+// and environment but no hook pin runs the hook. A test that asserts the
+// canary never ran calls this first, on a second HookCanary.
+func (c HookCanary) AssertLive(t testing.TB) {
+	t.Helper()
+	cmd := gitenv.Command(t.Context(), gitenv.Local, "-C", c.Dir, "status", "--porcelain")
+	_ = cmd.Run()
+	if !c.Ran(t) {
+		t.Fatal("a Local git status ran no hook; the fixture cannot fire, so a passing test would prove nothing")
+	}
+}
+
+// NewConfigHookCanary builds a HookCanary whose hook is defined in the
+// repository's own .git/config, as git 2.54 allows: hook.canary.event names
+// post-index-change and hook.canary.command creates the file at Path. A
+// hooks directory pin (core.hooksPath=/dev/null) does not reach it. It
+// skips t on a git older than 2.54, which runs no configured hook.
+func NewConfigHookCanary(t testing.TB) HookCanary {
+	t.Helper()
+	RequireGitVersion(t, 2, 54)
+	c := NewHookCanary(t)
+	Git(t, c.Dir, "config", "--unset", "core.hooksPath")
+	Git(t, c.Dir, "config", "hook.canary.event", "post-index-change")
+	Git(t, c.Dir, "config", "hook.canary.command", "touch '"+c.Path+"'")
+	return c
+}
+
+// AssertLiveThroughHooksPath proves a config hook canary fires through a
+// hooks-directory pin: a Local git status with core.hooksPath=/dev/null and
+// nothing else runs it.
+func (c HookCanary) AssertLiveThroughHooksPath(t testing.TB) {
+	t.Helper()
+	cmd := gitenv.Command(t.Context(), gitenv.Local, "-c", "core.hooksPath=/dev/null", "-C", c.Dir, "status", "--porcelain")
+	_ = cmd.Run()
+	if !c.Ran(t) {
+		t.Fatal("a configured hook did not run under core.hooksPath=/dev/null; the fixture cannot fire, so a passing test would prove nothing")
+	}
 }
