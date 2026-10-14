@@ -41,10 +41,16 @@ var ErrMetadataFailed = errors.New("herdr: the metadata report failed")
 var ErrBadToken = errors.New("herdr: invalid metadata token")
 
 // CheckTokenKey reports whether key is a token name herdr accepts: 1 to 32
-// ASCII letters, digits, '_' or '-'.
+// ASCII letters, digits, '_' or '-', not starting with '-'. herdr itself
+// takes a leading '-', but the key is an argv operand (--clear-token k), and
+// the sensitive exec seam refuses a dash-leading operand, so such a key is
+// refused here, before any herdr call.
 func CheckTokenKey(key string) error {
 	if key == "" || len(key) > maxTokenKeyLen {
 		return fmt.Errorf("%w: key %q must be 1-%d characters", ErrBadToken, key, maxTokenKeyLen)
+	}
+	if key[0] == '-' {
+		return fmt.Errorf("%w: key %q must not start with '-'", ErrBadToken, key)
 	}
 	for _, r := range key {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
@@ -104,24 +110,24 @@ func (a *Adapter) ShowWorkerName(ctx context.Context, ref backend.Ref, name stri
 	return nil
 }
 
-// TagPane sets and clears display tokens on a worker's root pane under
-// MetadataSource, after the checks a write makes (writablePane). It returns
-// the pane it tagged. set and unset must not both be empty, and no key may be
-// in both.
-func (a *Adapter) TagPane(ctx context.Context, ref backend.Ref, set map[string]string, unset []string) (string, error) {
+// CheckTag checks one tag report before anything reaches herdr: set and
+// unset are not both empty, at most MaxTokensPerReport keys in all, every key
+// and value passes CheckTokenKey and CheckTokenValue, and no key is named
+// twice. It returns the set keys and the cleared keys, each sorted.
+func CheckTag(set map[string]string, unset []string) ([]string, []string, error) {
 	if len(set) == 0 && len(unset) == 0 {
-		return "", fmt.Errorf("%w: no token to set or clear", ErrBadToken)
+		return nil, nil, fmt.Errorf("%w: no token to set or clear", ErrBadToken)
 	}
 	if len(set)+len(unset) > MaxTokensPerReport {
-		return "", fmt.Errorf("%w: at most %d tokens per report", ErrBadToken, MaxTokensPerReport)
+		return nil, nil, fmt.Errorf("%w: at most %d tokens per report", ErrBadToken, MaxTokensPerReport)
 	}
 	keys := make([]string, 0, len(set))
 	for k, v := range set {
 		if err := CheckTokenKey(k); err != nil {
-			return "", err
+			return nil, nil, err
 		}
 		if err := CheckTokenValue(k, v); err != nil {
-			return "", err
+			return nil, nil, err
 		}
 		keys = append(keys, k)
 	}
@@ -129,11 +135,22 @@ func (a *Adapter) TagPane(ctx context.Context, ref backend.Ref, set map[string]s
 	cleared := slices.Sorted(slices.Values(unset))
 	for i, k := range cleared {
 		if err := CheckTokenKey(k); err != nil {
-			return "", err
+			return nil, nil, err
 		}
 		if _, ok := set[k]; ok || (i > 0 && cleared[i-1] == k) {
-			return "", fmt.Errorf("%w: %s is named twice", ErrBadToken, k)
+			return nil, nil, fmt.Errorf("%w: %s is named twice", ErrBadToken, k)
 		}
+	}
+	return keys, cleared, nil
+}
+
+// TagPane sets and clears display tokens on a worker's root pane under
+// MetadataSource, after the checks a write makes (writablePane). It returns
+// the pane it tagged. The tokens must pass CheckTag.
+func (a *Adapter) TagPane(ctx context.Context, ref backend.Ref, set map[string]string, unset []string) (string, error) {
+	keys, cleared, err := CheckTag(set, unset)
+	if err != nil {
+		return "", err
 	}
 	pane, err := a.writablePane(ctx, ref)
 	if err != nil {

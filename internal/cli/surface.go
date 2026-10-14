@@ -208,8 +208,8 @@ after the launch and left out when that read fails. worker is
 
 A worker launch also shows the worker's name in herdr's sidebar: it sets the
 workspace token "worker" (herdr workspace report-metadata), which a
-[ui.sidebar.spaces] row shows as $worker. The workspace label stays the
-ownership marker. A failure to set it is a note on stderr, not a failed
+[ui.sidebar.spaces] row shows as $worker, after the workspace ownership
+check. The workspace label stays the ownership marker. A failure to set it is a note on stderr, not a failed
 launch.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex

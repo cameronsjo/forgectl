@@ -432,12 +432,24 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 
 	attempt, err := attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
 	if err != nil {
-		return err
+		if !launchStarted(attempt) {
+			return err
+		}
+		// The worker is running; only its bookkeeping failed. Say where it
+		// is, and with --json print what is known before failing.
+		err = runningWorkerError(err, attempt.launched.ref)
 	}
 
 	out := cmd.OutOrStdout()
 	if opts.JSON {
-		return writeJSON(out, workerLaunchResult(ctx, setup.adapter, attempt, setup.top))
+		res, rerr := workerLaunchResult(ctx, setup.adapter, attempt, spec.name, setup.top)
+		if werr := writeJSON(out, res); werr != nil {
+			return errors.Join(err, werr)
+		}
+		return errors.Join(err, rerr)
+	}
+	if err != nil {
+		return err
 	}
 	if _, err := fmt.Fprintln(out, safeTitle(attempt.launched.ref.String())); err != nil {
 		return err

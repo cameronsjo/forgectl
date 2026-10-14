@@ -103,6 +103,8 @@ func TestTagPane(t *testing.T) {
 		{"a key both set and cleared", map[string]string{"k": "v"}, []string{"k"}},
 		{"a key cleared twice", nil, []string{"k", "k"}},
 		{"a bad cleared key", nil, []string{"k=v"}},
+		{"a dash-leading key", map[string]string{"-x": "1"}, nil},
+		{"a dash-leading cleared key", nil, []string{"-x"}},
 	}
 	for _, tc := range refused {
 		t.Run("refuses "+tc.name, func(t *testing.T) {

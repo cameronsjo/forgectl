@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	osexec "os/exec"
 	"strings"
 	"time"
@@ -58,7 +59,8 @@ asked of GitHub, so it works for a worker in a repository with no GitHub
 remote. --json prints {"name","repo","harness","transcript","usage","reason"},
 where usage is {"costUsd","byModel","priced","unpricedModels"} as in surface
 status, or null with reason saying why. A codex or pi worker records no
-transcript, so it has no usage here. --days does not apply.
+transcript, so it has no usage here; a transcript file that does not exist
+yet is "transcript not found", not $0.00. --days does not apply.
 
 Exit 0: priced (priced is false when a model had no price, and costUsd then
 covers only the priced models). Exit 1: not priced; the reason says why.
@@ -179,12 +181,22 @@ func priceWorker(ctx context.Context, row worker.Row, top string, price func(con
 		res.Reason = "a " + row.Harness + " worker records no transcript forgectl can price"
 	case row.Transcript == "":
 		res.Reason = "the worker's ledger row records no transcript"
+	case !transcriptExists(row.Transcript):
+		// Priced, a missing file would read as $0.00: the session has not
+		// written it yet, or it was moved or removed.
+		res.Reason = "transcript not found: the session has not written it yet, or it was moved or removed"
 	default:
 		if res.Usage = price(ctx, row.Transcript); res.Usage == nil {
 			res.Reason = "the transcript could not be priced: cadence-hooks is not on PATH, its metrics price failed, or it answered in an unexpected shape"
 		}
 	}
 	return res
+}
+
+// transcriptExists reports whether path names a regular file.
+func transcriptExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // reportWorkerUsage prints res and exits 1 when nothing was priced. With

@@ -50,7 +50,8 @@ shows a token named k as $k, for example $task or $issue. Tokens are display
 only: they change no agent state, wait or notification.
 
 --token k=v sets a token and --clear-token k clears one; each repeats, up to
-16 in all. A key is 1-32 ASCII letters, digits, '_' or '-'. A value is 1-80
+16 in all. A key is 1-32 ASCII letters, digits, '_' or '-', not starting
+with '-'. A value is 1-80
 characters with no control, bidi or invisible character and no leading or
 trailing space, so herdr stores exactly what was sent. A key may appear once.
 
@@ -111,6 +112,11 @@ func runSurfaceTag(cmd *cobra.Command, deps module.Deps, opts tagOptions) error 
 	}
 	set, err := parseTagTokens(opts.Tokens)
 	if err != nil {
+		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	// The cleared keys, a key both set and cleared, and the per-report cap
+	// are checked here too, before the ledger or herdr is touched.
+	if _, _, err := herdradapter.CheckTag(set, opts.Clear); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)

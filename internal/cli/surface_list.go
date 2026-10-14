@@ -71,7 +71,7 @@ type listRow struct {
 
 	// TerminalID is herdr's terminal_id for the pane, which survives a pane
 	// move where pane_id renumbers. Read for a present worker under --json
-	// only, and absent when that read fails.
+	// only, and absent when that read, or an earlier row's, failed.
 	TerminalID string `json:"terminal_id,omitempty"`
 }
 
@@ -166,15 +166,19 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	}
 	now := time.Now()
 	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}
+	var kept []worker.Row
 	for _, r := range rows {
 		row := reconcileRow(ctx, w.herdr, r, w.top, listed, now)
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
-		if opts.JSON && row.State == workerPresent {
-			row.TerminalID = rowTerminalID(ctx, w.herdr, r)
-		}
 		res.Workers = append(res.Workers, row)
+		kept = append(kept, r)
+	}
+	if opts.JSON {
+		// After every probe, so a slow terminal read cannot starve a later
+		// row's probe into unreadable.
+		fillTerminalIDs(ctx, w.herdr, kept, res.Workers)
 	}
 	return reportList(cmd, res, opts.JSON)
 }
@@ -202,19 +206,37 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 	return row
 }
 
-// rowTerminalID reads the terminal_id of a present worker's pane, or "" when
-// it cannot be read: the id is a convenience, and the row was already
-// proved present by the probe.
-func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) string {
+// terminalReadTimeoutPerRow bounds one list row's terminal_id read.
+const terminalReadTimeoutPerRow = 5 * time.Second
+
+// fillTerminalIDs reads the terminal_id of each present worker in out (rows
+// are their ledger rows, index for index). Each read has its own short
+// timeout, and the first failed read ends the pass: a herdr that is slow or
+// failing for one pane is likely so for the next, and the ids are a
+// convenience, so the rest are left out rather than waited on.
+func fillTerminalIDs(ctx context.Context, tr terminalReader, rows []worker.Row, out []listRow) {
+	for i := range out {
+		if out[i].State != workerPresent {
+			continue
+		}
+		id, err := rowTerminalID(ctx, tr, rows[i])
+		if err != nil {
+			return
+		}
+		out[i].TerminalID = id
+	}
+}
+
+// rowTerminalID reads the terminal_id of a present worker's pane, under its
+// own timeout.
+func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) (string, error) {
 	ref, err := backend.DecodeRef(r.Ref)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	id, err := tr.TerminalID(ctx, ref)
-	if err != nil {
-		return ""
-	}
-	return id
+	ctx, cancel := context.WithTimeout(ctx, terminalReadTimeoutPerRow)
+	defer cancel()
+	return tr.TerminalID(ctx, ref)
 }
 
 // probeWorkspace probes the row's workspace. A row with no reference never

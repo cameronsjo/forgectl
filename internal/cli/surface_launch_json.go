@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // launchResult is what a real `surface launch --json` prints: what the
@@ -72,12 +75,21 @@ func newLaunchResult(ctx context.Context, adapter any, ref backend.Ref, surfaceN
 }
 
 // workerLaunchResult is a worker launch's result, from the row it wrote.
-func workerLaunchResult(ctx context.Context, adapter any, attempt workerAttempt, top string) launchResult {
+// name is the worker's name as launched. When that row could not be read
+// back, the result still carries what the launch itself returned (the ids,
+// worktree and name) and the error says the rest is missing.
+func workerLaunchResult(ctx context.Context, adapter any, attempt workerAttempt, name, top string) (launchResult, error) {
 	ref := attempt.launched.ref
 	w := &launchedWorkerResult{Repo: top, Worktree: attempt.launched.worktree}
-	var name, harness string
-	if r := attempt.row; r != nil {
-		name, harness = r.Name, r.Harness
+	var harness string
+	var err error
+	switch r := attempt.row; {
+	case attempt.rowErr != nil:
+		err = fmt.Errorf("the worker started, but its ledger row could not be read back for --json: %w", attempt.rowErr)
+	case r == nil:
+		err = errors.New("the worker started, but this launch's ledger row was not found for --json")
+	default:
+		harness = r.Harness
 		w.Branch, w.SessionID, w.Transcript = r.Branch, r.SessionID, r.Transcript
 		if r.Brief != nil {
 			w.Marker = r.Brief.Marker
@@ -85,5 +97,22 @@ func workerLaunchResult(ctx context.Context, adapter any, attempt workerAttempt,
 	}
 	res := newLaunchResult(ctx, adapter, ref, "herdr", name, top, harness)
 	res.Worker = w
-	return res
+	return res, err
+}
+
+// launchStarted reports whether a worker attempt got as far as a running
+// surface: its reference names a backend.
+func launchStarted(a workerAttempt) bool {
+	return a.launched.ref.Kind() != backend.KindUnspecified
+}
+
+// runningWorkerError adds where a running worker is to the error of a
+// launch whose bookkeeping failed after the start, so a caller can still
+// find it (and close it).
+func runningWorkerError(err error, ref backend.Ref) error {
+	where := ref.String()
+	if id, ierr := ref.HerdrIdentity(); ierr == nil {
+		where = fmt.Sprintf("%s, herdr workspace %s, pane %s", where, id.Workspace(), id.Pane())
+	}
+	return fmt.Errorf("%w (the worker is running: %s)", err, termsafe.SafeLineMax(where, 300))
 }

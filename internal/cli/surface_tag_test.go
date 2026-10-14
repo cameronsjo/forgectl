@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -46,19 +48,33 @@ func TestParseTagTokens(t *testing.T) {
 // tag refuses a call with nothing to do, or a bad token, as a usage error
 // before it opens a ledger or reaches herdr.
 func TestSurfaceTagRefusesBeforeHerdr(t *testing.T) {
-	for name, args := range map[string][]string{
-		"no token":  {"w1"},
-		"bad token": {"w1", "--token", "a.b=c"},
-		"bad name":  {"../w1", "--token", "a=b"},
+	many := []string{"w1"}
+	for i := range herdradapter.MaxTokensPerReport + 1 {
+		many = append(many, "--clear-token", "k"+strings.Repeat("x", i))
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no token":                 {[]string{"w1"}, "at least one"},
+		"bad token":                {[]string{"w1", "--token", "a.b=c"}, "a.b"},
+		"bad name":                 {[]string{"../w1", "--token", "a=b"}, "name"},
+		"dash-leading key":         {[]string{"w1", "--token=-x=1"}, "must not start with '-'"},
+		"dash-leading cleared key": {[]string{"w1", "--clear-token=-x"}, "must not start with '-'"},
+		"bad cleared key":          {[]string{"w1", "--clear-token", "a.b"}, "a.b"},
+		"cleared twice":            {[]string{"w1", "--clear-token", "k", "--clear-token", "k"}, "named twice"},
+		"set and cleared":          {[]string{"w1", "--token", "k=v", "--clear-token", "k"}, "named twice"},
+		"over the cap":             {many, "at most"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())
 			cmd := newSurfaceTagCmd(module.Deps{})
 			cmd.SetOut(&bytes.Buffer{})
 			cmd.SetErr(&bytes.Buffer{})
-			cmd.SetArgs(args)
-			if err := cmd.ExecuteContext(t.Context()); ExitCode(err) != exitUsage {
-				t.Fatalf("err = %v (exit %d), want exit %d", err, ExitCode(err), exitUsage)
+			cmd.SetArgs(tc.args)
+			err := cmd.ExecuteContext(t.Context())
+			if ExitCode(err) != exitUsage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v (exit %d), want exit %d naming %q", err, ExitCode(err), exitUsage, tc.want)
 			}
 		})
 	}
@@ -68,9 +84,13 @@ func TestPriceWorker(t *testing.T) {
 	priced := &statusUsage{CostUSD: 1.25, ByModel: json.RawMessage(`[]`), Priced: true, UnpricedModels: []string{}}
 	never := func(context.Context, string) *statusUsage { t.Fatal("priced a row with no transcript"); return nil }
 
-	got := priceWorker(t.Context(), worker.Row{Name: "w1", Harness: "claude", Transcript: "/t/s.jsonl"}, "/repo",
+	transcript := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := priceWorker(t.Context(), worker.Row{Name: "w1", Harness: "claude", Transcript: transcript}, "/repo",
 		func(_ context.Context, tr string) *statusUsage {
-			if tr != "/t/s.jsonl" {
+			if tr != transcript {
 				t.Errorf("priced %q", tr)
 			}
 			return priced
@@ -87,7 +107,11 @@ func TestPriceWorker(t *testing.T) {
 	if got.Usage != nil || !strings.Contains(got.Reason, "records no transcript") {
 		t.Errorf("no-transcript result = %+v", got)
 	}
-	got = priceWorker(t.Context(), worker.Row{Name: "w1", Harness: "claude", Transcript: "/t/s.jsonl"}, "/repo",
+	got = priceWorker(t.Context(), worker.Row{Name: "w1", Harness: "claude", Transcript: filepath.Join(t.TempDir(), "gone.jsonl")}, "/repo", never)
+	if got.Usage != nil || !strings.Contains(got.Reason, "transcript not found") {
+		t.Errorf("missing-transcript result = %+v", got)
+	}
+	got = priceWorker(t.Context(), worker.Row{Name: "w1", Harness: "claude", Transcript: transcript}, "/repo",
 		func(context.Context, string) *statusUsage { return nil })
 	if got.Usage != nil || !strings.Contains(got.Reason, "cadence-hooks") {
 		t.Errorf("unpriced result = %+v", got)
