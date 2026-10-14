@@ -88,6 +88,8 @@ Under `--json`, a failure before any section runs (a bad flag, or a bad `--timeo
 ## Human view
 
 ```text
+2 need you: prs, clean
+
 ✓ git    42 project(s) under "/Users/me/Projects": 38 clean, 3 dirty, 1 ahead, 0 unknown
     "forgectl"  [3 modified]
     "hearth"  [status unknown]
@@ -99,7 +101,7 @@ Under `--json`, a failure before any section runs (a bad flag, or a bad `--timeo
     ✗ chronicle — chronicle status failed
 ```
 
-The glyph is the section's `state`: `✓` ok, `!` degraded, `✗` failed. Colour follows the usual rules: none off a TTY or under `NO_COLOR`. The human view is an overview, so it caps its lists:
+The first line is the verdict: how many sections are degraded or failed, and which ones, or `nothing needs you`. A section that is only not set up (`- bench  not set up (optional)`) does not count. The glyph is the section's `state`: `✓` ok, `!` degraded, `✗` failed. Colour follows the usual rules: none off a TTY or under `NO_COLOR`. The human view is an overview, so it caps its lists:
 
 - `git` lists up to 10 projects that are dirty, ahead or unknown. Clean trees and plain directories are counted but not listed.
 - `prs` lists up to 5 PRs awaiting your review.

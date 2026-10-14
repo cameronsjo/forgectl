@@ -6,6 +6,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,14 +18,35 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// everydayGroupID and moreGroupID are root help's two cobra groups
-// (ADR-0005 addendum): every module's GroupID follows its Tier directly, so
-// promoting/demoting a module's tier (modules_test.go's core-set pin) moves
-// its help placement for free.
-const (
-	everydayGroupID = "everyday"
-	moreGroupID     = "more"
-)
+// pinnedGroupID is root help's first cobra group: the hub's pinned commands
+// (hubPinned). Every other module goes under the hub area that holds it
+// (hubGroups), so root help and the menu sort commands the same way
+// (forgectl#1151). A module no area names goes under hubOtherGroup, as it
+// does on the hub.
+const pinnedGroupID = "pinned"
+
+// rootHelpGroupID is the root help group a module named name sits in.
+func rootHelpGroupID(name string) string {
+	if slices.Contains(hubPinned, name) {
+		return pinnedGroupID
+	}
+	for _, g := range hubGroups {
+		if slices.Contains(g.names, name) {
+			return g.title
+		}
+	}
+	return hubOtherGroup
+}
+
+// rootHelpGroups is root help's cobra groups, in the hub's order. fang skips
+// a group with no command in it.
+func rootHelpGroups() []*cobra.Group {
+	groups := []*cobra.Group{{ID: pinnedGroupID, Title: "Pinned:"}}
+	for _, g := range hubGroups {
+		groups = append(groups, &cobra.Group{ID: g.title, Title: strings.ToUpper(g.title[:1]) + g.title[1:] + ":"})
+	}
+	return append(groups, &cobra.Group{ID: hubOtherGroup, Title: "Other:"})
+}
 
 // hubOrderAnnotation and hubTierAnnotation are cobra Annotations keys
 // buildHub (hub.go) reads back off root's constructed children to classify
@@ -123,10 +145,14 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   meta.AppName,
 		Short: meta.Tagline,
-		Long: `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.
+		Long: `forgectl: your workbench from one command. Repos, PRs, agents, the desk.
 
-Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`,
+Two ways in: type a command (forgectl status) or run forgectl with no
+arguments for the menu. New here? forgectl init, then forgectl doctor.
+
+Agents: state verbs take --json; forgectl menu --json <command> lists a
+command's verbs. Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized,
+4 refused; see docs/exit-codes.md.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
 		RunE:    rootRun,
@@ -142,10 +168,7 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-co
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
 	addSkillFlags(root)
 
-	root.AddGroup(
-		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
-		&cobra.Group{ID: moreGroupID, Title: "More:"},
-	)
+	root.AddGroup(rootHelpGroups()...)
 
 	for i, m := range allModules() {
 		cmd := m.New(deps)
@@ -163,11 +186,10 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-co
 		// copy is the safety net for any constructor that doesn't.
 		applyAliases(cmd, m.SubAliases)
 		tier := hubTierCore
-		cmd.GroupID = everydayGroupID
 		if m.Tier == module.TierExtension {
 			tier = hubTierExtension
-			cmd.GroupID = moreGroupID
 		}
+		cmd.GroupID = rootHelpGroupID(cmd.Name())
 		stampHubAnnotations(cmd, i, tier)
 		root.AddCommand(cmd)
 	}

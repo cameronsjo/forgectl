@@ -550,13 +550,18 @@ func TestStatus_DefaultCleanSourceFailsOnAnUnscannableRoot(t *testing.T) {
 }
 
 // statusTextHeadlines renders r as the text view and returns each section
-// line's text after its glyph and label, in report order.
+// line's text after its glyph and label, in report order. The verdict line
+// that opens the view is checked and skipped.
 func statusTextHeadlines(t *testing.T, r statusReportJSON) []string {
 	t.Helper()
 	var buf bytes.Buffer
 	renderStatus(&buf, r, theme.Theme{}.Marks())
+	verdict, body, _ := strings.Cut(buf.String(), "\n")
+	if want := statusVerdict(statusSectionViews(r)); verdict != want {
+		t.Fatalf("first line = %q, want the verdict %q", verdict, want)
+	}
 	var got []string
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for _, line := range strings.Split(body, "\n") {
 		if line == "" || strings.HasPrefix(line, " ") {
 			continue
 		}
@@ -624,5 +629,28 @@ func TestRenderStatus_UnconfiguredBenchIsNotHealthy(t *testing.T) {
 	half.Hearth.State = bench.StateOK
 	if got := render(half); !strings.HasPrefix(got, marks.OK+" bench  hearth ok") {
 		t.Errorf("configured bench line = %q, want the ✓ component headline", got)
+	}
+}
+
+// TestStatusVerdict pins forgectl#1151's verdict line: it names every
+// degraded or failed section, counts them, and leaves out a section that is
+// only not set up. Mutations that turn it red: count an Unset section; drop
+// the degraded state from "needs you".
+func TestStatusVerdict(t *testing.T) {
+	view := func(label string, state status.State, unset bool) statusSectionView {
+		return statusSectionView{Label: label, State: state, Unset: unset}
+	}
+	for _, tc := range []struct {
+		name  string
+		views [statusSectionCount]statusSectionView
+		want  string
+	}{
+		{"all ok", [statusSectionCount]statusSectionView{view("git", status.StateOK, false), view("prs", status.StateOK, false), view("clean", status.StateOK, false), view("bench", status.StateDegraded, true)}, "nothing needs you"},
+		{"one", [statusSectionCount]statusSectionView{view("git", status.StateOK, false), view("prs", status.StateDegraded, false), view("clean", status.StateOK, false), view("bench", status.StateOK, false)}, "1 needs you: prs"},
+		{"two", [statusSectionCount]statusSectionView{view("git", status.StateFailed, false), view("prs", status.StateDegraded, false), view("clean", status.StateOK, false), view("bench", status.StateDegraded, true)}, "2 need you: git, prs"},
+	} {
+		if got := statusVerdict(tc.views); got != tc.want {
+			t.Errorf("%s: statusVerdict = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

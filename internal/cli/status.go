@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -470,10 +471,32 @@ func renderStatus(out io.Writer, r statusReportJSON, marks theme.Marks) {
 // prs lists. A cap of 0 lists every row.
 func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, projectCap, prCap int) {
 	views := statusSectionViews(r)
+	_, _ = fmt.Fprintf(out, "%s\n\n", statusVerdict(views))
 	renderStatusSection(out, marks, views[statusIdxGit], func() { renderStatusGit(out, *r.Git.Data, projectCap) })
 	renderStatusSection(out, marks, views[statusIdxPRs], func() { renderStatusPRs(out, *r.PRs.Data, prCap) })
 	renderStatusSection(out, marks, views[statusIdxClean], func() {})
 	renderStatusSection(out, marks, views[statusIdxBench], func() { renderStatusBench(out, *r.Bench.Data, marks) })
+}
+
+// statusVerdict is the text view's first line (forgectl#1151): which sections
+// need the operator, so nobody reads all four to learn whether anything does.
+// A degraded or failed section needs them; a section that is only not set up
+// (Unset) does not.
+func statusVerdict(views [statusSectionCount]statusSectionView) string {
+	var need []string
+	for _, v := range views {
+		if !v.Unset && v.State != status.StateOK {
+			need = append(need, v.Label)
+		}
+	}
+	switch len(need) {
+	case 0:
+		return "nothing needs you"
+	case 1:
+		return "1 needs you: " + need[0]
+	default:
+		return strconv.Itoa(len(need)) + " need you: " + strings.Join(need, ", ")
+	}
 }
 
 // renderStatusSection prints a section's glyph, label and headline, then

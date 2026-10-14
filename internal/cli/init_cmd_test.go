@@ -313,3 +313,51 @@ func TestIntegration_Init_Idempotent(t *testing.T) {
 		t.Errorf("config.toml changed on a second, idempotent init run.\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+// TestIntegration_Init_EndsWithNextStep pins forgectl#1151: a run, first or
+// repeat, ends by naming where to go next.
+func TestIntegration_Init_EndsWithNextStep(t *testing.T) {
+	h := newInitHarness(t)
+	for _, run := range []string{"first", "repeat"} {
+		stdout, _ := h.run(t)
+		if !strings.HasSuffix(stdout, initNextStep+"\n") {
+			t.Errorf("%s run does not end with %q; got:\n%s", run, initNextStep, stdout)
+		}
+	}
+}
+
+// TestIntegration_Init_DryRunWritesNothing pins init --dry-run
+// (forgectl#1151): it lists every section it would add and creates no file;
+// over a partial config it lists only what is missing and leaves the file
+// byte-identical. Mutations that turn it red: let --dry-run fall through to
+// the write; report "added:" in place of "would add:".
+func TestIntegration_Init_DryRunWritesNothing(t *testing.T) {
+	h := newInitHarness(t)
+	stdout, _ := h.run(t, "--dry-run")
+	if _, err := os.Stat(h.configPath()); !os.IsNotExist(err) {
+		t.Fatalf("init --dry-run created config.toml (stat err %v)", err)
+	}
+	for _, s := range initSections {
+		if !strings.Contains(stdout, "would add:        "+s.label) {
+			t.Errorf("dry run does not list %q; got:\n%s", s.label, stdout)
+		}
+	}
+	if strings.Contains(stdout, "added:  ") || !strings.Contains(stdout, "(dry run: nothing written)") {
+		t.Errorf("dry run reads as a write; got:\n%s", stdout)
+	}
+
+	partial := "[launch]\n# mine\n"
+	if err := os.MkdirAll(filepath.Dir(h.configPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.configPath(), []byte(partial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ = h.run(t, "--dry-run")
+	if !strings.Contains(stdout, "already present: launch") || strings.Contains(stdout, "would add:        launch") {
+		t.Errorf("dry run over a config with [launch] does not report it present; got:\n%s", stdout)
+	}
+	if got, err := os.ReadFile(h.configPath()); err != nil || string(got) != partial {
+		t.Errorf("dry run changed config.toml: %q (err %v)", got, err)
+	}
+}

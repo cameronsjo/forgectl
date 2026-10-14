@@ -27,7 +27,7 @@ func TestBuildHub_FirstRunRow(t *testing.T) {
 	if got.Name != "init" {
 		t.Fatalf("entries[0].Name = %q, want %q", got.Name, "init")
 	}
-	wantShort := "first run: set up forgectl — creates config.toml (init)"
+	wantShort := "first run: set up forgectl — creates config.toml"
 	if got.Short != wantShort {
 		t.Errorf("entries[0].Short = %q, want %q", got.Short, wantShort)
 	}
@@ -340,5 +340,31 @@ func TestBuildHub_NestedGroupsCarryTheirLeaves(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("pr is missing group leaves %v", want)
+	}
+}
+
+// TestRootHelpGroupsFollowTheHub pins forgectl#1151: root help sorts each
+// module under the hub section that holds it (pinned, or its area), so the
+// two never disagree. Mutations that turn it red: set GroupID from the tier
+// again; drop the pinned check in rootHelpGroupID.
+func TestRootHelpGroupsFollowTheHub(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	sec := collectHubSections(root, true, nil)
+	want := map[string]string{}
+	for _, e := range sec.pinned {
+		want[e.Name] = pinnedGroupID
+	}
+	for _, g := range sec.groups {
+		for _, e := range g.entries {
+			want[e.Name] = g.title
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("the hub has no rows; the pin would pass vacuously")
+	}
+	for _, c := range hubModules(root) {
+		if c.GroupID != want[c.Name()] {
+			t.Errorf("%s: root help group %q, hub section %q", c.Name(), c.GroupID, want[c.Name()])
+		}
 	}
 }
