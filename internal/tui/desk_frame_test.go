@@ -1212,3 +1212,66 @@ func TestDeskFrame_FocusStaysShownAcrossRoomyThreshold(t *testing.T) {
 		}
 	}
 }
+
+// Below the minimum width the frame draws nothing wider than the window: no
+// queue panel drawn at deskMinWidth for the terminal to cut or wrap (#1152).
+func TestDeskFrame_NarrowWindowDrawsNothingWider(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	opts.Newer = "9.9.9"
+	for _, size := range [][2]int{{30, 8}, {30, 20}, {39, 40}, {12, 6}} {
+		out := RenderDeskFrame(snap, size[0], size[1], deskNow, opts)
+		lines := strings.Split(out, "\n")
+		if len(lines) != size[1] {
+			t.Errorf("%dx%d: %d lines, want %d", size[0], size[1], len(lines), size[1])
+		}
+		for i, l := range lines {
+			if w := ansi.StringWidth(l); w > size[0] {
+				t.Errorf("%dx%d: line %d is %d wide: %q", size[0], size[1], i, w, ansi.Strip(l))
+			}
+		}
+		if !strings.Contains(ansi.Strip(out), "too small") {
+			t.Errorf("%dx%d: no too-small line:\n%s", size[0], size[1], ansi.Strip(out))
+		}
+	}
+}
+
+// A newer forgectl installed adds one line under the header, at every
+// height the frame lays out, and the focus panel still shows (#1180).
+func TestDeskFrame_NewerInstalledLine(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	const want = "newer forgectl installed (0.33.0) · q then forgectl desk to restart"
+	for _, h := range []int{0, 14, 30, 60} {
+		plain := deskFrame{snap: snap, width: 100, height: h, now: deskNow, opts: opts}
+		with := plain
+		with.opts.Newer = "0.33.0"
+		out := ansi.Strip(with.render())
+		if strings.Count(out, want) != 1 {
+			t.Errorf("height %d: the notice is not drawn once:\n%s", h, out)
+		}
+		if strings.Contains(ansi.Strip(plain.render()), "newer forgectl") {
+			t.Errorf("height %d: a notice with no newer version", h)
+		}
+		if h > 0 && len(strings.Split(out, "\n")) != h {
+			t.Errorf("height %d: the notice made the frame %d lines", h, len(strings.Split(out, "\n")))
+		}
+		if plain.focusShown() && !with.focusShown() {
+			t.Errorf("height %d: the notice hid the focus panel", h)
+		}
+	}
+}
+
+// DeskKeysHelp has every binding, each starting its own line, and wraps
+// within the width (#1159).
+func TestDeskKeysHelpListsEveryBinding(t *testing.T) {
+	help := DeskKeysHelp(80)
+	for _, b := range deskBindings {
+		if !strings.Contains(help, "\n  "+fmt.Sprintf("%-4s ", b.key)) && !strings.HasPrefix(help, "  "+fmt.Sprintf("%-4s ", b.key)) {
+			t.Errorf("no line for %q:\n%s", b.key, help)
+		}
+	}
+	for _, l := range strings.Split(help, "\n") {
+		if ansi.StringWidth(l) > 80 {
+			t.Errorf("line is %d wide: %q", ansi.StringWidth(l), l)
+		}
+	}
+}
