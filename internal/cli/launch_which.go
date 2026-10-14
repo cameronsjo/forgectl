@@ -204,14 +204,9 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, inject
 	}
 }
 
-// writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
-// seam. Nothing is written before a marshal error, so a failing writer or
-// encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir, confPath string, injected []string) error {
-	return encodeLaunchWhichJSON(w, buildLaunchWhichJSON(p, cwd, runDir, confPath, injected))
-}
-
-// encodeLaunchWhichJSON encodes a built document through the same seam.
+// encodeLaunchWhichJSON encodes a built document through the sanctioned
+// termsafe seam. Nothing is written before a marshal error, so a failing
+// writer or encoder never leaves a partial document on stdout.
 func encodeLaunchWhichJSON(w io.Writer, doc launchWhichJSON) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")

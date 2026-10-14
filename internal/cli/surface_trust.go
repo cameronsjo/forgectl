@@ -61,9 +61,11 @@ func fileExists(path string) bool {
 
 // claudeFolderTrust reports whether dir is trusted in the Claude Code config
 // file. Trust is inherited: Claude Code skips the dialog for a directory under
-// any trusted one (measured on 2.1.289, docs/plans/2026-09-28-forgectl-herdr-
-// coordinator.md), so dir's physical path and every parent of it count, and
-// the spelling given counts as an exact key. That is the widest reading of the
+// any trusted one. That was observed live on 2.1.289
+// (docs/plans/2026-09-28-forgectl-herdr-coordinator.md) and read from
+// 2.1.296's source, whose check walks the parents of the session's cwd and
+// also accepts the git root's own entry. So dir's physical path and every
+// parent of it count, and the spelling given counts as an exact key. That is the widest reading of the
 // inheritance rule, chosen so the check never refuses a folder the harness
 // would open without the dialog.
 func claudeFolderTrust(configFile, dir string) claudeTrustState {

@@ -139,12 +139,12 @@ func TestBuildLaunchWhichJSON_NoEnvValuesEmitted(t *testing.T) {
 // TestNewLaunchWhichCmd_JSONFailingRunLeavesStdoutEmpty: the RunE error path
 // (a broken os.Getwd) must not have written any JSON before failing.
 func TestNewLaunchWhichCmd_JSONFailingRunLeavesStdoutEmpty(t *testing.T) {
-	// writeLaunchWhichJSON itself cannot fail on well-formed input, and
+	// encodeLaunchWhichJSON itself cannot fail on well-formed input, and
 	// os.Getwd failing is not reproducible in a test sandbox — so this test
 	// pins the achievable half of the contract: an encoder error propagates
 	// without a partial write reaching a real io.Writer beforehand.
 	buf := failingWriter{err: errWriteFailed}
-	if err := writeLaunchWhichJSON(buf, launch.Profile{Harness: "claude"}, "/tmp/cwd", "", "/tmp/config.toml", nil); err == nil {
+	if err := encodeLaunchWhichJSON(buf, buildLaunchWhichJSON(launch.Profile{Harness: "claude"}, "/tmp/cwd", "", "/tmp/config.toml", nil)); err == nil {
 		t.Fatal("expected an error from a failing writer, got nil")
 	}
 }
