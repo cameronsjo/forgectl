@@ -93,10 +93,11 @@ NAME is a desk item (NN-name). --log FILE reads a JSONL log instead: one
 JSON object per line, whose --event-key (default "event") names the event.
 A log has no step model, so it shows its events and no step state.
 --log - reads the log from stdin instead of a file, and --follow-cmd CMD
-reads the stdout of CMD (run with /bin/sh -c), for a log with no file to
-point at: kubectl logs -f, ssh HOST tail -F, docker logs -f. The stream is
-held in memory, never written to disk. A printed view reads it until it
-ends.
+reads the stdout of CMD (run with /bin/sh -c, no stdin and no terminal),
+for a log with no file to point at: kubectl logs -f, ssh -o BatchMode=yes
+HOST tail -n +1 -F, docker logs -f. The run is named by the command's first
+word. The stream is held in memory, never written to disk, up to the same
+32 MiB cap as a file. A printed view reads it until it ends.
 
 --lens teaches show to read an app's own log: a small TOML file that says
 how a line splits (JSON keys, or a regular expression for plain text) and
@@ -110,7 +111,10 @@ follows it as the log grows: the steps as a flow above the event timeline,
 with replay. It needs a terminal (with --log -, on stdout; keys are read from
 the terminal itself). Under --live a --follow-cmd command is restarted when
 it exits, so the run does not end because the stream did; the restarted
-command's output replaces the old, as a log file replaced on disk does.
+command's output replaces the old, as a log file replaced on disk does, so
+the command should replay its log from the start (tail needs -n +1). It is
+not restarted once the lens read the run's end, nor after 10 runs in a row
+with no output.
 --layout flow draws the steps as a top-down flowchart instead: a box per
 step with its state, duration and note, the running one marked now, from a
 start to an end that shows the run's exit, beside the event timeline when

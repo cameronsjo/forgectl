@@ -144,3 +144,20 @@ func TestFlowWindowKeepsTheFocusInView(t *testing.T) {
 		t.Errorf("a short chart should be shown whole, got %d lines", len(got))
 	}
 }
+
+// Below the side-by-side width, the chart gets the rows a short timeline
+// does not need, so a small run's End is not cut off.
+func TestFlowchartNarrowGivesTheChartTheSpareRows(t *testing.T) {
+	view := flowWatch(t, "go fetch\n", 99, 30, false)
+	if !strings.Contains(view, "End") {
+		t.Errorf("at 99x30 the End box was cut off:\n%s", view)
+	}
+}
+
+// A finished run with no running step scrolls the chart to its End.
+func TestFlowchartFocusesTheEndOfAFinishedRun(t *testing.T) {
+	view := flowWatch(t, "go fetch\nok fetch\ndone rc=0\n", 120, 14, false)
+	if !strings.Contains(view, "End") || !strings.Contains(view, "ok") {
+		t.Errorf("a finished run's chart should show its End:\n%s", view)
+	}
+}

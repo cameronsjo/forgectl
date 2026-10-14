@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,7 +99,7 @@ func (r *loadedRun) progress() (total, done, failed int) {
 // be opened is returned as a failure beside the ones that could. follow is
 // the live view's: a stream is followed rather than read to its end, and a
 // command is restarted when it exits.
-func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk, follow bool) (srcs []runview.Source, closeAll func(), failed []error) {
+func deskRunSources(ctx context.Context, cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk, follow bool) (srcs []runview.Source, closeAll func(), failed []error) {
 	var closers []func()
 	closeAll = func() {
 		for _, c := range closers {
@@ -113,7 +116,7 @@ func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log de
 		}
 	}
 	if log.named() {
-		src, closeLog, err := openLogSource(cmd.Context(), log, follow)
+		src, closeLog, err := openLogSource(ctx, log, follow)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
@@ -158,6 +161,15 @@ func openLogSource(ctx context.Context, log deskLogOpts, follow bool) (runview.S
 		}
 	}
 	return s, s.Close, nil
+}
+
+// checkStdinLog refuses --log - when stdin is a terminal: there is no log
+// on it, and reading it would wait for typing with no word of why.
+func checkStdinLog(log deskLogOpts, verb string) error {
+	if log.path == deskStdinLog && deskStdinIsTerminal() {
+		return deskUsage("desk %s: --log - reads the log from stdin, which is a terminal; pipe the log in (kubectl logs -f POD | forgectl desk %s --log -), or use --follow-cmd", verb, verb)
+	}
+	return nil
 }
 
 func openLogFile(log deskLogOpts, lens *runview.Lens) (runview.Source, error) {
@@ -229,7 +241,10 @@ func reportRunFailures(w io.Writer, failed []error) error {
 }
 
 func runDeskRuns(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, asJSON bool) error {
-	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, false, false)
+	if err := checkStdinLog(log, "runs"); err != nil {
+		return err
+	}
+	srcs, closeAll, failed := deskRunSources(cmd.Context(), cmd, deps, dirFlag, log, false, false)
 	defer closeAll()
 	var runs []*loadedRun
 	for _, src := range srcs {
@@ -353,11 +368,18 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 			return err
 		}
 	}
+	if err := checkStdinLog(log, "show"); err != nil {
+		return err
+	}
 	logOnStdin := log.path == deskStdinLog
 	if o.live && !deskHasTerminal() && (!logOnStdin || !deskStdoutHasTerminal()) {
 		return WithExitCode(tui.ErrRunWatchNeedsTerminal, deskExitUsage)
 	}
-	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "", o.live)
+	// A signal must stop a --follow-cmd command, not leave it running in
+	// its own session: the context ends, and the deferred close stops it.
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	srcs, closeAll, failed := deskRunSources(ctx, cmd, deps, dirFlag, log, name == "", o.live)
 	defer closeAll()
 	if len(failed) > 0 {
 		return errors.Join(failed...)
@@ -388,7 +410,7 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 		return err
 	}
 	if o.live {
-		err := tui.RunWatch(cmd.Context(), src, tui.RunWatchOptions{
+		err := tui.RunWatch(ctx, src, tui.RunWatchOptions{
 			Theme: deps.Theme, Name: r.ref.Name, ASCII: deskNoIcons(cmd, deps),
 			LogOnStdin: logOnStdin, Flowchart: o.layout == deskLayoutFlow,
 		})

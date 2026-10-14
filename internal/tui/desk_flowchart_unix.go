@@ -48,7 +48,7 @@ func (v *deskRunView) flowchartBody(st theme.Styles, g runview.Glyphs, s runview
 	if finished && v.folder != nil {
 		live, exit = v.sourceLive(), v.folder.At(v.folder.Len()).Exit
 	}
-	chart, focus := flowchart(st, g, s, v.timing(), runview.RunMark(g, live, exit), now)
+	chart, focus := flowchart(st, g, s, v.timing(), runview.RunMark(g, live, exit), now, finished)
 
 	rule := "events"
 	if c := v.counts(s); c != "" {
@@ -77,7 +77,13 @@ func (v *deskRunView) flowchartBody(st theme.Styles, g runview.Glyphs, s runview
 		}
 		return out
 	}
-	chartRows := max(rows-max(rows/3, 2)-1, 1)
+	// The timeline below takes what it needs, up to a third of the rows (at
+	// least two); the chart gets the rest, and the timeline any it leaves.
+	events := 1
+	if v.folder != nil {
+		events = max(v.folder.Len(), 1)
+	}
+	chartRows := max(rows-min(events, max(rows/3, 2))-1, 1)
 	out := flowWindow(chart, focus, chartRows)
 	for i := range out {
 		out[i] = cut(out[i], width)
@@ -105,10 +111,11 @@ func flowWindow(chart []string, focus, rows int) []string {
 }
 
 // flowchart draws s top to bottom: a start terminal, a box per step in
-// depth order, and an end terminal marked end. focus is the line of the
-// step to keep in view: the running one, else the last that did anything.
-// now, when set, counts a running step's time so far.
-func flowchart(st theme.Styles, g runview.Glyphs, s runview.RunState, timing []runview.StepTiming, end runview.Mark, now time.Time) (lines []string, focus int) {
+// depth order, and an end terminal marked end. focus is the line to keep in
+// view: the running step, else the end once the run is finished, else the
+// last step that did anything. now, when set, counts a running step's time
+// so far.
+func flowchart(st theme.Styles, g runview.Glyphs, s runview.RunState, timing []runview.StepTiming, end runview.Mark, now time.Time, finished bool) (lines []string, focus int) {
 	inner := flowBoxMin
 	for _, x := range s.Steps {
 		inner = max(inner, ansi.StringWidth(x.ID)+2)
@@ -187,12 +194,16 @@ func flowchart(st theme.Styles, g runview.Glyphs, s runview.RunState, timing []r
 			"  "+tone.Render("└"+center("┬", inner, '─')+"┘")+bottomSide)
 		arrow()
 	}
-	if focus < 0 {
+	endSide := "  " + runToneStyle(st, end.Tone).Render(end.Glyph+" "+end.Word)
+	endAt := len(lines) + 2
+	terminal("End", endSide, false)
+	switch {
+	case focus >= 0:
+	case finished:
+		focus = endAt
+	default:
 		focus = lastActive
 	}
-
-	endSide := "  " + runToneStyle(st, end.Tone).Render(end.Glyph+" "+end.Word)
-	terminal("End", endSide, false)
 	return lines, focus
 }
 

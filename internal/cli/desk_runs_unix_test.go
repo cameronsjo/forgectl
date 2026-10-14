@@ -373,8 +373,9 @@ func TestDeskLogKeyFlagsNeedALog(t *testing.T) {
 // --log - reads the log from stdin, to its end, and shows it as a file's.
 func TestDeskShow_LogFromStdin(t *testing.T) {
 	newDeskDir(t)
-	prev := deskStdin
-	t.Cleanup(func() { deskStdin = prev })
+	prev, prevTTY := deskStdin, deskStdinIsTerminal
+	t.Cleanup(func() { deskStdin, deskStdinIsTerminal = prev, prevTTY })
+	deskStdinIsTerminal = func() bool { return false }
 	deskStdin = strings.NewReader(`{"event":"a"}` + "\n" + `{"event":"b"}`)
 	out, _, err := deskRun(t, deskDeps(), "show", "--log", "-", "--events")
 	wantExit(t, err, 0)
@@ -416,5 +417,32 @@ func TestDeskShow_StreamAndLayoutUsage(t *testing.T) {
 	} {
 		_, _, err := deskRun(t, deskDeps(), args...)
 		wantExit(t, err, 2)
+	}
+}
+
+// --log - with a terminal on stdin has no log to read: it is refused rather
+// than left waiting for typing.
+func TestDeskShow_LogFromATerminalStdinIsRefused(t *testing.T) {
+	newDeskDir(t)
+	prev := deskStdinIsTerminal
+	t.Cleanup(func() { deskStdinIsTerminal = prev })
+	deskStdinIsTerminal = func() bool { return true }
+	for _, verb := range []string{"show", "runs"} {
+		_, _, err := deskRun(t, deskDeps(), verb, "--log", "-")
+		wantExit(t, err, 2)
+		if err == nil || !strings.Contains(err.Error(), "stdin, which is a terminal") {
+			t.Errorf("%s: err = %v, want the stdin refusal", verb, err)
+		}
+	}
+}
+
+// The run is named by the command's first word, so its arguments (a token)
+// are not shown.
+func TestDeskShow_FollowCmdIsNamedByItsFirstWord(t *testing.T) {
+	newDeskDir(t)
+	out, _, err := deskRun(t, deskDeps(), "show", "--follow-cmd", `printf '{"event":"a"}\n' --token=s3cret`)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "log/printf") || strings.Contains(out, "s3cret") {
+		t.Errorf("the run should be named printf, with no argument shown:\n%s", out)
 	}
 }

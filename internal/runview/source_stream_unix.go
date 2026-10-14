@@ -10,11 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -22,20 +23,20 @@ import (
 
 // Restart pacing for a followed command: the first restart waits
 // streamRestartMin, each one after a run that wrote nothing waits twice as
-// long, up to streamRestartMax.
-// They are variables so a test can run the restart quickly.
+// long, up to streamRestartMax, and after streamQuietRestarts runs in a row
+// that wrote nothing the command is not restarted again. They are variables
+// so a test can run them quickly.
 var (
-	streamRestartMin = time.Second
-	streamRestartMax = 30 * time.Second
+	streamRestartMin    = time.Second
+	streamRestartMax    = 30 * time.Second
+	streamQuietRestarts = 10
+	// streamStopGrace is how long a stopped command's process group has
+	// after SIGTERM before it is sent SIGKILL.
+	streamStopGrace = 2 * time.Second
 )
 
-const (
-	// streamStopGrace is how long a stopped command has to exit after
-	// SIGTERM before it is killed.
-	streamStopGrace = 2 * time.Second
-	// streamChunk is how much one read of the stream takes.
-	streamChunk = 32 << 10
-)
+// streamChunk is how much one read of the stream takes.
+const streamChunk = 32 << 10
 
 // StreamSource reads one run from a byte stream rather than a file: a log
 // piped to stdin, or the stdout of a command it runs (kubectl logs -f, ssh
@@ -45,11 +46,19 @@ const (
 // anything else. Its lines read exactly as a file's do, through a lens or as
 // JSONL.
 //
+// The cap is a cliff, as it is for a file: once a stream has passed 32 MiB,
+// what it writes after is discarded and the run reads partial until a
+// restart replaces it.
+//
 // A followed command is restarted when it exits, so the run does not end
 // because the stream did: a pod replaced mid-run starts a new logs -f. The
 // restarted command's first output replaces what the old one wrote, as a
 // log file replaced on disk does, because a command like kubectl logs -f
-// writes the whole log again from its start.
+// writes the whole log again from its start. That assumes a command that
+// replays its log from the start: one that does not (tail -F without
+// -n +1, kubectl logs --since, journalctl -f) loses the history before the
+// restart. A command is not restarted once the run has ended (the lens read
+// its end), nor after streamQuietRestarts runs in a row with no output.
 type StreamSource struct {
 	name string
 	r    lineReader
@@ -57,7 +66,8 @@ type StreamSource struct {
 	mu      sync.Mutex
 	buf     []byte
 	gen     uint64 // bumped when a restarted command's output replaces buf
-	capped  bool   // the stream passed maxFileBytes; the rest was discarded
+	limit   int    // the most bytes held: maxFileBytes, smaller in a test
+	capped  bool   // the stream passed limit; the rest was discarded
 	note    error  // what the stream is doing, when it is not just flowing
 	updated time.Time
 
@@ -74,6 +84,7 @@ func newStreamSource(name string, lens *Lens, keys LogKeys) (*StreamSource, erro
 		name:    clean(name),
 		r:       lineReader{lens: lens, keys: keys},
 		updated: time.Now().UTC(),
+		limit:   maxFileBytes,
 		cancel:  func() {},
 		done:    make(chan struct{}),
 	}, nil
@@ -104,12 +115,17 @@ func NewReaderSource(name string, r io.Reader, lens *Lens, keys LogKeys) (*Strea
 // command gets no stdin, and its stderr is kept only to say why it exited.
 // With follow set it is restarted whenever it exits, until ctx ends or Close;
 // without it, the stream ends when the command does. The run is named after
-// the command.
+// the command's first word, so an argument (a token, a header) is not shown.
+//
+// The command runs in a session of its own, with no controlling terminal:
+// stopping it stops its whole process group, and a command that would prompt
+// (ssh asking for a password) fails at once rather than drawing over the
+// view; give ssh -o BatchMode=yes to say so plainly.
 func NewCommandSource(ctx context.Context, command string, follow bool, lens *Lens, keys LogKeys) (*StreamSource, error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, errors.New("follow-cmd: the command must not be empty")
 	}
-	s, err := newStreamSource(command, lens, keys)
+	s, err := newStreamSource(commandName(command), lens, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +133,17 @@ func NewCommandSource(ctx context.Context, command string, follow bool, lens *Le
 	ctx, s.cancel = context.WithCancel(ctx)
 	go s.follow(ctx, command, follow)
 	return s, nil
+}
+
+// commandName is the name a command's run is shown by: its first word that
+// is not an environment assignment, as a base name.
+func commandName(command string) string {
+	for _, w := range strings.Fields(command) {
+		if !strings.Contains(w, "=") {
+			return filepath.Base(w)
+		}
+	}
+	return "command"
 }
 
 // Close stops a command the source runs and waits for it to exit. A reader
@@ -143,23 +170,30 @@ func (s *StreamSource) Wait(ctx context.Context) error {
 // follow runs command until it exits, then again while restart is set.
 func (s *StreamSource) follow(ctx context.Context, command string, restart bool) {
 	defer close(s.done)
-	wait := streamRestartMin
+	wait, quiet := streamRestartMin, 0
 	for run := 0; ; run++ {
 		wrote, err := s.runOnce(ctx, command, run > 0)
 		if ctx.Err() != nil {
 			return
 		}
-		if !restart {
+		if wrote {
+			wait, quiet = streamRestartMin, 0
+		} else {
+			quiet++
+		}
+		// A run that ended is over, and a restart would only replay it.
+		last := !restart || s.ended()
+		note := err
+		if !last && quiet >= streamQuietRestarts {
+			last = true
+			note = fmt.Errorf("%w; not restarted: %d runs in a row wrote nothing", errOrExit(err), quiet)
+		}
+		if last {
 			s.mu.Lock()
 			s.endLine()
-			if err != nil {
-				s.note = err
-			}
+			s.note = note
 			s.mu.Unlock()
 			return
-		}
-		if wrote {
-			wait = streamRestartMin
 		}
 		s.setNote(fmt.Errorf("%w; restarting in %s", errOrExit(err), wait))
 		select {
@@ -180,6 +214,18 @@ func errOrExit(err error) error {
 	return err
 }
 
+// ended reports whether the run, folded over all the stream holds, has
+// ended: the lens read its end. Only a lens can say so.
+func (s *StreamSource) ended() bool {
+	if s.r.lens == nil || !s.r.lens.Ends() {
+		return false
+	}
+	d, _ := s.Load(RunRef{}, &Cursor{})
+	f := NewFolder(s.Spec(RunRef{}), d.Defs)
+	f.Append(d.Events...)
+	return f.At(f.Len()).Live == LiveEnded
+}
+
 func (s *StreamSource) setNote(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -190,27 +236,49 @@ func (s *StreamSource) setNote(err error) {
 // restart, the command's first output replaces what the last run wrote.
 // wrote reports any output; err says how the command failed, with the last
 // line it wrote to stderr.
+//
+// When ctx ends, the command's process group gets SIGTERM, then SIGKILL
+// after streamStopGrace, and the read of its stdout is cut off then, so a
+// descendant that ignores SIGTERM and holds stdout open cannot hang the
+// caller.
 func (s *StreamSource) runOnce(ctx context.Context, command string, restart bool) (wrote bool, err error) {
 	// The command is the person's own --follow-cmd, run as they wrote it.
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command) //nolint:gosec // G204: running it is the point
-
-	// Its own process group, so stopping it stops a whole pipeline, and the
-	// terminal's job-control signals reach forgectl alone.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return unix.Kill(-cmd.Process.Pid, unix.SIGTERM) }
-	cmd.WaitDelay = streamStopGrace
+	// No CommandContext: its cancel signals only the shell, and procGroup
+	// stops the whole group instead.
+	cmd := exec.Command("/bin/sh", "-c", command) //nolint:gosec,noctx // G204: running it is the point
+	cmd.SysProcAttr = streamProcAttr()
 	var stderr lastLine
 	cmd.Stderr = &stderr
-	out, err := cmd.StdoutPipe()
+	cmd.WaitDelay = streamStopGrace // stderr held open by a descendant
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		return false, fmt.Errorf("cannot run the command: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	defer pr.Close() //nolint:errcheck // read side
+	cmd.Stdout = pw
+	err = cmd.Start()
+	_ = pw.Close() // the command holds its own copy
+	if err != nil {
 		return false, fmt.Errorf("cannot run the command: %w", err)
 	}
-	wrote, readErr := s.pump(out, restart)
-	err = cmd.Wait()
-	if err == nil {
+
+	g := &procGroup{pgid: cmd.Process.Pid}
+	waited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		g.reaped()
+		waited <- err
+	}()
+	stopKill := context.AfterFunc(ctx, func() { g.stop(pr) })
+	defer stopKill()
+	defer g.disarm()
+
+	wrote, readErr := s.pump(pr, restart)
+	err = <-waited
+	if ctx.Err() != nil {
+		return wrote, ctx.Err()
+	}
+	if err == nil && !errors.Is(readErr, os.ErrClosed) {
 		err = readErr
 	}
 	if err != nil {
@@ -220,6 +288,50 @@ func (s *StreamSource) runOnce(ctx context.Context, command string, restart bool
 		err = fmt.Errorf("the command failed: %w", err)
 	}
 	return wrote, err
+}
+
+// procGroup signals a command's process group until the command is reaped:
+// after that its pid, and so the group id, may belong to another process.
+type procGroup struct {
+	mu    sync.Mutex
+	pgid  int
+	done  bool        // Wait reaped the command: never signal the group again
+	timer *time.Timer // the SIGKILL that follows a SIGTERM
+}
+
+func (g *procGroup) signal(sig unix.Signal) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.done {
+		_ = unix.Kill(-g.pgid, sig)
+	}
+}
+
+func (g *procGroup) reaped() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.done = true
+}
+
+// stop sends the group SIGTERM, and after streamStopGrace SIGKILL, then cuts
+// off the read of r, which a descendant out of reach may still hold open.
+func (g *procGroup) stop(r *os.File) {
+	g.signal(unix.SIGTERM)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.timer = time.AfterFunc(streamStopGrace, func() {
+		g.signal(unix.SIGKILL)
+		_ = r.Close()
+	})
+}
+
+// disarm cancels a pending SIGKILL once runOnce is done with the command.
+func (g *procGroup) disarm() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.timer != nil {
+		g.timer.Stop()
+	}
 }
 
 // pump reads r into the buffer until r ends. With replace set, the first
@@ -237,7 +349,7 @@ func (s *StreamSource) pump(r io.Reader, replace bool) (wrote bool, err error) {
 				s.gen++
 			}
 			wrote = true
-			room := max(maxFileBytes-len(s.buf), 0)
+			room := max(s.limit-len(s.buf), 0)
 			s.buf = append(s.buf, chunk[:min(n, room)]...)
 			if n > room {
 				s.capped = true
@@ -247,6 +359,9 @@ func (s *StreamSource) pump(r io.Reader, replace bool) (wrote bool, err error) {
 		}
 		if errors.Is(err, io.EOF) || errors.Is(err, unix.EIO) || errors.Is(err, io.ErrClosedPipe) {
 			return wrote, nil
+		}
+		if errors.Is(err, os.ErrClosed) { // cut off by procGroup.stop
+			return wrote, err
 		}
 		if err != nil {
 			return wrote, err
