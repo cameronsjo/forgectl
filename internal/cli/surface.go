@@ -44,7 +44,7 @@ var surfaceModule = module.Manifest{
 func newSurfaceCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "surface",
-		Short: "Start a harness in a terminal manager, argv hidden",
+		Short: "Start a harness in a terminal manager, invocation hidden",
 		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
 tmux, cmux, or herdr — without the manager ever seeing the harness invocation.
 

@@ -100,6 +100,10 @@ func withRootHelpLayout(root *cobra.Command, fn func()) {
 	root.RemoveCommand(ordered...)
 	cobra.EnableCommandSorting = false
 	root.AddCommand(ordered...)
+	// AddCommand recomputed root's commandsMaxUseLen from the short Uses, and
+	// it stays at that width after the Uses are restored. Only cobra's default
+	// usage template reads it (UsagePadding); fang renders its own help and
+	// nothing else in forgectl reads it.
 	defer func() {
 		cobra.EnableCommandSorting = prevSorting
 		for _, s := range swaps {

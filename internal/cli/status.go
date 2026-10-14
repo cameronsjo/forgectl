@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -195,7 +197,7 @@ func defaultStatusSources(deps module.Deps) statusSources {
 			client := projects.New(deps.Runner)
 			found, err := client.Discover(ctx)
 			if err != nil {
-				return statusGitJSON{}, nil, err
+				return statusGitJSON{}, nil, withMissingFolderCause(client.ProjectsDir(), err)
 			}
 			return newStatusGit(client.ProjectsDir(), found), nil, nil
 		},
@@ -217,7 +219,7 @@ func defaultStatusSources(deps module.Deps) statusSources {
 			// construction, not by a literal someone could flip.
 			root, preview, err := client.Preview(ctx)
 			if err != nil {
-				return statusCleanJSON{}, nil, err
+				return statusCleanJSON{}, nil, withMissingFolderCause(client.Root(), err)
 			}
 			return newStatusClean(root, preview), nil, nil
 		},
@@ -393,6 +395,9 @@ type statusSectionView struct {
 	Notes    []string
 	HasData  bool
 	Headline string
+	// Cause is the section's categorical failure cause (status.Section.Cause),
+	// for the verdict line; never rendered.
+	Cause string
 	// Unset marks a section whose components are all not configured. It is
 	// not a failure, and it is not healthy either, so the line renderer
 	// draws the neutral skip glyph rather than ✓ (forgectl#1149).
@@ -427,6 +432,10 @@ func statusSectionViews(r statusReportJSON) [statusSectionCount]statusSectionVie
 		statusIdxClean: statusView(statusSectionLabels[statusIdxClean], r.Clean.State, r.Clean.Error, r.Clean.Notes, r.Clean.Data != nil),
 		statusIdxBench: statusView(statusSectionLabels[statusIdxBench], r.Bench.State, r.Bench.Error, r.Bench.Notes, r.Bench.Data != nil),
 	}
+	views[statusIdxGit].Cause = r.Git.Cause
+	views[statusIdxPRs].Cause = r.PRs.Cause
+	views[statusIdxClean].Cause = r.Clean.Cause
+	views[statusIdxBench].Cause = r.Bench.Cause
 	if r.Git.Data != nil {
 		views[statusIdxGit].Headline = statusGitHeadline(*r.Git.Data)
 	}
@@ -480,46 +489,61 @@ func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, pr
 // statusVerdict is the text view's first line (forgectl#1151): which sections
 // need the operator and why, so nobody reads all four to learn whether
 // anything does. A degraded or failed section needs them; a section that is
-// only not set up (Unset) does not. The count is of causes, not sections:
+// only not set up (Unset) does not. The count is of problems, one per cause:
 // sections with the same cause share one reason ("git, clean (no projects
 // folder)"), because a missing projects folder fails both and is one thing to
-// fix.
+// fix. Causes are matched on the sections' Cause field, never on their
+// capped error text.
 func statusVerdict(views [statusSectionCount]statusSectionView) string {
-	missing := map[string]bool{}
-	for _, v := range views {
-		if strings.Contains(v.Error, "projects directory not found") {
-			if p := firstQuoted(v.Error); p != "" {
-				missing[p] = true
-			}
-		}
+	projectsMissing := ""
+	if v := views[statusIdxGit]; strings.HasPrefix(v.Cause, statusCauseMissingFolder) {
+		projectsMissing = v.Cause
 	}
 	var reasons []string
 	labels := map[string][]string{}
-	n := 0
 	for _, v := range views {
 		if v.Unset || v.State == status.StateOK {
 			continue
 		}
-		n++
-		r := statusReason(v, missing)
+		r := statusReason(v, projectsMissing)
 		if _, seen := labels[r]; !seen {
 			reasons = append(reasons, r)
 		}
 		labels[r] = append(labels[r], v.Label)
 	}
-	if n == 0 {
+	if len(reasons) == 0 {
 		return "nothing needs you"
 	}
-	n = len(reasons)
 	parts := make([]string, 0, len(reasons))
 	for _, r := range reasons {
 		parts = append(parts, strings.Join(labels[r], ", ")+" ("+r+")")
 	}
-	verb := "need"
-	if n == 1 {
-		verb = "needs"
+	noun := "problems"
+	if len(reasons) == 1 {
+		noun = "problem"
 	}
-	return fmt.Sprintf("%d %s you: %s", n, verb, strings.Join(parts, "; "))
+	return fmt.Sprintf("%d %s: %s", len(reasons), noun, strings.Join(parts, "; "))
+}
+
+// statusCauseMissingFolder prefixes a section's Cause when its source failed
+// because a folder it reads does not exist; the folder's absolute path
+// follows. The path is compared, never rendered.
+const statusCauseMissingFolder = "missing-folder:"
+
+// withMissingFolderCause tags err with statusCauseMissingFolder when dir, the
+// folder the source reads, does not exist. Any other err is returned as is.
+func withMissingFolderCause(dir string, err error) error {
+	if dir == "" {
+		return err
+	}
+	abs, absErr := filepath.Abs(dir)
+	if absErr != nil {
+		return err
+	}
+	if _, statErr := os.Stat(abs); !errors.Is(statErr, fs.ErrNotExist) {
+		return err
+	}
+	return status.WithCause(statusCauseMissingFolder+abs, err)
 }
 
 // statusVerdictReasonMaxRunes caps one reason in the verdict line; the
@@ -527,18 +551,16 @@ func statusVerdict(views [statusSectionCount]statusSectionView) string {
 const statusVerdictReasonMaxRunes = 60
 
 // statusReason is a short cause for one section that needs the operator, from
-// its error (failed) or its notes (degraded). missing holds the quoted paths
-// of a projects folder another section found missing, so a scan of that same
-// folder reads as the same cause. The texts were escaped and capped by
+// its Cause (failed), its error, or its notes (degraded). projectsMissing is
+// the git section's missing-folder Cause, if any, so a scan of that same
+// folder reads as the same cause. Texts were escaped and capped by
 // status.Collect.
-func statusReason(v statusSectionView, missing map[string]bool) string {
+func statusReason(v statusSectionView, projectsMissing string) string {
 	if v.State != status.StateDegraded {
 		switch e := v.Error; {
-		case strings.Contains(e, "projects directory not found"):
+		case projectsMissing != "" && v.Cause == projectsMissing:
 			return "no projects folder"
-		case strings.Contains(e, "no such file or directory") && missing[firstQuoted(e)]:
-			return "no projects folder"
-		case strings.Contains(e, "no such file or directory"):
+		case strings.HasPrefix(v.Cause, statusCauseMissingFolder):
 			return "folder not found"
 		case strings.Contains(e, "timed out"):
 			return "timed out"
@@ -579,20 +601,6 @@ func noteReason(note string) string {
 	}
 	reason, _, _ := strings.Cut(note, ";")
 	return reason
-}
-
-// firstQuoted returns the first double-quoted span in s, quotes included, or
-// "" when there is none.
-func firstQuoted(s string) string {
-	i := strings.IndexByte(s, '"')
-	if i < 0 {
-		return ""
-	}
-	j := strings.IndexByte(s[i+1:], '"')
-	if j < 0 {
-		return ""
-	}
-	return s[i : i+j+2]
 }
 
 // renderStatusSection prints a section's glyph, label and headline, then

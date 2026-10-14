@@ -58,7 +58,7 @@ func newTasksCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "tasks",
-		Short: "Browse a Vikunja board, close a task, or serve it over MCP",
+		Short: "Browse or close Vikunja tasks, or serve them over MCP",
 		Long: `tasks is a client for a Vikunja instance: a local cache of what it returns,
 three read verbs over that data, one verb that closes a task, and an MCP
 server over the same client.

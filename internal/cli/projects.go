@@ -92,7 +92,7 @@ func newProjectsConfigErrorCmd(err error) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                "projects",
 		Aliases:            []string{"proj"},
-		Short:              "Find and open projects across hosts (clones on demand)",
+		Short:              "Find, clone and open projects: local, GitHub, Gitea",
 		Args:               cobra.ArbitraryArgs,
 		DisableFlagParsing: true,
 		RunE:               fail,
@@ -115,7 +115,7 @@ func newProjectsCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "projects",
 		Aliases: []string{"proj"},
-		Short:   "Find and open projects across hosts (clones on demand)",
+		Short:   "Find, clone and open projects: local, GitHub, Gitea",
 		// A stray subverb must not fall through to RunE below (forgectl#479;
 		// TestGroupParentsRefuseStrayTokens).
 		Args: cobra.NoArgs,
