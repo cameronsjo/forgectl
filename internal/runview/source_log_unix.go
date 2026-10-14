@@ -81,70 +81,98 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
-	d := Delta{Live: LiveUnknown}
-	if s.lens != nil {
-		d.Defs = s.lens.Steps()
-		if s.lens.Ends() {
-			d.Live = "" // the fold knows when the run ends
-		}
-	}
+	r := lineReader{lens: s.lens, keys: s.keys}
+	d := r.begin()
 	if replaced(&st, cur) {
 		*cur = Cursor{}
 		d.Reset = true
 	}
-	capped, err := readLines(f, &st, cur, func(_ int, b []byte) {
-		if cur.kept >= maxRunEvents {
+	capped, err := readLines(f, &st, cur, func(_ int, b []byte) { r.line(cur, &d, b) })
+	if err != nil {
+		err = fmt.Errorf("cannot read %s: %w", clean(filepath.Base(s.path)), err)
+	}
+	r.finish(cur, &d, capped, err)
+	return d, nil
+}
+
+// lineReader turns a log's lines into a Delta: through a lens when one is
+// set, else as JSONL read with keys. A file and a stream share it, so a log
+// reads the same wherever its lines come from.
+type lineReader struct {
+	lens *Lens
+	keys LogKeys
+}
+
+// begin is a Load's Delta before any line: the lens's step defs, and a
+// Live the fold decides when the lens knows how its runs end.
+func (r lineReader) begin() Delta {
+	d := Delta{Live: LiveUnknown}
+	if r.lens != nil {
+		d.Defs = r.lens.Steps()
+		if r.lens.Ends() {
+			d.Live = "" // the fold knows when the run ends
+		}
+	}
+	return d
+}
+
+// line reads one complete line into d.
+func (r lineReader) line(cur *Cursor, d *Delta, b []byte) {
+	if cur.kept >= maxRunEvents {
+		cur.dropped++
+		return
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return
+	}
+	if r.lens != nil {
+		e, nf, res, rule, split := r.lens.read(cur.kept+1, b)
+		cur.lensLines++
+		if split {
+			cur.split++
+		}
+		if rule > 0 {
+			if cur.ruleHits == nil {
+				cur.ruleHits = make([]int, r.lens.Rules())
+			}
+			cur.ruleHits[rule-1]++
+		}
+		switch res {
+		case lineDropped:
 			cur.dropped++
-			return
+		case lineIgnored:
+			cur.ignored++
+		default:
+			cur.fields += nf // as for a plain log: fields of a kept event
+			cur.kept++
+			d.Events = append(d.Events, e)
 		}
-		if strings.TrimSpace(string(b)) == "" {
-			return
-		}
-		if s.lens != nil {
-			e, nf, res, rule, split := s.lens.read(cur.kept+1, b)
-			cur.lensLines++
-			if split {
-				cur.split++
-			}
-			if rule > 0 {
-				if cur.ruleHits == nil {
-					cur.ruleHits = make([]int, s.lens.Rules())
-				}
-				cur.ruleHits[rule-1]++
-			}
-			switch res {
-			case lineDropped:
-				cur.dropped++
-			case lineIgnored:
-				cur.ignored++
-			default:
-				cur.fields += nf // as for a plain log: fields of a kept event
-				cur.kept++
-				d.Events = append(d.Events, e)
-			}
-			return
-		}
-		raw, nf, ok := scalarFields(b)
-		// Seq numbers events, not file lines, so #N and --at N agree.
-		e, named := logEvent(s.keys, cur.kept+1, raw)
-		if !ok || !named {
-			cur.dropped++
-			return
-		}
-		cur.fields += nf
-		cur.kept++
-		d.Events = append(d.Events, e)
-	})
+		return
+	}
+	raw, nf, ok := scalarFields(b)
+	// Seq numbers events, not file lines, so #N and --at N agree.
+	e, named := logEvent(r.keys, cur.kept+1, raw)
+	if !ok || !named {
+		cur.dropped++
+		return
+	}
+	cur.fields += nf
+	cur.kept++
+	d.Events = append(d.Events, e)
+}
+
+// finish sets d's totals from cur once the read is done. capped is a read
+// that stopped at the cap; err, when set, could not read the rest.
+func (r lineReader) finish(cur *Cursor, d *Delta, capped bool, err error) {
 	d.Partial = capped
 	d.Held = !capped && (len(cur.held) > 0 || cur.dropping) // past the cap, a cut line is Partial
 	if err != nil {
-		d.Err = cleanErr(fmt.Errorf("cannot read %s: %w", clean(filepath.Base(s.path)), err))
+		d.Err = cleanErr(err)
 	}
 	d.Dropped, d.DroppedFields, d.Ignored = cur.dropped, cur.fields, cur.ignored
-	if s.lens != nil {
-		d.RuleHits = make([]int, s.lens.Rules())
+	if r.lens != nil {
+		d.RuleHits = make([]int, r.lens.Rules())
 		copy(d.RuleHits, cur.ruleHits)
 		d.Lines, d.Split = cur.lensLines, cur.split
 	}
-	return d, nil
 }
