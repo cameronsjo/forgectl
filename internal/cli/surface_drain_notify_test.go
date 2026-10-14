@@ -5,10 +5,12 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
@@ -25,9 +27,36 @@ type fakePaneState struct {
 	reported []string // "<pane>|<message>"
 	released []string
 	err      error
+	// toasts are the herdr notifications shown ("<title>|<body>"); toast and
+	// toastErr are what each returns (zero toast: shown).
+	toasts   []string
+	toast    herdr.NotificationResult
+	toastErr error
 }
 
 func (f *fakePaneState) Session() string { return f.session }
+
+func (f *fakePaneState) Notify(_ context.Context, n herdr.Notification) (herdr.NotificationResult, error) {
+	f.toasts = append(f.toasts, n.Title+"|"+n.Body)
+	if f.toastErr != nil {
+		return herdr.NotificationResult{}, f.toastErr
+	}
+	if f.toast == (herdr.NotificationResult{}) {
+		return herdr.NotificationResult{Shown: true}, nil
+	}
+	return f.toast, nil
+}
+
+// failures joins the attempts that failed, or nil.
+func failures(attempts []notifyAttempt) error {
+	var errs []error
+	for _, a := range attempts {
+		if a.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", a.channel, a.err))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 func (f *fakePaneState) ReportBlocked(_ context.Context, ref backend.Ref, message string) error {
 	f.reported = append(f.reported, refPane(ref)+"|"+message)
@@ -80,7 +109,7 @@ func newNotifyRig(t *testing.T) *notifyRig {
 func TestNeedsYouNotificationArgv(t *testing.T) {
 	r := newNotifyRig(t)
 	reason := `blocked: "; do shell script "rm -rf ~" & $(id)`
-	if err := r.n.NeedsYou(t.Context(), r.row, r.led, reason); err != nil {
+	if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, reason)); err != nil {
 		t.Fatalf("NeedsYou: %v", err)
 	}
 	if len(r.run.Calls) != 1 {
@@ -108,7 +137,7 @@ func TestNeedsYouNotificationArgv(t *testing.T) {
 // from its ledger ref, never the drain's own HERDR_PANE_ID.
 func TestNeedsYouMarksTheLedgerPane(t *testing.T) {
 	r := newNotifyRig(t)
-	if err := r.n.NeedsYou(t.Context(), r.row, r.led, "idle without report"); err != nil {
+	if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "idle without report")); err != nil {
 		t.Fatalf("NeedsYou: %v", err)
 	}
 	want := "w9:p1|forgectl: fix-flake needs you — idle without report"
@@ -133,7 +162,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("adapter refuses the pane", func(t *testing.T) {
 		r := newNotifyRig(t)
 		r.panes.err = herdradapter.ErrScreenUnreadable
-		err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")
+		err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"))
 		if !errors.Is(err, herdradapter.ErrScreenUnreadable) {
 			t.Fatalf("err = %v, want the adapter's refusal", err)
 		}
@@ -144,7 +173,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("worker in another session", func(t *testing.T) {
 		r := newNotifyRig(t)
 		r.row.Session = "other"
-		if err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"); err == nil || !strings.Contains(err.Error(), "other") {
+		if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err == nil || !strings.Contains(err.Error(), "other") {
 			t.Fatalf("err = %v, want a session mismatch", err)
 		}
 		if len(r.panes.reported) != 0 || len(r.run.Calls) != 1 {
@@ -154,7 +183,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("adapter pinned elsewhere", func(t *testing.T) {
 		r := newNotifyRig(t)
 		r.panes.session = "default"
-		if err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"); err == nil {
+		if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err == nil {
 			t.Fatal("an adapter on another session was used")
 		}
 		if len(r.panes.reported) != 0 {
@@ -164,7 +193,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("no ledger ref", func(t *testing.T) {
 		r := newNotifyRig(t)
 		r.led.Ref = nil
-		if err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"); err == nil {
+		if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err == nil {
 			t.Fatal("no error for a row with no ref")
 		}
 		if len(r.panes.reported) != 0 || len(r.run.Calls) != 1 {
@@ -177,7 +206,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("osascript fails, the pane is still marked", func(t *testing.T) {
 		r := newNotifyRig(t)
 		r.run.RunFunc = func(string, []string) (string, error) { return "", errors.New("exit status 1") }
-		if err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"); err == nil || !strings.Contains(err.Error(), "macOS") {
+		if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err == nil || !strings.Contains(err.Error(), "macos") {
 			t.Fatalf("err = %v, want the macOS failure", err)
 		}
 		if len(r.panes.reported) != 1 {
@@ -198,7 +227,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 func TestNeedsYouOffDarwinSendsNoOsascript(t *testing.T) {
 	r := newNotifyRig(t)
 	r.n.mac = notify.New(r.run, notify.WithGOOS("linux"))
-	if err := r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"); err != nil {
+	if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err != nil {
 		t.Fatalf("NeedsYou: %v", err)
 	}
 	if len(r.run.Calls) != 0 || len(r.panes.reported) != 1 {

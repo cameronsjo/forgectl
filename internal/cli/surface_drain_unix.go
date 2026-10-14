@@ -127,7 +127,7 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 		if d != nil {
 			st = d.status(base, nil)
 		}
-		st.Status, st.PauseReason = drain.StatusStopped, ""
+		st.Status, st.PauseReason, st.SlotsHold = drain.StatusStopped, "", nil
 		if why != nil {
 			st.Error = termsafe.SafeLineMax(why.Error(), maxDrainErrorLen)
 		}

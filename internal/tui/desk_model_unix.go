@@ -569,9 +569,10 @@ func herdrNotify(ctx context.Context, title, body string) error {
 	if err != nil {
 		return nil //nolint:nilerr // no herdr binary on PATH: nothing to notify through
 	}
-	return herdr.NotificationShow(ctx, exec.NewOSSensitiveRunner(), path, herdr.Notification{
+	_, err = herdr.NotificationShow(ctx, exec.NewOSSensitiveRunner(), path, herdr.Notification{
 		Title: title, Body: body, Sound: herdr.SoundRequest,
 	})
+	return err
 }
 
 func (m deskModel) styles() theme.Styles { return m.theme.Styles() }
