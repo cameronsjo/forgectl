@@ -154,7 +154,9 @@ func readAtMax(dir int, name string, limit int) ([]byte, error) {
 	defer f.Close() //nolint:errcheck // read-only
 	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
+		// The reason alone, so the text reads as it did before the check
+		// moved to privdir: "<sentinel>: <name> is a symlink".
+		return nil, fmt.Errorf("%w: %s", ErrLedgerUnreadable, privdir.Reason(err))
 	}
 	if len(data) > limit {
 		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrLedgerUnreadable, name, limit)
@@ -203,7 +205,9 @@ func openVerified(dir int, name string, flags int) (*os.File, error) {
 	case errors.Is(err, os.ErrNotExist):
 		return nil, os.ErrNotExist
 	case err != nil:
-		return nil, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
+		// The reason alone, so the text reads as it did before the check
+		// moved to privdir: "<sentinel>: <name> is a symlink".
+		return nil, fmt.Errorf("%w: %s", ErrLedgerUnreadable, privdir.Reason(err))
 	}
 	return f, nil
 }

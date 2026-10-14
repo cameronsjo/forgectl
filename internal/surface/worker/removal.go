@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
@@ -221,10 +222,16 @@ func checkGitFile(common, path string) error {
 // unless the open handle is still a regular file of at most maxGitFileBytes.
 func readGitFile(gitfile string) ([]byte, error) {
 	f, err := gitenv.OpenGitfile(gitfile)
-	if err != nil {
-		// A symbolic link swapped in after the Lstat (ELOOP) lands here. A
-		// FIFO opens without blocking and is refused by the mode check below.
-		return nil, fmt.Errorf("%w: %s is not a gitfile: %w", ErrUnsafeWorktreeRoot, gitfile, err)
+	switch {
+	case errors.Is(err, syscall.ELOOP):
+		// A symbolic link swapped in after the Lstat. A FIFO opens without
+		// blocking and is refused by the mode check below.
+		return nil, fmt.Errorf("%w: %s is a symbolic link, not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+	case err != nil:
+		// Removed after the Lstat, unreadable, or any other open failure: no
+		// gitfile was read, so the worktree is kept, but nothing says the
+		// worktree is hostile.
+		return nil, fmt.Errorf("worker: open %s: %w", gitfile, err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 	info, err := f.Stat()

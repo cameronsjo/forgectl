@@ -178,3 +178,22 @@ func TestOpenFile_RefusesANameOrModeItCannotCheck(t *testing.T) {
 		}
 	}
 }
+
+// Reason strips privdir's sentinel so a caller's own sentinel reads as one
+// sentence.
+func TestReason_StripsTheSentinel(t *testing.T) {
+	dir, path := pinnedDir(t)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "x"), filepath.Join(path, "data")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := privdir.OpenFile(dir, "data", unix.O_RDONLY, 0o600)
+	if got := privdir.Reason(err); got != "data is a symlink" {
+		t.Errorf("Reason = %q, want %q", got, "data is a symlink")
+	}
+	if got := privdir.Reason(privdir.ErrUnsupported); got != "not supported on this platform" {
+		t.Errorf("Reason of a bare sentinel = %q", got)
+	}
+	if got := privdir.Reason(errors.New("other")); got != "other" {
+		t.Errorf("Reason of a foreign error = %q", got)
+	}
+}

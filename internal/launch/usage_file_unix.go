@@ -30,7 +30,7 @@ func openUsageFileAt(stateFD int, name string, flags int, create bool) (*os.File
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, errUsageAbsent
 	case err != nil:
-		return nil, unsafeStore("%s", strippedReason(err))
+		return nil, unsafeStore("%s", privdir.Reason(err))
 	}
 	return file, nil
 }

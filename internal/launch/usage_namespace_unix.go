@@ -5,7 +5,6 @@ package launch
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -59,26 +58,9 @@ func pinUsageLeaf(base string, create bool) (int, error) {
 		// namespace — leaving it would print "unsafe" twice — and "state" goes
 		// back in, because it is what tells the operator which directory
 		// doctor is complaining about.
-		return -1, unsafeStore("state %s", strippedReason(err))
+		return -1, unsafeStore("state %s", privdir.Reason(err))
 	case err != nil:
 		return -1, unsafeStore("pin state leaf: %s", err)
 	}
 	return fd, nil
-}
-
-// strippedReason returns privdir's refusal reason without its sentinel prefix,
-// so the wrapped message reads as one sentence rather than two stacked
-// "unsafe" clauses.
-func strippedReason(err error) string {
-	msg := err.Error()
-	for _, sentinel := range []error{privdir.ErrUnsafe, privdir.ErrUnsafeFile, privdir.ErrUnsupported} {
-		if trimmed, ok := strings.CutPrefix(msg, sentinel.Error()+": "); ok {
-			return trimmed
-		}
-		// An error that *is* the bare sentinel carries no further reason.
-		if msg == sentinel.Error() {
-			return strings.TrimPrefix(msg, "privdir: ")
-		}
-	}
-	return msg
 }

@@ -110,6 +110,13 @@ func TestReadGitFileRefusesWhatASwapCouldPlant(t *testing.T) {
 		})
 	}
 
+	t.Run("a gitfile removed after the check is an open error, not a hostile one", func(t *testing.T) {
+		_, err := readGitFile(filepath.Join(t.TempDir(), ".git"))
+		if err == nil || !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrUnsafeWorktreeRoot) {
+			t.Fatalf("readGitFile on a missing file = %v, want a not-exist error that is not ErrUnsafeWorktreeRoot", err)
+		}
+	})
+
 	t.Run("a gitfile within the bound is read", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), ".git")
 		writeFile(t, path, valid)

@@ -407,10 +407,10 @@ func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
 // (cameronsjo/forgectl#977) and hooks pinned off with
-// core.hooksPath=/dev/null (cameronsjo/forgectl#1079). It is for a call that can run a filter on the
-// working tree and needs none: status, whose racy or stat-dirty entries are
-// re-hashed through the clean filter (or the process filter) that
-// .gitattributes names. Local cannot stop that by itself: no option turns
+// core.hooksPath=/dev/null (cameronsjo/forgectl#1079). It is for a call that
+// can run a filter on the working tree and needs none: status, whose racy or
+// stat-dirty entries are re-hashed through the clean filter (or the process
+// filter) that .gitattributes names. Local cannot stop that by itself: no option turns
 // filters off, and the repository's own .gitattributes and .git/config
 // select and define them.
 //

@@ -19,6 +19,7 @@ package privdir
 import (
 	"errors"
 	"io/fs"
+	"strings"
 )
 
 var (
@@ -85,4 +86,22 @@ type Spec struct {
 	// Create makes Pin materialise Base and Leaf when absent. Without it, an
 	// absent directory reports ErrAbsent and nothing is written.
 	Create bool
+}
+
+// Reason returns err's refusal reason without privdir's sentinel prefix, for
+// a caller that wraps it under a sentinel of its own: the message then reads
+// as one sentence rather than two stacked "unsafe" clauses. A bare sentinel
+// carries no further reason and is returned without its "privdir: "
+// namespace; any other error is returned whole.
+func Reason(err error) string {
+	msg := err.Error()
+	for _, sentinel := range []error{ErrUnsafe, ErrUnsafeFile, ErrUnsupported} {
+		if trimmed, ok := strings.CutPrefix(msg, sentinel.Error()+": "); ok {
+			return trimmed
+		}
+		if msg == sentinel.Error() {
+			return strings.TrimPrefix(msg, "privdir: ")
+		}
+	}
+	return msg
 }
