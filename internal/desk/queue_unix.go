@@ -64,17 +64,27 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		snap.Pending = append(snap.Pending, it)
 	}
 
+	afterPendingScan()
 	running, err := d.list(DirRunning)
 	if err != nil {
 		return nil, err
 	}
+	claimedSince := map[string]bool{}
 	for _, e := range running {
 		name, kind, ok := kindOfFile(e.Name())
 		if !ok {
 			continue
 		}
+		if !inRunning[name] {
+			claimedSince[name] = true
+		}
 		inRunning[name] = true
 		snap.Running = append(snap.Running, d.runningItem(name, kind))
+	}
+	// An item claimed after it was read from pending/ is listed once, as
+	// running.
+	if len(claimedSince) > 0 {
+		snap.Pending = slices.DeleteFunc(snap.Pending, func(it Item) bool { return claimedSince[it.Name] })
 	}
 
 	if snap.Done, err = d.doneItems(inRunning); err != nil {
@@ -151,8 +161,9 @@ func (d *Desk) runningNames() (map[string]bool, error) {
 
 // refusedNameTaken is the refusal of a pending item whose name a run already
 // holds, in running/ or done/: claiming it would rename over that run's
-// record, or its run would be skipped as name-reused once approved. It never
-// clears; the item is skipped and queued again under a new number.
+// record, or its run would be skipped as name-reused once approved. It stays
+// refused while that name is in running/ or done/; the operator skips it and
+// it is queued again under a new number.
 const refusedNameTaken = "another item already uses this name"
 
 // hold sets a waiting item's state when it cannot be claimed: refused when
@@ -179,7 +190,7 @@ func (d *Desk) hold(it *Item, running bool) {
 // line that can never be met (a bad name, the item itself, too many names).
 func (d *Desk) unmetAfter(name string, after []string) (why string, permanent bool) {
 	if len(after) > MaxAfter {
-		return fmt.Sprintf("its AFTER line names %d items; at most %d are allowed", len(after), MaxAfter), true
+		return fmt.Sprintf("its AFTER line names more than %d items", MaxAfter), true
 	}
 	for _, a := range after {
 		if !ValidName(a) {
@@ -216,6 +227,10 @@ func (d *Desk) doneExit(name string) (rc int, ok bool) {
 	}
 	return *meta.ExitCode, true
 }
+
+// afterPendingScan runs between Scan's read of pending/ and its second
+// listing of running/. Tests replace it to claim an item in that window.
+var afterPendingScan = func() {}
 
 func newItem(name string, kind Kind, state State) Item {
 	n, stem := SplitName(name)

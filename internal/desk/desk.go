@@ -299,7 +299,7 @@ func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
 		}
 		after := splitAfter(strings.Join(h.After, ","))
 		if len(after) > MaxAfter {
-			return nil, fmt.Errorf("desk: --after names %d items; at most %d are allowed", len(after), MaxAfter)
+			return nil, fmt.Errorf("desk: --after names more than %d items", MaxAfter)
 		}
 		for _, n := range after {
 			if !ValidName(n) {

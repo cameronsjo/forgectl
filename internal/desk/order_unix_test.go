@@ -149,7 +149,7 @@ func TestAfterLineThatCannotBeMetIsRefused(t *testing.T) {
 	}
 	dropPending(t, d, "03-z.sh", "# WHAT: x\n# WHY: y\n# AFTER: "+strings.Join(many, ",")+"\necho z\n")
 	s := scan(t, d)
-	if it := pendingItem(t, s, "03-z"); it.State != StateRefused || !strings.Contains(it.Refusal, "at most") {
+	if it := pendingItem(t, s, "03-z"); it.State != StateRefused || !strings.Contains(it.Refusal, "more than") {
 		t.Errorf("03-z: state %s refusal %q", it.State, it.Refusal)
 	}
 	if it := pendingItem(t, s, "01-x"); it.State != StateRefused || !strings.Contains(it.Refusal, "not an item name") {
@@ -188,7 +188,7 @@ func TestSplitAfterIsLinearAndCapped(t *testing.T) {
 	if len(h.After) != MaxAfter+1 {
 		t.Errorf("parsed %d names, want MaxAfter+1 = %d (enough to refuse)", len(h.After), MaxAfter+1)
 	}
-	if why, permanent := (&Desk{}).unmetAfter("99-x", h.After); !permanent || !strings.Contains(why, "at most") {
+	if why, permanent := (&Desk{}).unmetAfter("99-x", h.After); !permanent || !strings.Contains(why, "more than") {
 		t.Errorf("unmetAfter = %q, %v; want refused as over the cap", why, permanent)
 	}
 }
@@ -265,6 +265,63 @@ func TestLinkUnlinkDropsTheLinkWhenTheSourceStays(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "a")); err != nil || fi.Sys().(*syscall.Stat_t).Nlink != 1 {
 		t.Errorf("a: %v; want it in place with one link", err)
+	}
+}
+
+// An ENOENT from the source unlink (an NFS retransmit of our own unlink, or
+// someone removing it) keeps the new link when it is now the only copy, and
+// drops it while the source is still there.
+func TestLinkUnlinkOnENOENTKeepsTheOnlyCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		removeSrc  bool
+		wantTarget bool
+	}{{"source gone", true, true}, {"source still there", false, false}} {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "a"), "a\n", 0o600)
+		f, err := os.Open(dir) //nolint:gosec // G304: a directory under t.TempDir
+		if err != nil {
+			t.Fatal(err)
+		}
+		prev := unlinkSource
+		unlinkSource = func(fd int, p string, flags int) error {
+			if tc.removeSrc {
+				if err := unix.Unlinkat(fd, p, flags); err != nil {
+					return err
+				}
+			}
+			return unix.ENOENT
+		}
+		fd := int(f.Fd())
+		err = linkUnlink(fd, "a", fd, "b")
+		unlinkSource = prev
+		_ = f.Close()
+		_, statErr := os.Stat(filepath.Join(dir, "b"))
+		if got := statErr == nil; got != tc.wantTarget {
+			t.Errorf("%s: target present = %v (linkUnlink err %v), want %v", tc.name, got, err, tc.wantTarget)
+		}
+		if tc.wantTarget && err != nil {
+			t.Errorf("%s: linkUnlink = %v, want nil: the move completed", tc.name, err)
+		}
+	}
+}
+
+// An item claimed between Scan's read of pending/ and its second listing of
+// running/ is listed once, as running.
+func TestScanListsAnItemClaimedMidScanOnce(t *testing.T) {
+	d := openDesk(t)
+	a := addScript(t, d, "a.sh", "echo a\n")
+	scan(t, d)
+	prev := afterPendingScan
+	afterPendingScan = func() {
+		if _, err := d.Claim(a.Name, a.SHA256); err != nil {
+			t.Errorf("Claim: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterPendingScan = prev })
+	s := scan(t, d)
+	if len(s.Pending) != 0 || len(s.Running) != 1 {
+		t.Errorf("pending %d, running %d; want the item once, as running", len(s.Pending), len(s.Running))
 	}
 }
 

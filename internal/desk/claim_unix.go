@@ -178,8 +178,9 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 			// is the one Release would act on, so put this one back in
 			// pending/ instead, unclaimed, and leave the other alone. If the
 			// move back fails the item stays in running/ beside that meta
-			// and is reported; it has no owner, so it reads as lost once the
-			// claim grace passes, and only `desk skip` moves it on.
+			// and the error says so. A scan then reads the other item's
+			// meta under the name, so the stranded item is shown with that
+			// item's state, not as a claim of its own; it needs a hand.
 			back := d.renameNoReplace(DirRunning, DirPending, file)
 			if back != nil {
 				d.leftPending(meta)

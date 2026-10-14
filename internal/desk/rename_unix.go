@@ -46,7 +46,16 @@ func linkUnlink(fromfd int, from string, tofd int, to string) error {
 	if err := unlinkSource(fromfd, from, 0); err != nil {
 		// The file must not stay under both names: drop the new link, so it
 		// is where it was (or, if someone else moved the source meanwhile,
-		// only where they put it).
+		// only where they put it). A source already gone (ENOENT: removed
+		// by someone else, or an NFS retransmit of our own unlink) may have
+		// left the new link as the only copy; it is dropped only while the
+		// file still has another link.
+		if errors.Is(err, unix.ENOENT) {
+			var st unix.Stat_t
+			if serr := unix.Fstatat(tofd, to, &st, unix.AT_SYMLINK_NOFOLLOW); serr == nil && st.Nlink < 2 {
+				return nil
+			}
+		}
 		if uerr := unix.Unlinkat(tofd, to, 0); uerr != nil {
 			return fmt.Errorf("remove %s after linking it: %w (and the new link could not be removed: %w)", from, err, uerr)
 		}
