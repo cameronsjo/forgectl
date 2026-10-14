@@ -154,67 +154,24 @@ func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string,
 	if err != nil {
 		return Profile{}, nil, err
 	}
-	// A block applies when the physical cwd lies under its match as written,
-	// or when the cwd as spelled ($PWD, the target argument) lies under it
-	// AND the physical cwd lies under the match's own resolved path
-	// (forgectl#1042). The resolved path is only a containment test, never
-	// the match: resolving it could widen it (a committed `scratch -> ..`
-	// would make a block written for scratch cover its parent). And a
-	// spelled-only match never counts on its own: a link inside a loose
-	// block's tree that points into a stricter one (`prod -> /srv`) must not
-	// carry the loose block, or bypass the defaults, at the physical place.
-	physical, spelled := normalizeCWD(cwd), spelledCWD(cwd)
-	i := matchProjectIndexFunc(lc, home, func(m string) bool {
-		if under(physical, m) {
-			return true
-		}
-		if !under(spelled, m) {
-			return false
-		}
-		resolved, err := filepath.EvalSymlinks(m)
-		return err == nil && under(physical, filepath.Clean(resolved))
-	})
-	var win *config.LaunchProject
-	if i >= 0 {
-		win = &lc.Projects[i]
-	}
-	return resolveProject(lc, win, home), win, nil
-}
-
-// under reports whether path is dir or lies below it. Both are clean.
-func under(path, dir string) bool {
-	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
-}
-
-// spelledCWD is cwd made absolute and clean with its symlinks left in place:
-// the path as the operator reached it ($PWD, or the target argument).
-func spelledCWD(cwd string) string {
-	if abs, err := filepath.Abs(cwd); err == nil {
-		return filepath.Clean(abs)
-	}
-	return filepath.Clean(cwd)
+	norm := normalizeCWD(cwd)
+	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
 }
 
 // matchProject is the longest project match for an already normalized cwd.
 func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
-	if i := matchProjectIndexFunc(lc, home, func(m string) bool { return under(cwd, m) }); i >= 0 {
-		return &lc.Projects[i]
-	}
-	return nil
-}
-
-// matchProjectIndexFunc is the index in lc.Projects of the longest match
-// (tilde-expanded and clean) that applies says covers the cwd, or -1.
-func matchProjectIndexFunc(lc config.LaunchConfig, home string, applies func(match string) bool) int {
-	best, win := -1, -1
+	best := -1
+	var win *config.LaunchProject
 	for i := range lc.Projects {
 		if lc.Projects[i].Match == "" {
 			continue
 		}
 		m := filepath.Clean(expandTilde(lc.Projects[i].Match, home))
-		if len(m) > best && applies(m) {
-			best = len(m)
-			win = i
+		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
+			if len(m) > best {
+				best = len(m)
+				win = &lc.Projects[i]
+			}
 		}
 	}
 	return win
@@ -295,13 +252,8 @@ func projectsUseHome(ps []config.LaunchProject) bool {
 // resolve is the pure resolution: fixed home, already-clean absolute cwd. It is
 // the risk-bearing core and is exercised directly by the tests.
 func resolve(lc config.LaunchConfig, cwd, home string) Profile {
-	return resolveProject(lc, matchProject(lc, cwd, home), home)
-}
-
-// resolveProject merges the matched block win (nil for none) over the
-// defaults.
-func resolveProject(lc config.LaunchConfig, win *config.LaunchProject, home string) Profile {
 	p := defaultsProfile(lc.Defaults, home)
+	win := matchProject(lc, cwd, home)
 
 	if win != nil {
 		if win.Harness != "" {

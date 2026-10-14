@@ -8,155 +8,37 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// symlinkTree makes base/dir/sub and base/link -> base/dir, with base
-// resolved so the temp dir's own symlinks (macOS /var) do not interfere.
-func symlinkTree(t *testing.T) (base, dir, link string) {
-	t.Helper()
+// TestResolve_SymlinkedMatchFailsClosed pins today's behavior while
+// forgectl#1042 waits on a decision: a project match is compared with the
+// physical working directory only, so a match written through a symlink
+// applies neither through the symlink nor at its target. Every way found of
+// letting it apply let content a repository can commit (a symlink) steer the
+// posture; see the comments on #1042.
+func TestResolve_SymlinkedMatchFailsClosed(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir = filepath.Join(base, "dir")
+	dir := filepath.Join(base, "dir")
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	link = filepath.Join(base, "link")
+	link := filepath.Join(base, "link")
 	if err := os.Symlink(dir, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	return base, dir, link
-}
-
-// TestResolve_SymlinkedMatch is forgectl#1042: a project block whose match is
-// written through a symlink applies when the cwd is spelled through that
-// symlink, and the profile reports the match as written.
-//
-// Mutation: drop spelledCWD from resolveMatched and the block stops applying.
-func TestResolve_SymlinkedMatch(t *testing.T) {
-	_, _, link := symlinkTree(t)
-	lc := config.LaunchConfig{Projects: []config.LaunchProject{{Match: link, PermissionMode: "acceptEdits"}}}
-	for _, cwd := range []string{link, filepath.Join(link, "sub")} {
-		p, proj, err := resolveMatched(lc, cwd, os.UserHomeDir)
-		if err != nil {
-			t.Fatalf("%s: %v", cwd, err)
-		}
-		if p.PermissionMode != "acceptEdits" || p.Match != link || proj == nil || proj.Match != link {
-			t.Errorf("%s: permission %q, match %q, block %v; want acceptEdits from the block matched as %q", cwd, p.PermissionMode, p.Match, proj, link)
-		}
-	}
-}
-
-// TestResolve_SymlinkedMatchNeverWidens is the review finding on #1262: a
-// match is never resolved, so a committed `scratch -> ..` does not make a
-// block written for scratch apply to its parent or a sibling.
-//
-// Mutation: resolve the match with filepath.EvalSymlinks and the parent and
-// sibling get the looser block.
-func TestResolve_SymlinkedMatchNeverWidens(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	foo := filepath.Join(base, "foo")
-	sibling := filepath.Join(foo, "other")
-	if err := os.MkdirAll(sibling, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	scratch := filepath.Join(foo, "scratch")
-	if err := os.Symlink("..", scratch); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	allow := true
 	lc := config.LaunchConfig{
 		Defaults: config.LaunchDefaults{AllowDanger: new(bool)},
-		Projects: []config.LaunchProject{{Match: scratch, AllowDanger: &allow}},
+		Projects: []config.LaunchProject{{Match: link, AllowDanger: &allow}},
 	}
-	for _, cwd := range []string{foo, sibling, base} {
+	for _, cwd := range []string{link, filepath.Join(link, "sub"), dir, filepath.Join(dir, "sub")} {
 		p, proj, err := resolveMatched(lc, cwd, os.UserHomeDir)
 		if err != nil {
 			t.Fatalf("%s: %v", cwd, err)
 		}
 		if proj != nil || p.AllowDanger || p.Match != "" {
-			t.Errorf("%s: got the scratch block (allow_danger %v, match %q)", cwd, p.AllowDanger, p.Match)
+			t.Errorf("%s: the symlinked block applied (allow_danger %v, match %q)", cwd, p.AllowDanger, p.Match)
 		}
 	}
-}
-
-// TestResolve_UnresolvableMatchKeepsItsSpelling: a match naming a directory
-// that does not exist yet still matches by its written path.
-func TestResolve_UnresolvableMatchKeepsItsSpelling(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "not-yet")
-	lc := config.LaunchConfig{Projects: []config.LaunchProject{{Match: missing, Model: "sonnet"}}}
-	p, err := resolveWithHome(lc, filepath.Join(missing, "x"), os.UserHomeDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Match != missing || p.Model != "sonnet" {
-		t.Errorf("match %q model %q; want the block to apply", p.Match, p.Model)
-	}
-}
-
-// TestResolve_SpelledMatchNeedsThePhysicalPlace is the second review finding
-// on #1262: a link inside a loose block's tree that points into a stricter
-// block's (sandbox/repo/prod -> srv) must not carry the loose block to the
-// physical place, against the stricter block or against the defaults.
-//
-// Mutation: count a spelled-cwd match without the physical containment test
-// and both cases get the sandbox block.
-func TestResolve_SpelledMatchNeedsThePhysicalPlace(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := filepath.Join(base, "srv")
-	sandbox := filepath.Join(base, "projects", "sandbox")
-	repo := filepath.Join(sandbox, "repo")
-	for _, d := range []string{srv, repo} {
-		if err := os.MkdirAll(d, 0o750); err != nil {
-			t.Fatal(err)
-		}
-	}
-	prod := filepath.Join(repo, "prod")
-	if err := os.Symlink(srv, prod); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	loose, strict := true, false
-	sandboxBlock := config.LaunchProject{Match: sandbox, AllowDanger: &loose, PermissionMode: "acceptEdits"}
-
-	t.Run("a stricter block at the physical place wins", func(t *testing.T) {
-		lc := config.LaunchConfig{Projects: []config.LaunchProject{
-			{Match: srv, AllowDanger: &strict, PermissionMode: "plan"},
-			sandboxBlock,
-		}}
-		p, proj, err := resolveMatched(lc, prod, os.UserHomeDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if proj == nil || proj.Match != srv || p.AllowDanger || p.PermissionMode != "plan" {
-			t.Errorf("block %v, allow_danger %v, permission %q; want the /srv block", proj, p.AllowDanger, p.PermissionMode)
-		}
-	})
-	t.Run("the defaults are not bypassed", func(t *testing.T) {
-		lc := config.LaunchConfig{
-			Defaults: config.LaunchDefaults{AllowDanger: &strict, PermissionMode: "plan"},
-			Projects: []config.LaunchProject{sandboxBlock},
-		}
-		p, proj, err := resolveMatched(lc, prod, os.UserHomeDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if proj != nil || p.AllowDanger || p.PermissionMode != "plan" {
-			t.Errorf("block %v, allow_danger %v, permission %q; want the defaults", proj, p.AllowDanger, p.PermissionMode)
-		}
-	})
-	t.Run("the sandbox block still covers its own tree", func(t *testing.T) {
-		lc := config.LaunchConfig{Projects: []config.LaunchProject{sandboxBlock}}
-		_, proj, err := resolveMatched(lc, repo, os.UserHomeDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if proj == nil || proj.Match != sandbox {
-			t.Errorf("block %v; want the sandbox block", proj)
-		}
-	})
 }
