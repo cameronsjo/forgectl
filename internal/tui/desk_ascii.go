@@ -17,6 +17,8 @@ var deskASCII = strings.NewReplacer(
 	"▸", ">", "▶", ">", "⌨", "t", "┆", "|", "↳", ">", "→", ">", "←", "<", "↓", "v", "•", "*",
 	// panel borders
 	"╭", "+", "╮", "+", "╰", "+", "╯", "+", "─", "-", "│", "|", "┤", "|", "├", "|",
+	// flowchart boxes (desk show --live --layout flow)
+	"┌", "+", "┐", "+", "└", "+", "┘", "+", "┬", "+",
 	// bars: fill, running, empty, shimmer
 	"█", "#", "▓", "=", "░", ".", "▒", "~", "━", "=",
 	// sparkline ramp, lowest first (█ is above)
