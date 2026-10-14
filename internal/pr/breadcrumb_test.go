@@ -40,13 +40,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 // fakeWorkspace makes a dir under the OS temp root with the forgectl-workflow-
 // prefix — what validateWorkspace accepts as a real sandbox.
 func fakeWorkspace(t *testing.T) string {
 	t.Helper()
-	ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+	// Named as sandbox.Sandbox names a real workspace: the review's private
+	// temp dir carries the suffix, and a longer one than os.MkdirTemp's
+	// 10 digits would not fit claudeTmpDirMax beside a multi-digit uid.
+	ws, err := os.MkdirTemp("", sandbox.WorkspacePrefix+"*")
 	if err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
