@@ -32,9 +32,10 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		return backend.NewCloseUnreadable(cause)
 	case locateAbsent:
 		return backend.NewCloseAlreadyGone()
-	case locateFound:
-		// Fall through. The switch is written so ONLY this state reaches the
-		// close — see the default below.
+	case locateFound, locateRestored:
+		// Fall through. The switch is written so ONLY these states reach the
+		// close — see the default below. A restored workspace is ours and is
+		// closed like any other.
 	default:
 		// A state nobody has taught this switch about must not reach the close.
 		// A CONSTRUCTION guard, not a tested control: every state locate can
@@ -48,10 +49,12 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 
 	switch a.turnover(server) {
 	case turnoverGone:
-		// The endpoint vanished after the lookup: the server quit, and the
-		// workspace went with it. The same conclusion the failed-close path
-		// below draws from the same stat.
-		return backend.NewCloseAlreadyGone()
+		// The endpoint vanished after the lookup. Not concluded gone: absence
+		// needs a failed herdr call AND the stat (see locateIn), and here
+		// herdr was never asked. The obligation is kept, nothing is closed,
+		// and the next close settles it.
+		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureUnavailable,
+			errors.New("the herdr socket vanished between the lookup and the close; nothing was closed")))
 	case turnoverChanged:
 		return backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the herdr server restarted between the lookup and the close; nothing was closed")))
@@ -167,6 +170,8 @@ func (a *Adapter) probeIn(ctx context.Context, ref backend.Ref, view workspaceVi
 		return backend.NewProbeGone()
 	case locateFound:
 		return backend.NewProbePresent()
+	case locateRestored:
+		return backend.NewProbePresentRestored()
 	case locateInvalid:
 	}
 	// Unreadable, never Present: an unknown state answering "the workspace is
@@ -218,6 +223,10 @@ const (
 	locateAbsent
 	locateMismatch
 	locateUnreadable
+	// locateRestored is locateFound for a workspace a restarted server holds
+	// under the reference's id and marker (locateAfterTurnover): ours, but
+	// the worker that ran in it died with the old server.
+	locateRestored
 )
 
 // workspaceView is where locate reads the server's readiness and the
@@ -354,9 +363,11 @@ func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceV
 
 // locateAfterTurnover answers locate for a reference whose server incarnation
 // changed, when the caller vouches that the reference was taken in this
-// session (ForSessionLedger). The socket the session owns changed, so the
-// server that minted the reference has stopped or restarted, and its panes,
-// the worker's harness among them, went with it (forgectl#1077).
+// session (ForSessionLedger) and the reference records the same socket path
+// the session resolves to now. The server behind that path turned over: it
+// restarted, and its panes, the worker's harness among them, went with the
+// old one (forgectl#1077). A change in the socket's change time alone, with
+// no restart, lands here too.
 //
 // What can remain is the workspace OBJECT: herdr's session restore brings a
 // workspace back under its saved id and label, with fresh shells. So the
@@ -364,16 +375,30 @@ func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceV
 // cannot be on anybody else's workspace, read from a complete listing:
 //
 //   - no workspace carries the marker: gone. The new server does not hold it.
-//   - exactly one does, at the reference's id: found, and Close closes it.
-//     This is also the answer when the socket's change time moved with no
-//     restart at all.
+//   - exactly one does, at the reference's id: locateRestored. It is ours,
+//     and Close closes it.
 //   - anything else (the marker at another id, or on two): a mismatch,
 //     because neither absence nor this id is proved.
+//
+// The listing cannot catch a restore half done: herdr binds its API socket
+// before it restores the saved session, but answers a listing only from its
+// event loop, which starts after the restore (herdr's
+// src/server/headless/bootstrap.rs).
 //
 // One gap is shared with serverGone: a server still running after its socket
 // path was taken over by another still holds the workspace, and nothing on
 // this side can see it.
 func (a *Adapter) locateAfterTurnover(ctx context.Context, ref backend.Ref, want string, server serverInfo, view workspaceView) (string, serverInfo, locateState, backend.StartCause) {
+	// Same session NAME is not same server. herdr derives the socket from its
+	// config directory ($XDG_CONFIG_HOME, and a debug build's own app name),
+	// so a reference taken from another environment can reach a different
+	// server that is still running and still holds the worker. Only a
+	// turnover at the SAME socket path is a restart; a reference that does
+	// not record its path keeps the plain mismatch.
+	if taken, ok := ref.Endpoint(); !ok || !taken.Matches(backend.EndpointOf(server.socket)) {
+		return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the herdr server is not the one this reference was taken on, and it is not a restart at the same socket"))
+	}
 	rows, scause := view.snapshot(ctx)
 	if scause != nil {
 		return "", server, locateUnreadable, *scause
@@ -389,7 +414,7 @@ func (a *Adapter) locateAfterTurnover(ctx context.Context, ref backend.Ref, want
 	case len(held) == 0:
 		return "", server, locateAbsent, backend.StartCause{}
 	case len(held) == 1 && held[0] == want:
-		return want, server, locateFound, backend.StartCause{}
+		return want, server, locateRestored, backend.StartCause{}
 	}
 	return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 		errors.New("the herdr server restarted, and forgectl's marker is on a workspace other than the one the reference names"))

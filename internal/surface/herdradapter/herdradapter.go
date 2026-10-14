@@ -263,6 +263,11 @@ func checkSocketPath(socket string) error {
 // Reading and typing into a worker's pane (WorkerScreen, TypeText,
 // PressEnter) still refuse a changed incarnation: a workspace herdr restored
 // after a restart runs a fresh shell, not the worker.
+//
+// The copy is shallow. That is safe because an Adapter holds only its pin and
+// seams, all fixed at construction. A field that must not be copied (a lock,
+// a cache, a counter) changes that: go vet's copylocks check catches a lock,
+// nothing catches the others, so whoever adds one rebuilds this method.
 func (a *Adapter) ForSessionLedger() *Adapter {
 	c := *a
 	c.sessionBound = true

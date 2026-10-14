@@ -4,6 +4,7 @@ package herdradapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -19,11 +20,12 @@ import (
 func TestALedgerBoundAdapterSettlesARestartByTheMarker(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name    string
-		listing func(marker string) []byte
-		close   backend.CloseState
-		probe   backend.ProbeState
-		cleanup bool
+		name     string
+		listing  func(marker string) []byte
+		close    backend.CloseState
+		probe    backend.ProbeState
+		restored bool
+		cleanup  bool
 	}{
 		{
 			name:    "no workspace carries the marker: gone",
@@ -42,7 +44,7 @@ func TestALedgerBoundAdapterSettlesARestartByTheMarker(t *testing.T) {
 			// label, with fresh shells. It is ours, so close closes it.
 			name:    "a restored workspace at the same id: found and closed",
 			listing: func(m string) []byte { return listJSON([2]string{wsA, m}) },
-			close:   backend.CloseClosed, probe: backend.ProbePresent, cleanup: true,
+			close:   backend.CloseClosed, probe: backend.ProbePresent, restored: true, cleanup: true,
 		},
 		{
 			name:    "the marker at another id: a mismatch",
@@ -61,8 +63,12 @@ func TestALedgerBoundAdapterSettlesARestartByTheMarker(t *testing.T) {
 			run := newRunner().reply1(exec.KindHerdrProbe, tc.listing(ref.OwnershipName()))
 			a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode+1))).ForSessionLedger()
 
-			if got := a.Probe(ctx, ref).State(); got != tc.probe {
+			probe := a.Probe(ctx, ref)
+			if got := probe.State(); got != tc.probe {
 				t.Errorf("Probe state = %v, want %v", got, tc.probe)
+			}
+			if probe.Restored() != tc.restored {
+				t.Errorf("Probe restored = %v, want %v", probe.Restored(), tc.restored)
 			}
 			if got := a.Prober()(ctx, ref).State(); got != tc.probe {
 				t.Errorf("Prober state = %v, want %v", got, tc.probe)
@@ -92,6 +98,65 @@ func TestALedgerBoundAdapterSettlesARestartByTheMarker(t *testing.T) {
 		}
 		if got := a.Probe(ctx, ref).State(); got == backend.ProbeGone || got == backend.ProbePresent {
 			t.Errorf("Probe state = %v, want an inconclusive answer", got)
+		}
+	})
+
+	// The review's case: one session name, two herdr servers. herdr derives
+	// the socket from its config directory, so a ledger row written from
+	// another environment reaches a different, still-running server. That is
+	// not a restart, and the worker may be alive on the other server.
+	t.Run("a different endpoint is a mismatch, never gone", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		run := newRunner().reply1(exec.KindHerdrProbe, listJSON())
+		run.sessions = func() (exec.SensitiveResult, error) {
+			return stdout(sessionsJSON(map[string]any{
+				"default": true, "name": defaultSession, "running": true,
+				"session_dir": "/tmp/herdrtest", "socket_path": otherSocket,
+			})), nil
+		}
+		a := newTestAdapter(t, run, nil).ForSessionLedger()
+
+		if got := a.Close(ctx, ref).State(); got != backend.CloseIdentityMismatch {
+			t.Errorf("Close state = %v, want identity-mismatch", got)
+		}
+		if got := a.Probe(ctx, ref).State(); got != backend.ProbeIdentityMismatch {
+			t.Errorf("Probe state = %v, want identity-mismatch", got)
+		}
+		if _, cleaned := commandOfKind(run.calls(), exec.KindHerdrCleanup); cleaned {
+			t.Error("a close ran against another endpoint")
+		}
+	})
+
+	t.Run("a reference that records no endpoint keeps the mismatch", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		raw, err := json.Marshal(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := fields["endpoint"]; !ok {
+			t.Fatal("a launch did not record its endpoint")
+		}
+		delete(fields, "endpoint")
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old, err := backend.DecodeRef(raw)
+		if err != nil {
+			t.Fatalf("DecodeRef: %v", err)
+		}
+		run := newRunner().reply1(exec.KindHerdrProbe, listJSON())
+		a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode+1))).ForSessionLedger()
+
+		if got := a.Close(ctx, old).State(); got != backend.CloseIdentityMismatch {
+			t.Errorf("Close state = %v, want identity-mismatch", got)
+		}
+		if got := a.Probe(ctx, old).State(); got != backend.ProbeIdentityMismatch {
+			t.Errorf("Probe state = %v, want identity-mismatch", got)
 		}
 	})
 
@@ -166,7 +231,9 @@ func TestCloseReprovesTheIncarnationAroundTheClose(t *testing.T) {
 		}
 	})
 
-	t.Run("a server that quit after the lookup is already gone", func(t *testing.T) {
+	// Absence needs a failed herdr call AND the stat; a stat alone keeps the
+	// obligation.
+	t.Run("a socket that vanished after the lookup closes nothing and keeps the obligation", func(t *testing.T) {
 		_, _, ref := startClean(t)
 		seam, quit := flip(absentSocket)
 		run := newRunner().on(exec.KindHerdrProbe, func() (exec.SensitiveResult, error) {
@@ -175,8 +242,8 @@ func TestCloseReprovesTheIncarnationAroundTheClose(t *testing.T) {
 		})
 		a := newTestAdapter(t, run, nil, WithLstat(seam))
 
-		if got := a.Close(ctx, ref).State(); got != backend.CloseAlreadyGone {
-			t.Errorf("Close state = %v, want already-gone", got)
+		if got := a.Close(ctx, ref).State(); got != backend.CloseUnreadable {
+			t.Errorf("Close state = %v, want unreadable", got)
 		}
 		if _, cleaned := commandOfKind(run.calls(), exec.KindHerdrCleanup); cleaned {
 			t.Error("a close ran against a server that had quit")

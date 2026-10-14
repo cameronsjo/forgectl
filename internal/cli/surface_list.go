@@ -216,6 +216,10 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 	res := probe.Probe(ctx, ref)
 	switch res.State() {
 	case backend.ProbePresent:
+		if res.Restored() {
+			return workerPresent, "the herdr server behind this session changed and holds the workspace again; " +
+				"if herdr restarted, it restored the workspace with a fresh shell and the worker did not survive: close it"
+		}
 		return workerPresent, ""
 	case backend.ProbeGone:
 		return workerGone, "the herdr workspace is gone"

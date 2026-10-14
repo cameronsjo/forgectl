@@ -356,10 +356,23 @@ func (s ProbeState) Conclusive() bool { return s == ProbePresent || s == ProbeGo
 type ProbeResult struct {
 	state ProbeState
 	cause StartCause
+	// restored marks a present object the server brought back after a
+	// restart: it is ours, but whatever ran in it did not survive.
+	restored bool
 }
 
 // NewProbePresent reports a confirmed existing object.
 func NewProbePresent() ProbeResult { return ProbeResult{state: ProbePresent} }
+
+// NewProbePresentRestored reports a confirmed existing object that the
+// server restored after a restart. The object is ours and still has to be
+// closed, but the process the reference started in it is gone.
+func NewProbePresentRestored() ProbeResult {
+	return ProbeResult{state: ProbePresent, restored: true}
+}
+
+// Restored reports a present object the server restored after a restart.
+func (r ProbeResult) Restored() bool { return r.restored }
 
 // NewProbeGone reports a confirmed absent object.
 func NewProbeGone() ProbeResult { return ProbeResult{state: ProbeGone} }

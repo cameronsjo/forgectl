@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,19 @@ func TestReconcileRow(t *testing.T) {
 			}
 		})
 	}
+
+	// A workspace herdr restored after a restart is present, but the worker
+	// in it did not survive, and list says so (forgectl#1077).
+	t.Run("a restored workspace is present and says the worker is gone", func(t *testing.T) {
+		got := reconcileRow(ctx, fakeProber{backend.NewProbePresentRestored()}, launchedRow(t), top, listed, time.Unix(1e9, 0))
+		if got.State != workerPresent || !strings.Contains(got.Reason, "did not survive") {
+			t.Fatalf("state %q reason %q", got.State, got.Reason)
+		}
+		plain := reconcileRow(ctx, fakeProber{backend.NewProbePresent()}, launchedRow(t), top, listed, time.Unix(1e9, 0))
+		if plain.Reason != "" {
+			t.Fatalf("a plain present row carries a reason: %q", plain.Reason)
+		}
+	})
 
 	t.Run("the reference's ids and the session ride along", func(t *testing.T) {
 		row := launchedRow(t)
