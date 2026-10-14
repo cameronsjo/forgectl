@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
@@ -36,6 +37,8 @@ func worktreeRunFunc(headBranch string, failFirstAdd bool) func(string, []string
 			}
 		case "git":
 			switch {
+			case gitenvtest.FilterListing(args):
+				return gitenvtest.AnswerListing(name, args)
 			case strings.Contains(joined, "config remote.origin.fetch"):
 				return "", nil
 			case strings.Contains(joined, "fetch origin"):
@@ -239,10 +242,11 @@ func TestWorktree_WorktreeAddFallback(t *testing.T) {
 	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" origin/feature/foo -b feature/foo") {
 		t.Errorf("expected the origin/<branch> -b <branch> fallback, calls: %+v", fake.Calls)
 	}
-	// Both adds run with hooks pinned off (#1049).
+	// Both adds run with every hook switched off (#1049).
+	off := strings.Join(gitenv.NoHookArgs(nil), " ")
 	for _, tail := range []string{wantDir + " feature/foo", wantDir + " origin/feature/foo -b feature/foo"} {
-		if !hasCall(fake.Calls, "git", "-c core.hooksPath=/dev/null worktree add "+tail) {
-			t.Errorf("expected `worktree add %s` to pin core.hooksPath=/dev/null, calls: %+v", tail, fake.Calls)
+		if !hasCall(fake.Calls, "git", off+" -C "+filepath.Join(base, ".bare")+" worktree add "+tail) {
+			t.Errorf("expected `worktree add %s` to switch every hook off, calls: %+v", tail, fake.Calls)
 		}
 	}
 }

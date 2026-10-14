@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
@@ -87,5 +88,54 @@ func TestWorktreeRunsNoHook(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("a post-checkout hook ran during projects worktree's add")
+	}
+}
+
+// TestWorktreeRunsNoConfiguredHook: a post-checkout hook defined in the
+// operator's global configuration (git 2.54+), which core.hooksPath does
+// not reach, does not run during projects worktree's add either (#1079).
+// Mutation: run the adds under gitenv.Run with only core.hooksPath pinned:
+// the hook runs.
+func TestWorktreeRunsNoConfiguredHook(t *testing.T) {
+	gitenvtest.RequireGitVersion(t, 2, 54)
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "hook-ran")
+	global := filepath.Join(tmp, "gitconfig")
+	if err := os.WriteFile(global, []byte("[hook \"canary\"]\n\tevent = post-checkout\n\tcommand = touch '"+marker+"'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(tmp, "src")
+	hooks := filepath.Join(tmp, "hooks")
+	for _, d := range []string{src, hooks} {
+		if err := os.Mkdir(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitenvtest.Git(t, src, "init", "-q", "-b", "main")
+	gitenvtest.Git(t, src, "commit", "-q", "--allow-empty", "-m", "control")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	// The control: an add with only the hooks directory pinned runs it.
+	ctl := filepath.Join(tmp, "control.git")
+	gitenvtest.Git(t, "", "clone", "-q", "--bare", src, ctl)
+	cmd := gitenv.Command(t.Context(), gitenv.Local, "-c", "core.hooksPath=/dev/null", "-C", ctl, "worktree", "add", "-q", filepath.Join(tmp, "control"), "main")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("control add: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("a configured hook did not run under core.hooksPath=/dev/null; the fixture cannot fire: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	run := localRemoteRunner{t: t, src: src, hooks: hooks}
+	c := &Client{Dir: filepath.Join(tmp, "projects"), run: run, gitBin: "git"}
+	if _, err := c.Worktree(t.Context(), Repo{Host: "git.example.test", Owner: "o", Name: "r", SSHURL: "ssh://git.example.test/o/r.git"}, "main"); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a configured post-checkout hook ran during projects worktree's add")
 	}
 }
