@@ -49,7 +49,7 @@ var transportAllowlist = map[string]struct {
 	uses   int
 	reason string
 }{
-	"internal/sandbox/sandbox.go:Sandbox":           {2, "clones the repository under review, or adds a worktree from the operator's own repository, which may be a partial clone that fetches what the checkout needs"},
+	"internal/sandbox/sandbox.go:SandboxIn":         {2, "clones the repository under review, or adds a worktree from the operator's own repository, which may be a partial clone that fetches what the checkout needs"},
 	"internal/projects/gitea.go:cloneFromGitea":     {1, "clones over SSH; ext:: and fd:: stay refused at the call"},
 	"internal/projects/gitea.go:cloneBareFromURL":   {1, "bare-clones over SSH; ext:: and fd:: stay refused at the call"},
 	"internal/projects/worktree.go:Client.Worktree": {1, "fetches origin into the bare clone it just made"},
