@@ -220,23 +220,31 @@ func TestRunRefusingKeepsTheOperatorsOtherTransports(t *testing.T) {
 	}
 }
 
-// A caller's own protocol allow key would outrank the refusal, because git
-// keeps the last value for a key and the refusing -c options come first
-// (#1020). RunRefusing refuses such a call before running anything, in
-// every spelling git and clone accept, and lets an unrelated -c through.
-// Mutation: drop the check (the call runs with the caller's allow last).
-func TestRunRefusingRejectsACallersProtocolAllow(t *testing.T) {
+// A caller's own config would outrank the refusal, because git keeps the
+// last value for a key and the refusing -c options come first (#1020): a
+// protocol allow key directly, or an include that points at a file setting
+// one. RunRefusing refuses any config option before running anything, in
+// each spelling the table lists, and leaves an argument after "--" alone.
+// Mutation: drop the check (the call runs with the caller's config last).
+func TestRunRefusingRejectsACallersConfig(t *testing.T) {
 	refuse := []string{"ext", "fd"}
 	for _, args := range [][]string{
 		{"-c", "protocol.ext.allow=always", "clone", "--", "u", "d"},
 		{"-c", "Protocol.EXT.Allow=always", "fetch"},
 		{"-c", "protocol.allow=always", "fetch"},
-		{"-c", "protocol.file.allow", "fetch"},
+		{"-c", "include.path=/f", "fetch"},
+		{"-c", "includeIf.gitdir:/.path=/f", "fetch"},
+		{"-c", "core.autocrlf=false", "fetch"},
+		{"-cinclude.path=/f", "fetch"},
+		{"--config-env", "include.path=VAR", "fetch"},
+		{"--config-env=include.path=VAR", "fetch"},
+		{"--config-env=protocol.ext.allow=VAR", "fetch"},
 		{"clone", "--config", "protocol.ext.allow=always", "--", "u", "d"},
 		{"clone", "--config=protocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "--conf=protocol.ext.allow=always", "--", "u", "d"},
+		{"clone", "--c", "include.path=/f", "--", "u", "d"},
 		{"clone", "-cprotocol.ext.allow=always", "--", "u", "d"},
-		{"--config-env", "protocol.ext.allow=ENVVAR", "fetch"},
-		{"--config-env=protocol.ext.allow=ENVVAR", "fetch"},
+		{"clone", "-qcfoo=x", "--", "u", "d"},
 	} {
 		f := &exec.FakeRunner{}
 		if _, err := RunRefusing(t.Context(), f, Transport, refuse, args...); err == nil {
@@ -246,8 +254,13 @@ func TestRunRefusingRejectsACallersProtocolAllow(t *testing.T) {
 			t.Errorf("RunRefusing(%q) started git: %+v", args, f.Calls)
 		}
 	}
-	f := &exec.FakeRunner{}
-	if _, err := RunRefusing(t.Context(), f, Transport, refuse, "-c", "core.autocrlf=false", "-C", "dir", "fetch"); err != nil {
-		t.Errorf("an unrelated -c was refused: %v", err)
+	for _, args := range [][]string{
+		{"-C", "dir", "fetch", "origin"},
+		{"clone", "--bare", "--branch", "main", "--", "-c", "d"},
+	} {
+		f := &exec.FakeRunner{}
+		if _, err := RunRefusing(t.Context(), f, Transport, refuse, args...); err != nil {
+			t.Errorf("RunRefusing(%q) was refused: %v", args, err)
+		}
 	}
 }

@@ -1504,6 +1504,34 @@ func TestClone_DotLeafCollisionIsRefused(t *testing.T) {
 	}
 }
 
+// TestClone_WingDotLeafOfAnotherOwnerIsNotCalledATwin: a wing leaf has no
+// owner segment, so owner b's ".github" and owner a's ".github" share
+// <wing>/dot-github. The refusal must not name a/dot-github, a repo that is
+// not there; it falls back to the plain message.
+func TestClone_WingDotLeafOfAnotherOwnerIsNotCalledATwin(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "w", "dot-github", ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && slices.Contains(args, "get-url") {
+			return "git@github.com:b/.github.git\n", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+	_, err := c.CloneInto(context.Background(), Repo{Host: "github.com", Owner: "a", Name: ".github"}, "w")
+	if err == nil {
+		t.Fatal("CloneInto reused another owner's checkout; want a refusal")
+	}
+	if strings.Contains(err.Error(), "dot-github and") || strings.Contains(err.Error(), "a/dot-github") {
+		t.Errorf("error %q blames a twin that is not there", err)
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error %q is not the plain collision refusal", err)
+	}
+}
+
 // TestPlacement_WingSegmentTakesTheHostGuard: the --wing flag is a second
 // entry point into the depth-1 namespace and does not go through ResolveWings,
 // so Placement itself has to hold the line.

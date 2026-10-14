@@ -818,11 +818,14 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 		}
 		// dest is forgectl-composed from already-guarded segments, so it is
 		// safe to name; r.Host/Owner/Name are server-supplied and stay out.
-		if twin := dotLeafTwin(r.Name); twin != "" {
+		if twin := dotLeafTwin(r.Name); twin != "" && c.originIsTwin(ctx, dest, r, twin) {
 			// A mapped leaf can collide with a real repo of that name: an
 			// owner may have both ".github" and "dot-github" (#1057). Name both
 			// so the operator knows which two repos share the directory. Both
 			// passed Placement's charset guard above, so they are safe to print.
+			// Only when the checkout really is the twin: a wing leaf has no
+			// owner segment, so another owner's ".github" lands there too, and
+			// naming this owner's twin would blame a repo that is not there.
 			return "", fmt.Errorf("%s already exists but its origin is a different repo — "+
 				"%s/%s and %s/%s file under the same directory; clone it elsewhere by hand",
 				dest, r.Owner, r.Name, r.Owner, twin)
@@ -1016,6 +1019,13 @@ func repoDirLeaf(name string) (string, bool) {
 	return leaf, true
 }
 
+// originIsTwin reports whether the checkout at dir is r's twin: the same
+// host and owner as r, under the twin name dotLeafTwin gave.
+func (c *Client) originIsTwin(ctx context.Context, dir string, r Repo, twin string) bool {
+	host, owner, name, ok := c.originOf(ctx, dir)
+	return ok && host == r.Host && strings.EqualFold(owner, r.Owner) && strings.EqualFold(name, twin)
+}
+
 // dotLeafTwin returns the other repo name that repoDirLeaf files under the
 // same leaf as name — "dot-github" for ".github" and the reverse — or "" when
 // no other name can share it.
@@ -1065,20 +1075,27 @@ func (c *Client) otherPlacements(r Repo, dest string) []string {
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
 func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
+	host, owner, name, ok := c.originOf(ctx, dir)
+	return ok && host == r.Host && owner == r.Owner && name == r.Name
+}
+
+// originOf returns the (host, owner, name) the checkout at dir's origin
+// remote parses to, and false when there is none or it cannot be read.
+func (c *Client) originOf(ctx context.Context, dir string) (host, owner, name string, ok bool) {
 	// Bounded (#1005): dir may be any checkout already at the placement, and
 	// a FIFO HEAD there blocks get-url for good; one Blocks sees is refused
 	// at once.
 	if gitenv.Blocks(dir) {
-		return false
+		return "", "", "", false
 	}
 	ctx, cancel := gitenv.Bounded(ctx)
 	defer cancel()
 	url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "remote", "get-url", "origin")
 	if err != nil {
-		return false
+		return "", "", "", false
 	}
-	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
-	return host == r.Host && owner == r.Owner && name == r.Name
+	host, owner, name = parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
+	return host, owner, name, name != ""
 }
 
 // inventorySSHURL returns origin as the SSHURL a local repo records in the

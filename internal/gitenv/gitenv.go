@@ -294,8 +294,8 @@ func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args
 // RunBinRefusing is RunRefusing with the git executable named, as RunBin is
 // Run's: internal/projects pulls through the absolute path it resolved.
 func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse []string, args ...string) (string, error) {
-	if setsProtocolAllow(args) {
-		return "", errCallerProtocolAllow
+	if setsConfig(args) {
+		return "", errCallerConfig
 	}
 	overrides, unset := filter(p, os.Environ())
 	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
@@ -311,38 +311,41 @@ func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse
 	return r.RunWithEnvFiltered(ctx, overrides, unset, bin, append(pre, args...)...)
 }
 
-// errCallerProtocolAllow is RunBinRefusing's refusal of a call whose own
-// args set a protocol allow key (#1020).
-var errCallerProtocolAllow = errors.New("gitenv: refusing a git call whose own config sets a protocol allow key: it would override the refused transports")
+// errCallerConfig is RunBinRefusing's refusal of a call that carries config
+// options of its own (#1020).
+var errCallerConfig = errors.New("gitenv: refusing a git call that sets config of its own: it could override the refused transports")
 
-// setsProtocolAllow reports whether args set protocol.allow or any
-// protocol.<name>.allow through a config option: git's global -c and
-// --config-env, or clone's -c/--config, in the separate, attached and "="
-// spellings. git keeps the last value given for a key, and the refusing -c
-// options come first, so a caller's own `-c protocol.ext.allow=always`
-// would cancel the refusal (#1020). Any such key is refused, whichever
-// transport it names, so the check does not depend on refuse's contents.
-func setsProtocolAllow(args []string) bool {
-	for i, a := range args {
-		var kv string
-		switch {
-		case a == "-c" || a == "--config" || a == "--config-env":
-			if i+1 >= len(args) {
-				continue
+// setsConfig reports whether args, up to a "--" that ends option parsing,
+// carry any config option: git's global -c and --config-env, or clone's
+// -c/--config, in the separate, attached, abbreviated (--conf=…) and bundled
+// (-qcfoo=x) spellings.
+//
+// Every config option is refused, not only protocol keys. git keeps the last
+// value given for a key and the refusing -c options come first, so a
+// caller's own `-c protocol.ext.allow=always` would cancel the refusal, and
+// so would `-c include.path=<file>` or `-c includeIf.<cond>.path=<file>`
+// naming a file that sets it. A list of dangerous keys would have to keep up
+// with every way git can pull configuration in; no refusing call needs a
+// config option of its own, so none is allowed. A clone's -c also persists
+// into the new repository's .git/config.
+//
+// It errs toward refusing: a single-dash bundle holding a 'c' anywhere is
+// refused, though a flag's attached value could be what holds it.
+func setsConfig(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if long, ok := strings.CutPrefix(a, "--"); ok {
+			name, _, _ := strings.Cut(long, "=")
+			// --config-env, --config, and any abbreviation of --config git's
+			// option parser would accept (--c, --co, --con, …).
+			if strings.HasPrefix(name, "config") || (name != "" && strings.HasPrefix("config", name)) {
+				return true
 			}
-			kv = args[i+1]
-		case strings.HasPrefix(a, "--config="):
-			kv = strings.TrimPrefix(a, "--config=")
-		case strings.HasPrefix(a, "--config-env="):
-			kv = strings.TrimPrefix(a, "--config-env=")
-		case strings.HasPrefix(a, "-c") && len(a) > 2:
-			kv = a[2:]
-		default:
 			continue
 		}
-		key, _, _ := strings.Cut(kv, "=")
-		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "protocol.allow" || (strings.HasPrefix(key, "protocol.") && strings.HasSuffix(key, ".allow")) {
+		if len(a) > 1 && a[0] == '-' && strings.ContainsRune(a[1:], 'c') {
 			return true
 		}
 	}
