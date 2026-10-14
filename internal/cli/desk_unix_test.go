@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -354,7 +355,7 @@ func TestDeskStatus(t *testing.T) {
 
 	out, _, err = deskRun(t, deskDeps(), "status", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"dir", "done", "pending", "running", "skipped", "taken"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"dir", "done", "found", "pending", "running", "skipped", "taken"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("status --json keys = %v, want %v", got, want)
 	}
 	var snap deskStatusJSON
@@ -856,5 +857,107 @@ func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 		if !strings.Contains(para, want) {
 			t.Errorf("keys paragraph lacks %q:\n%s", want, para)
 		}
+	}
+}
+
+// TestDeskReadVerbsNeverCreateADesk pins forgectl#1150: status, runs, show,
+// watch and plan, pointed at a directory that is not a desk, neither create
+// nor chmod it. status and runs report the empty result (found=false for
+// status) with a note on stderr, exit 0; a verb given a NAME exits 1 and
+// names the path.
+func TestDeskReadVerbsNeverCreateADesk(t *testing.T) {
+	fastWatch(t)
+	dir := newDeskDir(t) // DESK_DIR names it; nothing has created it
+
+	out, errOut, err := deskRun(t, deskDeps(), "status")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, ": not found; 0 waiting") || !strings.Contains(errOut, "note: desk not found at") {
+		t.Errorf("status: stdout %q stderr %q", out, errOut)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", "--json")
+	wantExit(t, err, 0)
+	var snap deskStatusJSON
+	if err := json.Unmarshal([]byte(out), &snap); err != nil {
+		t.Fatalf("status --json: %v\n%s", err, out)
+	}
+	if snap.Found || snap.Dir != dir || snap.Pending == nil || len(snap.Pending) != 0 {
+		t.Errorf("status --json = %+v; want found=false, dir %s, empty lists", snap, dir)
+	}
+
+	out, errOut, err = deskRun(t, deskDeps(), "runs", "--json")
+	wantExit(t, err, 0)
+	if strings.TrimSpace(out) != "[]" || !strings.Contains(errOut, "is not a desk") {
+		t.Errorf("runs --json: stdout %q stderr %q", out, errOut)
+	}
+
+	for _, args := range [][]string{{"status", "01-x"}, {"show", "01-x"}, {"watch", "01-x"}, {"plan", "01-x"}} {
+		_, _, err := deskRun(t, deskDeps(), args...)
+		wantExit(t, err, 1)
+		if err == nil || !strings.Contains(err.Error(), "is not a desk") || !strings.Contains(err.Error(), "DESK_DIR") {
+			t.Errorf("%v: err = %v; want it to name the path and how to check it", args, err)
+		}
+	}
+
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a read verb created the desk directory (lstat err %v)", err)
+	}
+
+	// A directory that exists but is not a desk is not chmodded either.
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = deskRun(t, deskDeps(), "status")
+	wantExit(t, err, 0)
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("status changed a non-desk directory: %v %v", fi.Mode(), err)
+	}
+	if desk.Exists(dir) {
+		t.Error("status made the directory a desk")
+	}
+}
+
+// TestDeskNotFoundNamesTheListingVerb pins forgectl#1095: a name that matches
+// nothing says which command lists the valid names.
+func TestDeskNotFoundNamesTheListingVerb(t *testing.T) {
+	newDeskDir(t)
+	queueItem(t, "w.sh", "true\n")
+	for verb, want := range map[string]string{
+		"status": "forgectl desk status lists every item",
+		"watch":  "forgectl desk status lists every item",
+		"show":   "forgectl desk runs lists every run",
+		"plan":   "forgectl desk status lists every item",
+	} {
+		_, _, err := deskRun(t, deskDeps(), verb, "99-nope")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("desk %s 99-nope: err = %v; want %q", verb, err, want)
+		}
+	}
+}
+
+// TestDeskStatus_SkippedItemNamesNoMissingEventsFile pins forgectl#1095: a
+// skipped item never ran, so status does not name an events file that is not
+// there; a waiting item still names where its events will be.
+func TestDeskStatus_SkippedItemNamesNoMissingEventsFile(t *testing.T) {
+	newDeskDir(t)
+	skipped, _ := queueItem(t, "s.sh", "true\n")
+	waiting, _ := queueItem(t, "w.sh", "true\n")
+	if _, _, err := deskRun(t, deskDeps(), "skip", skipped, "--reason", "dup"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := deskRun(t, deskDeps(), "status", skipped)
+	wantExit(t, err, 0)
+	if strings.Contains(out, "events=") {
+		t.Errorf("skipped item detail names an events file: %q", out)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", skipped, "--json")
+	wantExit(t, err, 0)
+	var res deskDetailJSON
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.Events != "" {
+		t.Errorf("skipped item events = %q (err %v); want \"\"", res.Events, err)
+	}
+	out, _, err = deskRun(t, deskDeps(), "status", waiting)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "events=") {
+		t.Errorf("waiting item detail lacks its events path: %q", out)
 	}
 }

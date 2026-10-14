@@ -62,6 +62,31 @@ func openDeskDir(flag string) (*desk.Desk, error) {
 	return desk.Open(dir)
 }
 
+// errNoDesk marks a read verb pointed at a directory that is not a desk.
+var errNoDesk = errors.New("not a desk")
+
+// openReadDeskFor is openDeskDirFor for a verb that only reads (forgectl#1150):
+// a directory that is not a desk is neither created nor tightened, and the
+// error, which wraps errNoDesk, names the directory and how to check it. Open
+// creates a missing desk, so without this a typo in --dir or DESK_DIR made a
+// new empty desk and reported an empty queue the operator never sees.
+func openReadDeskFor(cmd *cobra.Command, deps module.Deps, flag, verb string) (*desk.Desk, error) {
+	dir, err := resolveDeskDir(flag)
+	if err != nil {
+		return nil, err
+	}
+	if !desk.Exists(dir) {
+		return nil, noDeskError(verb, dir)
+	}
+	return openDeskDirFor(cmd, deps, flag)
+}
+
+// noDeskError is the error a read verb returns for a directory that is not a
+// desk.
+func noDeskError(verb, dir string) error {
+	return fmt.Errorf("%s: %s is %w; desk add creates one, so check --dir and DESK_DIR (forgectl config shows desk.dir)", verb, safePath(dir), errNoDesk)
+}
+
 // openDeskDirFor opens the desk and attaches the operator-signal clearing, so
 // every verb that can take an item out of pending/ (a run, a skip, a Scan that
 // skips a changed item) keeps the pane state in step.
@@ -362,7 +387,7 @@ func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string
 	if err := checkDeskName(target); err != nil {
 		return "", nil, err
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk plan")
 	if err != nil {
 		return "", nil, err
 	}
@@ -384,7 +409,7 @@ func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string
 	}
 	data, kind, err := d.Record(target)
 	if errors.Is(err, desk.ErrNotFound) {
-		return "", nil, fmt.Errorf("desk plan: no item named %s", target)
+		return "", nil, fmt.Errorf("desk plan: no item named %s; %s", target, deskListHint("desk plan"))
 	}
 	if err != nil {
 		return "", nil, err
@@ -423,8 +448,11 @@ type deskItemJSON struct {
 
 // deskStatusJSON is `desk status --json`.
 type deskStatusJSON struct {
-	Dir     string         `json:"dir"`
-	Taken   time.Time      `json:"taken"`
+	Dir   string    `json:"dir"`
+	Taken time.Time `json:"taken"`
+	// Found is false when Dir is not a desk: nothing was opened or created,
+	// and every list is empty because there is no desk (as desk prune).
+	Found   bool           `json:"found"`
 	Pending []deskItemJSON `json:"pending"`
 	Running []deskItemJSON `json:"running"`
 	Done    []deskItemJSON `json:"done"`
@@ -511,7 +539,10 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 			return err
 		}
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk status")
+	if errors.Is(err, errNoDesk) && name == "" {
+		return reportNoDeskStatus(cmd, dirFlag, asJSON)
+	}
 	if err != nil {
 		return err
 	}
@@ -528,7 +559,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 	}
 	if asJSON {
 		return writeJSON(out, deskStatusJSON{
-			Dir: snap.Dir, Taken: snap.Taken,
+			Dir: snap.Dir, Taken: snap.Taken, Found: true,
 			Pending: itemViews(snap.Pending, now), Running: itemViews(snap.Running, now),
 			Done: itemViews(snap.Done, now), Skipped: itemViews(snap.Skipped, now),
 		})
@@ -552,6 +583,28 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
 	}
 	return w.err
+}
+
+// reportNoDeskStatus is `desk status` on a directory that is not a desk:
+// nothing is opened or created, a note names the path on stderr, and the
+// report is the empty one with found=false. Exit 0, as desk prune.
+func reportNoDeskStatus(cmd *cobra.Command, dirFlag string, asJSON bool) error {
+	dir, err := resolveDeskDir(dirFlag)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing queued (desk add creates it; forgectl config shows desk.dir)\n", safePath(dir)); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if asJSON {
+		return writeJSON(out, deskStatusJSON{
+			Dir: dir, Taken: deskNow().UTC(),
+			Pending: []deskItemJSON{}, Running: []deskItemJSON{}, Done: []deskItemJSON{}, Skipped: []deskItemJSON{},
+		})
+	}
+	_, err = fmt.Fprintf(out, "desk %s: not found; 0 waiting, 0 running, 0 done, 0 skipped\n", safeText(dir))
+	return err
 }
 
 // statusLine renders one item as a grep-friendly line. Every untrusted field
@@ -634,7 +687,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if !ok {
 		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
-	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: d.EventsPath(name)}
+	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: detailEventsPath(d, it)}
 	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
 		if data, _, err := d.Record(name); err == nil {
 			res.Record = &deskRecordDigest{SHA256: desk.SHA256Hex(data), Bytes: len(data)}
@@ -695,7 +748,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.State == string(desk.StateDone) {
 		kv("log", safeText(res.Log))
 	}
-	kv("events", safeText(res.Events))
+	if res.Events != "" {
+		kv("events", safeText(res.Events))
+	}
 	if res.Summary != nil {
 		s := res.Summary
 		w.printf("summary rc=%d reason=%s ok=%d failed=%d skipped=%d\n", s.RC, safeText(s.Reason), s.OK, s.Failed, s.Skipped)
@@ -722,6 +777,23 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 		w.printf("%s\n", safeText(line))
 	}
 	return w.err
+}
+
+// detailEventsPath is the events file status names for it: its path while
+// the item can still run or is running (the file appears when it starts), and
+// for an item that has finished, been skipped or been refused, the path only
+// when the file exists, else "" (forgectl#1095). A skipped item never ran, so
+// naming a file that is not there sends a caller to an ENOENT.
+func detailEventsPath(d *desk.Desk, it desk.Item) string {
+	p := d.EventsPath(it.Name)
+	switch it.State {
+	case desk.StateWaiting, desk.StateRunning, desk.StateLost:
+		return p
+	}
+	if _, err := os.Lstat(p); err != nil {
+		return ""
+	}
+	return p
 }
 
 func stepView(r desk.StepStatus) deskStepJSON {
@@ -755,7 +827,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 			return deskUsage("desk watch: --dir %w, so a resume= line could not name it", err)
 		}
 	}
-	d, err := openDeskDirFor(cmd, deps, dirFlag)
+	d, err := openReadDeskFor(cmd, deps, dirFlag, "desk watch")
 	if err != nil {
 		return err
 	}

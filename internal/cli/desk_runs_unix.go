@@ -96,8 +96,12 @@ func (r *loadedRun) progress() (total, done, failed int) {
 func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk bool) (srcs []runview.Source, closeAll func(), failed []error) {
 	closeAll = func() {}
 	if !skipDesk {
-		d, err := openDeskDirFor(cmd, deps, dirFlag)
-		if err != nil {
+		d, err := openReadDeskFor(cmd, deps, dirFlag, "desk "+cmd.Name())
+		if errors.Is(err, errNoDesk) && cmd.Name() == "runs" {
+			// runs lists every run it can read: no desk is an empty desk,
+			// said on stderr, and a --log source is still listed.
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", safeText(err.Error()))
+		} else if err != nil {
 			failed = append(failed, err)
 		} else {
 			srcs = append(srcs, runview.NewDeskSource(d))
@@ -616,6 +620,10 @@ func (r *loadedRun) readInPart() error {
 // knownRunNames lists the runs in the desk, to decorate a not-found error. A
 // desk that cannot be opened yields none: the error is already being reported.
 func knownRunNames(dirFlag string) []string {
+	dir, err := resolveDeskDir(dirFlag)
+	if err != nil || !desk.Exists(dir) {
+		return nil // never create a desk to decorate an error
+	}
 	d, err := openDeskDir(dirFlag)
 	if err != nil {
 		return nil

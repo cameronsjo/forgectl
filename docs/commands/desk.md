@@ -176,7 +176,9 @@ Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is
 
 ### `forgectl desk status [name]`
 
-Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir` and `taken`.
+Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir`, `taken` and `found`.
+
+`status` never creates a desk. A directory that is not one (it holds none of `pending/`, `running/`, `done/`, `skipped/`) is not opened, created or `chmod`ed: `status` prints `note: desk not found at <path>` on stderr and the empty queue (`found: false` in JSON), exit 0, so a typo in `--dir` or `DESK_DIR` does not become a new desk the operator never sees. `status NAME`, `show NAME`, `watch` and `plan NAME` on such a directory exit 1 and name the path. `forgectl config` shows the `desk.dir` in use and which variable set it.
 
 ```text
 desk /home/me/.local/state/forgectl/desk: 1 waiting, 0 running, 2 done, 1 skipped
@@ -188,7 +190,7 @@ skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="supe
 
 A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
 
-With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
+With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` path and the `events` path (left out once the item has finished, been skipped or been refused when the file does not exist, as for an item that never ran; `""` in JSON), and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
 Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
@@ -227,6 +229,8 @@ Every run with its progress, one line each: live runs first, then the most recen
 |---|---|
 | `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
 | `--log FILE` | add a JSONL log as one more run (see `desk show`) |
+
+`runs` never creates a desk either: on a directory that is not one it prints a `note:` on stderr and lists only what `--log` names (`[]` with no `--log`), exit 0.
 
 `live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, reading the desk scans it.
 

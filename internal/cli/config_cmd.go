@@ -145,6 +145,9 @@ type configReport struct {
 	Entries         []configEntry      `json:"entries"`
 	HostResolved    hostResolvedView   `json:"host_resolved"`
 	LaunchResolved  launchResolvedView `json:"launch_resolved"`
+	// EnvResolved is each setting an environment variable can supply, as the
+	// verbs resolve it, and which source supplied it (forgectl#1150).
+	EnvResolved []envResolvedEntry `json:"env_resolved"`
 }
 
 func newConfigCmd(module.Deps) *cobra.Command {
@@ -165,11 +168,13 @@ func newConfigCmd(module.Deps) *cobra.Command {
 			entries := walkConfig(cfg, rep)
 			hosts := resolveHostView(cfg)
 			resolved := resolveLaunchView(cfg)
+			envResolved := resolveEnvView(cfg, deskGetenv)
 
 			if asJSON {
-				return emitConfigJSON(out, entries, rep, hosts, resolved)
+				return emitConfigJSON(out, entries, rep, hosts, resolved, envResolved)
 			}
 			renderConfigText(out, entries, rep, hosts, resolved)
+			renderEnvResolvedText(out, envResolved)
 
 			slog.Info("Successfully displayed configuration.",
 				"path", rep.Path, "found", rep.Found, "entries", len(entries),
@@ -629,8 +634,9 @@ func provenance(e configEntry) string {
 }
 
 // emitConfigJSON writes the stable machine-readable document.
-func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hosts hostResolvedView, resolved launchResolvedView) error {
+func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hosts hostResolvedView, resolved launchResolvedView, envResolved []envResolvedEntry) error {
 	doc := configReport{
+		EnvResolved:    envResolved,
 		Path:           rep.Path,
 		Found:          rep.Found,
 		Unrecognized:   rep.Unrecognized,

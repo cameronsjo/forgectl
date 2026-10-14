@@ -426,3 +426,85 @@ func TestReviewCmd_HostileNoteSanitized(t *testing.T) {
 		t.Errorf("sanitized note lost its visible content: %q", stderr.String())
 	}
 }
+
+// TestReviewCmd_JSON_AllSourcesFailedCarriesTheCause pins forgectl#1096:
+// under --json an all-sources failure writes no note lines to stderr, and the
+// error the failure object is built from carries each source's note, so the
+// categorical cause and its fix reach a JSON caller.
+func TestReviewCmd_JSON_AllSourcesFailedCarriesTheCause(t *testing.T) {
+	src := fakeReviewSource{
+		notes: []string{"issues(cameronsjo): query failed (gh is not signed in to github.com; run gh auth login -h github.com)"},
+		err:   review.ErrGitHubQueriesUnavailable,
+	}
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("an all-sources failure must be an error")
+	}
+	if !strings.Contains(err.Error(), "every source failed") || !strings.Contains(err.Error(), "gh auth login -h github.com") {
+		t.Errorf("error = %q; want the aggregate failure and the source's cause and fix", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("--json stderr must hold only the failure object, which the contract writes; got notes %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q; want empty", stdout.String())
+	}
+
+	// Without --json the notes still print as lines above the error.
+	cmd = newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+	stderr.Reset()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("an all-sources failure must be an error")
+	}
+	if !strings.Contains(stderr.String(), "note: issues(cameronsjo)") {
+		t.Errorf("human stderr = %q; want the note line", stderr.String())
+	}
+}
+
+// TestReviewCmd_MalformedRepoAndKindAreUsageErrors pins forgectl#1096 and
+// #1150: a --repo that is not owner/name, and an unknown --kind, are refused
+// with exit 2 and code usage_error before any source is queried.
+func TestReviewCmd_MalformedRepoAndKindAreUsageErrors(t *testing.T) {
+	for _, args := range [][]string{
+		{"--repo", "nonslash"},
+		{"--repo", "a/b/c"},
+		{"--repo", "/b"},
+		{"--repo", "-x/y"},
+		{"--kind", "foo"},
+	} {
+		src := &countingReviewSource{}
+		cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+		var stderr bytes.Buffer
+		cmd.SetOut(new(bytes.Buffer))
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(append(args, "--json"))
+		err := cmd.ExecuteContext(context.Background())
+		if got := ExitCode(err); err == nil || got != exitUsage {
+			t.Errorf("review %v: exit %d (err %v); want %d", args, got, err, exitUsage)
+		}
+		if code := failureCode(t, stderr.String()); code != jsonCodeUsage {
+			t.Errorf("review %v: code %q; want %q", args, code, jsonCodeUsage)
+		}
+		if src.calls != 0 {
+			t.Errorf("review %v queried the source %d times; want none", args, src.calls)
+		}
+	}
+}
+
+// countingReviewSource counts its Items calls.
+type countingReviewSource struct{ calls int }
+
+func (c *countingReviewSource) Name() string { return "counting" }
+func (c *countingReviewSource) Items(context.Context) ([]review.Item, []string, error) {
+	c.calls++
+	return nil, nil, nil
+}

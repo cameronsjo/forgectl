@@ -316,6 +316,10 @@ finished).
 Like the dashboard, status fixes the hash of a hand-dropped item the first time
 it sees it, and moves a pending item whose bytes changed to skipped/.
 
+status never creates a desk. A directory that is not one (a typo in --dir or
+DESK_DIR) prints a note on stderr and the empty queue with found=false, exit 0;
+with NAME it is an error. forgectl config shows the desk.dir in use.
+
 Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -326,7 +330,7 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 			return runDeskStatus(cmd, deps, *dir, name, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the queue (or the item) as one JSON object")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the queue as {"dir","taken","found","pending","running","done","skipped"}, or with NAME the item as {"item","log","events","record","steps","summary"}`)
 	return cmd
 }
 
