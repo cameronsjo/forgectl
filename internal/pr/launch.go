@@ -680,9 +680,12 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// leaves it writable, so a hostile review could plant files there for
 	// another session to read, among them the copy of an inline --settings
 	// document Claude Code keeps under a content hash (the reviewer's own
-	// document is a file, so it gets no such copy; see below). Pointed here, the
-	// shared dir becomes read-only to the reviewer's Bash (measured on Claude
-	// Code 2.1.296). The dir outlives this call with the review and goes with
+	// document is a file, so it gets no such copy; see below). Pointed here,
+	// the reviewer's Bash gets the claude-<uid> dir inside this one as its
+	// TMPDIR (measured on Linux, Claude Code 2.1.299). That pin alone is not
+	// what keeps the shared dir out of reach: on macOS (2.1.289) the
+	// reviewer's Bash still got the shared dir. The sandbox's write denies on
+	// it do that (sharedClaudeTmpDirs). The dir outlives this call with the review and goes with
 	// the workspace (teardownWorkspace); a refusal before the window opens
 	// removes it, and the settings dir below, here. That removal names only
 	// the dirs this call made, never an entry it merely found under a
@@ -712,6 +715,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// (reviewRelocationEnv). The unset ones are unset for real, below.
 	relocSet, relocUnset := reviewRelocationEnv()
 	windowEnv = pinEnv(windowEnv, relocSet, relocUnset)
+	// On macOS, point gh at a CA bundle file, or its TLS checks fail under
+	// Seatbelt (reviewCertEnv, forgectl#1253).
+	windowEnv = pinEnv(windowEnv, reviewCertEnv(), nil)
 	// The document goes to claude as a file forgectl writes 0400 in a 0500
 	// dir of its own beside the workspace, outside CLAUDE_CODE_TMPDIR and
 	// every other root the sandbox can write (writeReviewSettings). Passed inline,

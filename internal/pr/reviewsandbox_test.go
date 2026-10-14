@@ -216,9 +216,73 @@ func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reviewDenyWrite: %v", err)
 	}
+	shared := sharedClaudeTmpDirs(ws)
 	for _, p := range got {
-		if p != ws && p != resolvedOrSelf(ws) {
-			t.Errorf("a clone's denyWrite should hold only the workspace, got extra %s", p)
+		if p != ws && p != resolvedOrSelf(ws) && !slices.Contains(shared, p) {
+			t.Errorf("a clone's denyWrite should hold only the workspace and the shared temp dirs, got extra %s", p)
+		}
+	}
+}
+
+// TestSharedClaudeTmpDirs: the claude-<uid> dirs other sessions share are
+// denied under forgectl's TMPDIR and /tmp, plus /private/tmp on macOS, but
+// never one holding the workspace, whose private temp dir sits beside it.
+func TestSharedClaudeTmpDirs(t *testing.T) {
+	origUID, origGOOS := reviewUID, sandboxGOOS
+	t.Cleanup(func() { reviewUID, sandboxGOOS = origUID, origGOOS })
+	reviewUID = func() int { return 501 }
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	ws := filepath.Join(tmp, "forgectl-workflow-1")
+
+	sandboxGOOS = "linux"
+	want := []string{filepath.Join(tmp, "claude-501"), "/tmp/claude-501"}
+	if got := sharedClaudeTmpDirs(ws); !slices.Equal(got, want) {
+		t.Errorf("linux: sharedClaudeTmpDirs = %v, want %v", got, want)
+	}
+	sandboxGOOS = "darwin"
+	want = append(want, "/private/tmp/claude-501")
+	if got := sharedClaudeTmpDirs(ws); !slices.Equal(got, want) {
+		t.Errorf("darwin: sharedClaudeTmpDirs = %v, want %v", got, want)
+	}
+	for _, d := range sharedClaudeTmpDirs(ws) {
+		if pathWithin(filepath.Join(tmp, reviewTmpPrefix+"1-2", "claude-501"), d) {
+			t.Errorf("shared deny %s covers the review's own temp dir", d)
+		}
+	}
+
+	// forgectl run from inside a Claude Code session: TMPDIR is itself a
+	// claude-<uid> dir, and the workspace and its private dir live in it.
+	sandboxGOOS = "linux"
+	inner := filepath.Join(tmp, "claude-501")
+	t.Setenv("TMPDIR", inner)
+	got := sharedClaudeTmpDirs(filepath.Join(inner, "forgectl-workflow-1"))
+	if slices.Contains(got, inner) {
+		t.Errorf("sharedClaudeTmpDirs = %v denies the dir holding the workspace", got)
+	}
+	if !slices.Contains(got, "/tmp/claude-501") {
+		t.Errorf("sharedClaudeTmpDirs = %v dropped /tmp/claude-501, which does not hold the workspace", got)
+	}
+
+	reviewUID = func() int { return -1 }
+	if got := sharedClaudeTmpDirs(ws); got != nil {
+		t.Errorf("without a uid: sharedClaudeTmpDirs = %v, want none", got)
+	}
+}
+
+func TestPathWithin(t *testing.T) {
+	for _, tc := range []struct {
+		p, dir string
+		want   bool
+	}{
+		{"/tmp/claude-0", "/tmp/claude-0", true},
+		{"/tmp/claude-0/x", "/tmp/claude-0", true},
+		{"/tmp/claude-01", "/tmp/claude-0", false},
+		{"/tmp", "/tmp/claude-0", false},
+		{"/tmp/..claude", "/tmp", true},
+	} {
+		if got := pathWithin(tc.p, tc.dir); got != tc.want {
+			t.Errorf("pathWithin(%q, %q) = %v, want %v", tc.p, tc.dir, got, tc.want)
 		}
 	}
 }

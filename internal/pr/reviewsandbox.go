@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -87,10 +90,12 @@ type sandboxSettings struct {
 
 // sandboxFilesystem narrows the sandbox's default write set, which is the
 // working directory (the workspace), Claude Code's temp directory, and every
-// --add-dir root. DenyWrite takes the workspace back out. The temp directory
-// is the claude-<uid> dir inside the review's own private one
-// (createReviewTmpDir, forgectl#907), not the claude-<uid> dir every session
-// of the operator's shares; the private dir's root is not writable.
+// --add-dir root. DenyWrite takes the workspace back out, and the
+// claude-<uid> dirs the operator's other sessions share
+// (sharedClaudeTmpDirs, forgectl#907). The temp directory the reviewer is
+// meant to get is the claude-<uid> dir inside the review's own private one
+// (createReviewTmpDir), whose root is not writable; the denies hold even
+// where Claude Code falls back to the shared dir instead.
 //
 // DenyRead takes the credential stores out of the default read set, which is
 // the whole host. Paths are `~/`-rooted, which the sandbox resolves against
@@ -188,9 +193,10 @@ func ghAPIDomains(host string) []string {
 	return []string{host}
 }
 
-// reviewDenyWrite returns the paths a reviewer must not write: the workspace
-// and, when the workspace is a linked worktree (`pr local` makes one), the
-// repository's shared git directory. Claude Code's sandbox opens that shared
+// reviewDenyWrite returns the paths a reviewer must not write: the workspace;
+// when the workspace is a linked worktree (`pr local` makes one), the
+// repository's shared git directory; and the shared Claude Code temp dirs
+// (sharedClaudeTmpDirs). Claude Code's sandbox opens that shared git
 // directory for writes on its own so git works in a worktree, and it is the
 // operator's real repository.
 //
@@ -210,6 +216,7 @@ func reviewDenyWrite(workspace string) ([]string, error) {
 	if shared != "" {
 		paths = append(paths, shared)
 	}
+	paths = append(paths, sharedClaudeTmpDirs(workspace)...)
 	out := make([]string, 0, 2*len(paths))
 	seen := make(map[string]bool, 2*len(paths))
 	for _, p := range paths {
@@ -227,6 +234,63 @@ func reviewDenyWrite(workspace string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// reviewUID is the uid Claude Code names its shared temp dir after
+// (claude-<uid>), a seam for tests. It is -1 off Unix.
+var reviewUID = os.Getuid
+
+// sharedClaudeTmpDirs are the claude-<uid> temp dirs the operator's other
+// Claude Code sessions share, which the reviewer must not write (forgectl#907):
+// the one under forgectl's own TMPDIR, the one under /tmp, and on macOS the
+// /private/tmp spelling Seatbelt compares. The review's own claude-<uid> dir
+// sits inside its private temp dir, beside the workspace, so none of these
+// covers it.
+//
+// The private dir alone did not keep the reviewer out of the shared one: on
+// macOS (Claude Code 2.1.289) the reviewer's Bash saw TMPDIR=/tmp/claude-501
+// and wrote there. Claude Code falls back to /tmp on macOS and to TMPDIR on
+// Linux whenever CLAUDE_CODE_TMPDIR does not reach it. With these denies, a
+// write to the shared dir fails even then: measured on Linux (2.1.299) with
+// CLAUDE_CODE_TMPDIR unset and the dir granted by --add-dir, the write failed
+// read-only, and with the pin in place the private claude-<uid> dir stayed
+// writable. A listed dir that does not exist is accepted.
+//
+// A dir that holds the workspace is left out, because denying it would deny
+// the review's own temp dir beside the workspace: that is forgectl run from a
+// shell whose TMPDIR is itself a claude-<uid> dir, inside a Claude Code
+// session. There the review's dirs already live inside the shared one, and
+// this deny cannot separate them.
+func sharedClaudeTmpDirs(workspace string) []string {
+	uid := reviewUID()
+	if uid < 0 {
+		return nil
+	}
+	name := "claude-" + strconv.Itoa(uid)
+	bases := []string{os.TempDir(), "/tmp"}
+	if sandboxGOOS == "darwin" {
+		bases = append(bases, "/private/tmp")
+	}
+	ws := []string{filepath.Clean(workspace), resolvedOrSelf(workspace)}
+	var out []string
+	for _, base := range bases {
+		dir := filepath.Join(base, name)
+		if slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, dir) || pathWithin(w, resolvedOrSelf(dir)) }) {
+			slog.Warn("Not denying the reviewer writes to a shared Claude Code temp dir: the review workspace is inside it.",
+				"dir", dir)
+			continue
+		}
+		if !slices.Contains(out, dir) {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// pathWithin reports whether p is dir or below it.
+func pathWithin(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolvedOrSelf is filepath.EvalSymlinks, falling back to p when p cannot
