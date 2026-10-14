@@ -177,12 +177,16 @@ func SplitName(name string) (int, string) {
 	return n, stem
 }
 
-// Headers are an item's "# WHAT:", "# WHY:" and "# TTY:" comment lines. The
-// first occurrence of each wins.
+// Headers are an item's "# WHAT:", "# WHY:", "# TTY:" and "# AFTER:" comment
+// lines. The first occurrence of each wins.
 type Headers struct {
 	What string
 	Why  string
 	TTY  bool
+	// After names the items this one runs after ("# AFTER: 03-enable,04-x"):
+	// it is refused until each has finished with exit 0. The names are raw
+	// script text, checked with [ValidName] wherever they are used.
+	After []string
 }
 
 // HeadersFor is [ParseHeaders] for an item of kind. "# TTY: yes" means
@@ -201,7 +205,7 @@ func HeadersFor(kind Kind, data []byte) Headers {
 // script text: render them through termsafe before they reach a terminal.
 func ParseHeaders(data []byte) Headers {
 	var h Headers
-	var seenWhat, seenWhy, seenTTY bool
+	var seenWhat, seenWhy, seenTTY, seenAfter bool
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		key, value, ok := headerLine(line)
@@ -215,6 +219,8 @@ func ParseHeaders(data []byte) Headers {
 			h.Why, seenWhy = value, true
 		case key == "TTY" && !seenTTY:
 			h.TTY, seenTTY = value == "yes", true
+		case key == "AFTER" && !seenAfter:
+			h.After, seenAfter = splitAfter(value), true
 		}
 	}
 	return h
@@ -226,7 +232,7 @@ func headerLine(line string) (key, value string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	for _, k := range [...]string{"WHAT", "WHY", "TTY"} {
+	for _, k := range [...]string{"WHAT", "WHY", "TTY", "AFTER"} {
 		if v, found := strings.CutPrefix(rest, k+":"); found {
 			return k, strings.TrimLeft(v, " "), true
 		}
@@ -234,10 +240,34 @@ func headerLine(line string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// insertHeaders returns body with header lines for what, why and tty added
-// after a leading shebang (or at the top). A header the body already carries
-// may not be given again; the result must carry both WHAT and WHY.
-func insertHeaders(body []byte, kind Kind, what, why string, tty bool) ([]byte, error) {
+// MaxAfter caps the names an AFTER line may give; an item over it is refused.
+const MaxAfter = 16
+
+// splitAfter reads an AFTER value: item names separated by commas or spaces,
+// each kept once, in order. It stops at MaxAfter+1 distinct names, enough to
+// refuse the line as over the cap, so a hostile line costs one linear pass.
+func splitAfter(value string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, n := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+		if len(out) > MaxAfter {
+			break
+		}
+	}
+	return out
+}
+
+// insertHeaders returns body with header lines for h's what, why, tty and
+// after added after a leading shebang (or at the top). A header the body
+// already carries may not be given again; the result must carry both WHAT and
+// WHY.
+func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
+	what, why, tty := h.What, h.Why, h.TTY
 	for _, f := range [...]struct{ label, v string }{{"--what", what}, {"--why", why}} {
 		if strings.ContainsAny(f.v, "\r\n") {
 			return nil, fmt.Errorf("desk: %s must be one line", f.label)
@@ -262,6 +292,21 @@ func insertHeaders(body []byte, kind Kind, what, why string, tty bool) ([]byte, 
 	}
 	if tty && !have.TTY {
 		lines = append(lines, "# TTY: yes")
+	}
+	if len(h.After) > 0 {
+		if have.After != nil {
+			return nil, errors.New("desk: the file already has a '# AFTER:' line; drop --after or the line")
+		}
+		after := splitAfter(strings.Join(h.After, ","))
+		if len(after) > MaxAfter {
+			return nil, fmt.Errorf("desk: --after names more than %d items", MaxAfter)
+		}
+		for _, n := range after {
+			if !ValidName(n) {
+				return nil, fmt.Errorf("desk: --after %q is not an item name (NN-name)", describe(n))
+			}
+		}
+		lines = append(lines, "# AFTER: "+strings.Join(after, ","))
 	}
 	if (have.What == "" && what == "") || (have.Why == "" && why == "") {
 		return nil, errors.New("desk: an item needs both WHAT and WHY (flags or '# WHAT:'/'# WHY:' lines)")
@@ -353,6 +398,10 @@ type State string
 const (
 	StateWaiting State = "waiting"
 	StateRefused State = "refused" // pending, but not a regular file with one link, or too large
+	// StateHeld is pending and well-formed, but not claimable yet: an item
+	// its AFTER line names has not finished with exit 0, or a run of the same
+	// name is in running/. It becomes waiting on its own; Item.Hold says why.
+	StateHeld    State = "held"
 	StateRunning State = "running"
 	StateLost    State = "lost" // running, owner dead, no RUN-END
 	StateDone    State = "done"
@@ -378,6 +427,8 @@ type Item struct {
 	Legacy bool
 	// Refusal says why a refused item cannot run.
 	Refusal string
+	// Hold says why a held item cannot run yet.
+	Hold string
 	// ExitCode is a done item's rc: from meta, or for a legacy item the log's
 	// last line, EXIT=<rc>. nil means no exit was recorded.
 	ExitCode *int

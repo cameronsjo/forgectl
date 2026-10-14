@@ -783,16 +783,33 @@ func newCmd(a []string) *osexec.Cmd {
 	return osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: ttyArgv's fixed argv
 }
 
-// TestTTYRun_BeginRunRefusalReleasesTheClaim: a reused number (done/ already
-// holds the name) makes BeginRun refuse after Claim succeeded. The claim
-// must end in skipped/ (launch-failed), not sit ownerless in running/.
+// logOnClaim plants a done/ log under the claimed name right after Claim:
+// a run of the same name that lands between Claim's own check and BeginRun.
+type logOnClaim struct {
+	*fakeLaunch
+	log string
+}
+
+func (l *logOnClaim) Claim(name, sha string) (*desk.Claimed, error) {
+	c, err := l.fakeLaunch.Claim(name, sha)
+	if err == nil {
+		if werr := os.WriteFile(l.log, []byte("EXIT=0\n"), 0o600); werr != nil {
+			panic(werr)
+		}
+	}
+	return c, err
+}
+
+// TestTTYRun_BeginRunRefusalReleasesTheClaim: a reused number (done/ holds
+// the name by the time the run begins) makes BeginRun refuse after Claim
+// succeeded. The claim must end in skipped/ (launch-failed), not sit
+// ownerless in running/. (A name done/ already holds is refused by Claim
+// itself, and the item stays pending.)
 func TestTTYRun_BeginRunRefusalReleasesTheClaim(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-console.sh", ttyScript("console"))
-	if err := os.WriteFile(filepath.Join(h.d.Path(), desk.DirDone, "01-console.log"), []byte("EXIT=0\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	h.scan()
+	h.m.d = &logOnClaim{fakeLaunch: h.backend, log: filepath.Join(h.d.Path(), desk.DirDone, "01-console.log")}
 	h.selectItem("01-console")
 	h.press("y")
 	if got := h.where("01-console"); got != desk.DirSkipped {

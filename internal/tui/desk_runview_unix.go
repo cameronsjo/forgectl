@@ -155,7 +155,7 @@ func (m deskModel) openRunViewOf(r queueRow, ok bool) (tea.Model, tea.Cmd) {
 	}
 	name := ""
 	if ok {
-		if r.kind == rowWaiting || r.kind == rowRefused {
+		if r.kind == rowWaiting || r.kind == rowHeld || r.kind == rowRefused {
 			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet; r opens its run once it starts"))
 			return m, nil
 		}
