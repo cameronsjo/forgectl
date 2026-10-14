@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -216,7 +215,11 @@ func reviewDenyWrite(workspace string) ([]string, error) {
 	if shared != "" {
 		paths = append(paths, shared)
 	}
-	paths = append(paths, sharedClaudeTmpDirs(workspace)...)
+	sharedTmp, err := sharedClaudeTmpDirs(workspace)
+	if err != nil {
+		return nil, err
+	}
+	paths = append(paths, sharedTmp...)
 	out := make([]string, 0, 2*len(paths))
 	seen := make(map[string]bool, 2*len(paths))
 	for _, p := range paths {
@@ -242,10 +245,11 @@ var reviewUID = os.Getuid
 
 // sharedClaudeTmpDirs are the claude-<uid> temp dirs the operator's other
 // Claude Code sessions share, which the reviewer must not write (forgectl#907):
-// the one under forgectl's own TMPDIR, the one under /tmp, and on macOS the
-// /private/tmp spelling Seatbelt compares. The review's own claude-<uid> dir
-// sits inside its private temp dir, beside the workspace, so none of these
-// covers it.
+// the one beside the workspace (reviewWorkspaceRoot puts the workspace
+// beside the shared dir when TMPDIR was inside it), the one under forgectl's
+// own TMPDIR, the one under /tmp, and on macOS the /private/tmp spelling
+// Seatbelt compares. The review's own claude-<uid> dir sits inside its private
+// temp dir, beside the workspace, so none of these covers it.
 //
 // The private dir alone did not keep the reviewer out of the shared one: on
 // macOS (Claude Code 2.1.289) the reviewer's Bash saw TMPDIR=/tmp/claude-501
@@ -256,18 +260,20 @@ var reviewUID = os.Getuid
 // read-only, and with the pin in place the private claude-<uid> dir stayed
 // writable. A listed dir that does not exist is accepted.
 //
-// A dir that holds the workspace is left out, because denying it would deny
-// the review's own temp dir beside the workspace: that is forgectl run from a
-// shell whose TMPDIR is itself a claude-<uid> dir, inside a Claude Code
-// session. There the review's dirs already live inside the shared one, and
-// this deny cannot separate them.
-func sharedClaudeTmpDirs(workspace string) []string {
+// A workspace inside one of these refuses the review: denying that dir would
+// deny the review's own temp dir beside the workspace, and leaving it out
+// would let the reviewer write the shared one. reviewWorkspaceRoot keeps
+// workspaces out of them, so this is a backstop. Containment is judged
+// against each dir as spelled, not resolved: a symlink someone else put at
+// /tmp/claude-<uid>, pointing at /tmp, must not make every workspace look
+// inside it.
+func sharedClaudeTmpDirs(workspace string) ([]string, error) {
 	uid := reviewUID()
 	if uid < 0 {
-		return nil
+		return nil, nil
 	}
 	name := "claude-" + strconv.Itoa(uid)
-	bases := []string{os.TempDir(), "/tmp"}
+	bases := []string{filepath.Dir(filepath.Clean(workspace)), os.TempDir(), "/tmp"}
 	if sandboxGOOS == "darwin" {
 		bases = append(bases, "/private/tmp")
 	}
@@ -275,16 +281,15 @@ func sharedClaudeTmpDirs(workspace string) []string {
 	var out []string
 	for _, base := range bases {
 		dir := filepath.Join(base, name)
-		if slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, dir) || pathWithin(w, resolvedOrSelf(dir)) }) {
-			slog.Warn("Not denying the reviewer writes to a shared Claude Code temp dir: the review workspace is inside it.",
-				"dir", dir)
-			continue
+		if slices.ContainsFunc(ws, func(w string) bool { return pathWithin(w, dir) }) {
+			return nil, fmt.Errorf("refusing to build the review sandbox: the workspace %q is inside Claude Code's shared temp dir %q, "+
+				"which the reviewer must not write; set TMPDIR to a directory outside it", workspace, dir)
 		}
 		if !slices.Contains(out, dir) {
 			out = append(out, dir)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // pathWithin reports whether p is dir or below it.

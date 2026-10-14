@@ -15,7 +15,7 @@ import (
 //   [x] Off macOS: nothing
 //   [x] macOS: an operator SSL_CERT_FILE naming a readable file wins
 //   [x] macOS: an unusable operator value falls back to the system bundle
-//   [x] macOS: no usable bundle at all gives nothing
+//   [x] macOS: no usable bundle unsets SSL_CERT_FILE in the window
 
 func stubCertPlatform(t *testing.T, goos, def string) {
 	t.Helper()
@@ -36,15 +36,16 @@ func TestReviewCertEnv(t *testing.T) {
 	}
 	cases := []struct {
 		name, goos, def, env string
-		want                 []string
+		want, wantUnset      []string
 	}{
-		{"linux", "linux", system, operator, nil},
-		{"darwin, operator file", "darwin", system, operator, []string{"SSL_CERT_FILE=" + operator}},
-		{"darwin, unset", "darwin", system, "", []string{"SSL_CERT_FILE=" + system}},
-		{"darwin, missing operator file", "darwin", system, filepath.Join(dir, "gone.pem"), []string{"SSL_CERT_FILE=" + system}},
-		{"darwin, relative operator file", "darwin", system, "corp.pem", []string{"SSL_CERT_FILE=" + system}},
-		{"darwin, operator dir", "darwin", system, dir, []string{"SSL_CERT_FILE=" + system}},
-		{"darwin, no bundle", "darwin", filepath.Join(dir, "none.pem"), "", nil},
+		{"linux", "linux", system, operator, nil, nil},
+		{"darwin, operator file", "darwin", system, operator, []string{"SSL_CERT_FILE=" + operator}, nil},
+		{"darwin, unset", "darwin", system, "", []string{"SSL_CERT_FILE=" + system}, nil},
+		{"darwin, missing operator file", "darwin", system, filepath.Join(dir, "gone.pem"), []string{"SSL_CERT_FILE=" + system}, nil},
+		{"darwin, relative operator file", "darwin", system, "corp.pem", []string{"SSL_CERT_FILE=" + system}, nil},
+		{"darwin, operator dir", "darwin", system, dir, []string{"SSL_CERT_FILE=" + system}, nil},
+		{"darwin, no bundle", "darwin", filepath.Join(dir, "none.pem"), "", nil, []string{"SSL_CERT_FILE"}},
+		{"darwin, no bundle, unusable operator file", "darwin", filepath.Join(dir, "none.pem"), "corp.pem", nil, []string{"SSL_CERT_FILE"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,8 +54,9 @@ func TestReviewCertEnv(t *testing.T) {
 			if tc.env == "" {
 				_ = os.Unsetenv("SSL_CERT_FILE")
 			}
-			if got := reviewCertEnv(); !slices.Equal(got, tc.want) {
-				t.Errorf("reviewCertEnv = %v, want %v", got, tc.want)
+			got, unset := reviewCertEnv()
+			if !slices.Equal(got, tc.want) || !slices.Equal(unset, tc.wantUnset) {
+				t.Errorf("reviewCertEnv = %v, %v, want %v, %v", got, unset, tc.want, tc.wantUnset)
 			}
 		})
 	}
@@ -85,5 +87,29 @@ func TestLaunchInline_PinsTheCertBundleOnMacOS(t *testing.T) {
 	}
 	if argPair(args, "-e", "SSL_CERT_FILE=/elsewhere.pem") {
 		t.Errorf("the window env's own SSL_CERT_FILE survived beside the pin: %v", args)
+	}
+}
+
+// TestLaunchInline_UnsetsAStaleCertBundleOnMacOS: with no usable bundle, the
+// window must not keep an SSL_CERT_FILE from the tmux server's environment,
+// so claude runs under env -u SSL_CERT_FILE.
+func TestLaunchInline_UnsetsAStaleCertBundleOnMacOS(t *testing.T) {
+	stubCertPlatform(t, "darwin", filepath.Join(t.TempDir(), "none.pem"))
+	t.Setenv("SSL_CERT_FILE", "")
+	_ = os.Unsetenv("SSL_CERT_FILE")
+	t.Setenv("FORGECTL_CLAUDE_BIN", fakeHarnessBin(t, "claude"))
+	fake := successfulLaunchRunner()
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"),
+		WithWindowEnv(func() ([]string, error) { return []string{"SSL_CERT_FILE=/stale.pem"}, nil }))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if _, err := c.Launch(t.Context(), sess, config.Config{}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	if argPair(args, "-e", "SSL_CERT_FILE=/stale.pem") {
+		t.Errorf("the stale SSL_CERT_FILE reached the window: %v", args)
+	}
+	if _, err := unsetEnvCommand(nil, nil); err == nil && !argPair(args, "-u", "SSL_CERT_FILE") {
+		t.Errorf("claude does not run with SSL_CERT_FILE unset: %v", args)
 	}
 }

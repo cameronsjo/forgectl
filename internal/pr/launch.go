@@ -717,7 +717,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	windowEnv = pinEnv(windowEnv, relocSet, relocUnset)
 	// On macOS, point gh at a CA bundle file, or its TLS checks fail under
 	// Seatbelt (reviewCertEnv, forgectl#1253).
-	windowEnv = pinEnv(windowEnv, reviewCertEnv(), nil)
+	certSet, certUnset := reviewCertEnv()
+	windowEnv = pinEnv(windowEnv, certSet, certUnset)
+	relocUnset = append(relocUnset, certUnset...)
 	// The document goes to claude as a file forgectl writes 0400 in a 0500
 	// dir of its own beside the workspace, outside CLAUDE_CODE_TMPDIR and
 	// every other root the sandbox can write (writeReviewSettings). Passed inline,

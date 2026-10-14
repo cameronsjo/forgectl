@@ -236,7 +236,11 @@ func (c *Client) recordPrepared(ctx context.Context, ref Ref, bc Breadcrumb, rec
 // sequence (and its teardown-on-failure discipline) has exactly one owner. On
 // failure it tears down whatever it created before returning.
 func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alwaysClone bool) (string, error) {
-	workspace, err := sandbox.Sandbox(ctx, c.run, repo, ref, alwaysClone)
+	root, err := reviewWorkspaceRoot()
+	if err != nil {
+		return "", fmt.Errorf("sandbox: %w", err)
+	}
+	workspace, err := sandbox.SandboxIn(ctx, c.run, root, repo, ref, alwaysClone)
 	if err != nil {
 		return "", fmt.Errorf("sandbox: %w", err)
 	}

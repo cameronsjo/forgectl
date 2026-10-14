@@ -216,7 +216,10 @@ func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reviewDenyWrite: %v", err)
 	}
-	shared := sharedClaudeTmpDirs(ws)
+	shared, err := sharedClaudeTmpDirs(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, p := range got {
 		if p != ws && p != resolvedOrSelf(ws) && !slices.Contains(shared, p) {
 			t.Errorf("a clone's denyWrite should hold only the workspace and the shared temp dirs, got extra %s", p)
@@ -225,8 +228,9 @@ func TestReviewDenyWrite_CloneDeniesOnlyTheWorkspace(t *testing.T) {
 }
 
 // TestSharedClaudeTmpDirs: the claude-<uid> dirs other sessions share are
-// denied under forgectl's TMPDIR and /tmp, plus /private/tmp on macOS, but
-// never one holding the workspace, whose private temp dir sits beside it.
+// denied beside the workspace, under forgectl's TMPDIR and /tmp, plus
+// /private/tmp on macOS. A workspace inside one refuses the review, and a
+// symlink at one of them does not make a workspace look inside it.
 func TestSharedClaudeTmpDirs(t *testing.T) {
 	origUID, origGOOS := reviewUID, sandboxGOOS
 	t.Cleanup(func() { reviewUID, sandboxGOOS = origUID, origGOOS })
@@ -237,36 +241,43 @@ func TestSharedClaudeTmpDirs(t *testing.T) {
 
 	sandboxGOOS = "linux"
 	want := []string{filepath.Join(tmp, "claude-501"), "/tmp/claude-501"}
-	if got := sharedClaudeTmpDirs(ws); !slices.Equal(got, want) {
-		t.Errorf("linux: sharedClaudeTmpDirs = %v, want %v", got, want)
+	if got, err := sharedClaudeTmpDirs(ws); err != nil || !slices.Equal(got, want) {
+		t.Errorf("linux: sharedClaudeTmpDirs = %v, %v, want %v", got, err, want)
 	}
 	sandboxGOOS = "darwin"
 	want = append(want, "/private/tmp/claude-501")
-	if got := sharedClaudeTmpDirs(ws); !slices.Equal(got, want) {
-		t.Errorf("darwin: sharedClaudeTmpDirs = %v, want %v", got, want)
+	got, err := sharedClaudeTmpDirs(ws)
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("darwin: sharedClaudeTmpDirs = %v, %v, want %v", got, err, want)
 	}
-	for _, d := range sharedClaudeTmpDirs(ws) {
+	for _, d := range got {
 		if pathWithin(filepath.Join(tmp, reviewTmpPrefix+"1-2", "claude-501"), d) {
 			t.Errorf("shared deny %s covers the review's own temp dir", d)
 		}
 	}
 
-	// forgectl run from inside a Claude Code session: TMPDIR is itself a
-	// claude-<uid> dir, and the workspace and its private dir live in it.
+	// The backstop: a workspace inside the shared dir refuses the review.
 	sandboxGOOS = "linux"
 	inner := filepath.Join(tmp, "claude-501")
-	t.Setenv("TMPDIR", inner)
-	got := sharedClaudeTmpDirs(filepath.Join(inner, "forgectl-workflow-1"))
-	if slices.Contains(got, inner) {
-		t.Errorf("sharedClaudeTmpDirs = %v denies the dir holding the workspace", got)
+	if got, err := sharedClaudeTmpDirs(filepath.Join(inner, "forgectl-workflow-1")); err == nil {
+		t.Errorf("a workspace inside the shared dir got denies %v, want a refusal", got)
 	}
-	if !slices.Contains(got, "/tmp/claude-501") {
-		t.Errorf("sharedClaudeTmpDirs = %v dropped /tmp/claude-501, which does not hold the workspace", got)
+
+	// Another user's symlink at a shared dir's path, pointing at the dir that
+	// holds the workspace, must not switch the deny off.
+	linked := t.TempDir()
+	t.Setenv("TMPDIR", linked)
+	if err := os.Symlink(linked, filepath.Join(linked, "claude-501")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = sharedClaudeTmpDirs(filepath.Join(linked, "forgectl-workflow-1"))
+	if err != nil || !slices.Contains(got, filepath.Join(linked, "claude-501")) {
+		t.Errorf("with a symlinked shared dir: sharedClaudeTmpDirs = %v, %v, want it denied", got, err)
 	}
 
 	reviewUID = func() int { return -1 }
-	if got := sharedClaudeTmpDirs(ws); got != nil {
-		t.Errorf("without a uid: sharedClaudeTmpDirs = %v, want none", got)
+	if got, err := sharedClaudeTmpDirs(ws); got != nil || err != nil {
+		t.Errorf("without a uid: sharedClaudeTmpDirs = %v, %v, want none", got, err)
 	}
 }
 

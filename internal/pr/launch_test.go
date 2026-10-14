@@ -440,7 +440,8 @@ func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 		"TMPDIR="+tmpDir, "CLAUDE_CODE_TMPDIR="+tmpDir, reviewEnvScrub)
 	relocSet, _ := reviewRelocationEnv()
 	want = append(want, relocSet...)
-	want = append(want, reviewCertEnv()...)
+	certSet, _ := reviewCertEnv()
+	want = append(want, certSet...)
 	if !slices.Equal(envs, want) {
 		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}
