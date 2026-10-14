@@ -119,6 +119,7 @@ import (
 	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // Profile selects how git is hardened for one call. The zero value is Local.
@@ -431,27 +432,13 @@ var repoDeadline = 30 * time.Second
 // projects inventory's `remote get-url`, for one. The caller defers cancel.
 //
 // A git in its own group no longer gets the terminal's Ctrl-C, which goes
-// to the foreground group only, so Bounded passes it on (interruptible): a
+// to the foreground group only, so Bounded passes it on (internal/sigrelay): a
 // terminating signal that reaches forgectl while the context is live
 // cancels it, which kills the git's group, and cancel then re-raises the
 // signal, so forgectl stops as it did when git shared its group rather
 // than carrying on to the next repository.
 func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
-	return BoundedFor(ctx, repoDeadline)
-}
-
-// BoundedFor is Bounded with the deadline named, for a caller that budgets
-// its own children: audit secrets' per-repo git status and gitleaks runs and
-// the gitleaks version probe (#1020). Each starts its child in a group of its
-// own, so without the relay a Ctrl-C ended forgectl and left the child
-// running. The caller defers cancel.
-func BoundedFor(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	dctx, cancel := context.WithTimeout(ctx, d)
-	ictx, stop := interruptible(dctx)
-	return fexec.WithProcessGroup(ictx), func() {
-		stop()
-		cancel()
-	}
+	return sigrelay.Group(ctx, repoDeadline)
 }
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with

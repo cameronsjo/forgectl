@@ -42,8 +42,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // Name is the executable resolved through PATH.
@@ -123,7 +123,7 @@ func Resolve(ctx context.Context, lookPath func(string) (string, error), r Runne
 		return Binary{State: StateRefused, Path: p, Reason: ReasonUnderScanRoot}
 	}
 	// Its own process group, with a Ctrl-C passed on to it (#1020).
-	vctx, cancel := gitenv.BoundedFor(ctx, versionTimeout)
+	vctx, cancel := sigrelay.Group(ctx, versionTimeout)
 	defer cancel()
 	out, err := r.RunWithEnvFiltered(vctx, nil, UnsetEnv(), p, "version")
 	if err != nil {

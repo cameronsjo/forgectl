@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // RepoTimeout caps one repo's scan. The scan budget (Scan's ctx) bounds the
@@ -152,7 +152,7 @@ scan:
 		removeReport(tmp)
 		// Its own process group, with a Ctrl-C passed on to it: the terminal
 		// sends one to forgectl's group only (#1020).
-		rctx, cancel := gitenv.BoundedFor(ctx, perRepo)
+		rctx, cancel := sigrelay.Group(ctx, perRepo)
 		_, runErr := r.RunWithEnvFiltered(rctx, nil, UnsetEnv(), bin, Args(repo, tmp)...)
 		repoTimedOut := rctx.Err() != nil
 		cancel()
