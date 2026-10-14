@@ -38,6 +38,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -537,5 +538,32 @@ func TestParseWorkRefForHosts_PortedHost(t *testing.T) {
 		if _, err := ParseWorkRefForHosts(in, GitHubHost, hosts); err == nil {
 			t.Errorf("ParseWorkRefForHosts(%q): unlisted host:port must be rejected", in)
 		}
+	}
+}
+
+// #1018: each owner's notes come out in owner order, not arrival order. The
+// first owner answers only after the second has, so arrival order is the
+// reverse. Mutation: append notes as results arrive (the order flips).
+func TestGiteaItems_NotesKeepOwnerOrder(t *testing.T) {
+	secondDone := make(chan struct{})
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if argAfter(args, "--owner") == "first" {
+			<-secondDone
+			// Give the second owner's result time to land first; the
+			// assertion holds either way, this only makes the mutation fail.
+			time.Sleep(50 * time.Millisecond)
+			return "", errors.New("tea: user does not exist")
+		}
+		defer close(secondDone)
+		return "", errors.New("tea: user does not exist")
+	}}
+	g, err := NewGitea(fake, "git.sjo.lol", "cameron", []string{"first", "second"})
+	if err != nil {
+		t.Fatalf("NewGitea: %v", err)
+	}
+	_, notes, _ := g.Items(context.Background())
+	want := []string{"gitea(first): query failed", "gitea(second): query failed"}
+	if !slices.Equal(notes, want) {
+		t.Errorf("notes = %q; want %q", notes, want)
 	}
 }

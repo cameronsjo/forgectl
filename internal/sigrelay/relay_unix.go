@@ -1,6 +1,6 @@
 //go:build unix
 
-package gitenv
+package sigrelay
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// interruptSignals are the terminating signals Bounded passes on to the git
+// interruptSignals are the terminating signals Group passes on to the child
 // it runs in a process group of its own: SIGINT (Ctrl-C, which the terminal
 // sends to the foreground group only), SIGTERM and SIGHUP (a closed terminal
 // or a dropped SSH session).
@@ -21,8 +21,8 @@ var interruptSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGH
 // the process, and the stop that ends the watch. When a signal fired, stop
 // re-raises it after it stops watching, so it meets whatever handles it
 // next: the default, which ends the process by it, as it ended forgectl
-// when git shared forgectl's group; or a handler someone else registered,
-// a concurrent Bounded call or a command's own scope, which then decides.
+// when the child shared forgectl's group; or a handler someone else registered,
+// a concurrent Group call or a command's own scope, which then decides.
 // It waits up to a second for the re-raised signal to take, then returns.
 //
 // A signal the process inherited as ignored stays ignored, as in

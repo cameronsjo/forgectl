@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -80,8 +81,8 @@ func (g *Gitea) Host() string { return g.host }
 // a second literal, so the two bounds cannot drift apart.
 const maxGiteaQueryConcurrency = maxGitHubQueryConcurrency
 
-// giteaQueryResult carries one owner's tea query outcome across the
-// fan-out channel — the same Inventory model github.go's ghQueryResult uses.
+// giteaQueryResult carries one owner's tea query outcome out of the fan-out,
+// in that owner's indexed slot.
 type giteaQueryResult struct {
 	label     string
 	items     []Item
@@ -101,25 +102,30 @@ func (g *Gitea) Items(ctx context.Context) ([]Item, []string, error) {
 
 	// The semaphore is acquired BEFORE the `go` statement so the bound caps
 	// live goroutines, not merely concurrent tea processes (the same reasoning
-	// github.go and projects.fanOut document). ch is buffered to len(owners),
-	// so a worker never blocks on its send while holding a slot — the loop
-	// cannot deadlock against the drain below.
-	ch := make(chan giteaQueryResult, len(g.owners))
+	// github.go and projects.fanOut document).
+	//
+	// Each owner writes its own indexed slot and the slots are read in owner
+	// order, so the notes come out in the same order on every run rather than
+	// in arrival order (#1018).
+	results := make([]giteaQueryResult, len(g.owners))
 	sem := make(chan struct{}, maxGiteaQueryConcurrency)
-	for _, owner := range g.owners {
+	var wg sync.WaitGroup
+	for i, owner := range g.owners {
 		sem <- struct{}{}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer func() { <-sem }()
 			items, truncated, err := g.issuesForOwner(ctx, owner)
-			ch <- giteaQueryResult{fmt.Sprintf("gitea(%s)", owner), items, truncated, err}
+			results[i] = giteaQueryResult{fmt.Sprintf("gitea(%s)", owner), items, truncated, err}
 		}()
 	}
+	wg.Wait()
 
 	var notes []string
 	var items []Item
 	failed := 0
-	for range g.owners {
-		res := <-ch
+	for _, res := range results {
 		if res.err != nil {
 			// The raw cause is logged, never rendered — the same rule the GitHub
 			// source follows, and for a sharper reason here: res.err is usually a

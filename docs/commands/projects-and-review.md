@@ -74,6 +74,12 @@ Three filing rules, and `projects clone` writes the first that applies:
 `github.example.com` — never a short token. Every segment is lowercased, so the
 tree mirrors a repo's dedup identity exactly.
 
+A repo whose name starts with a dot, such as an org's `.github`, is filed under
+a `dot-` leaf: `<projects>/github.com/<owner>/dot-github`. `gh` and `git` still
+get the real name, and `surface launch .github` finds the `dot-github`
+checkout. If the owner also has a real `dot-github` repo, the second clone is
+refused and the error names both.
+
 A **wing** is a directory directly under the projects root holding repos that
 belong together, one level shallower than the host tree. Placement and
 discovery answer different questions and come from different places:

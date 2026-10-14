@@ -62,7 +62,8 @@ func giteaList(ctx context.Context, run interface {
 			continue // malformed row — a real repo always has an owner and name
 		}
 		// Both become directories; drop rather than repair (see validRepoSegment).
-		if !validRepoSegment(owner) || !validRepoSegment(name) {
+		// A leading-dot name is filed under a "dot-" leaf (repoDirLeaf, #1057).
+		if _, ok := repoDirLeaf(name); !validRepoSegment(owner) || !ok {
 			slog.Warn("Dropped a Gitea row whose owner or name is not a safe path segment.")
 			continue
 		}

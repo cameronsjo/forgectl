@@ -42,8 +42,8 @@ import (
 	"strings"
 	"time"
 
-	fexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // Name is the executable resolved through PATH.
@@ -122,7 +122,8 @@ func Resolve(ctx context.Context, lookPath func(string) (string, error), r Runne
 	if scanRoot != "" && underRoot(p, scanRoot) {
 		return Binary{State: StateRefused, Path: p, Reason: ReasonUnderScanRoot}
 	}
-	vctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), versionTimeout)
+	// Its own process group, with a Ctrl-C passed on to it (#1020).
+	vctx, cancel := sigrelay.Group(ctx, versionTimeout)
 	defer cancel()
 	out, err := r.RunWithEnvFiltered(vctx, nil, UnsetEnv(), p, "version")
 	if err != nil {

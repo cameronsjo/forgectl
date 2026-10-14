@@ -29,6 +29,8 @@ var gitleaksImports = map[string]bool{
 	"time":          true,
 	"github.com/cameronsjo/forgectl/internal/exec":       true,
 	"github.com/cameronsjo/forgectl/internal/selfupdate": true,
+	// The Ctrl-C relay for the scan's process group (#1020); no filesystem.
+	"github.com/cameronsjo/forgectl/internal/sigrelay": true,
 }
 
 // sourceViolations parses the named Go sources and returns every breach of

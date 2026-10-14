@@ -368,3 +368,26 @@ func TestExpandHome_ReportsAFailedLookup(t *testing.T) {
 		t.Errorf("expandHomeWith(~/x) = %q, %v", ok, err)
 	}
 }
+
+// TestResolveTarget_DotNameFindsItsMappedLeaf: `.github` is cloned to a
+// `dot-github` leaf (#1057), so launching it by its real name must find that
+// checkout, in the host tree and in a wing.
+func TestResolveTarget_DotNameFindsItsMappedLeaf(t *testing.T) {
+	for _, parts := range [][]string{
+		{"github.com", "o", "dot-github"},
+		{"wing", "dot-github"},
+	} {
+		tmp := t.TempDir()
+		dir := filepath.Join(append([]string{tmp}, parts...)...)
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		got, err := (&Client{Dir: tmp}).ResolveTarget(".github")
+		if err != nil {
+			t.Fatalf("ResolveTarget(.github) under %v: %v", parts, err)
+		}
+		if want, _ := filepath.EvalSymlinks(dir); got != want {
+			t.Errorf("ResolveTarget(.github) = %q; want %q", got, want)
+		}
+	}
+}
