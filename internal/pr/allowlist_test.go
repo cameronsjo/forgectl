@@ -9,6 +9,7 @@ package pr
 //   [x] Never grants gh pr review/comment/merge under allow
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -298,7 +299,7 @@ func TestDenyLists_CarryNoMultiEdit(t *testing.T) {
 	}
 	for name, list := range map[string][]string{
 		"remote": remote.Deny,
-		"local":  localProfile("/tmp/forgectl-findings-x").Deny,
+		"local":  mustLocalProfile(t, "/tmp/forgectl-findings-x").Deny,
 	} {
 		for _, rule := range list {
 			if strings.HasPrefix(rule, "MultiEdit") {
@@ -317,15 +318,22 @@ func TestProfiles_DenyReadsOfCredentialStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := localProfile("/tmp/forgectl-findings-x")
+	local := mustLocalProfile(t, "/tmp/forgectl-findings-x")
 	for name, perms := range map[string]permissions{"remote": remote, "local": local} {
-		for _, want := range []string{"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.netrc)", "Read(~/.config/sops/**)"} {
+		for _, want := range []string{
+			"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.netrc)", "Read(~/.config/sops/**)",
+			"Read(~/.claude/.credentials.json)", "Read(~/.codex/auth.json)", "Read(~/.config/hub/**)",
+			"Read(~/.cargo/credentials.toml)", "Read(~/.terraform.d/credentials.tfrc.json)", "Read(~/.vault-token)",
+			"Read(~/.pgpass)", "Read(~/.password-store/**)", "Read(~/.local/share/keyrings/**)",
+			"Read(~/.config/rclone/**)", "Read(~/.m2/settings.xml)", "Read(~/.gem/credentials)", "Read(~/.config/op/**)",
+			"Read(//proc/**)",
+		} {
 			if !contains(perms.Deny, want) {
 				t.Errorf("%s deny list missing %q", name, want)
 			}
 		}
 		for _, rule := range perms.Deny {
-			if strings.HasPrefix(rule, "Read(") && !strings.HasPrefix(rule, "Read(~/") {
+			if strings.HasPrefix(rule, "Read(") && !strings.HasPrefix(rule, "Read(~/") && !strings.HasPrefix(rule, "Read(//") {
 				t.Errorf("%s credential deny %q is not home-rooted", name, rule)
 			}
 		}
@@ -343,5 +351,59 @@ func TestProfiles_DenyReadsOfCredentialStores(t *testing.T) {
 	}
 	if !contains(local.Deny, ghRule) {
 		t.Errorf("local deny list missing %q", ghRule)
+	}
+}
+
+// TestReviewCredentialPaths_FollowRelocations: a store an environment
+// variable moved is denied where it now lives, absolute paths //-rooted in a
+// rule, and gh's relocated config only for a local review. A relative or
+// pattern-bearing value is not turned into a rule.
+func TestReviewCredentialPaths_FollowRelocations(t *testing.T) {
+	orig := credentialEnv
+	t.Cleanup(func() { credentialEnv = orig })
+	env := map[string]string{ //nolint:gosec // G101: credential-path variable names and fake paths, no secret
+		"XDG_CONFIG_HOME":             "/srv/xdg",
+		"GH_CONFIG_DIR":               "/srv/gh",
+		"CLOUDSDK_CONFIG":             "/srv/gcloud",
+		"AWS_SHARED_CREDENTIALS_FILE": "/srv/aws/credentials",
+		"CLAUDE_CONFIG_DIR":           "relative/claude",
+		"CODEX_HOME":                  "/srv/co*dex",
+	}
+	credentialEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+
+	remote, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := mustLocalProfile(t, "/tmp/forgectl-findings-x")
+	for name, perms := range map[string]permissions{"remote": remote, "local": local} {
+		for _, want := range []string{
+			"Read(//srv/xdg/gcloud/**)", "Read(//srv/xdg/sops/**)", "Read(//srv/xdg/git/credentials)",
+			"Read(//srv/gcloud/**)", "Read(//srv/aws/credentials)",
+		} {
+			if !contains(perms.Deny, want) {
+				t.Errorf("%s deny list missing the relocated %q", name, want)
+			}
+		}
+		for _, rule := range perms.Deny {
+			if strings.Contains(rule, "relative/claude") || strings.Contains(rule, "co*dex") {
+				t.Errorf("%s deny list carries an unusable relocation: %q", name, rule)
+			}
+		}
+	}
+	for _, rule := range []string{"Read(//srv/gh/**)", "Read(//srv/xdg/gh/**)"} {
+		if contains(remote.Deny, rule) {
+			t.Errorf("remote deny list carries %q, which would cut gh off from its stored token", rule)
+		}
+		if !contains(local.Deny, rule) {
+			t.Errorf("local deny list missing %q", rule)
+		}
+	}
+	sb, err := reviewSandbox(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(sb.Filesystem.DenyRead, "/srv/gh") || !slices.Contains(sb.Filesystem.DenyRead, "/srv/aws/credentials") {
+		t.Errorf("sandbox denyRead misses the relocated stores: %v", sb.Filesystem.DenyRead)
 	}
 }

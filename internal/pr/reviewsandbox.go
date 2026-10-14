@@ -154,16 +154,6 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 	}, nil
 }
 
-// credentialDenyRead renders paths as the sandbox's denyRead entries. A
-// directory entry covers its subtree.
-func credentialDenyRead(paths []credentialPath) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		out = append(out, p.path)
-	}
-	return out
-}
-
 // reviewSettingsJSON renders the reviewer's whole configuration — perms, the
 // sandbox block, and disableAllHooks — as the inline JSON `claude --settings`
 // takes. It is passed with --setting-sources reviewSettingSources, so nothing

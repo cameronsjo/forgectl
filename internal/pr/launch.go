@@ -515,6 +515,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
 	}
 	profile.AllowDanger = false
+	// The environment scrub the window pins (reviewEnvScrub) makes Claude Code
+	// override this to default. Plan is still passed, so the posture does not
+	// loosen if that override goes away; under -p, default refuses every tool
+	// call the allow-list does not grant.
 	profile.PermissionMode = "plan"
 	// Refuse every DISCOVERED MCP configuration. The workspace is a third
 	// party's checkout, and Claude Code spawns a discovered server's `command` +
@@ -627,7 +631,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		// writable root besides the review's private temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
-		perms = localProfile(sess.FindingsDir)
+		if perms, err = localProfile(sess.FindingsDir); err != nil {
+			return Dispatch{}, err
+		}
 	} else {
 		host, _, err := c.prHost(sess.Ref)
 		if err != nil {
@@ -691,7 +697,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 				"dir", tmpDir, "error", rerr)
 		}
 	}()
-	windowEnv = pinReviewTmpEnv(windowEnv, tmpDir)
+	// The same pin turns on Claude Code's subprocess environment scrub, so
+	// an allowed `cat /proc/self/environ` cannot print the window's
+	// credentials into the transcript (reviewEnvScrub).
+	windowEnv = pinReviewClaudeEnv(windowEnv, tmpDir)
 	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}

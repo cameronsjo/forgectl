@@ -327,7 +327,7 @@ func TestPrepareLocal_WritesNoSettingsIntoTheWorkspace(t *testing.T) {
 }
 
 func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
-	perms := localProfile("/tmp/forgectl-findings-test")
+	perms := mustLocalProfile(t, "/tmp/forgectl-findings-test")
 	if !contains(perms.Deny, "Bash(gh:*)") {
 		t.Error("deny list must block every gh subcommand via Bash(gh:*)")
 	}
@@ -345,7 +345,7 @@ func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
 
 func TestLocalProfile_FindingsDirIsOnlyWritablePath(t *testing.T) {
 	const dir = "/tmp/forgectl-findings-test"
-	perms := localProfile(dir)
+	perms := mustLocalProfile(t, dir)
 
 	var writeGrants []string
 	for _, a := range perms.Allow {
@@ -531,5 +531,35 @@ func TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects(t *testing.
 	}
 	if !strings.Contains(err.Error(), "clean-room workspace") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// mustLocalProfile is localProfile for a findings dir the test knows is valid.
+func mustLocalProfile(t *testing.T, findingsDir string) permissions {
+	t.Helper()
+	perms, err := localProfile(findingsDir)
+	if err != nil {
+		t.Fatalf("localProfile(%q): %v", findingsDir, err)
+	}
+	return perms
+}
+
+// TestFindingsEditRule_RefusesWhatWouldWidenOrBreakTheGrant: a relative dir
+// would be read against the settings file, and a pattern character or a
+// closing parenthesis would widen the one write grant or end it early.
+func TestFindingsEditRule_RefusesWhatWouldWidenOrBreakTheGrant(t *testing.T) {
+	for _, dir := range []string{
+		"findings", "./findings", "",
+		"/tmp/f*", "/tmp/f?", "/tmp/f[ab]", "/tmp/f!x", "/tmp/f)x", "/tmp/f(x", "/tmp/f{a,b}", `/tmp/f\x`,
+	} {
+		if rule, err := findingsEditRule(dir); err == nil {
+			t.Errorf("findingsEditRule(%q) = %q, want a refusal", dir, rule)
+		}
+		if _, err := localProfile(dir); err == nil {
+			t.Errorf("localProfile(%q) built a profile, want a refusal", dir)
+		}
+	}
+	if rule, err := findingsEditRule("/tmp/x/../forgectl-findings-1/"); err != nil || rule != "Edit(//tmp/forgectl-findings-1/**)" {
+		t.Errorf("findingsEditRule of an unclean absolute dir = %q, %v; want the cleaned //-rooted rule", rule, err)
 	}
 }

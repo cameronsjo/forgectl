@@ -27,11 +27,36 @@ const reviewTmpPrefix = "forgectl-rtmp-"
 // dir inside it. TMPDIR is what every other process in the window reads.
 var reviewTmpEnvKeys = []string{"TMPDIR", "CLAUDE_CODE_TMPDIR"}
 
+// reviewEnvScrub turns on Claude Code's subprocess environment scrub for the
+// reviewer. Without it, an allowed `cat /proc/self/environ` printed the whole
+// window environment into the transcript (measured on Claude Code 2.1.296,
+// with ANTHROPIC_* and AWS_SECRET_ACCESS_KEY among it). With it, Claude Code
+// strips credential-shaped variables (ANTHROPIC_API_KEY, AWS_SECRET_ACCESS_KEY,
+// any *_TOKEN or *_SECRET it classifies) and credential-path variables
+// (GH_CONFIG_DIR, XDG_CONFIG_HOME and the like) from every command's
+// environment, and refuses a command naming /proc/*/environ.
+//
+// Two things it does not do, measured on 2.1.296: it keeps GH_TOKEN and
+// GITHUB_TOKEN, so gh still authenticates from them (and a reviewer that
+// finds another way to print its environment still sees them); and it forces
+// the permission mode to default, overriding the plan mode forgectl passes.
+// In -p mode, default still refuses every tool call the allow-list does not
+// grant, since there is nobody to ask.
+const reviewEnvScrub = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
+
 // reviewTmpDirFor is the private temp directory of the review of workspace:
 // a sibling of the workspace, named from the workspace's own random suffix.
 // It is derived, not recorded, so every path that removes a workspace can find
 // it again from the breadcrumb's workspace field alone. A workspace whose name
 // lacks the sandbox prefix has none.
+//
+// It derives from the workspace path as spelled, unresolved, on purpose. That
+// is the string the dispatch created the dir from and the one every teardown
+// path holds, and it is the string sandbox.Teardown removes (it resolves only
+// to check the prefix). A symlinked workspace therefore finds the dir beside
+// the link, where it was made. removeReviewTmpDir refuses anything at that
+// path but a real directory, so the derived name never leads it through a
+// link.
 //
 // The sibling sits outside the workspace on purpose. The sandbox denies
 // writes to the whole workspace, and a deny there outranks any grant below it.
@@ -134,25 +159,38 @@ func removeReviewTmpDir(workspace string) error {
 	return nil
 }
 
+// workspaceTeardown is sandbox.Teardown, a seam so a test can stage a
+// teardown that fails after the workspace is gone.
+var workspaceTeardown = sandbox.Teardown
+
 // teardownWorkspace removes a review workspace and then its private temp
-// directory. The temp dir goes only once the workspace teardown succeeded,
-// which is also when sandbox.Teardown has vouched for the workspace path the
-// sibling's name is derived from.
+// directory. The temp dir goes once the workspace teardown succeeded, which is
+// also when sandbox.Teardown has vouched for the workspace path, or when the
+// teardown failed but the workspace is gone anyway: nothing is left for a
+// retry to find the temp dir from, so leaving it would only leak it.
 func teardownWorkspace(ctx context.Context, run exec.Runner, workspace string) error {
-	if err := sandbox.Teardown(ctx, run, workspace); err != nil {
+	if err := workspaceTeardown(ctx, run, workspace); err != nil {
+		if workspace != "" {
+			if _, lerr := os.Lstat(workspace); errors.Is(lerr, os.ErrNotExist) {
+				if rerr := removeReviewTmpDir(workspace); rerr != nil {
+					slog.Warn("Failed to remove the review's private temp dir.", "workspace", workspace, "error", rerr)
+				}
+			}
+		}
 		return err
 	}
 	return removeReviewTmpDir(workspace)
 }
 
-// pinReviewTmpEnv returns env with every reviewTmpEnvKeys entry pointing at
-// dir. Any entry env carries for one of them is dropped first. env is not
-// modified.
-func pinReviewTmpEnv(env []string, dir string) []string {
-	out := make([]string, 0, len(env)+len(reviewTmpEnvKeys))
+// pinReviewClaudeEnv returns env with every reviewTmpEnvKeys entry pointing at
+// dir and the environment scrub on (reviewEnvScrub). Any entry env carries
+// for one of those variables is dropped first. env is not modified.
+func pinReviewClaudeEnv(env []string, dir string) []string {
+	scrubKey, _, _ := strings.Cut(reviewEnvScrub, "=")
+	out := make([]string, 0, len(env)+len(reviewTmpEnvKeys)+1)
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if slices.Contains(reviewTmpEnvKeys, key) {
+		if slices.Contains(reviewTmpEnvKeys, key) || key == scrubKey {
 			continue
 		}
 		out = append(out, e)
@@ -160,5 +198,5 @@ func pinReviewTmpEnv(env []string, dir string) []string {
 	for _, k := range reviewTmpEnvKeys {
 		out = append(out, k+"="+dir)
 	}
-	return out
+	return append(out, reviewEnvScrub)
 }

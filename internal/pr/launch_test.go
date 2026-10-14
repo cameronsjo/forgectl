@@ -440,7 +440,7 @@ func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := append(append([]string{}, reviewGitEnv...), "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=",
-		"TMPDIR="+tmpDir, "CLAUDE_CODE_TMPDIR="+tmpDir)
+		"TMPDIR="+tmpDir, "CLAUDE_CODE_TMPDIR="+tmpDir, reviewEnvScrub)
 	if !slices.Equal(envs, want) {
 		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}

@@ -3,7 +3,9 @@ package pr
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // reviewSettings is the whole Claude Code settings document the clean-room
@@ -183,73 +185,6 @@ var denyPosting = []string{
 	"WebFetch",
 }
 
-// credentialPath is one operator credential location, home-relative in the
-// `~/` spelling both Claude Code's permission rules and its sandbox paths
-// resolve against the home directory. dir says whether it is a directory,
-// whose whole subtree is denied, or a single file.
-type credentialPath struct {
-	path string
-	dir  bool
-}
-
-// credentialPaths are the credential stores a reviewer has no reason to read
-// (forgectl#715 item 2). The sandbox lets a command read anything the operator
-// can, and whatever it reads goes to the model provider as tool output, so a
-// prompt-injected review could otherwise lift a key. It is a list of the
-// common stores, not a proof that nothing else on the host is secret.
-//
-// gh's own config dir is not here: a PR review's gh reads authenticate from
-// its hosts.yml, and a Read deny rule is also applied to the sandbox's reads
-// (measured on Claude Code 2.1.296: `Read(~/.config/gh/**)` alone made a
-// sandboxed `gh config get` fall back to its defaults). ghConfigPath adds it
-// for a local review, which runs no gh at all.
-var credentialPaths = []credentialPath{
-	{"~/.ssh", true},
-	{"~/.gnupg", true},
-	{"~/.aws", true},
-	{"~/.azure", true},
-	{"~/.config/gcloud", true},
-	{"~/.kube", true},
-	{"~/.docker", true},
-	{"~/.config/sops", true},
-	{"~/.netrc", false},
-	{"~/.git-credentials", false},
-	{"~/.config/git/credentials", false},
-	{"~/.npmrc", false},
-	{"~/.pypirc", false},
-}
-
-// ghConfigPath is gh's config dir, holding its stored tokens. Only a local
-// review denies it; see credentialPaths.
-var ghConfigPath = credentialPath{"~/.config/gh", true}
-
-// reviewCredentialPaths are the credential paths a review denies reads of:
-// credentialPaths, plus gh's config dir for a local review (ghHost "").
-func reviewCredentialPaths(ghHost string) []credentialPath {
-	paths := append([]credentialPath{}, credentialPaths...)
-	if ghHost == "" {
-		paths = append(paths, ghConfigPath)
-	}
-	return paths
-}
-
-// credentialReadDeny renders paths as Read deny rules. Claude Code applies a
-// Read rule to the Read, Grep and Glob tools and to the paths an allowed Bash
-// reader such as `cat` or `ls` names; measured on 2.1.296, `cat` and `ls` of a
-// denied path were refused. The sandbox's denyRead (reviewSandbox) is the
-// OS-enforced half, for a read no command text shows.
-func credentialReadDeny(paths []credentialPath) []string {
-	rules := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if p.dir {
-			rules = append(rules, "Read("+p.path+"/**)")
-		} else {
-			rules = append(rules, "Read("+p.path+")")
-		}
-	}
-	return rules
-}
-
 // remoteProfile builds the deny-by-default permission set for a PR review:
 // allowReadOnly plus the gh reads generated for this PR's own host and number
 // (prGhReadRules), which it refuses to build from an unvalidated value.
@@ -318,17 +253,30 @@ var localDenyNetwork = []string{
 // the filesystem root. Measured on Claude Code 2.1.296: Edit(//dir/**) let
 // the Write tool create a file in dir, and both Write(//dir/**) and
 // Edit(/dir/**) left it needing a grant.
-func localProfile(findingsDir string) permissions {
-	allow := append(append([]string{}, localAllowReadOnly...), findingsEditRule(findingsDir))
+func localProfile(findingsDir string) (permissions, error) {
+	grant, err := findingsEditRule(findingsDir)
+	if err != nil {
+		return permissions{}, err
+	}
 	return permissions{
 		DefaultMode: "plan",
-		Allow:       allow,
+		Allow:       append(append([]string{}, localAllowReadOnly...), grant),
 		Deny:        append(append([]string{}, localDenyNetwork...), credentialReadDeny(reviewCredentialPaths(""))...),
-	}
+	}, nil
 }
 
-// findingsEditRule is the scoped write grant for findingsDir, an absolute
-// path, in the `//`-rooted spelling a permission rule needs for one.
-func findingsEditRule(findingsDir string) string {
-	return fmt.Sprintf("Edit(/%s/**)", findingsDir)
+// findingsEditRule is the scoped write grant for findingsDir, in the
+// `//`-rooted spelling a permission rule needs for an absolute path. It
+// refuses a relative path, which the rule would read against the settings
+// file, and a path holding a character a permission path treats as a pattern
+// or that would end the rule early: either would widen or break the one
+// write grant the reviewer has.
+func findingsEditRule(findingsDir string) (string, error) {
+	if !filepath.IsAbs(findingsDir) {
+		return "", fmt.Errorf("refusing to grant the reviewer writes to %q: the findings dir is not absolute", findingsDir)
+	}
+	if strings.ContainsAny(findingsDir, permissionPathMeta) {
+		return "", fmt.Errorf("refusing to grant the reviewer writes to %q: the findings dir holds a character a permission rule reads as a pattern", findingsDir)
+	}
+	return "Edit(/" + filepath.Clean(findingsDir) + "/**)", nil
 }

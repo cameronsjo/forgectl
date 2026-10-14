@@ -14,8 +14,13 @@ package pr
 //   [x] A missing dir is not an error
 //   [x] A symlink in its place is refused and its target left alone
 //   [x] teardownWorkspace removes the workspace and then the private dir
-// pinReviewTmpEnv
-//   [x] Replaces ambient TMPDIR / CLAUDE_CODE_TMPDIR entries
+// pinReviewClaudeEnv
+//   [x] Replaces ambient TMPDIR / CLAUDE_CODE_TMPDIR / scrub entries
+// teardownWorkspace after a failure
+//   [x] A failed teardown of a gone workspace still removes the private dir
+//   [x] A failed teardown of a standing workspace keeps it
+// launchInline after a failed new-window
+//   [x] The dir stays for teardown, and teardown removes it
 // launchInline wiring
 //   [x] The window env points both variables at a fresh 0700 dir
 //   [x] A dispatch refused before the window opens removes the dir
@@ -191,15 +196,60 @@ func TestTeardownWorkspace_RemovesThePrivateTmpDir(t *testing.T) {
 	}
 }
 
-func TestPinReviewTmpEnv_ReplacesAmbientEntries(t *testing.T) {
-	env := []string{"TMPDIR=/shared", "PATH=/bin", "CLAUDE_CODE_TMPDIR=/shared2"}
-	got := pinReviewTmpEnv(env, "/private")
-	want := []string{"PATH=/bin", "TMPDIR=/private", "CLAUDE_CODE_TMPDIR=/private"}
+func TestPinReviewClaudeEnv_ReplacesAmbientEntries(t *testing.T) {
+	env := []string{"TMPDIR=/shared", "PATH=/bin", "CLAUDE_CODE_TMPDIR=/shared2", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0"}
+	got := pinReviewClaudeEnv(env, "/private")
+	want := []string{"PATH=/bin", "TMPDIR=/private", "CLAUDE_CODE_TMPDIR=/private", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"}
 	if !slices.Equal(got, want) {
-		t.Errorf("pinReviewTmpEnv = %v, want %v", got, want)
+		t.Errorf("pinReviewClaudeEnv = %v, want %v", got, want)
 	}
 	if env[0] != "TMPDIR=/shared" {
-		t.Error("pinReviewTmpEnv modified its input")
+		t.Error("pinReviewClaudeEnv modified its input")
+	}
+}
+
+// TestTeardownWorkspace_FailedTeardownOfAGoneWorkspaceStillRemovesTheTmpDir:
+// once the workspace is gone, nothing can find the temp dir again, so a
+// failed teardown must not leak it.
+func TestTeardownWorkspace_FailedTeardownOfAGoneWorkspaceStillRemovesTheTmpDir(t *testing.T) {
+	ws := fakeWorkspaceIn(t, t.TempDir())
+	dir, err := createReviewTmpDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("teardown hit an error after removing the workspace")
+	orig := workspaceTeardown
+	workspaceTeardown = func(_ context.Context, _ exec.Runner, w string) error {
+		_ = os.RemoveAll(w)
+		return failure
+	}
+	t.Cleanup(func() { workspaceTeardown = orig })
+
+	if err := teardownWorkspace(context.Background(), &exec.FakeRunner{}, ws); !errors.Is(err, failure) {
+		t.Fatalf("teardownWorkspace = %v, want the teardown's error", err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the private dir survived a failed teardown of a gone workspace (%v)", err)
+	}
+}
+
+// TestTeardownWorkspace_FailedTeardownKeepsTheTmpDirWhileTheWorkspaceStands:
+// a workspace still on disk can be torn down again, and the dir goes then.
+func TestTeardownWorkspace_FailedTeardownKeepsTheTmpDirWhileTheWorkspaceStands(t *testing.T) {
+	ws := fakeWorkspaceIn(t, t.TempDir())
+	dir, err := createReviewTmpDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := workspaceTeardown
+	workspaceTeardown = func(context.Context, exec.Runner, string) error { return errors.New("disk said no") }
+	t.Cleanup(func() { workspaceTeardown = orig })
+
+	if err := teardownWorkspace(context.Background(), &exec.FakeRunner{}, ws); err == nil {
+		t.Fatal("teardownWorkspace swallowed the teardown's error")
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Errorf("the private dir went while its workspace still stands: %v", err)
 	}
 }
 
@@ -222,6 +272,9 @@ func TestLaunchInline_GivesTheWindowAPrivateTmpDir(t *testing.T) {
 		if !argPair(args, "-e", key+"="+dir) {
 			t.Errorf("tmux argv does not pin %s to the private dir %s: %v", key, dir, args)
 		}
+	}
+	if !argPair(args, "-e", reviewEnvScrub) {
+		t.Errorf("tmux argv does not turn on the subprocess environment scrub: %v", args)
 	}
 	if argPair(args, "-e", "TMPDIR=/tmp") {
 		t.Errorf("the ambient TMPDIR survived beside the pin: %v", args)
@@ -257,5 +310,39 @@ func TestLaunchInline_RefusedDispatchRemovesThePrivateTmpDir(t *testing.T) {
 	}
 	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a refused dispatch left its private dir behind (%v)", err)
+	}
+}
+
+// TestLaunchInline_FailedNewWindowLeavesTheTmpDirForTeardown: once tmux was
+// asked to open the window, a claude may be running in it, so a failed
+// new-window keeps the private dir; the session is parked, and the teardown
+// that settles it (pr repair --rollback, pr teardown) removes it.
+func TestLaunchInline_FailedNewWindowLeavesTheTmpDirForTeardown(t *testing.T) {
+	t.Setenv("FORGECTL_CLAUDE_BIN", fakeHarnessBin(t, "claude"))
+	base := successfulLaunchRunner()
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "new-window" {
+			return "", errors.New("tmux: create window failed")
+		}
+		return base.RunFunc(name, args)
+	}}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
+		t.Fatal("Launch succeeded although new-window failed")
+	}
+	dir, err := reviewTmpDirFor(sess.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Fatalf("a failed new-window removed the private dir a running claude may use: %v", err)
+	}
+	if err := sandboxTeardown(context.Background(), fake, sess.Workspace); err != nil {
+		t.Fatalf("sandboxTeardown: %v", err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("teardown left the private dir behind (%v)", err)
 	}
 }

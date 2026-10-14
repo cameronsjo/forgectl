@@ -137,7 +137,7 @@ func TestReviewSettingsJSON_RemoteIsStrictAndScopedToThePRHost(t *testing.T) {
 func TestReviewSettingsJSON_LocalReachesNoNetwork(t *testing.T) {
 	ws := t.TempDir()
 	findingsDir := filepath.Join(t.TempDir(), "findings")
-	doc, err := reviewSettingsJSON(ws, "", localProfile(findingsDir))
+	doc, err := reviewSettingsJSON(ws, "", mustLocalProfile(t, findingsDir))
 	if err != nil {
 		t.Fatalf("reviewSettingsJSON: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestLaunchInline_PassesTheWholeProfileAndLoadsNoSettingsFile(t *testing.T) 
 	if len(s2.Sandbox.Network.AllowedDomains) != 0 {
 		t.Errorf("a local review must reach no host, got %v", s2.Sandbox.Network.AllowedDomains)
 	}
-	if !slices.Equal(s2.Permissions.Allow, localProfile(findingsDir).Allow) {
+	if !slices.Equal(s2.Permissions.Allow, mustLocalProfile(t, findingsDir).Allow) {
 		t.Errorf("local settings allow = %v, want localProfile's", s2.Permissions.Allow)
 	}
 	assertNoWorkspaceClaudeDir(t, ws2)

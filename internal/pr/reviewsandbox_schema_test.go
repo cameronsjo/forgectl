@@ -71,11 +71,32 @@ func emittedDocuments(t *testing.T) map[string]string {
 		}
 		docs["remote "+host] = doc
 	}
-	doc, err := reviewSettingsJSON(ws, "", localProfile(filepath.Join(t.TempDir(), "findings")))
+	doc, err := reviewSettingsJSON(ws, "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	docs["local"] = doc
+
+	// Relocated credential stores add absolute, //-rooted rules and absolute
+	// denyRead entries; those must validate too.
+	orig := credentialEnv
+	credentialEnv = func(k string) (string, bool) {
+		switch k {
+		case "XDG_CONFIG_HOME":
+			return "/srv/xdg", true
+		case "GH_CONFIG_DIR":
+			return "/srv/gh", true
+		case "AWS_SHARED_CREDENTIALS_FILE":
+			return "/srv/aws/credentials", true
+		}
+		return "", false
+	}
+	defer func() { credentialEnv = orig }()
+	doc, err = reviewSettingsJSON(ws, "", mustLocalProfile(t, filepath.Join(t.TempDir(), "findings")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs["local relocated"] = doc
 	return docs
 }
 
