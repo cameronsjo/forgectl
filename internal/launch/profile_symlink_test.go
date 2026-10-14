@@ -95,3 +95,68 @@ func TestResolve_UnresolvableMatchKeepsItsSpelling(t *testing.T) {
 		t.Errorf("match %q model %q; want the block to apply", p.Match, p.Model)
 	}
 }
+
+// TestResolve_SpelledMatchNeedsThePhysicalPlace is the second review finding
+// on #1262: a link inside a loose block's tree that points into a stricter
+// block's (sandbox/repo/prod -> srv) must not carry the loose block to the
+// physical place, against the stricter block or against the defaults.
+//
+// Mutation: count a spelled-cwd match without the physical containment test
+// and both cases get the sandbox block.
+func TestResolve_SpelledMatchNeedsThePhysicalPlace(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := filepath.Join(base, "srv")
+	sandbox := filepath.Join(base, "projects", "sandbox")
+	repo := filepath.Join(sandbox, "repo")
+	for _, d := range []string{srv, repo} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prod := filepath.Join(repo, "prod")
+	if err := os.Symlink(srv, prod); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	loose, strict := true, false
+	sandboxBlock := config.LaunchProject{Match: sandbox, AllowDanger: &loose, PermissionMode: "acceptEdits"}
+
+	t.Run("a stricter block at the physical place wins", func(t *testing.T) {
+		lc := config.LaunchConfig{Projects: []config.LaunchProject{
+			{Match: srv, AllowDanger: &strict, PermissionMode: "plan"},
+			sandboxBlock,
+		}}
+		p, proj, err := resolveMatched(lc, prod, os.UserHomeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proj == nil || proj.Match != srv || p.AllowDanger || p.PermissionMode != "plan" {
+			t.Errorf("block %v, allow_danger %v, permission %q; want the /srv block", proj, p.AllowDanger, p.PermissionMode)
+		}
+	})
+	t.Run("the defaults are not bypassed", func(t *testing.T) {
+		lc := config.LaunchConfig{
+			Defaults: config.LaunchDefaults{AllowDanger: &strict, PermissionMode: "plan"},
+			Projects: []config.LaunchProject{sandboxBlock},
+		}
+		p, proj, err := resolveMatched(lc, prod, os.UserHomeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proj != nil || p.AllowDanger || p.PermissionMode != "plan" {
+			t.Errorf("block %v, allow_danger %v, permission %q; want the defaults", proj, p.AllowDanger, p.PermissionMode)
+		}
+	})
+	t.Run("the sandbox block still covers its own tree", func(t *testing.T) {
+		lc := config.LaunchConfig{Projects: []config.LaunchProject{sandboxBlock}}
+		_, proj, err := resolveMatched(lc, repo, os.UserHomeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proj == nil || proj.Match != sandbox {
+			t.Errorf("block %v; want the sandbox block", proj)
+		}
+	})
+}
