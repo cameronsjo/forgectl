@@ -4,9 +4,10 @@ package launch
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 
-	"golang.org/x/sys/unix"
+	"github.com/cameronsjo/forgectl/internal/privdir"
 )
 
 // openUsageFileAt opens one fixed name relative to the pinned state leaf and
@@ -14,77 +15,22 @@ import (
 // through here, so a fixture that fools one of them cannot be safe for the
 // others.
 //
-// The order is deliberate. Every property is checked while holding the
-// descriptor — never by re-consulting the name — and the one mutating step
-// (narrowing a broad mode) runs last, after type, ownership, link count, and
-// identity are all proven. A hardlink is refused BEFORE that chmod, because
-// chmod on a hardlinked inode changes the mode of a file that is also
-// somebody else's.
+// The check itself is privdir.OpenFile, which the surface worker ledger
+// shares (forgectl#1048): a no-follow, non-blocking openat, then type,
+// ownership, link count and identity proven on the descriptor before a
+// broad mode is narrowed to usageFileMode. What stays here is the
+// translation back into the two error identities the reader and doctor
+// branch on.
 func openUsageFileAt(stateFD int, name string, flags int, create bool) (*os.File, error) {
-	// O_NONBLOCK so a FIFO substituted for the data or lock name cannot hang
-	// the open itself — the refusal below only helps if control returns to it.
-	openFlags := flags | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	if create {
-		openFlags |= unix.O_CREAT
+		flags |= os.O_CREATE
 	}
-	fd, err := unix.Openat(stateFD, name, openFlags, usageFileMode)
+	file, err := privdir.OpenFile(stateFD, name, flags, usageFileMode)
 	switch {
-	case errors.Is(err, unix.ENOENT):
+	case errors.Is(err, fs.ErrNotExist):
 		return nil, errUsageAbsent
-	case errors.Is(err, unix.ELOOP):
-		return nil, unsafeStore("%s is a symlink", name)
-	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EISDIR), errors.Is(err, unix.ENOTDIR):
-		return nil, unsafeStore("%s is not a regular file", name)
 	case err != nil:
-		return nil, unsafeStore("open %s: %s", name, err)
-	}
-
-	file := os.NewFile(uintptr(fd), name)
-	if err := verifyUsageFile(stateFD, name, file); err != nil {
-		file.Close() //nolint:errcheck // refusing; nothing was written
-		return nil, err
+		return nil, unsafeStore("%s", privdir.Reason(err))
 	}
 	return file, nil
-}
-
-func verifyUsageFile(stateFD int, name string, file *os.File) error {
-	fd := int(file.Fd())
-	var pinned unix.Stat_t
-	if err := unix.Fstat(fd, &pinned); err != nil {
-		return unsafeStore("stat %s: %s", name, err)
-	}
-	if pinned.Mode&unix.S_IFMT != unix.S_IFREG {
-		return unsafeStore("%s is not a regular file", name)
-	}
-	if int(pinned.Uid) != os.Geteuid() {
-		return unsafeStore("%s is owned by another user", name)
-	}
-	if pinned.Nlink != 1 {
-		// More than one name for this inode means writing here also writes
-		// somewhere forgectl was never pointed at.
-		return unsafeStore("%s is hardlinked", name)
-	}
-
-	var named unix.Stat_t
-	if err := unix.Fstatat(stateFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return unsafeStore("stat %s entry: %s", name, err)
-	}
-	if named.Dev != pinned.Dev || named.Ino != pinned.Ino {
-		return unsafeStore("%s entry does not match the opened file", name)
-	}
-
-	if pinned.Mode&0o7777 != usageFileMode {
-		if err := unix.Fchmod(fd, usageFileMode); err != nil {
-			return unsafeStore("restrict %s mode: %s", name, err)
-		}
-		var rechecked unix.Stat_t
-		if err := unix.Fstat(fd, &rechecked); err != nil {
-			return unsafeStore("re-stat %s: %s", name, err)
-		}
-		if rechecked.Ino != pinned.Ino || rechecked.Dev != pinned.Dev || rechecked.Nlink != 1 ||
-			rechecked.Mode&0o7777 != usageFileMode || int(rechecked.Uid) != os.Geteuid() {
-			return unsafeStore("%s changed identity while being restricted", name)
-		}
-	}
-	return nil
 }

@@ -153,6 +153,6 @@ The human view can change between releases. Scripts should read `--json`, whose 
 
 - **Refresh.** Opening the cockpit runs one full collection. After that, only `git` refreshes itself, every 60s; it reads local clones and makes no network call. `prs` (which calls `gh`), `clean` and `bench` refresh only when you press `r` or `R`. A section refreshes at most once every 15s, and only one refresh per section runs at a time. A section whose source is still running after its `--timeout` shows as failed, but stays `refreshing…`, and refuses another refresh, until that source has actually returned.
 
-`--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
+`--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. Under `TERM=dumb`, which cannot draw a full-screen view, it exits 1 and points at plain `status`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
 
 Unlike the hub, the cockpit has no `1`–`9` keys. Its rows carry no visible numbers, and a digit on a PR row would start a review on a row nobody saw numbered.

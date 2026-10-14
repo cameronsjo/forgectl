@@ -1677,17 +1677,19 @@ func TestAVanishedEndpointIsGoneNotUnreadable(t *testing.T) {
 		// herdr that quit mid-rollback. cmux has this arm; herdr had only the
 		// structured-code half, so this yielded CloseFailed for a workspace that
 		// could not possibly still exist.
-		stats := 0
+		// The socket goes while the close runs: Close stats it again right
+		// before the close (forgectl#1045), so it must still be there then.
+		quit := false
 		live := liveSocket(liveInode)
 		seam := func(path string) (os.FileInfo, error) {
-			stats++
-			if stats > 1 {
+			if quit {
 				return absentSocket(path)
 			}
 			return live(path)
 		}
 		run := newRunner().reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
 		run.on(exec.KindHerdrCleanup, func() (exec.SensitiveResult, error) {
+			quit = true
 			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrCleanup, exec.OutcomeExit)
 		})
 		a := newTestAdapter(t, run, nil, WithLstat(seam))

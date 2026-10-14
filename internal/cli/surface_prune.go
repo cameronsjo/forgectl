@@ -216,7 +216,9 @@ func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) dra
 	}
 	// One readiness read and one workspace listing for the whole prune, not
 	// two herdr calls per row.
-	probe := herdr.Prober()
+	// Only rows from this session's ledgers are probed (below), so the
+	// prober may settle a restarted session by the ownership marker.
+	probe := herdr.ForSessionLedger().Prober()
 	return func(id worker.LedgerID, r worker.Row) drain.Workspace {
 		if id.Session != herdr.Session() {
 			return drain.WorkspaceUnknown

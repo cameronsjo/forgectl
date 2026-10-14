@@ -46,6 +46,7 @@ type fakeDrain struct {
 	probe    func(q worker.QueueRow, led worker.Row) drain.Probe
 	launched []string
 	notified []string
+	alerted  []string
 	cleared  []string
 	// notifyErr and clearErr are what NeedsYou and Cleared return.
 	notifyErr error
@@ -91,10 +92,15 @@ func (f *fakeDrain) checkOwnLedger(row worker.QueueRow, led worker.Row) {
 	}
 }
 
-func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, led worker.Row, reason string) error {
+func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, led worker.Row, reason string) []notifyAttempt {
 	f.checkOwnLedger(row, led)
 	f.notified = append(f.notified, row.Name+": "+reason)
-	return f.notifyErr
+	return []notifyAttempt{{channel: channelHerdr}, {channel: channelPane, err: f.notifyErr}}
+}
+
+func (f *fakeDrain) Alert(_ context.Context, title, body string) []notifyAttempt {
+	f.alerted = append(f.alerted, title+": "+body)
+	return []notifyAttempt{{channel: channelHerdr, err: f.notifyErr}}
 }
 
 func (f *fakeDrain) Cleared(_ context.Context, row worker.QueueRow, led worker.Row) error {
@@ -623,6 +629,7 @@ func TestClassifyLaunchError(t *testing.T) {
 		"surface launch error":       {&surface.LaunchError{}, drain.ErrOther},
 		"run directory":              {fmt.Errorf("launch: %w: base is not absolute", surface.ErrRunDir), drain.ErrLaunchConfig},
 		"socket path too long":       {fmt.Errorf("launch: %w: set TMPDIR shorter", surface.ErrSocketPathTooLong), drain.ErrLaunchConfig},
+		"untrusted folder":           {fmt.Errorf("%w: /repo", errUntrustedFolder), drain.ErrRowInvalid},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
