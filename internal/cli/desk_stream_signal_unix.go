@@ -82,6 +82,15 @@ func deskInterruptible(ctx context.Context) (_ context.Context, fired func() boo
 			mu.Lock()
 			s := got
 			mu.Unlock()
+			// A signal can sit in ch unread: the watcher took done when both
+			// were ready, or it arrived after the watcher left and before
+			// Stop. Drain it so it is re-raised, not swallowed.
+			if s == nil {
+				select {
+				case s = <-ch:
+				default:
+				}
+			}
 			if sig, ok := s.(syscall.Signal); ok {
 				deskRaise(sig)
 			}
