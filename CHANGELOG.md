@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0](https://github.com/cameronsjo/forgectl/compare/v0.46.0...v0.47.0) (2026-10-14)
+
+
+### Features
+
+* **surface:** cross-harness messaging with surface send ([65b7d91](https://github.com/cameronsjo/forgectl/commit/65b7d916850cf2c78a5ada5a0a9a262654fbf95a))
+
 ## [0.46.0](https://github.com/cameronsjo/forgectl/compare/v0.45.0...v0.46.0) (2026-10-14)
 
 
