@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,9 @@ const (
 	deskExitBrokenPipe = 141
 	// deskQuoteMax caps an argument quoted back in an error.
 	deskQuoteMax = 120
+	// deskWatchDeadlineUnset is the deadline runDeskWatch gets when the flag
+	// was not given; it picks 0 or deskWatchDefaultDeadline.
+	deskWatchDeadlineUnset = -1
 )
 
 // Injectable seams, so command tests need no home directory, terminal, or
@@ -52,6 +56,11 @@ var (
 	deskUserHome      = os.UserHomeDir
 	deskNow           = time.Now
 	deskWatchInterval = 500 * time.Millisecond
+	// deskWatchDefaultDeadline bounds, in seconds, a `desk watch` given no
+	// --deadline and run without a terminal (forgectl#1094): an agent that
+	// waits on it gets exit 75 and a resume= line instead of no output until
+	// the operator acts.
+	deskWatchDefaultDeadline = 540
 )
 
 // deskUsage marks err as a usage or precondition failure (exit 2).
@@ -160,6 +169,8 @@ bytes, not anything the script sources, calls or downloads.`,
 type deskAddOpts struct {
 	what, why, name string
 	tty, asJSON     bool
+	// after names the items this one runs after ("# AFTER:").
+	after []string
 	// allowDuplicate queues the item even when an identical one is waiting.
 	allowDuplicate bool
 }
@@ -200,6 +211,11 @@ stderr.
 --tty marks a script that needs the terminal (a password prompt, sudo); it runs
 in the dashboard's own pane. A batch cannot be a TTY item.
 
+--after NAME (repeatable, or comma-separated) orders items: it adds an
+"# AFTER:" line, and the item shows as refused ("waits on NAME") and cannot be
+run until each named item has finished with exit 0. A run that failed keeps it
+waiting; skip it, or queue a new item, to go on.
+
 Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the
 same --what and --why) is already waiting in pending/, add queues nothing. It
@@ -227,6 +243,7 @@ unsafe --what/--why, a bad --name).`,
 	cmd.Flags().StringVar(&o.why, "why", "", "why it needs the operator, one line (required)")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "the script needs a terminal; it runs in the dashboard's pane")
 	cmd.Flags().StringVar(&o.name, "name", "", "file name for an item read from stdin (FILE -), e.g. deploy.sh")
+	cmd.Flags().StringSliceVar(&o.after, "after", nil, "run only after this item (NN-name) has finished with exit 0; repeatable")
 	cmd.Flags().BoolVar(&o.asJSON, "json", false, `print the queued item as {"name","kind","sha256","path","warnings","duplicate","signal"} JSON; duplicate is true when an identical item was already waiting; signal is sent, already-sent, failed or none-enabled; signal warnings go in warnings[]`)
 	cmd.Flags().BoolVar(&o.allowDuplicate, "allow-duplicate", false, "queue the item even when an identical one is already waiting")
 	return cmd
@@ -257,6 +274,11 @@ func checkAddFlags(file string, o deskAddOpts) error {
 	}
 	if err := checkFlagText("--why", o.why); err != nil {
 		return err
+	}
+	for _, a := range o.after {
+		if !desk.ValidName(a) {
+			return deskUsage("desk add: --after %s is not an item name (NN-name)", termsafe.QuoteArgMax(a, deskQuoteMax))
+		}
 	}
 	switch {
 	case file == "-" && o.name == "":
@@ -299,7 +321,7 @@ is not a manifest or was not found; 2 usage.`,
 }
 
 func newDeskStatusCmd(dir *string, deps module.Deps) *cobra.Command {
-	var asJSON bool
+	var asJSON, full bool
 	cmd := &cobra.Command{
 		Use:   "status [name]",
 		Short: "Show the queue, or one item and its batch summary",
@@ -308,6 +330,9 @@ lists all) and skipped items, one line each, with the state, age, a short
 sha256, and the exit code. A waiting item older than 24h is flagged stale; a
 running item whose supervisor is gone with no RUN-END is "lost" (clear it with
 ` + "`desk skip`" + `).
+
+A waiting or running item's line ends in what="...", cut at 72 characters;
+--full prints it whole. With NAME, and under --json, it is never cut.
 
 With NAME it prints that item in detail as key=value lines, including the full
 sha256 and, for a batch, its steps (the run's summary.json once it has
@@ -323,10 +348,11 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 			if len(args) == 1 {
 				name = args[0]
 			}
-			return runDeskStatus(cmd, deps, *dir, name, asJSON)
+			return runDeskStatus(cmd, deps, *dir, name, asJSON, full)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the queue (or the item) as one JSON object")
+	cmd.Flags().BoolVar(&full, "full", false, "print each item's WHAT whole instead of cut at 72 characters")
 	return cmd
 }
 
@@ -337,8 +363,13 @@ func newDeskWatchCmd(dir *string, deps module.Deps) *cobra.Command {
 		Short: "Stream a run's event lines and exit with its outcome",
 		Long: `watch prints NAME's event lines (RUN-START, STEP-START, STEP-END, STEP-SKIP,
 STEP-WARN, RUN-END) as they arrive, one per line, and exits when the run does.
-It waits while the item is still pending, and reads no input, so it is safe
-under a monitor with no terminal.
+It waits while the item is still pending, which can be for as long as the
+operator takes to approve it, and reads no input.
+
+From a script or an agent, pass --deadline S: the watch stops after S seconds
+with exit 75 and a resume= line. Without a terminal on stdin and stdout and
+with no --deadline, it stops after ` + strconv.Itoa(deskWatchDefaultDeadline) + ` seconds the same way; --deadline 0 waits
+for the run with no limit.
 
 Exit codes:
    0  RUN-END with rc=0
@@ -348,7 +379,7 @@ Exit codes:
   75  --deadline passed first; the last line is
       resume=forgectl desk watch NAME --skip N ...
       which picks up after the N lines already printed
- 130  interrupted
+ 130  interrupted (SIGINT or SIGTERM); the last line is resume=...
  141  stdout closed (a write failed); the watch stops at once and the
       resume= command is in the error on stderr
 
@@ -360,10 +391,13 @@ watch printed.`,
 			if deadline < 0 || skip < 0 {
 				return deskUsage("desk watch: --deadline and --skip must not be negative")
 			}
+			if !cmd.Flags().Changed("deadline") {
+				deadline = deskWatchDeadlineUnset
+			}
 			return runDeskWatch(cmd, deps, *dir, args[0], deadline, skip)
 		},
 	}
-	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run)")
+	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run; unset: "+strconv.Itoa(deskWatchDefaultDeadline)+" without a terminal)")
 	cmd.Flags().IntVar(&skip, "skip", 0, "leave out the first N event lines (a previous watch's resume point)")
 	return cmd
 }

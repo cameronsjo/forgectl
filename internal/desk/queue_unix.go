@@ -33,6 +33,22 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 	}()
 
+	// running/ is listed first, so a waiting item whose name a run holds is
+	// seen as such (forgectl#1157).
+	running, err := d.list(DirRunning)
+	if err != nil {
+		return nil, err
+	}
+	inRunning := map[string]bool{}
+	for _, e := range running {
+		name, kind, ok := kindOfFile(e.Name())
+		if !ok {
+			continue
+		}
+		inRunning[name] = true
+		snap.Running = append(snap.Running, d.runningItem(name, kind))
+	}
+
 	pending, err := d.list(DirPending)
 	if err != nil {
 		return nil, err
@@ -48,23 +64,14 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 		if gone {
 			changed = append(changed, it.Meta)
-		} else {
-			snap.Pending = append(snap.Pending, it)
-		}
-	}
-
-	running, err := d.list(DirRunning)
-	if err != nil {
-		return nil, err
-	}
-	inRunning := map[string]bool{}
-	for _, e := range running {
-		name, kind, ok := kindOfFile(e.Name())
-		if !ok {
 			continue
 		}
-		inRunning[name] = true
-		snap.Running = append(snap.Running, d.runningItem(name, kind))
+		if it.State == StateWaiting {
+			if why := d.blocked(name, it.After, inRunning[name]); why != "" {
+				it.State, it.Refusal = StateRefused, why
+			}
+		}
+		snap.Pending = append(snap.Pending, it)
 	}
 
 	if snap.Done, err = d.doneItems(inRunning); err != nil {
@@ -104,6 +111,65 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		return -byNumber(a, b)
 	})
 	return snap, nil
+}
+
+// blocked says why a waiting item cannot be claimed yet, or "" when it can:
+// its name is held by a run in running/ (claiming it would rename over that
+// run's record), or an item it runs after (its "# AFTER:" line) has not
+// finished with exit 0. Both clear on their own, so the item stays in
+// pending/ and is only shown as refused until then.
+func (d *Desk) blocked(name string, after []string, running bool) string {
+	if running {
+		return "an item of this name is running; it waits until that run ends"
+	}
+	return d.unmetAfter(name, after)
+}
+
+// unmetAfter checks an item's AFTER names, in order, and says which one is
+// not yet done with exit 0, or "" when all are.
+func (d *Desk) unmetAfter(name string, after []string) string {
+	for _, a := range after {
+		if !ValidName(a) {
+			return "its AFTER line names " + strconv.Quote(describe(a)) + ", which is not an item name"
+		}
+		if a == name {
+			return "its AFTER line names the item itself"
+		}
+		if _, err := d.findKind(DirRunning, a); err == nil {
+			return "waits on " + a + ", which is still running"
+		}
+		rc, ok := d.doneExit(a)
+		switch {
+		case !ok:
+			return "waits on " + a + ", which has not run"
+		case rc != 0:
+			return "waits on " + a + ", which finished with exit " + strconv.Itoa(rc) + ", not 0"
+		}
+	}
+	return ""
+}
+
+// doneExit returns the exit code of the finished run called name: from its
+// meta in done/, or for a legacy item the log's EXIT= line. ok is false when
+// done/ holds no finished run of that name.
+func (d *Desk) doneExit(name string) (rc int, ok bool) {
+	meta, found, err := d.readMeta(DirDone, name)
+	if err == nil && found && meta.ExitCode != nil {
+		return *meta.ExitCode, true
+	}
+	if found {
+		return 0, false
+	}
+	line, err := d.lastLine(path.Join(DirDone, name+extLog))
+	if err != nil {
+		return 0, false
+	}
+	m := exitLineRe.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	rc, _ = strconv.Atoi(m[1])
+	return rc, true
 }
 
 func newItem(name string, kind Kind, state State) Item {

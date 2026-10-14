@@ -1303,13 +1303,6 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 		_ = os.Remove(rcPath)
 		return nil, errors.Join(fmt.Errorf("desk: %s is a %s, not a TTY script; it does not run in the terminal", itemLabel(c.Name), c.Kind), d.Release(c.Name, desk.SkipLaunchFailed))
 	}
-	// A TTY item starts where a detached one does: in the home directory,
-	// with the operator's environment minus bash's startup hooks.
-	home, err := desk.HomeDir()
-	if err != nil {
-		_ = os.Remove(rcPath)
-		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
-	}
 	run, err := d.BeginRun(c.Name, os.Getpid())
 	if err != nil {
 		// The claim has no owner: end it in skipped/ rather than leave it
@@ -1332,7 +1325,15 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 	}
 	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
-	cmd.Dir, cmd.Env = home, ttyEnv(desk.ChildEnv())
+	// A TTY item starts where a detached one does: in the home directory,
+	// with the operator's environment minus bash's startup hooks.
+	if err := desk.ApplyItemEnv(cmd); err != nil {
+		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", err)
+		_ = logF.Close()
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(err, run.Finish(2, "internal"))
+	}
+	cmd.Env = ttyEnv(cmd.Env)
 	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 

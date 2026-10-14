@@ -128,10 +128,13 @@ The dashboard rings the terminal bell when an item arrives, and again every 5 mi
 | `--why TEXT` | why it needs a person, one line of plain text; required and non-empty |
 | `--tty` | the script needs a terminal (a password prompt, `sudo`); it runs in the dashboard's own pane |
 | `--name FILE` | the file name for an item read from stdin (`<file>` is `-`), such as `deploy.sh` |
+| `--after NAME` | run only after the item `NAME` (`NN-name`) has finished with exit 0; repeatable or comma-separated; adds a `# AFTER:` line |
 | `--allow-duplicate` | queue the item even when an identical one is already waiting |
 | `--json` | print `{name, kind, sha256, path, warnings, duplicate, signal}` |
 
 The kind comes from the extension: `.sh` is a script, `.manifest` is a batch. The name is the next free `NN-` plus the file's base name. `# WHAT:`, `# WHY:` and (with `--tty`) `# TTY: yes` lines are inserted after a shebang before the hash is taken. `--what` and `--why` are required, so the file must not already carry a `# WHAT:` or `# WHY:` line: `add` refuses the duplicate. Neither may hold a control character (a newline, CR, ESC, or a C1 code) or a bidi control; they are written into the script, where `cat` and editors would show them raw.
+
+`--after` orders dependent items. Until every item it names has finished with exit 0, the item shows as `refused` with a reason such as `waits on 03-enable, which has not run`, and claiming it (`y`, or `a` on several) is refused. It stays in `pending/` and becomes waiting on its own once the earlier run succeeds. If the earlier run fails, skip the item or queue a new one.
 
 A `.manifest` is planned before it is queued: one that cannot run is refused, and its warnings are printed as `warning:` lines on stderr. A batch cannot be a TTY item.
 
@@ -178,6 +181,8 @@ Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is
 
 Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir` and `taken`.
 
+A waiting or running item's line ends in `what="..."`, cut at 72 characters; `--full` prints it whole. `status NAME` and `--json` never cut it.
+
 ```text
 desk /home/me/.local/state/forgectl/desk: 1 waiting, 0 running, 2 done, 1 skipped
 waiting  17-merge-1201  age=12m  sha256=3f1a9c0d2b7e  what="Merge PR 1201 once checks are green"
@@ -186,11 +191,11 @@ done     12-probe  age=3h  exit=1  took=18s
 skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="superseded by 17"
 ```
 
-A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
+A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. A pending item is also `refused`, and stays in `pending/` until the cause clears, while an item of the same name is in `running/` (claiming it would replace that run's record) or while an item its `# AFTER:` line names has not finished with exit 0. Every text field goes through the terminal-safe filter.
 
-With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
+With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, `after` (when set), the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
-Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
+Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `after` (the names its `# AFTER:` line gives, `[]` when none), `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
 Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
 
@@ -198,11 +203,11 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 a usage er
 
 ### `forgectl desk watch <name>`
 
-Prints the item's event lines as they arrive and exits when the run does. It reads no input.
+Prints the item's event lines as they arrive and exits when the run does. It reads no input. It waits while the item is pending, which lasts until the operator approves it, so a script or an agent passes `--deadline`.
 
 | Flag | Meaning |
 |---|---|
-| `--deadline S` | stop after `S` seconds; `0` (the default) waits for the run |
+| `--deadline S` | stop after `S` seconds with exit 75 and a `resume=` line; `0` waits for the run. Not given: `0` with a terminal on stdin and stdout, 540 without one |
 | `--skip N` | leave out the first `N` event lines, the resume point an earlier watch printed |
 
 | Code | Meaning |
@@ -210,8 +215,8 @@ Prints the item's event lines as they arrive and exits when the run does. It rea
 | 0 | `RUN-END` with `rc=0` |
 | 1 | `RUN-END` with another rc; `RUN-LOST`; the item was skipped; or no such item |
 | 2 | a usage error |
-| 75 | the deadline passed first; the last line is `resume=forgectl desk watch NAME --skip N` (plus `--deadline` and `--dir` when they were given) |
-| 130 | interrupted; the last line is the same `resume=` line |
+| 75 | the deadline passed first; the last line is `resume=forgectl desk watch NAME --skip N` (plus `--deadline` when one applied, and `--dir` when given) |
+| 130 | interrupted by `SIGINT` or `SIGTERM`; the last line is the same `resume=` line |
 | 141 | stdout closed (a write failed, as when the monitor reading it went away); the watch stops at once, and the error on stderr names the `resume` command |
 
 ### `forgectl desk runs`
@@ -428,6 +433,8 @@ A script carries its header lines anywhere in the file (the first of each wins):
 # TTY: yes
 gh pr merge 1201 --squash --auto
 ```
+
+`# AFTER: 16-enable` (what `add --after` writes; several names are comma-separated) holds the item until each named item has finished with exit 0.
 
 `# TTY: yes` makes it a TTY item, which runs in the dashboard's own pane through `script(1)` so prompts work. Everything else runs detached, under a supervisor, with stdin from `/dev/null`, and keeps running when the dashboard quits.
 

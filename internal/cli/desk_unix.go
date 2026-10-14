@@ -214,11 +214,7 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		a         desk.Added
 		duplicate bool
 	)
-	if o.allowDuplicate {
-		a, err = d.Add(src, what, why, o.tty)
-	} else {
-		a, duplicate, err = d.AddUnique(src, what, why, o.tty)
-	}
+	a, duplicate, err = d.AddWith(src, desk.Headers{What: what, Why: why, TTY: o.tty, After: o.after}, !o.allowDuplicate)
 	if err != nil {
 		return err
 	}
@@ -405,6 +401,7 @@ type deskItemJSON struct {
 	What            string     `json:"what"`
 	Why             string     `json:"why"`
 	TTY             bool       `json:"tty"`
+	After           []string   `json:"after"`
 	SHA256          string     `json:"sha256"`
 	AddedAt         *time.Time `json:"added_at"`
 	StartedAt       *time.Time `json:"started_at"`
@@ -461,9 +458,12 @@ type deskStepJSON struct {
 func itemView(it desk.Item, now time.Time) deskItemJSON {
 	v := deskItemJSON{
 		Name: it.Name, Kind: string(it.Kind), State: string(it.State), Legacy: it.Legacy,
-		What: it.What, Why: it.Why, TTY: it.TTY, SHA256: it.Meta.SHA256,
+		What: it.What, Why: it.Why, TTY: it.TTY, After: it.After, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
 		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, PID: it.Meta.PID,
+	}
+	if v.After == nil {
+		v.After = []string{}
 	}
 	if it.Number >= 0 {
 		n := it.Number
@@ -505,7 +505,7 @@ func itemViews(items []desk.Item, now time.Time) []deskItemJSON {
 	return out
 }
 
-func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, asJSON bool) error {
+func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, asJSON, full bool) error {
 	if name != "" {
 		if err := checkDeskName(name); err != nil {
 			return err
@@ -538,7 +538,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 		safeText(snap.Dir), len(snap.Pending), len(snap.Running), len(snap.Done), len(snap.Skipped))
 	for _, group := range [][]desk.Item{snap.Pending, snap.Running} {
 		for _, it := range group {
-			w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+			w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 		}
 	}
 	for i, it := range snap.Done {
@@ -546,17 +546,18 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 			w.printf("… %d older done items (--json lists all)\n", len(snap.Done)-deskStatusDone)
 			break
 		}
-		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 	}
 	for _, it := range snap.Skipped {
-		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now), full)))
 	}
 	return w.err
 }
 
 // statusLine renders one item as a grep-friendly line. Every untrusted field
-// (WHAT, a skip note, a refusal) goes through termsafe.
-func statusLine(v deskItemJSON) string {
+// (WHAT, a skip note, a refusal) goes through termsafe. WHAT is cut at
+// deskWhatCols unless full is set.
+func statusLine(v deskItemJSON, full bool) string {
 	parts := []string{fmt.Sprintf("%-8s %s", v.State, v.Name)}
 	if v.AgeSeconds != nil {
 		parts = append(parts, "age="+shortAge(*v.AgeSeconds))
@@ -597,8 +598,15 @@ func statusLine(v deskItemJSON) string {
 	if v.State == string(desk.StateLost) {
 		parts = append(parts, "(clear it: forgectl desk skip "+v.Name+" --reason ...)")
 	}
+	if len(v.After) > 0 && (v.State == string(desk.StateWaiting) || v.State == string(desk.StateRefused)) {
+		parts = append(parts, "after="+termsafe.SafeLineMax(strings.Join(v.After, ","), deskQuoteMax))
+	}
 	if v.What != "" && (v.State == string(desk.StateWaiting) || v.State == string(desk.StateRunning)) {
-		parts = append(parts, "what="+strconv.Quote(termsafe.SafeLineMax(v.What, deskWhatCols)))
+		what := termsafe.SafeLineMax(v.What, deskWhatCols)
+		if full {
+			what = safeText(v.What)
+		}
+		parts = append(parts, "what="+strconv.Quote(what))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -667,6 +675,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	kv("what", safeText(v.What))
 	kv("why", safeText(v.Why))
 	kv("tty", strconv.FormatBool(v.TTY))
+	if len(v.After) > 0 {
+		kv("after", strings.Join(v.After, ","))
+	}
 	kv("sha256", v.SHA256)
 	for _, t := range []struct {
 		k string
@@ -761,6 +772,14 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 	}
 	defer d.Close() //nolint:errcheck // read side
 	name = resolveDeskName(d, name)
+	if deadline == deskWatchDeadlineUnset {
+		// No --deadline: wait for the run at a terminal, but never without
+		// bound for a caller that has none (forgectl#1094).
+		deadline = 0
+		if !deskHasTerminal() {
+			deadline = deskWatchDefaultDeadline
+		}
+	}
 	// A write to a closed stdout must come back as EPIPE, not kill the
 	// process with SIGPIPE before it can say where to resume.
 	signal.Ignore(syscall.SIGPIPE)

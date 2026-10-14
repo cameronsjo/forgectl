@@ -113,6 +113,22 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	if wantSHA != meta.SHA256 {
 		return nil, fmt.Errorf("%w: %s: the hash on screen is not the hash it was queued with", ErrChanged, describe(name))
 	}
+	// The claim's rename replaces whatever running/ holds under the name, so
+	// a run already there would lose its record (forgectl#1157). Either kind
+	// counts: a same-named run of the other kind shares its log and events.
+	// Nothing has been written yet, so the item stays waiting.
+	if _, err := d.findKind(DirRunning, name); err == nil {
+		return nil, fmt.Errorf("%w: %s: an item of this name is running; it waits until that run ends", ErrRefused, describe(name))
+	}
+	// An item that runs after others waits for each to finish with exit 0.
+	// The pending bytes are read here only for their AFTER line: when they
+	// hash to the queued hash they are the bytes the claim verifies below, so
+	// their AFTER line is the one approved.
+	if data, _, err := d.readItem(DirPending, name+kind.Ext()); err == nil && SHA256Hex(data) == meta.SHA256 {
+		if why := d.unmetAfter(name, HeadersFor(kind, data).After); why != "" {
+			return nil, fmt.Errorf("%w: %s: %s", ErrRefused, describe(name), why)
+		}
+	}
 
 	// claimed_at goes into the meta before the rename, so the moment the item
 	// is in running/ its meta (once it follows) says when the claim began. A

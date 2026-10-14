@@ -66,11 +66,6 @@ type BatchOptions struct {
 	// Event receives each event line (STEP-START, STEP-END, STEP-SKIP,
 	// STEP-WARN). It may be nil.
 	Event func(line string)
-	// Env is the steps' base environment; nil means [ChildEnv].
-	Env []string
-	// WorkDir is the steps' working directory; "" means the runner's own.
-	// The desk passes [HomeDir].
-	WorkDir string
 	// Grace overrides DefaultGrace.
 	Grace time.Duration
 }
@@ -152,9 +147,6 @@ func NewBatch(m *Manifest, opts BatchOptions) *Batch {
 	}
 	if opts.Log == nil {
 		opts.Log = io.Discard
-	}
-	if opts.Env == nil {
-		opts.Env = ChildEnv()
 	}
 	b := &Batch{
 		m: m, opts: opts, steps: filepath.Join(opts.Dir, "steps"),
@@ -277,8 +269,11 @@ func (b *Batch) launch(s Step) error {
 	if err != nil {
 		return err
 	}
-	env := slices.Clone(b.opts.Env)
-	env = append(env, "STEP_OUT="+outPath, "RUN_BATCH_DIR="+b.opts.Dir, "RUN_STEP_ID="+s.ID)
+	// A step starts where an approved script does: in the home directory,
+	// with [ChildEnv], plus the step's own variables.
+	cmd := exec.Command("/bin/bash", "-c", s.Command) //nolint:gosec,noctx // G204: the approved manifest's command is the payload; the runner owns the step's lifetime through its process group, not a context
+	itemEnvErr := ApplyItemEnv(cmd)
+	cmd.Env = append(cmd.Env, "STEP_OUT="+outPath, "RUN_BATCH_DIR="+b.opts.Dir, "RUN_STEP_ID="+s.ID)
 	anc := make([]string, 0, len(b.m.Ancestors[s.ID]))
 	for a := range b.m.Ancestors[s.ID] {
 		anc = append(anc, a)
@@ -286,7 +281,7 @@ func (b *Batch) launch(s Step) error {
 	sort.Strings(anc)
 	for _, a := range anc {
 		for _, k := range b.outKeys[a] {
-			env = append(env, "OUT_"+a+"_"+k+"="+b.outputs[a][k])
+			cmd.Env = append(cmd.Env, "OUT_"+a+"_"+k+"="+b.outputs[a][k])
 		}
 	}
 	b.state[s.ID], b.t0[s.ID] = stepRunning, time.Now()
@@ -299,12 +294,15 @@ func (b *Batch) launch(s Step) error {
 	}
 	// A step is its own process group, so a timeout or Ctrl-C reaches
 	// everything it started, not only its shell.
-	cmd := exec.Command("/bin/bash", "-c", s.Command) //nolint:gosec,noctx // G204: the approved manifest's command is the payload; the runner owns the step's lifetime through its process group, not a context
-	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.Env, cmd.Dir = nil, w, w, env, b.opts.WorkDir
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, w, w
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	startErr := cmd.Start()
+	startErr := itemEnvErr
+	if startErr == nil {
+		startErr = cmd.Start()
+	}
 	_ = w.Close() // the child holds the write end now; EOF comes when every holder exits
 	if startErr != nil {
+		_, _ = fmt.Fprintf(logF, "run-batch: could not start: %v\n", startErr)
 		_ = r.Close()
 		_ = logF.Close()
 		b.endStep(s, 127, stepFailed)

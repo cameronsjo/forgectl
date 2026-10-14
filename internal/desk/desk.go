@@ -177,12 +177,16 @@ func SplitName(name string) (int, string) {
 	return n, stem
 }
 
-// Headers are an item's "# WHAT:", "# WHY:" and "# TTY:" comment lines. The
-// first occurrence of each wins.
+// Headers are an item's "# WHAT:", "# WHY:", "# TTY:" and "# AFTER:" comment
+// lines. The first occurrence of each wins.
 type Headers struct {
 	What string
 	Why  string
 	TTY  bool
+	// After names the items this one runs after ("# AFTER: 03-enable,04-x"):
+	// it is refused until each has finished with exit 0. The names are raw
+	// script text, checked with [ValidName] wherever they are used.
+	After []string
 }
 
 // HeadersFor is [ParseHeaders] for an item of kind. "# TTY: yes" means
@@ -201,7 +205,7 @@ func HeadersFor(kind Kind, data []byte) Headers {
 // script text: render them through termsafe before they reach a terminal.
 func ParseHeaders(data []byte) Headers {
 	var h Headers
-	var seenWhat, seenWhy, seenTTY bool
+	var seenWhat, seenWhy, seenTTY, seenAfter bool
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		key, value, ok := headerLine(line)
@@ -215,6 +219,8 @@ func ParseHeaders(data []byte) Headers {
 			h.Why, seenWhy = value, true
 		case key == "TTY" && !seenTTY:
 			h.TTY, seenTTY = value == "yes", true
+		case key == "AFTER" && !seenAfter:
+			h.After, seenAfter = splitAfter(value), true
 		}
 	}
 	return h
@@ -226,7 +232,7 @@ func headerLine(line string) (key, value string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	for _, k := range [...]string{"WHAT", "WHY", "TTY"} {
+	for _, k := range [...]string{"WHAT", "WHY", "TTY", "AFTER"} {
 		if v, found := strings.CutPrefix(rest, k+":"); found {
 			return k, strings.TrimLeft(v, " "), true
 		}
@@ -234,10 +240,17 @@ func headerLine(line string) (key, value string, ok bool) {
 	return "", "", false
 }
 
-// insertHeaders returns body with header lines for what, why and tty added
-// after a leading shebang (or at the top). A header the body already carries
-// may not be given again; the result must carry both WHAT and WHY.
-func insertHeaders(body []byte, kind Kind, what, why string, tty bool) ([]byte, error) {
+// splitAfter reads an AFTER value: item names separated by commas or spaces.
+func splitAfter(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+}
+
+// insertHeaders returns body with header lines for h's what, why, tty and
+// after added after a leading shebang (or at the top). A header the body
+// already carries may not be given again; the result must carry both WHAT and
+// WHY.
+func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
+	what, why, tty := h.What, h.Why, h.TTY
 	for _, f := range [...]struct{ label, v string }{{"--what", what}, {"--why", why}} {
 		if strings.ContainsAny(f.v, "\r\n") {
 			return nil, fmt.Errorf("desk: %s must be one line", f.label)
@@ -262,6 +275,17 @@ func insertHeaders(body []byte, kind Kind, what, why string, tty bool) ([]byte, 
 	}
 	if tty && !have.TTY {
 		lines = append(lines, "# TTY: yes")
+	}
+	if len(h.After) > 0 {
+		if have.After != nil {
+			return nil, errors.New("desk: the file already has a '# AFTER:' line; drop --after or the line")
+		}
+		for _, n := range h.After {
+			if !ValidName(n) {
+				return nil, fmt.Errorf("desk: --after %q is not an item name (NN-name)", describe(n))
+			}
+		}
+		lines = append(lines, "# AFTER: "+strings.Join(h.After, ","))
 	}
 	if (have.What == "" && what == "") || (have.Why == "" && why == "") {
 		return nil, errors.New("desk: an item needs both WHAT and WHY (flags or '# WHAT:'/'# WHY:' lines)")

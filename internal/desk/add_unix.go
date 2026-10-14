@@ -50,7 +50,7 @@ type Added struct {
 // removal sees link count 2 and refuses the item until the next scan, so it
 // never hashes a partial file.
 func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
-	a, _, err := d.add(src, what, why, tty, false)
+	a, _, err := d.AddWith(src, Headers{What: what, Why: why, TTY: tty}, false)
 	return a, err
 }
 
@@ -62,7 +62,7 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 // approval. The check and the queueing are not one atomic step: two adds of
 // the same file at the same instant can both queue.
 func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bool, err error) {
-	return d.add(src, what, why, tty, true)
+	return d.AddWith(src, Headers{What: what, Why: why, TTY: tty}, true)
 }
 
 // Signalled reports whether the operator signal for the pending item name is
@@ -114,9 +114,11 @@ func (d *Desk) waitingWith(kind Kind, sum string) (string, bool, error) {
 	return "", false, nil
 }
 
-// add is Add and AddUnique: with unique set, an identical waiting item is
-// returned instead of a new one being queued.
-func (d *Desk) add(src, what, why string, tty, unique bool) (Added, bool, error) {
+// AddWith is [Desk.Add] (unique false) or [Desk.AddUnique] (unique true) with
+// the header lines given as h: What, Why and TTY as there, and After, when
+// set, written as "# AFTER: a,b", so the item is refused until each named
+// item has finished with exit 0.
+func (d *Desk) AddWith(src string, h Headers, unique bool) (Added, bool, error) {
 	base := filepath.Base(src)
 	var kind Kind
 	switch {
@@ -135,7 +137,7 @@ func (d *Desk) add(src, what, why string, tty, unique bool) (Added, bool, error)
 	if err != nil {
 		return Added{}, false, err
 	}
-	body, err := insertHeaders(data, kind, what, why, tty)
+	body, err := insertHeaders(data, kind, h)
 	if err != nil {
 		return Added{}, false, err
 	}
