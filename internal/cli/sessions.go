@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,7 +32,7 @@ func newSessionsCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "sessions",
-		Short: "Sync local session ledgers into the operational concordance and query it",
+		Short: "Sync session ledgers into the concordance and query it",
 		Long: `sessions drains this machine's local JSONL write-ahead log
 (Cadence XDG state, with read-only legacy ~/.claude fallbacks) and the runbook markdown corpus
 into the cross-machine operational concordance — an
@@ -67,7 +68,10 @@ func resolveDSN(flagDSN string, cfg config.SessionsConfig) string {
 func withConcordance(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Concordance) error) error {
 	resolved := resolveDSN(dsn, cfg)
 	if resolved == "" {
-		return fmt.Errorf("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
+		// Unconfigured, so exit 2 and usage_error (docs/exit-codes.md,
+		// docs/json-contract.md): nothing was attempted and retrying cannot
+		// help, unlike a connection that failed (exit 1, failed).
+		return withJSONUsageCode(WithExitCode(errors.New("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn"), exitUsage))
 	}
 	concordance, err := sessions.ConnectConcordance(cmd.Context(), resolved)
 	if err != nil {
@@ -121,6 +125,9 @@ the command exits non-zero — a skipped session is never silent.
 				return err
 			}
 			receipt, err := sessions.Sync(cmd.Context(), resolved)
+			if errors.Is(err, sessions.ErrNoDSN) {
+				return withJSONUsageCode(WithExitCode(err, exitUsage))
+			}
 			if err != nil {
 				return err
 			}
@@ -354,7 +361,7 @@ NARRATIVE lookup, not a VCS touch history:
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one repo (exact)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum sessions to return")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"session_id","date","repo","model","committed","runbook_type","intent","link","key_decisions"}] to stdout (an empty list is []; empty fields are left out); notes go to stderr`)
 	return cmd
 }
 
@@ -395,7 +402,7 @@ Honest degradations:
 		},
 	}
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"session_id","repo","branch","model","machine","first_ts","last_ts","committed","artifacts":[{"type","title","path"}]} to stdout, or null when the repo has no session; empty fields are left out; notes go to stderr`)
 	return cmd
 }
 

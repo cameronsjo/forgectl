@@ -25,6 +25,8 @@ forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
 
+`review` refuses a `--repo` that is not `owner/name` and a `--kind` other than `issue` or `pr` with exit 2 (`usage_error` under `--json`) before any query runs. When every source fails, it exits 1; under `--json` the per-source notes, each with its cause and fix (`gh is not signed in to github.com; run gh auth login`), go inside the one failure object's `error` rather than as note lines before it.
+
 When both stdin and stdout are terminals, these selectors keep their existing
 pickers. With either descriptor non-TTY, `projects`/`projects pick` emit one
 sanitized display identity per candidate on stdout and exit 1; narrow pick to a
@@ -71,6 +73,12 @@ Three filing rules, and `projects clone` writes the first that applies:
 `<host>` is the **full hostname** — `github.com`, `git.example.com`,
 `github.example.com` — never a short token. Every segment is lowercased, so the
 tree mirrors a repo's dedup identity exactly.
+
+A repo whose name starts with a dot, such as an org's `.github`, is filed under
+a `dot-` leaf: `<projects>/github.com/<owner>/dot-github`. `gh` and `git` still
+get the real name, and `surface launch .github` finds the `dot-github`
+checkout. If the owner also has a real `dot-github` repo, the second clone is
+refused and the error names both.
 
 A **wing** is a directory directly under the projects root holding repos that
 belong together, one level shallower than the host tree. Placement and

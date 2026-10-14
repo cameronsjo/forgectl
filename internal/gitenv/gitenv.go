@@ -119,7 +119,7 @@ import (
 	"strings"
 	"time"
 
-	fexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/sigrelay"
 )
 
 // Profile selects how git is hardened for one call. The zero value is Local.
@@ -294,6 +294,9 @@ func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args
 // RunBinRefusing is RunRefusing with the git executable named, as RunBin is
 // Run's: internal/projects pulls through the absolute path it resolved.
 func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse []string, args ...string) (string, error) {
+	if setsConfig(args) {
+		return "", errCallerConfig
+	}
 	overrides, unset := filter(p, os.Environ())
 	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
 		if overrides == nil {
@@ -306,6 +309,52 @@ func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse
 		pre = append(pre, "-c", "protocol."+name+".allow=never")
 	}
 	return r.RunWithEnvFiltered(ctx, overrides, unset, bin, append(pre, args...)...)
+}
+
+// errCallerConfig is RunBinRefusing's refusal of a call that carries config
+// options of its own (#1020).
+var errCallerConfig = errors.New("gitenv: refusing a git call that sets config of its own: it could override the refused transports")
+
+// setsConfig reports whether args, up to a "--" that ends option parsing,
+// carry any config option: git's global -c and --config-env, or clone's
+// -c/--config, in the separate, attached, abbreviated (--conf=…) and bundled
+// (-qcfoo=x) spellings.
+//
+// Every config option is refused, not only protocol keys. git keeps the last
+// value given for a key and the refusing -c options come first, so a
+// caller's own `-c protocol.ext.allow=always` would cancel the refusal, and
+// so would `-c include.path=<file>` or `-c includeIf.<cond>.path=<file>`
+// naming a file that sets it. A list of dangerous keys would have to keep up
+// with every way git can pull configuration in; no refusing call needs a
+// config option of its own, so none is allowed. A clone's -c also persists
+// into the new repository's .git/config.
+//
+// It errs toward refusing: a single-dash bundle holding a 'c' anywhere is
+// refused, though a flag's attached value could be what holds it.
+//
+// It trusts the first "--" to be a real end-of-options marker and does not
+// look past it. An option that takes a value can swallow a "--" as that
+// value (`clone --template -- -c foo.bar=x …` writes foo.bar), so a caller
+// must never pass "--" as an option's value.
+func setsConfig(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if long, ok := strings.CutPrefix(a, "--"); ok {
+			name, _, _ := strings.Cut(long, "=")
+			// --config-env, --config, and any abbreviation of --config git's
+			// option parser would accept (--c, --co, --con, …).
+			if strings.HasPrefix(name, "config") || (name != "" && strings.HasPrefix("config", name)) {
+				return true
+			}
+			continue
+		}
+		if len(a) > 1 && a[0] == '-' && strings.ContainsRune(a[1:], 'c') {
+			return true
+		}
+	}
+	return false
 }
 
 // allowProtocolVar is git's transport allowlist variable.
@@ -390,18 +439,13 @@ var repoDeadline = 30 * time.Second
 // projects inventory's `remote get-url`, for one. The caller defers cancel.
 //
 // A git in its own group no longer gets the terminal's Ctrl-C, which goes
-// to the foreground group only, so Bounded passes it on (interruptible): a
+// to the foreground group only, so Bounded passes it on (internal/sigrelay): a
 // terminating signal that reaches forgectl while the context is live
 // cancels it, which kills the git's group, and cancel then re-raises the
 // signal, so forgectl stops as it did when git shared its group rather
 // than carrying on to the next repository.
 func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
-	dctx, cancel := context.WithTimeout(ctx, repoDeadline)
-	ictx, stop := interruptible(dctx)
-	return fexec.WithProcessGroup(ictx), func() {
-		stop()
-		cancel()
-	}
+	return sigrelay.Group(ctx, repoDeadline)
 }
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with

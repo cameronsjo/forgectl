@@ -35,6 +35,13 @@ explicitly: the configured host for a typed `owner/repo#N` or a listed row, a
 pasted URL's host, or the checkout remote's host for a bare `N`. See
 [the host pin](projects-and-review.md) for the rule.
 
+When every gh query fails (gh not signed in, the host unreachable), neither
+verb reports an empty inbox. `pr prs` exits 1; under `--json` stdout stays
+empty and the one failure object's `error` carries each query's note, its
+cause and fix. `pr dash` still shows the active reviews (and `--json` still
+writes its document, PR sections empty) and then exits 1. One failed query
+out of several is still a note and exit 0.
+
 Any of these gh calls that goes to a host other than github.com ignores
 `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
 `GITHUB_ENTERPRISE_TOKEN`. The rule follows the host the call goes to, not

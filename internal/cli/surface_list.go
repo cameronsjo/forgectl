@@ -68,6 +68,11 @@ type listRow struct {
 	Marker          string    `json:"marker,omitempty"`
 	Failure         string    `json:"failure,omitempty"`
 	Recovery        string    `json:"recovery,omitempty"`
+
+	// TerminalID is herdr's terminal_id for the pane, which survives a pane
+	// move where pane_id renumbers. Read for a present worker under --json
+	// only, and absent when that read, or an earlier row's, failed.
+	TerminalID string `json:"terminal_id,omitempty"`
 }
 
 type listOptions struct {
@@ -103,7 +108,7 @@ error, such as a ledger that cannot be read.
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the workers were launched from (project name or path)")
 	cmd.Flags().BoolVar(&opts.Orphans, "orphans", false, "show only workers whose workspace is gone or whose launch never finished")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery"}]} as JSON`)
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","terminal_id"}]} as JSON`)
 	return cmd
 }
 
@@ -161,12 +166,19 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	}
 	now := time.Now()
 	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}
+	var kept []worker.Row
 	for _, r := range rows {
 		row := reconcileRow(ctx, w.herdr, r, w.top, listed, now)
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
 		res.Workers = append(res.Workers, row)
+		kept = append(kept, r)
+	}
+	if opts.JSON {
+		// After every probe, so a slow terminal read cannot starve a later
+		// row's probe into unreadable.
+		fillTerminalIDs(ctx, w.herdr, kept, res.Workers)
 	}
 	return reportList(cmd, res, opts.JSON)
 }
@@ -192,6 +204,39 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 	// would refuse it.
 	row.Orphan = !launchInFlight(r, now) && (row.State == workerGone || r.Stage != worker.StageLaunched)
 	return row
+}
+
+// terminalReadTimeoutPerRow bounds one list row's terminal_id read.
+const terminalReadTimeoutPerRow = 5 * time.Second
+
+// fillTerminalIDs reads the terminal_id of each present worker in out (rows
+// are their ledger rows, index for index). Each read has its own short
+// timeout, and the first failed read ends the pass: a herdr that is slow or
+// failing for one pane is likely so for the next, and the ids are a
+// convenience, so the rest are left out rather than waited on.
+func fillTerminalIDs(ctx context.Context, tr terminalReader, rows []worker.Row, out []listRow) {
+	for i := range out {
+		if out[i].State != workerPresent {
+			continue
+		}
+		id, err := rowTerminalID(ctx, tr, rows[i])
+		if err != nil {
+			return
+		}
+		out[i].TerminalID = id
+	}
+}
+
+// rowTerminalID reads the terminal_id of a present worker's pane, under its
+// own timeout.
+func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) (string, error) {
+	ref, err := backend.DecodeRef(r.Ref)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, terminalReadTimeoutPerRow)
+	defer cancel()
+	return tr.TerminalID(ctx, ref)
 }
 
 // probeWorkspace probes the row's workspace. A row with no reference never

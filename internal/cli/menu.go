@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -33,10 +34,11 @@ func newMenuCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "menu [group]",
-		Short: "Print the hub's contents: status, pinned, recent, and every command",
+		Short: "Print the hub's contents without opening it",
 		Long: `Print what bare forgectl shows, without opening it: the status line, the
-pinned commands, the recent ones, and every other command with its subverbs.
-Nothing is run. --json emits the same content as one document.
+pinned commands, the recent ones, and every other command, one line each.
+Name a group to list its subverbs too: forgectl menu docs. Nothing is run.
+--json emits the same content, subverbs included, as one document.
 
 The whole --json document is about 33 KB. To read less, name a group:
   forgectl menu --json desk     one command and its subverbs
@@ -58,7 +60,9 @@ A name that is neither is a usage error that lists every valid one.`,
 			if asJSON {
 				return menuEncoder(cmd.OutOrStdout()).Encode(doc)
 			}
-			return writeMenuText(cmd.OutOrStdout(), doc, header)
+			// The whole menu lists one line per command; a named group
+			// expands its subverbs (forgectl#1151).
+			return writeMenuText(cmd.OutOrStdout(), doc, header, len(args) == 1)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout; about 33 KB whole, so name a command or area (menu --json desk) to get one subtree (see docs/commands/menu.md)`)
@@ -372,9 +376,11 @@ func menuUsage(parents []string, use string) string {
 // one (header.Line, escaped and capped as the hub draws it),
 // then each section under its heading (pinned, recent, then one per area),
 // one row per line — usage, then
-// description — with each leaf indented under its row. Plain text only, so it
-// stays line-oriented and grep-safe off a TTY (ADR-0008 rule 5).
-func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader) error {
+// description. With expand, each leaf is indented under its row; without it,
+// a row with leaves says how many and a closing line says how to list them.
+// Plain text only, so it stays line-oriented and grep-safe off a TTY
+// (ADR-0008 rule 5).
+func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader, expand bool) error {
 	var b strings.Builder
 	if line := header.Line(); line != "" {
 		b.WriteString(meta.AppName + " · " + line + "\n\n")
@@ -397,6 +403,7 @@ func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader) error {
 	}
 	sections = append(sections, areas...)
 	first := true
+	collapsed := false
 	for _, s := range sections {
 		if len(s.rows) == 0 {
 			continue
@@ -406,15 +413,40 @@ func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader) error {
 		}
 		first = false
 		b.WriteString(s.title + "\n")
-		writeMenuRows(&b, s.rows, 1)
+		if writeMenuRows(&b, s.rows, 1, expand) {
+			collapsed = true
+		}
+	}
+	if collapsed {
+		_, _ = fmt.Fprintf(&b, "\n%s menu <command> lists a command's subverbs.\n", meta.AppName)
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
 }
 
-func writeMenuRows(b *strings.Builder, rows []menuRowJSON, depth int) {
+// writeMenuRows writes rows at depth, their leaves too when expand is set. It
+// reports whether it left any leaves out.
+func writeMenuRows(b *strings.Builder, rows []menuRowJSON, depth int, expand bool) bool {
+	collapsed := false
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(b, "%s%s  %s\n", strings.Repeat("  ", depth), r.Usage, r.Description)
-		writeMenuRows(b, r.Leaves, depth+1)
+		indent := strings.Repeat("  ", depth)
+		if expand || len(r.Leaves) == 0 {
+			_, _ = fmt.Fprintf(b, "%s%s  %s\n", indent, r.Usage, r.Description)
+			if writeMenuRows(b, r.Leaves, depth+1, expand) {
+				collapsed = true
+			}
+			continue
+		}
+		_, _ = fmt.Fprintf(b, "%s%s  %s (%s)\n", indent, r.Usage, r.Description, menuVerbCount(len(r.Leaves)))
+		collapsed = true
 	}
+	return collapsed
+}
+
+// menuVerbCount is a collapsed row's subverb count: "1 subverb", "6 subverbs".
+func menuVerbCount(n int) string {
+	if n == 1 {
+		return "1 subverb"
+	}
+	return strconv.Itoa(n) + " subverbs"
 }

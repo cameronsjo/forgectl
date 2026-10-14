@@ -49,7 +49,7 @@ func newPreflightCmdForConfig(cfg config.PreflightConfig) *cobra.Command {
 		// root, which already silences both.
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short:         "Align enabled plugins to the skill catalog's core-tier default set",
+		Short:         "Align enabled plugins to the skill catalog's core-tier set",
 		Long: `preflight computes the cadence skill catalog's deterministic core-tier
 plugin set, folds in this project's committed .claude/settings.json
 enabledPlugins entries (a repo's own choices survive by inclusion), and

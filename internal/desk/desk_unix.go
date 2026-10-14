@@ -46,6 +46,10 @@ type Desk struct {
 	signalPane string
 	onLeave    func(Meta)
 	onReturn   func(Meta)
+
+	// readOnly is set by OpenReadOnly: nothing below the desk is created,
+	// moved, chmodded or written, and Scan reports what it would have fixed.
+	readOnly bool
 }
 
 // SetSignalPane records pane, the herdr pane of the queuing session, in the
@@ -224,6 +228,9 @@ func fchmodTo(fd int, mode fs.FileMode) error {
 // list reads a protocol subdirectory, sorted by name.
 func (d *Desk) list(sub string) ([]fs.DirEntry, error) {
 	entries, err := fs.ReadDir(d.root.FS(), sub)
+	if d.readOnly && errors.Is(err, fs.ErrNotExist) {
+		return nil, nil // read-only creates nothing, so an absent dir is empty
+	}
 	if err != nil {
 		return nil, fmt.Errorf("desk: read %s/: %w", sub, err)
 	}
@@ -373,6 +380,9 @@ func (d *Desk) readMeta(sub, name string) (m Meta, ok bool, err error) {
 // root-relative path. Scans ignore dot names, so a half-written temp file is
 // never read as an item.
 func (d *Desk) writeTemp(sub, prefix string, data []byte) (string, error) {
+	if d.readOnly {
+		return "", ErrReadOnly
+	}
 	tmp := path.Join(sub, "."+prefix+"."+rand.Text()+".tmp")
 	f, err := d.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
 	if err != nil {
@@ -402,6 +412,9 @@ func encodeMeta(m Meta) ([]byte, error) {
 
 // writeMeta replaces <sub>/<name>.meta.json atomically.
 func (d *Desk) writeMeta(sub, name string, m Meta) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	data, err := encodeMeta(m)
 	if err != nil {
 		return err
@@ -421,6 +434,9 @@ func (d *Desk) writeMeta(sub, name string, m Meta) error {
 // whole: a link(2) of a finished temp file, so no reader sees half a file and
 // two desks sighting the same item cannot overwrite each other.
 func (d *Desk) createMeta(sub, name string, m Meta) (created bool, err error) {
+	if d.readOnly {
+		return false, ErrReadOnly
+	}
 	data, err := encodeMeta(m)
 	if err != nil {
 		return false, err
@@ -444,6 +460,9 @@ func (d *Desk) createMeta(sub, name string, m Meta) (created bool, err error) {
 // item's rename is the step that can fail on a race (ENOENT); the meta follows
 // and may be absent for a legacy item.
 func (d *Desk) move(name string, kind Kind, from, to string) error {
+	if d.readOnly {
+		return ErrReadOnly
+	}
 	file := name + kind.Ext()
 	if err := d.root.Rename(path.Join(from, file), path.Join(to, file)); err != nil {
 		return err

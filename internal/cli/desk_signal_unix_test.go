@@ -280,10 +280,11 @@ func TestDeskSkip_ClearsEvenWhenTheSettingIsNowOff(t *testing.T) {
 	}
 }
 
-// A pending item edited after it was queued is skipped as changed by whichever
-// verb scans next. Each verb that scans must clear the pane that item was
-// blocking, not only the dashboard and skip.
-func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
+// A pending item edited after it was queued is skipped as changed by the next
+// writing verb (the dashboard, a run, skip), which clears its pane. status and
+// runs only read (the #1270 review): they move nothing, so they release no
+// pane, and status shows the item refused until a writing verb moves it.
+func TestDeskReadVerbsLeaveAChangedItemAndItsPane(t *testing.T) {
 	for _, verb := range [][]string{{"status"}, {"runs"}} {
 		t.Run(verb[0], func(t *testing.T) {
 			dir := newDeskDir(t)
@@ -292,15 +293,23 @@ func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
 			if _, err := addItem(t, rig, "one"); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, desk.DirPending, "01-one.sh"), []byte("echo changed\n"), 0o600); err != nil {
+			item := filepath.Join(dir, desk.DirPending, "01-one.sh")
+			if err := os.WriteFile(item, []byte("echo changed\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			before := len(rig.herdr.Calls())
-			if _, _, err := deskRun(t, rig.deps, verb...); err != nil {
+			out, _, err := deskRun(t, rig.deps, verb...)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if calls := rig.herdr.Calls()[before:]; len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p9")) {
-				t.Fatalf("`desk %s` after the edit: %d herdr calls, want the release of w1:p9", verb[0], len(calls))
+			if calls := rig.herdr.Calls()[before:]; len(calls) != 0 {
+				t.Fatalf("`desk %s` after the edit: %d herdr calls, want none (it only reads)", verb[0], len(calls))
+			}
+			if _, err := os.Stat(item); err != nil {
+				t.Errorf("`desk %s` moved the changed item: %v", verb[0], err)
+			}
+			if verb[0] == "status" && !strings.Contains(out, "refused") {
+				t.Errorf("status = %q; want the changed item shown refused", out)
 			}
 		})
 	}

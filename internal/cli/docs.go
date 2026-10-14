@@ -22,7 +22,7 @@ var docsModule = module.Manifest{
 func newDocsCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "docs",
-		Short: "Local markdown reader — render + serve an indexed doc set over loopback HTTP",
+		Short: "Local markdown reader over loopback HTTP",
 		Long: `docs is forgectl's local markdown reader (forgectl#93): pure-Go
 server-side rendering (goldmark+GFM, class-based chroma highlighting,
 bluemonday sanitization), Artificer-themed, served over loopback HTTP so it

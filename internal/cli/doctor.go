@@ -37,7 +37,7 @@ func newDoctorCmdForDeps(d doctor.Deps, th theme.Theme) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Check the whole workbench is wired: claude, tmux, ghostty, gh, config, the local bench, and forgectl itself",
+		Short: "Check the workbench: claude, tmux, gh, config, bench, forgectl",
 		Long: `doctor is forgectl's ecosystem health check. It orchestrates the checks
 each domain already knows how to make — it never reimplements one:
 
@@ -85,7 +85,7 @@ Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable report to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"checks":[{"name","state","detail","hint"}],"healthy"} to stdout; detail and hint are left out when empty`)
 	return cmd
 }
 
