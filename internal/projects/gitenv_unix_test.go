@@ -63,6 +63,27 @@ func TestGitStatusRunsNoFilterDriver(t *testing.T) {
 	}
 }
 
+// The projects status probe refreshes a stat-dirty entry, which rewrites the
+// index and would fire the post-index-change hook the repository selects;
+// the hook does not run (#1079).
+// Mutation: drop gitenv's hook pin from RunUnfiltered: the canary runs.
+func TestGitStatusRunsNoHook(t *testing.T) {
+	gitenvtest.NewHookCanary(t).AssertLive(t)
+	canary := gitenvtest.NewHookCanary(t)
+	bin, err := osexec.LookPath(gitenv.Bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := gitStatus(context.Background(), exec.OSRunner{}, bin, canary.Dir)
+	if canary.Ran(t) {
+		t.Fatal("the projects status probe ran a hook the repository selects")
+	}
+	if got.State != StatusOK || got.Modified != 0 {
+		t.Errorf("gitStatus = %+v, want a clean %q: the file matches its blob", got, StatusOK)
+	}
+}
+
 // #1005: a repository whose HEAD is a FIFO, on which git itself blocks,
 // reads as unknown, and promptly: the probe never starts git there.
 // Mutation: drop gitenv's HEAD mode check: git runs, blocks until the

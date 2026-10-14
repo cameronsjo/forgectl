@@ -40,6 +40,93 @@ func TestRunUnfilteredRunsNoFilterDriver(t *testing.T) {
 	}
 }
 
+// RunUnfiltered runs a status that refreshes a stat-dirty entry, which
+// rewrites the index and would fire the post-index-change hook the
+// repository's own config selects, on real git, and the hook does not run
+// (#1079).
+// Mutation: drop noHooks from runUnfilteredAlso's call (the hook runs).
+func TestRunUnfilteredRunsNoHook(t *testing.T) {
+	gitenvtest.NewHookCanary(t).AssertLive(t)
+
+	c := gitenvtest.NewHookCanary(t)
+	if _, err := gitenv.RunUnfiltered(t.Context(), exec.OSRunner{}, gitenv.Bin, c.Dir, "status", "--porcelain"); err != nil {
+		t.Fatalf("RunUnfiltered status: %v", err)
+	}
+	if c.Ran(t) {
+		t.Fatal("a hook the repository selects ran during an unfiltered status")
+	}
+}
+
+// A hook defined in configuration (git 2.54+) is not found through the
+// hooks directory, so core.hooksPath=/dev/null does not stop it; the
+// status runs it not (#1079).
+// Mutation: drop the per-name hook.<name>.enabled=false from NoHookArgs
+// (on git 2.54 the hook runs; on 2.55 the per-event switch also stops it).
+func TestRunUnfilteredRunsNoConfiguredHook(t *testing.T) {
+	gitenvtest.NewConfigHookCanary(t).AssertLiveThroughHooksPath(t)
+
+	c := gitenvtest.NewConfigHookCanary(t)
+	if _, err := gitenv.RunUnfiltered(t.Context(), exec.OSRunner{}, gitenv.Bin, c.Dir, "status", "--porcelain"); err != nil {
+		t.Fatalf("RunUnfiltered status: %v", err)
+	}
+	if c.Ran(t) {
+		t.Fatal("a hook the repository's config defines ran during an unfiltered status")
+	}
+}
+
+// RunNoHooks lists the configured hooks in dir and switches each off, with
+// the hooks directory and every event, ahead of -C dir and the call.
+func TestRunNoHooksBuildsTheCall(t *testing.T) {
+	f := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if slices.Contains(args, `^hook\..*\.(command|event)$`) {
+			return "hook.a.b.command\x00hook.a.b.event\x00", nil
+		}
+		return "", nil
+	}}
+	if _, err := gitenv.RunNoHooks(t.Context(), f, "/repo", "worktree", "add", "/repo/wt", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != 3 {
+		t.Fatalf("calls = %v, want the hook listing, the include listing and the call", f.Calls)
+	}
+	wantIncludes := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--show-origin", "--get-regexp", `^(include\.path|includeif\..*\.path)$`)
+	if !slices.Equal(f.Calls[1].Args, wantIncludes) {
+		t.Errorf("include listing = %v, want %v", f.Calls[1].Args, wantIncludes)
+	}
+	wantList := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--name-only", "--get-regexp", `^hook\..*\.(command|event)$`)
+	if !slices.Equal(f.Calls[0].Args, wantList) {
+		t.Errorf("listing = %v, want %v", f.Calls[0].Args, wantList)
+	}
+	want := append(append(gitenv.Args(gitenv.Local), gitenv.NoHookArgs([]string{"a.b"})...), "-C", "/repo", "worktree", "add", "/repo/wt", "main")
+	if !slices.Equal(f.Calls[2].Args, want) {
+		t.Errorf("call = %v, want %v", f.Calls[2].Args, want)
+	}
+}
+
+// RunNoHooks fails closed: a hook it cannot switch off, or a listing that
+// fails, runs nothing.
+func TestRunNoHooksFailsClosed(t *testing.T) {
+	for name, answer := range map[string]func(string, []string) (string, error){
+		"a name -c cannot override": func(string, []string) (string, error) { return "hook.a=b.command\x00", nil },
+		"a failed listing": func(n string, a []string) (string, error) {
+			return "", &exec.CommandError{Name: n, Args: a, ExitCode: 128, Err: errors.New("exit status 128")}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &exec.FakeRunner{RunFunc: func(n string, args []string) (string, error) {
+				if slices.Contains(args, "--get-regexp") {
+					return answer(n, args)
+				}
+				t.Errorf("RunNoHooks ran %v after %s", args, name)
+				return "", nil
+			}}
+			if _, err := gitenv.RunNoHooks(t.Context(), f, "/repo", "worktree", "add"); err == nil {
+				t.Fatal("RunNoHooks succeeded")
+			}
+		})
+	}
+}
+
 // A driver name holding '=' cannot be overridden with -c, since git splits
 // the argument at its first '='. RunUnfiltered then refuses to run the call
 // at all, rather than run it with that driver live.
@@ -129,12 +216,13 @@ func mkRepoDir(t *testing.T, dir string) {
 }
 
 // The overrides precede the caller's -C and arguments, after Local's own
-// options, and the listings run in the same directory under Local. Every
-// listed driver is blanked, whatever scope defined it.
+// options, and the listings run in the same directory under Local. Hooks are
+// switched off (#1079), each listed configured hook by name, and every listed
+// driver is blanked, whatever scope defined it.
 // Mutation: list without -C dir (the listing reads another repository).
 func TestRunUnfilteredBuildsTheCall(t *testing.T) {
 	f := listingFake(map[string]string{
-		"/repo": "filter.lfs.clean\x00filter.lfs.process\x00filter.a.b.smudge\x00",
+		"/repo": "filter.lfs.clean\x00filter.lfs.process\x00filter.a.b.smudge\x00hook.x.y.command\x00hook.x.y.event\x00hook.z.event\x00",
 	}, map[string]string{"/repo": "100644 " + strings.Repeat("a", 40) + " 0\tfile\x00"})
 	if _, err := gitenv.RunUnfiltered(t.Context(), f, "/pinned/git", "/repo", "status", "--porcelain"); err != nil {
 		t.Fatal(err)
@@ -142,7 +230,7 @@ func TestRunUnfilteredBuildsTheCall(t *testing.T) {
 	if len(f.Calls) != 3 {
 		t.Fatalf("calls = %v, want the two listings and the status", f.Calls)
 	}
-	wantList := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--name-only", "--get-regexp", `^filter\..*\.(clean|smudge|process)$`)
+	wantList := append(gitenv.Args(gitenv.Local), "-C", "/repo", "config", "-z", "--name-only", "--get-regexp", `^(filter\..*\.(clean|smudge|process)|hook\..*\.(command|event))$`)
 	if got := f.Calls[0]; got.Name != "/pinned/git" || !slices.Equal(got.Args, wantList) {
 		t.Errorf("driver listing = %s %v, want /pinned/git %v", got.Name, got.Args, wantList)
 	}
@@ -150,7 +238,8 @@ func TestRunUnfilteredBuildsTheCall(t *testing.T) {
 	if got := f.Calls[1]; got.Name != "/pinned/git" || !slices.Equal(got.Args, wantSubs) {
 		t.Errorf("submodule listing = %s %v, want /pinned/git %v", got.Name, got.Args, wantSubs)
 	}
-	want := append(gitenv.Args(gitenv.Local),
+	want := append(gitenv.Args(gitenv.Local), gitenv.NoHookArgs([]string{"x.y", "z"})...)
+	want = append(want,
 		"-c", "filter.a.b.clean=", "-c", "filter.a.b.smudge=", "-c", "filter.a.b.process=",
 		"-c", "filter.lfs.clean=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=",
 		"-C", "/repo", "status", "--porcelain")
@@ -364,7 +453,7 @@ func TestRunUnfilteredAlsoListsTheWorkingTreesItReaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := f.Calls[len(f.Calls)-1].Args
-	want := append(gitenv.Args(gitenv.Local), "-c", "filter.wt.clean=", "-c", "filter.wt.smudge=", "-c", "filter.wt.process=", "worktree", "remove", "--", wt)
+	want := append(append(gitenv.Args(gitenv.Local), gitenv.NoHookArgs(nil)...), "-c", "filter.wt.clean=", "-c", "filter.wt.smudge=", "-c", "filter.wt.process=", "worktree", "remove", "--", wt)
 	if !slices.Equal(last, want) {
 		t.Errorf("remove = %v, want %v", last, want)
 	}
