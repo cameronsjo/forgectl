@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.46.0](https://github.com/cameronsjo/forgectl/compare/v0.45.0...v0.46.0) (2026-10-14)
+
+
+### Features
+
+* **cli:** root help groups commands by the hub's sections, in hub order, and fits about 100 columns ([db07f93](https://github.com/cameronsjo/forgectl/commit/db07f937b0355cd154d8d17fea2e98f0fe423ee5))
+* **config:** show settings set by FORGECTL_SESSIONS_DSN, HEARTH_DIR, CHRONICLE_DIR and DESK_DIR with their source (env_resolved) ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **desk:** ? in the run view lists its keys, and desk --help lists the dashboard keys from the same table as the footer ([a63da16](https://github.com/cameronsjo/forgectl/commit/a63da16861a34fd3dfef3a81246be4f8ce6d1667))
+* **desk:** add --after to hold an item until earlier ones succeed, and status --full for the whole WHAT ([3066583](https://github.com/cameronsjo/forgectl/commit/306658314d1dd97cc09b69dc87b3bf54fe07c3e5))
+* **desk:** desk show --live --layout flow draws a run as a top-down flowchart beside its timeline ([70f35cf](https://github.com/cameronsjo/forgectl/commit/70f35cfa92109cdff8137e1bf09ecdb17001a984))
+* **desk:** desk show reads a log from stdin (--log -) or a command's stdout (--follow-cmd), restarted under --live when it exits ([70f35cf](https://github.com/cameronsjo/forgectl/commit/70f35cfa92109cdff8137e1bf09ecdb17001a984))
+* **desk:** the dashboard says when a newer forgectl is installed than the one running ([a63da16](https://github.com/cameronsjo/forgectl/commit/a63da16861a34fd3dfef3a81246be4f8ce6d1667))
+* **drain:** send needs-you through herdr notification show, record each attempt (rate_limited as a note), and add surface drain notify-test ([4d4b260](https://github.com/cameronsjo/forgectl/commit/4d4b260f2c246580a36d8344f4c7293f7bce19b5))
+* **drain:** show a claude-slots hold in drain status and alert once when the check cannot answer for 15 minutes ([4d4b260](https://github.com/cameronsjo/forgectl/commit/4d4b260f2c246580a36d8344f4c7293f7bce19b5))
+* **init:** add --dry-run, say it is safe to rerun, and end with "next: forgectl doctor" ([db07f93](https://github.com/cameronsjo/forgectl/commit/db07f937b0355cd154d8d17fea2e98f0fe423ee5))
+* **launch:** show the effective worker posture, with each field's source, in launch which and forgectl config ([7d231b8](https://github.com/cameronsjo/forgectl/commit/7d231b81e9f03338cd24ddafa68e8cddc7a372fe))
+* **menu:** the text form lists one line per command with a subverb count; menu &lt;group&gt; or --json lists the subverbs ([db07f93](https://github.com/cameronsjo/forgectl/commit/db07f937b0355cd154d8d17fea2e98f0fe423ee5))
+* **status:** open the text view with a verdict naming each problem, the sections it hits, and why ([db07f93](https://github.com/cameronsjo/forgectl/commit/db07f937b0355cd154d8d17fea2e98f0fe423ee5))
+* **surface:** a worker launch shows the worker name in herdr's sidebar as the workspace token $worker ([b852aea](https://github.com/cameronsjo/forgectl/commit/b852aeaf8818b3344fd1bde2b993d18fc9d6878f))
+* **surface:** add surface tag to set display tokens on a worker's herdr pane ([b852aea](https://github.com/cameronsjo/forgectl/commit/b852aeaf8818b3344fd1bde2b993d18fc9d6878f))
+* **surface:** surface launch --json prints what a real launch created, including herdr ids and terminal_id ([b852aea](https://github.com/cameronsjo/forgectl/commit/b852aeaf8818b3344fd1bde2b993d18fc9d6878f))
+* **surface:** surface list --json reports each present worker's herdr terminal_id ([b852aea](https://github.com/cameronsjo/forgectl/commit/b852aeaf8818b3344fd1bde2b993d18fc9d6878f))
+* **surface:** surface usage &lt;name&gt; prices one worker's transcript without GitHub ([b852aea](https://github.com/cameronsjo/forgectl/commit/b852aeaf8818b3344fd1bde2b993d18fc9d6878f))
+
+
+### Bug Fixes
+
+* **audit:** stop audit secrets' git and gitleaks children on Ctrl-C ([7abfcb8](https://github.com/cameronsjo/forgectl/commit/7abfcb8be5ad9d3cb61518dc02d6f4086ebc26b5))
+* **cli:** a --json failure object on stderr is one line ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **desk:** bound desk watch to 540s by default when stdin is not a terminal ([3066583](https://github.com/cameronsjo/forgectl/commit/306658314d1dd97cc09b69dc87b3bf54fe07c3e5))
+* **desk:** put the title first in herdr notification show, so the desk's herdr signal works on herdr 0.9.3, and name herdr's own error when it fails ([4d4b260](https://github.com/cameronsjo/forgectl/commit/4d4b260f2c246580a36d8344f4c7293f7bce19b5))
+* **desk:** read verbs open the desk read-only and never create, migrate or chmod it; skip and --frame never create a desk ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **desk:** refuse a claim that would replace a running item's record ([3066583](https://github.com/cameronsjo/forgectl/commit/306658314d1dd97cc09b69dc87b3bf54fe07c3e5))
+* **desk:** status, runs, show, watch and plan never create a desk; status --json reports found ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **gitenv:** run no hook, from the hooks directory or from configuration, during the git status behind clean, projects status and surface close ([0ba5e9b](https://github.com/cameronsjo/forgectl/commit/0ba5e9bad347772b28e874fecd7713ef9a9ae562))
+* **projects:** clone a repo whose name starts with a dot, such as .github, into a dot- directory ([7abfcb8](https://github.com/cameronsjo/forgectl/commit/7abfcb8be5ad9d3cb61518dc02d6f4086ebc26b5))
+* **projects:** run no hook from the fetched branch, configuration or a conditional include during projects worktree's checkout ([0ba5e9b](https://github.com/cameronsjo/forgectl/commit/0ba5e9bad347772b28e874fecd7713ef9a9ae562))
+* **pr:** prs and dash exit 1 when every gh query failed ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **review:** --json carries each source's cause and fix in the one failure object; a malformed --repo or unknown --kind exits 2 ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **review:** list review notes in a fixed order ([7abfcb8](https://github.com/cameronsjo/forgectl/commit/7abfcb8be5ad9d3cb61518dc02d6f4086ebc26b5))
+* **sessions:** a missing concordance DSN exits 2 as usage_error ([a1d4a38](https://github.com/cameronsjo/forgectl/commit/a1d4a38525dc66530b86ef77901629d6f81bc4cf))
+* **surface:** `surface close` and `surface list` handle a herdr restart: a worker whose workspace the restarted server does not hold reads gone and closes, instead of staying unreadable forever ([9e32990](https://github.com/cameronsjo/forgectl/commit/9e32990531d1e81a53c6f7fe211af6487fc9c753))
+* **surface:** `surface close` re-checks the herdr server right before and after closing, so a restart cannot make it close another workspace that reused the id ([9e32990](https://github.com/cameronsjo/forgectl/commit/9e32990531d1e81a53c6f7fe211af6487fc9c753))
+* **surface:** refuse a claude surface launch or worker whose folder the session's Claude account has not trusted, before anything is created ([7d231b8](https://github.com/cameronsjo/forgectl/commit/7d231b81e9f03338cd24ddafa68e8cddc7a372fe))
+* **surface:** refuse a symlinked, FIFO or oversized worktree gitfile in surface close instead of following or hanging on it ([0ba5e9b](https://github.com/cameronsjo/forgectl/commit/0ba5e9bad347772b28e874fecd7713ef9a9ae562))
+* **surface:** stop forwarding the launcher's tmux and cmux pane ids to a surface-launched harness ([7d231b8](https://github.com/cameronsjo/forgectl/commit/7d231b81e9f03338cd24ddafa68e8cddc7a372fe))
+* **tui:** the hub, tmux menu, desk and status --tui refuse TERM=dumb and name their plain forms; desk below 40 columns no longer draws a clipped queue ([a63da16](https://github.com/cameronsjo/forgectl/commit/a63da16861a34fd3dfef3a81246be4f8ce6d1667))
+
 ## [0.45.0](https://github.com/cameronsjo/forgectl/compare/v0.44.1...v0.45.0) (2026-10-13)
 
 
