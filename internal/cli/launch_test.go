@@ -48,23 +48,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	// Review workspaces, and the private temp and settings dirs a Claude
-	// launch makes beside each (forgectl#907), land under the OS temp root,
-	// and several tests here launch without tearing down. Point the temp
-	// root into dir so they go with it. The settings dir is left 0500, so
-	// removal makes every dir writable first.
-	tmp := filepath.Join(dir, "tmp")
-	if err := os.Mkdir(tmp, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		panic("create temp root: " + err.Error())
-	}
-	if err := os.Setenv("TMPDIR", tmp); err != nil {
-		_ = os.RemoveAll(dir)
-		panic("set TMPDIR: " + err.Error())
-	}
-
 	code := m.Run()
-	unsealTree(dir)
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
