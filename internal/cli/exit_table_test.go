@@ -95,7 +95,7 @@ func TestExitTable_LeafWalk(t *testing.T) {
 	for _, p := range leaves {
 		args := append(append([]string(nil), p...), "--zz-no-such-flag")
 		want := exitUsage
-		if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" {
+		if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
 			want = exitFailed
 		}
 		err := execRoot(t, args...)
@@ -281,7 +281,7 @@ func TestExitTable_ArgCountWalk(t *testing.T) {
 			}
 			rejected++
 			want := exitUsage
-			if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" {
+			if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
 				want = exitFailed
 			}
 			if got := ExitCode(err); got != want {
@@ -315,4 +315,36 @@ func TestExitTable_EnvFailureKeepsExceptionVerbs(t *testing.T) {
 			t.Errorf("%v: exit = %d, want %d", tt.argv, got, tt.want)
 		}
 	}
+}
+
+// TestSurfaceEvent_NeverExitsTwo: `surface event` runs as a worker's Claude
+// Code Stop and UserPromptSubmit hook, where exit 2 blocks the stop or erases
+// the prompt. Like `resume snapshot`, it exits 0 or 1 on a bad flag, a stray
+// argument, an environment failure, and a config that does not parse.
+//
+// Mutation that turns it red: drop `surface event` from usageKeepsOne (the
+// flag and argument rows) or from hookVerbs (the environment and config rows).
+func TestSurfaceEvent_NeverExitsTwo(t *testing.T) {
+	notTwo := func(t *testing.T, err error) {
+		t.Helper()
+		if got := ExitCode(err); got == exitUsage {
+			t.Errorf("exit = %d (err %v): a hook that exits 2 blocks the session", got, err)
+		}
+	}
+	t.Run("bad flag", func(t *testing.T) {
+		notTwo(t, execRoot(t, "surface", "event", "--zz-no-such-flag"))
+	})
+	t.Run("stray argument", func(t *testing.T) {
+		notTwo(t, execRoot(t, "surface", "event", "--harness", "claude", "a", "b"))
+	})
+	t.Run("environment failure", func(t *testing.T) {
+		stubEnvFailure(t)
+		withArgs(t, "surface", "event", "--harness", "pi", "--state", "idle")
+		notTwo(t, Execute(context.Background()))
+	})
+	t.Run("config that does not parse", func(t *testing.T) {
+		writeMalformedUserConfig(t)
+		_, err := executeCapturingStderr(t, "surface", "event", "--harness", "pi", "--state", "idle")
+		notTwo(t, err)
+	})
 }

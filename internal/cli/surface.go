@@ -97,7 +97,10 @@ transcript with no GitHub call:
 
 tag stamps display tokens on a worker's herdr pane for the sidebar:
 
-  forgectl surface tag fix-login --token task=PAP-12`,
+  forgectl surface tag fix-login --token task=PAP-12
+
+send, inbox, flush and event carry messages between a coordinator and
+its workers across harnesses. See forgectl surface send --help.`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -119,6 +122,10 @@ tag stamps display tokens on a worker's herdr pane for the sidebar:
 	cmd.AddCommand(newSurfacePruneCmd(deps))
 	cmd.AddCommand(newSurfaceUsageCmd(deps))
 	cmd.AddCommand(newSurfaceTagCmd(deps))
+	cmd.AddCommand(newSurfaceSendCmd(deps))
+	cmd.AddCommand(newSurfaceInboxCmd(deps))
+	cmd.AddCommand(newSurfaceFlushCmd(deps))
+	cmd.AddCommand(newSurfaceEventCmd(deps))
 	return cmd
 }
 
@@ -397,6 +404,16 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// claudeMessagingEnv is the inbox Claude Code exports to its own children.
+var claudeMessagingEnv = []string{"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
+
+// withoutClaudeInbox drops the inbox of the Claude session forgectl was run
+// from. A harness started with it would resolve as that session in surface
+// send (mail.LedgerDir keys the coordinator on its socket).
+func withoutClaudeInbox(env []string) []string {
+	return launch.StripEnv(env, claudeMessagingEnv)
+}
+
 // herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
 // runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
 // launcher and the new pane share.
@@ -519,11 +536,15 @@ func validPaneIdentity(v string) bool {
 // receive anything addressed to "its" pane, on the launcher's pane. Every
 // launch marks its invocation with its backend (markPane), and the trampoline
 // puts back the new pane's own values for that backend (paneIdentityEnv).
+//
+// Claude Code's messaging socket and token go too: they are the launcher
+// session's inbox, so a Codex or pi agent in the new surface would otherwise
+// find the launcher's mail ledger and `surface send` as the coordinator.
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || isPaneIdentityKey(key) {
+		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) {
 			continue
 		}
 		out = append(out, entry)

@@ -197,7 +197,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 		Config:      lc,
 		CWD:         cwd,
 		Args:        args,
-		BaseEnv:     os.Environ(),
+		BaseEnv:     withoutClaudeInbox(os.Environ()),
 		InjectedEnv: injected,
 		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
