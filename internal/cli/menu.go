@@ -34,7 +34,7 @@ func newMenuCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "menu [group]",
-		Short: "Print the hub's contents: status, pinned, recent, and every command",
+		Short: "Print the hub's contents without opening it",
 		Long: `Print what bare forgectl shows, without opening it: the status line, the
 pinned commands, the recent ones, and every other command, one line each.
 Name a group to list its subverbs too: forgectl menu docs. Nothing is run.

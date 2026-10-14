@@ -374,7 +374,7 @@ func newInitCmd(deps module.Deps) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Create config.toml, or add the sections it lacks (safe to rerun)",
+		Short: "Create config.toml or add missing sections (safe to rerun)",
 		Long: `Create config.toml with every section as a commented template, sensibly
 defaulted. When config.toml exists, init adds only the sections it is missing
 and never edits or reorders the ones already there, so it is safe to rerun

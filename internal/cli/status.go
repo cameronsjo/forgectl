@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -245,7 +244,7 @@ func newStatusCmdWith(src statusSources, th theme.Theme, rt statusTUIRuntime) *c
 	)
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Read-only overview: local git state, PRs, reclaimable space, bench health",
+		Short: "Read-only overview: git state, PRs, reclaimable space, bench",
 		Long: `status composes four read paths that already ship into one overview:
 
   git    working-tree state of every local project (as projects discovery sees it)
@@ -479,24 +478,121 @@ func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, pr
 }
 
 // statusVerdict is the text view's first line (forgectl#1151): which sections
-// need the operator, so nobody reads all four to learn whether anything does.
-// A degraded or failed section needs them; a section that is only not set up
-// (Unset) does not.
+// need the operator and why, so nobody reads all four to learn whether
+// anything does. A degraded or failed section needs them; a section that is
+// only not set up (Unset) does not. The count is of causes, not sections:
+// sections with the same cause share one reason ("git, clean (no projects
+// folder)"), because a missing projects folder fails both and is one thing to
+// fix.
 func statusVerdict(views [statusSectionCount]statusSectionView) string {
-	var need []string
+	missing := map[string]bool{}
 	for _, v := range views {
-		if !v.Unset && v.State != status.StateOK {
-			need = append(need, v.Label)
+		if strings.Contains(v.Error, "projects directory not found") {
+			if p := firstQuoted(v.Error); p != "" {
+				missing[p] = true
+			}
 		}
 	}
-	switch len(need) {
-	case 0:
-		return "nothing needs you"
-	case 1:
-		return "1 needs you: " + need[0]
-	default:
-		return strconv.Itoa(len(need)) + " need you: " + strings.Join(need, ", ")
+	var reasons []string
+	labels := map[string][]string{}
+	n := 0
+	for _, v := range views {
+		if v.Unset || v.State == status.StateOK {
+			continue
+		}
+		n++
+		r := statusReason(v, missing)
+		if _, seen := labels[r]; !seen {
+			reasons = append(reasons, r)
+		}
+		labels[r] = append(labels[r], v.Label)
 	}
+	if n == 0 {
+		return "nothing needs you"
+	}
+	n = len(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		parts = append(parts, strings.Join(labels[r], ", ")+" ("+r+")")
+	}
+	verb := "need"
+	if n == 1 {
+		verb = "needs"
+	}
+	return fmt.Sprintf("%d %s you: %s", n, verb, strings.Join(parts, "; "))
+}
+
+// statusVerdictReasonMaxRunes caps one reason in the verdict line; the
+// section's own line below carries the whole text.
+const statusVerdictReasonMaxRunes = 60
+
+// statusReason is a short cause for one section that needs the operator, from
+// its error (failed) or its notes (degraded). missing holds the quoted paths
+// of a projects folder another section found missing, so a scan of that same
+// folder reads as the same cause. The texts were escaped and capped by
+// status.Collect.
+func statusReason(v statusSectionView, missing map[string]bool) string {
+	if v.State != status.StateDegraded {
+		switch e := v.Error; {
+		case strings.Contains(e, "projects directory not found"):
+			return "no projects folder"
+		case strings.Contains(e, "no such file or directory") && missing[firstQuoted(e)]:
+			return "no projects folder"
+		case strings.Contains(e, "no such file or directory"):
+			return "folder not found"
+		case strings.Contains(e, "timed out"):
+			return "timed out"
+		case e == "":
+			return "failed"
+		default:
+			return termsafe.SafeLineMax(e, statusVerdictReasonMaxRunes)
+		}
+	}
+	var out []string
+	for _, note := range v.Notes {
+		r := noteReason(note)
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return "degraded"
+	}
+	return termsafe.SafeLineMax(strings.Join(out, ", "), statusVerdictReasonMaxRunes)
+}
+
+// noteReason shortens a degradation note. A gh query note,
+// "<label>: query failed (<reason>; <fix>)", becomes its reason without the
+// fix; the generic "run forgectl doctor" reason becomes "query failed". Any
+// other note is kept up to its first ";".
+func noteReason(note string) string {
+	if _, rest, ok := strings.Cut(note, ": query failed ("); ok {
+		reason := strings.TrimSuffix(rest, ")")
+		reason, _, _ = strings.Cut(reason, ";")
+		if strings.HasPrefix(reason, "run forgectl doctor") {
+			return "query failed"
+		}
+		return reason
+	}
+	if strings.HasSuffix(note, ": query failed") {
+		return "query failed"
+	}
+	reason, _, _ := strings.Cut(note, ";")
+	return reason
+}
+
+// firstQuoted returns the first double-quoted span in s, quotes included, or
+// "" when there is none.
+func firstQuoted(s string) string {
+	i := strings.IndexByte(s, '"')
+	if i < 0 {
+		return ""
+	}
+	j := strings.IndexByte(s[i+1:], '"')
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j+2]
 }
 
 // renderStatusSection prints a section's glyph, label and headline, then

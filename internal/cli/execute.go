@@ -336,10 +336,28 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	// only shows help.
 	if target, _, _ := root.Find(args); target == root && rootRunShowsHelp(args) {
 		var err error
-		withTrimmedOut(root, func() { err = run() })
+		withTrimmedOut(root, func() {
+			if showsRootPage(args) {
+				withRootHelpLayout(root, func() { err = run() })
+				return
+			}
+			err = run()
+		})
 		return err
 	}
 	return run()
+}
+
+// showsRootPage reports whether an argv rootRunShowsHelp accepted renders
+// root's own page, the one that lists root's children. `help <command>`
+// renders that command's page, whose usage line must stay its full Use.
+func showsRootPage(args []string) bool {
+	first, i := firstNonFlag(args)
+	if first != "help" {
+		return true
+	}
+	next, _ := firstNonFlag(args[i+1:])
+	return next == ""
 }
 
 // completionShells are the shell children cobra's lazy `completion` builtin

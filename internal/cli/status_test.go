@@ -633,21 +633,39 @@ func TestRenderStatus_UnconfiguredBenchIsNotHealthy(t *testing.T) {
 }
 
 // TestStatusVerdict pins forgectl#1151's verdict line: it names every
-// degraded or failed section, counts them, and leaves out a section that is
-// only not set up. Mutations that turn it red: count an Unset section; drop
-// the degraded state from "needs you".
+// degraded or failed section with a short reason, counts causes rather than
+// sections (a missing projects folder fails git and clean, and is one thing
+// to fix), and leaves out a section that is only not set up. Mutations that
+// turn it red: count an Unset section; drop the degraded state from "needs
+// you"; count sections in place of causes; keep a gh note's fix text.
 func TestStatusVerdict(t *testing.T) {
-	view := func(label string, state status.State, unset bool) statusSectionView {
-		return statusSectionView{Label: label, State: state, Unset: unset}
+	ok := func(label string) statusSectionView {
+		return statusSectionView{Label: label, State: status.StateOK}
 	}
+	unset := statusSectionView{Label: "bench", State: status.StateDegraded, Unset: true}
+	noFolder := statusSectionView{Label: "git", State: status.StateFailed,
+		Error: `projects directory not found: "/h/Projects" (set PROJECTS_DIR to the folder that holds your repos, or create it)`}
+	cleanScan := statusSectionView{Label: "clean", State: status.StateFailed,
+		Error: `scan "/h/Projects": lstat "/h/Projects": no such file or directory`}
+	otherScan := statusSectionView{Label: "clean", State: status.StateFailed,
+		Error: `scan "/elsewhere": lstat "/elsewhere": no such file or directory`}
+	ghNotes := statusSectionView{Label: "prs", State: status.StateDegraded, Notes: []string{
+		"awaiting-you: query failed (gh is not signed in to github.com; run gh auth login --hostname github.com)",
+		"your-open: query failed (gh is not signed in to github.com; run gh auth login --hostname github.com)",
+	}}
+	unknownNote := statusSectionView{Label: "prs", State: status.StateDegraded, Notes: []string{
+		"awaiting-you: query failed (run forgectl doctor for the cause)",
+	}}
+	timedOut := statusSectionView{Label: "bench", State: status.StateFailed, Error: "timed out after 20s"}
 	for _, tc := range []struct {
 		name  string
 		views [statusSectionCount]statusSectionView
 		want  string
 	}{
-		{"all ok", [statusSectionCount]statusSectionView{view("git", status.StateOK, false), view("prs", status.StateOK, false), view("clean", status.StateOK, false), view("bench", status.StateDegraded, true)}, "nothing needs you"},
-		{"one", [statusSectionCount]statusSectionView{view("git", status.StateOK, false), view("prs", status.StateDegraded, false), view("clean", status.StateOK, false), view("bench", status.StateOK, false)}, "1 needs you: prs"},
-		{"two", [statusSectionCount]statusSectionView{view("git", status.StateFailed, false), view("prs", status.StateDegraded, false), view("clean", status.StateOK, false), view("bench", status.StateDegraded, true)}, "2 need you: git, prs"},
+		{"all ok", [statusSectionCount]statusSectionView{ok("git"), ok("prs"), ok("clean"), unset}, "nothing needs you"},
+		{"one degraded", [statusSectionCount]statusSectionView{ok("git"), ghNotes, ok("clean"), ok("bench")}, "1 needs you: prs (gh is not signed in to github.com)"},
+		{"shared cause", [statusSectionCount]statusSectionView{noFolder, unknownNote, cleanScan, unset}, "2 need you: git, clean (no projects folder); prs (query failed)"},
+		{"different folder", [statusSectionCount]statusSectionView{noFolder, ok("prs"), otherScan, timedOut}, "3 need you: git (no projects folder); clean (folder not found); bench (timed out)"},
 	} {
 		if got := statusVerdict(tc.views); got != tc.want {
 			t.Errorf("%s: statusVerdict = %q, want %q", tc.name, got, tc.want)
