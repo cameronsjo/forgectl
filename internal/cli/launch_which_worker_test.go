@@ -46,7 +46,7 @@ func TestPrintWorkerPosture(t *testing.T) {
 // TestLaunchWhichWorkerJSON pins the worker object's keys and that empty
 // lists encode as [] rather than null.
 func TestLaunchWhichWorkerJSON(t *testing.T) {
-	doc := buildLaunchWhichJSON(launch.Profile{Harness: "pi"}, "/tmp/cwd", "", "/tmp/config.toml", nil)
+	doc := buildLaunchWhichJSON(launch.Profile{Harness: "pi"}, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)
 	doc.Worker = buildLaunchWhichWorkerJSON(launch.WorkerPosture{Harness: "pi"})
 	raw, err := json.Marshal(doc)
 	if err != nil {

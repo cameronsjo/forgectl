@@ -38,11 +38,7 @@ func deskTimeline(snap *desk.Snapshot) []tlEntry {
 	}
 	var out []tlEntry
 	for _, it := range snap.Pending {
-		k := rowWaiting
-		if it.State == desk.StateRefused {
-			k = rowRefused
-		}
-		out = append(out, tlEntry{queueRow{k, it}, metaTime(it.Meta.AddedAt)})
+		out = append(out, tlEntry{queueRow{pendingRowKind(it), it}, metaTime(it.Meta.AddedAt)})
 	}
 	for _, it := range snap.Running {
 		k := rowRunning
@@ -164,6 +160,8 @@ func tlOutcome(e tlEntry, now time.Time, steps []desk.StepStatus) string {
 		return s
 	case rowRefused:
 		return "can't run · refused: " + deskText(it.Refusal)
+	case rowHeld:
+		return "not yet · held: " + deskText(it.Hold)
 	case rowRunning:
 		s := "running"
 		if it.Kind == desk.KindBatch && len(steps) > 0 {

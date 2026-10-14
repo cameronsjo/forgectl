@@ -28,7 +28,7 @@ func TestBuildLaunchWhichJSON_KeySet(t *testing.T) {
 		Match:          "cadence-ecosystem",
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-hunter2"},
-	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)
 
 	raw, err := json.Marshal(got)
 	if err != nil {
@@ -38,7 +38,7 @@ func TestBuildLaunchWhichJSON_KeySet(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	want := []string{"directory", "config", "matched", "harness", "model", "effort",
+	want := []string{"directory", "config", "config_path", "config_note", "matched", "harness", "model", "effort",
 		"permission_mode", "allow_danger", "env_keys", "injected_env_keys", "add_dir"}
 	if len(decoded) != len(want) {
 		t.Fatalf("key set = %v, want exactly %v", keysOf(decoded), want)
@@ -63,7 +63,7 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "x", "FOO": "y"},
 	}
-	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "", "/tmp/config.toml", nil)
+	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)
 
 	var buf bytes.Buffer
 	printLaunchProfile(&buf, theme.Theme{}, profile, "/tmp/cwd", "", "/tmp/config.toml", nil)
@@ -96,7 +96,7 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 // no-env, no-add-dir profile: both slice fields must encode as [], never null,
 // so a caller can range over them without a nil guard.
 func TestBuildLaunchWhichJSON_EmptyCollectionsAreArraysNeverNull(t *testing.T) {
-	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "", "/tmp/config.toml", nil)
+	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -119,7 +119,7 @@ func TestBuildLaunchWhichJSON_NoEnvValuesEmitted(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-hunter2",
 			"FOO":               "plainbarvalue",
 		},
-	}, "/tmp/cwd", "", "/tmp/config.toml", nil)
+	}, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -144,7 +144,7 @@ func TestNewLaunchWhichCmd_JSONFailingRunLeavesStdoutEmpty(t *testing.T) {
 	// pins the achievable half of the contract: an encoder error propagates
 	// without a partial write reaching a real io.Writer beforehand.
 	buf := failingWriter{err: errWriteFailed}
-	if err := encodeLaunchWhichJSON(buf, buildLaunchWhichJSON(launch.Profile{Harness: "claude"}, "/tmp/cwd", "", "/tmp/config.toml", nil)); err == nil {
+	if err := encodeLaunchWhichJSON(buf, buildLaunchWhichJSON(launch.Profile{Harness: "claude"}, "/tmp/cwd", "", launchConfigSource{Path: "/tmp/config.toml"}, nil)); err == nil {
 		t.Fatal("expected an error from a failing writer, got nil")
 	}
 }
@@ -350,7 +350,7 @@ func TestLaunchWhich_RunDirectory(t *testing.T) {
 		{"codex", launch.Profile{Harness: "codex"}, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := json.Marshal(buildLaunchWhichJSON(tc.profile, "/repo/pkg", tc.runDir, "/tmp/config.toml", nil))
+			raw, err := json.Marshal(buildLaunchWhichJSON(tc.profile, "/repo/pkg", tc.runDir, launchConfigSource{Path: "/tmp/config.toml"}, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -366,5 +366,21 @@ func TestLaunchWhich_RunDirectory(t *testing.T) {
 				t.Errorf("run_directory = %s, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildLaunchWhichJSON_ConfigPathIsAPath pins forgectl#1095: config keeps
+// the human label, and config_path is the bare path with the note apart.
+func TestBuildLaunchWhichJSON_ConfigPathIsAPath(t *testing.T) {
+	src := launchConfigSource{Path: "/tmp/config.toml", Note: "missing — built-in defaults"}
+	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude"}, "/tmp/cwd", "", src, nil)
+	if got.ConfigPath != "/tmp/config.toml" || got.ConfigNote != "missing — built-in defaults" {
+		t.Errorf("config_path %q, config_note %q", got.ConfigPath, got.ConfigNote)
+	}
+	if got.Config != "/tmp/config.toml (missing — built-in defaults)" {
+		t.Errorf("config = %q; want the unchanged label", got.Config)
+	}
+	if l := (launchConfigSource{Path: "/p"}).label(); l != "/p" {
+		t.Errorf("label with no note = %q", l)
 	}
 }

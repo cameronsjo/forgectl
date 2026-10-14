@@ -146,7 +146,7 @@ func TestDeskShow_JSONContract(t *testing.T) {
 	name := batchRun(t, dir, pipeEvents, 1)
 	out, _, err := deskRun(t, deskDeps(), "show", name, "--json")
 	wantExit(t, err, 0)
-	want := []string{"counts", "edges", "events", "events_total", "exit", "kind", "live", "name", "partial", "source", "steps", "at"}
+	want := []string{"counts", "edges", "events", "events_total", "exit", "kind", "live", "name", "partial", "source", "steps", "at", "held", "note"}
 	got := jsonKeys(t, []byte(out))
 	for _, k := range want {
 		if !strings.Contains(" "+strings.Join(got, " ")+" ", " "+k+" ") {

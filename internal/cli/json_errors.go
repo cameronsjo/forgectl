@@ -83,8 +83,10 @@ func jsonFailure(cmd *cobra.Command, err error, asJSON bool, code string) error 
 	if chainAs(err, &withPath) {
 		path = withPath.jsonFailurePath()
 	}
+	// One line, not indented: the object is the last line of stderr, so a
+	// caller that reads only that line (or splits stderr on newlines) gets the
+	// whole object.
 	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
-	enc.SetIndent("", "  ")
 	if encErr := enc.Encode(jsonFailureObject{Error: jsonErrorText(err), Code: code, Path: path}); encErr != nil {
 		return err
 	}

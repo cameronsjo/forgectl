@@ -3,7 +3,8 @@
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
 ```sh
-forgectl menu            # the hub as plain text: status line, sections, every command and subverb
+forgectl menu            # the hub as plain text: status line, sections, one line per command
+forgectl menu docs       # one command with its subverbs
 forgectl menu --json     # the same content as one JSON document
 forgectl menu --json desk  # only the `desk` rows and subverbs (one subtree, a fraction of the bytes)
 forgectl menu --json repos # one area: every command in it
@@ -88,16 +89,18 @@ A bad flag or a stray argument follows the [stderr contract](../json-contract.md
 
 ## Text form
 
-Without `--json`, `menu` prints the hub's status line, then one line per row under each section heading: `pinned`, `recent`, then one heading per area. Each line holds the row's usage and then its description, and each subverb is indented under its row. The text is plain, with no colour and no escapes, so it is safe to grep.
+Without `--json`, `menu` prints the hub's status line, then one line per row under each section heading: `pinned`, `recent`, then one heading per area. Each line holds the row's usage and then its description.
+
+Bare `menu` lists commands only, one line each. A command with subverbs ends with a count, such as `(6 subverbs)`, and a last line says how to list them. Name a command or an area (`forgectl menu docs`, `forgectl menu repos`) and each subverb is indented under its row. Until forgectl#1151, bare `menu` listed every subverb. A script that greps for a subverb (`forgectl pr findings`, say) should now grep `forgectl menu <command>`, or better, read `forgectl menu --json`, which always carries every subverb.
+
+The text is plain, with no colour and no escapes, so it is safe to grep. Its shape can change between releases; `--json` is the stable surface.
 
 ```text
 forgectl · forgectl @ main · 3 tmux · 1 review running, 2 queued
 
 pinned
-  forgectl docs  Local markdown reader — render + serve an indexed doc set over loopback HTTP
-    forgectl docs list [dir|file ...]  List the indexed docs, most-recently-modified first
-  forgectl pr <ref>  Clean-room review of a pull request
-    forgectl pr prs  List open PRs across your repos (authored, assigned, review-requested)
+  forgectl docs  Local markdown reader over loopback HTTP (6 subverbs)
+  forgectl pr <ref>  Clean-room review of a pull request (16 subverbs)
 …
 
 recent
@@ -109,6 +112,8 @@ agents
 
 setup
   forgectl doctor  …
+
+forgectl menu <command> lists a command's subverbs.
 ```
 
 ## The picker opt-out

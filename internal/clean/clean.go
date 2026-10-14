@@ -186,6 +186,11 @@ type Result struct {
 	TotalReclaimed int64
 }
 
+// Root is the root a scan with no --root reads: [clean] default_root, else
+// <home>/Projects, tilde-expanded but not made absolute. "" when neither
+// resolves.
+func (c *Client) Root() string { return c.root }
+
 // ScanReport resolves opts.Root/Types against the Client's defaults and runs
 // Scan exactly once, with no dirty-tree check and no deletion. It exists so
 // a caller that needs to show a preview before a confirmation prompt (the

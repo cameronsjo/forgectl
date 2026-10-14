@@ -140,6 +140,11 @@ const (
 	// desk marks the pane of the session that queued an item as needing the
 	// operator, and clears it when the item runs or is skipped.
 	KindHerdrPaneAgent
+	// KindHerdrMetadata is `workspace report-metadata` and `pane
+	// report-metadata`: display-only sidebar tokens on a workspace or pane
+	// forgectl owns (a worker's name, a scheduler's tags). They change no
+	// agent state.
+	KindHerdrMetadata
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -195,6 +200,7 @@ var kindNames = [kindCount]string{
 	KindHerdrSendText:    "herdr.send-text",
 	KindHerdrPaneAgent:   "herdr.pane-agent",
 	KindHerdrSendKeys:    "herdr.send-keys",
+	KindHerdrMetadata:    "herdr.report-metadata",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

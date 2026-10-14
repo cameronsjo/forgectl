@@ -99,6 +99,10 @@ worker does not type into another by accident.
 
 Exit 0: sent and working. Exit 1: refused (not at its prompt, a dialog, text
 already in the input box, a read-back that did not match) or unconfirmed.
+--json's outcome tells the two apart, and only refused is safe to retry:
+refused submitted nothing, while unconfirmed already sent Enter, so a retry
+could send the brief twice. After unconfirmed, check the worker with
+surface ready or surface read before sending again.
 Exit 2: a usage or setup error.
 
   forgectl surface brief fix-login "Now run the full test suite and fix failures."

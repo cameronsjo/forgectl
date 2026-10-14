@@ -104,8 +104,12 @@ func deskRunSources(ctx context.Context, cmd *cobra.Command, deps module.Deps, d
 		}
 	}
 	if !skipDesk {
-		d, err := openDeskDirFor(cmd, deps, dirFlag)
-		if err != nil {
+		d, err := openReadDeskFor(dirFlag, "desk "+cmd.Name())
+		if errors.Is(err, errNoDesk) && cmd.Name() == "runs" {
+			// runs lists every run it can read: no desk is an empty desk,
+			// said on stderr, and a --log source is still listed.
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", safeText(err.Error()))
+		} else if err != nil {
 			failed = append(failed, err)
 		} else {
 			srcs = append(srcs, runview.NewDeskSource(d))
@@ -469,7 +473,7 @@ type deskShowJSON struct {
 	Counts      runShowCountJSON `json:"counts"`
 	Partial     bool             `json:"partial"`
 	Held        bool             `json:"held"`
-	Note        string           `json:"note,omitempty"`
+	Note        string           `json:"note"` // "" when the log read cleanly; always present, as --help lists it
 }
 
 type runStepJSON struct {
@@ -694,7 +698,7 @@ func (r *loadedRun) readInPart() error {
 // knownRunNames lists the runs in the desk, to decorate a not-found error. A
 // desk that cannot be opened yields none: the error is already being reported.
 func knownRunNames(dirFlag string) []string {
-	d, err := openDeskDir(dirFlag)
+	d, err := openReadDeskFor(dirFlag, "desk show")
 	if err != nil {
 		return nil
 	}

@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 
@@ -364,12 +368,22 @@ var initModule = module.Manifest{
 // newInitCmd builds `forgectl init`: for each block in initSections, append
 // (or, for the host-scalar preamble, prepend) its template iff that block is
 // not already present in config.toml. It never overwrites or reflows a
-// section that's already there.
+// section that's already there. --dry-run reports the same plan and writes
+// nothing (forgectl#1151).
 func newInitCmd(deps module.Deps) *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Scaffold every config.toml section with commented, sensibly-defaulted templates",
-		Args:  cobra.NoArgs,
+		Short: "Create config.toml or add missing sections (safe to rerun)",
+		Long: `Create config.toml with every section as a commented template, sensibly
+defaulted. When config.toml exists, init adds only the sections it is missing
+and never edits or reorders the ones already there, so it is safe to rerun
+after an upgrade adds a section.
+
+--dry-run lists what init would add and writes nothing.
+
+Next: forgectl doctor checks the workbench is wired.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			slog.Debug("Preparing to scaffold config.toml.")
 			if err := refuseConfigMutationForLegacyBoundary(deps.LegacyBoundary); err != nil {
@@ -386,23 +400,14 @@ func newInitCmd(deps module.Deps) *cobra.Command {
 				}
 			}
 			out := cmd.OutOrStdout()
+			if dryRun {
+				return runInitDryRun(out, path)
+			}
 			added := 0
 			var lines []string
 			action, err := updateConfigLocked(path, nativeConfigWriterOps(), func(raw []byte) ([]byte, error) {
-				data := raw
-				for _, s := range initSections {
-					if hasSection(data, s.name) {
-						lines = append(lines, "already present: "+s.label)
-						continue
-					}
-					if s.name == "" {
-						data = append([]byte(s.template), data...)
-					} else {
-						data = append(data, []byte(s.template)...)
-					}
-					lines = append(lines, "added:            "+s.label)
-					added++
-				}
+				var data []byte
+				data, lines, added = planInit(raw, "added:            ")
 				return data, nil
 			})
 			if err != nil && !visibleWithoutDirectoryDurability(action, err) {
@@ -417,9 +422,52 @@ func newInitCmd(deps module.Deps) *cobra.Command {
 
 			slog.Info("Successfully scaffolded config.toml.", "path", termsafe.QuotePath(path), "sections_added", added)
 			fmt.Fprintf(out, "\n%d section(s) added to %s\n", added, termsafe.QuotePath(path))
+			_, _ = fmt.Fprintln(out, initNextStep)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list the sections init would add; write nothing")
+	return cmd
+}
+
+// initNextStep is init's last line: where a first run goes next.
+const initNextStep = "next: forgectl doctor"
+
+// planInit applies initSections to raw: each missing block is added (the
+// host-scalar preamble at the top, every other section at the end), and each
+// present one is left as it is. lines reports every block, an added one
+// prefixed with addedPrefix.
+func planInit(raw []byte, addedPrefix string) (data []byte, lines []string, added int) {
+	data = raw
+	for _, s := range initSections {
+		if hasSection(data, s.name) {
+			lines = append(lines, "already present: "+s.label)
+			continue
+		}
+		if s.name == "" {
+			data = append([]byte(s.template), data...)
+		} else {
+			data = append(data, []byte(s.template)...)
+		}
+		lines = append(lines, addedPrefix+s.label)
+		added++
+	}
+	return data, lines, added
+}
+
+// runInitDryRun reports what init would add to the config at path without
+// writing it. A missing file is an empty one: init would create it.
+func runInitDryRun(out io.Writer, path string) error {
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is forgectl's own config path, read only
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return termsafe.Error(err)
+	}
+	_, lines, added := planInit(raw, "would add:        ")
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(out, line)
+	}
+	_, _ = fmt.Fprintf(out, "\n%d section(s) would be added to %s (dry run: nothing written)\n", added, termsafe.QuotePath(path))
+	return nil
 }
 
 // hasSection reports whether data already defines the named top-level TOML

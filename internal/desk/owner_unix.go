@@ -36,6 +36,9 @@ type ownerLock struct {
 
 // openLock opens (creating) the lock file, which must be a regular file.
 func (d *Desk) openLock(name string) (*os.File, error) {
+	if d.readOnly {
+		return nil, ErrReadOnly
+	}
 	f, err := d.root.OpenFile(lockName(name), os.O_RDWR|os.O_CREATE|unix.O_NONBLOCK, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("desk: open the owner lock for %s: %w", describe(name), err)

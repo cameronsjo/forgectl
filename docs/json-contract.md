@@ -6,8 +6,8 @@ Exit statuses follow one table: [exit-codes.md](exit-codes.md).
 
 Under `--json`, forgectl never writes its human error frame (the styled `ERROR` block) to stderr. A non-zero exit takes one of two forms:
 
-- **The verdict is already on stdout.** A verb that reports a problem as its result puts the full JSON verdict on stdout and exits with its documented code. It writes no error object to stderr, because the verdict already says what went wrong. Examples: `doctor` finding a failed check, `docs check` with error findings, `preflight` finding a misaligned project, `pr repair` finding unsettled sessions, `update` with a failed step, `projects list --strict` on a partial inventory, `status --strict` with a section that is not `ok`, `launch stats` with skipped rows (the `skipped_rows` field), `surface ready` reporting a worker that is blocked, gone, unreadable, or not ready, `surface brief` with an outcome other than `sent`, `surface wait` with a state other than `settled`, `surface read --report` with `found: false`, and `surface close` with `closed: false`.
-- **The verb failed before it emitted anything.** stdout stays empty, and stderr gets exactly one JSON object.
+- **The verdict is already on stdout.** A verb that reports a problem as its result puts the full JSON verdict on stdout and exits with its documented code. It writes no error object to stderr, because the verdict already says what went wrong. Examples: `doctor` finding a failed check, `docs check` with error findings, `preflight` finding a misaligned project, `pr repair` finding unsettled sessions, `update` with a failed step, `projects list --strict` on a partial inventory, `status --strict` with a section that is not `ok`, `launch stats` with skipped rows (the `skipped_rows` field), `surface ready` reporting a worker that is blocked, gone, unreadable, or not ready, `surface brief` with an outcome other than `sent`, `surface wait` with a state other than `settled`, `surface read --report` with `found: false`, `surface close` with `closed: false`, and `pr dash` when both of its gh queries failed.
+- **The verb failed before it emitted anything.** stdout stays empty, and stderr gets exactly one JSON object, on one line. A verb whose failure has notes behind it (`review` and `pr prs` when every query failed) puts them in the object's `error` text instead of printing them as lines before it.
 
 A verb that streams several verdicts can hit both forms in one run. `pr drain --watch --json` writes one report per pass to stdout. If a later pass then fails before it can report, that pass's failure object goes to stderr, and the earlier reports stay on stdout.
 
@@ -15,7 +15,7 @@ A verb that streams several verdicts can hit both forms in one run. `pr drain --
 
 Some failures happen before any verb starts: a `config.toml` that does not parse or cannot be read (exit 2), and an environment forgectl cannot resolve its directories from, such as an unset `$HOME` or a relative `$XDG_CONFIG_HOME` (exit 2). These follow the same rule. When the verb you ran declares `--json` and you passed it, stderr gets that verb's one failure object in place of the plain `forgectl: …` line: code `failed` for most verbs, and the family shapes below for `env check` and the docs verbs. `launch` declares no `--json`, because everything after `launch` goes to the harness, so a `launch` failure stays a plain line.
 
-Some verbs also write documented progress or notes to stderr under `--json`: the `update` transcript, `herdr organize`'s human report, `projects list`'s per-host degradation notes, `sessions why`'s match count, and `tasks done`'s close record. Those lines are part of the verb's normal output. The contract only rules out the human error frame on top of them.
+Some verbs also write documented progress or notes to stderr under `--json`: the `update` transcript, `herdr organize`'s human report, `projects list`'s and `review`'s per-host degradation notes on a run that still produced rows, `pr prs`'s and `pr dash`'s per-query notes, `sessions why`'s match count, and `tasks done`'s close record. Those lines are part of the verb's normal output. The contract only rules out the human error frame on top of them.
 
 ## The failure object
 
@@ -29,7 +29,7 @@ All three keys are always present.
 
 | `code` | When |
 | --- | --- |
-| `usage_error` | forgectl rejected a flag or positional argument before the verb ran: an unknown flag, a flag missing its value, or a wrong number of arguments. |
+| `usage_error` | Nothing was attempted, and the call or setup can fix it. Either forgectl rejected a flag or positional argument before the verb ran (an unknown flag, a flag missing its value, a wrong number of arguments), or the verb refused a value before doing any work: `review` with a malformed `--repo` or an unknown `--kind`, a `sessions` verb with no concordance DSN configured. |
 | `failed` | The verb ran and failed before it wrote its verdict, for example because a subprocess failed, a flag combination was refused, or the config is invalid. |
 
 `path` is the one resolved file the failure is about, relative to the repository root, when there is one. Today only env-file refusals set it. Everywhere else it is `""`.

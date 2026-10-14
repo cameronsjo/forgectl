@@ -62,7 +62,7 @@ func newCleanCmdForClient(client *cleanpkg.Client, th theme.Theme) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:     "clean",
 		Aliases: cleanGroupAliases,
-		Short:   "Reclaim dep/build directories under a project root (dry-run by default)",
+		Short:   "Reclaim dep/build directories (dry-run by default)",
 		Long: `clean scans --root (default ~/Projects) for reclaimable dependency and
 build-output directories — node_modules, .venv/venv, __pycache__, target,
 dist, .next, build, vendor, .svelte-kit — and reports each one's size plus a

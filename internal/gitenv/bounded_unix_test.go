@@ -55,7 +55,7 @@ func TestBoundedHelper(t *testing.T) {
 // terminal's Ctrl-C, which reaches the foreground group, forgectl, only. A
 // SIGINT sent to forgectl alone must still end the git and its helpers, and
 // then forgectl itself, by that signal, as when they shared a group.
-// Mutations: make interruptible return ctx unchanged (forgectl dies, but
+// Mutations: make sigrelay's interruptible return ctx unchanged (forgectl dies, but
 // the git and its sleep run on with init as their parent); drop the
 // re-raise in its stop (the git dies, but forgectl exits 0 and would carry
 // on to the next repository).

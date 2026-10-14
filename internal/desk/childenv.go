@@ -3,6 +3,7 @@ package desk
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -53,4 +54,19 @@ func HomeDir() (string, error) {
 		return "", fmt.Errorf("desk: an item starts in the home directory, and $HOME (%s) is not absolute", describe(home))
 	}
 	return home, nil
+}
+
+// ApplyItemEnv sets where and with what environment an approved item's
+// process starts: cmd.Dir is [HomeDir] and cmd.Env is [ChildEnv]. Every path
+// that launches an item (the supervisor, a script, a batch step, a TTY item)
+// goes through it, so none can inherit the desk's own cwd or bash's startup
+// hooks. It returns HomeDir's error and leaves cmd unchanged then. A caller
+// that adds variables appends them to cmd.Env afterwards.
+func ApplyItemEnv(cmd *exec.Cmd) error {
+	home, err := HomeDir()
+	if err != nil {
+		return err
+	}
+	cmd.Dir, cmd.Env = home, ChildEnv()
+	return nil
 }

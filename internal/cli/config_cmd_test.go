@@ -704,7 +704,7 @@ func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
 	}
 
 	var js bytes.Buffer
-	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved); err != nil {
+	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved, nil); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {

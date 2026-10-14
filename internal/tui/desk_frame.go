@@ -143,7 +143,22 @@ const (
 	// rowSkipped is an item skipped for any reason but a change. Only the
 	// timeline shows one; the queue panel never does.
 	rowSkipped
+	// rowHeld is a pending item that cannot run yet (desk.StateHeld): it
+	// waits on an earlier item, or on a run of the same name. It becomes
+	// waiting on its own.
+	rowHeld
 )
+
+// pendingRowKind is the row kind of a pending item.
+func pendingRowKind(it desk.Item) rowKind {
+	switch it.State {
+	case desk.StateRefused:
+		return rowRefused
+	case desk.StateHeld:
+		return rowHeld
+	}
+	return rowWaiting
+}
 
 // queueRow is one row of the queue panel.
 type queueRow struct {
@@ -163,11 +178,7 @@ func deskRows(snap *desk.Snapshot, now time.Time) []queueRow {
 	}
 	var rows []queueRow
 	for _, it := range snap.Pending {
-		k := rowWaiting
-		if it.State == desk.StateRefused {
-			k = rowRefused
-		}
-		rows = append(rows, queueRow{k, it})
+		rows = append(rows, queueRow{pendingRowKind(it), it})
 	}
 	for _, it := range snap.Running {
 		k := rowRunning
@@ -839,6 +850,8 @@ func rowLook(st theme.Styles, k rowKind) (glyph, label string, style func(...str
 	switch k {
 	case rowRefused:
 		return "⊘", "refused", st.Danger.Render
+	case rowHeld:
+		return "◔", "held", st.Muted.Render
 	case rowRunning:
 		return "●", "running", st.Active.Render
 	case rowLost:
@@ -951,6 +964,8 @@ func (f deskFrame) rowBar(st theme.Styles, r queueRow, w int) (string, string) {
 		return BarThin(st, w, 0), detail
 	case rowRefused:
 		return BarThin(st, w, 0), st.Danger.Render("refused")
+	case rowHeld:
+		return BarThin(st, w, 0), st.Muted.Render("held")
 	case rowLost:
 		return BarThin(st, w, 0), st.Warn.Render("lost")
 	case rowChanged:
@@ -1213,6 +1228,8 @@ func (f deskFrame) focusState(r queueRow) string {
 		return s
 	case rowRefused:
 		return "refused: " + deskText(it.Refusal)
+	case rowHeld:
+		return "held: " + deskText(it.Hold)
 	case rowRunning:
 		if it.Started.IsZero() {
 			return "starting"
@@ -1482,7 +1499,7 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 	return deskKeys(st, width, keyState{
 		rows:    len(rows) > 0,
 		run:     canRun && len(rows) > 0 && sel.kind == rowWaiting,
-		skip:    len(rows) > 0 && (sel.kind == rowWaiting || sel.kind == rowRefused || sel.kind == rowLost),
+		skip:    len(rows) > 0 && (sel.kind == rowWaiting || sel.kind == rowHeld || sel.kind == rowRefused || sel.kind == rowLost),
 		waiting: n > 0,
 		undo:    f.canUndo,
 		logs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running) > 0,

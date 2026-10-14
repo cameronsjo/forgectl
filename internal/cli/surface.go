@@ -44,7 +44,7 @@ var surfaceModule = module.Manifest{
 func newSurfaceCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "surface",
-		Short: "Start a harness inside a terminal manager without exposing its invocation",
+		Short: "Start a harness in a terminal manager, invocation hidden",
 		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
 tmux, cmux, or herdr — without the manager ever seeing the harness invocation.
 
@@ -89,9 +89,15 @@ rows, recording their cost in usage-daily.jsonl; the drain runs it daily:
 
   forgectl surface prune --dry-run
 
-usage sums what the drain's workers cost by UTC day:
+usage sums what the drain's workers cost by UTC day, or prices one worker's
+transcript with no GitHub call:
 
-  forgectl surface usage --days 7`,
+  forgectl surface usage --days 7
+  forgectl surface usage fix-login --json
+
+tag stamps display tokens on a worker's herdr pane for the sidebar:
+
+  forgectl surface tag fix-login --token task=PAP-12`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -112,6 +118,7 @@ usage sums what the drain's workers cost by UTC day:
 	cmd.AddCommand(newSurfaceMergeMachineCmd(deps))
 	cmd.AddCommand(newSurfacePruneCmd(deps))
 	cmd.AddCommand(newSurfaceUsageCmd(deps))
+	cmd.AddCommand(newSurfaceTagCmd(deps))
 	return cmd
 }
 
@@ -189,7 +196,24 @@ only it sees, so a clean preview is not a promise. --json prints the preview as 
 and absent otherwise. posture maps each field the harness takes (claude
 permission_mode; codex sandbox, approval_policy) to {"value","source"}, where
 source is default, launch.worker, or repo-profile; the text preview prints
-<field>= and <field>_source= lines. --json needs --dry-run.
+<field>= and <field>_source= lines.
+
+Without --dry-run, --json prints what the launch created as one object:
+{"surface","name","target","harness","ref","workspace_id","tab_id",
+"pane_id","terminal_id","worker"}. ref is the line a launch prints without
+--json. The herdr ids are present for a herdr launch; terminal_id is read
+after the launch and left out when that read fails. worker is
+{"repo","worktree","branch","session_id","transcript","marker"} for
+--worktree and absent otherwise; marker is the first brief's REPORT marker.
+If a worker starts but its ledger row cannot be read back or completed, the
+object is still printed, with the ids and the worktree, and the launch then
+exits 1: check the exit code before trusting the empty fields.
+
+A worker launch also shows the worker's name in herdr's sidebar: it sets the
+workspace token "worker" (herdr workspace report-metadata), which a
+[ui.sidebar.spaces] row shows as $worker, after the workspace ownership
+check. The workspace label stays the ownership marker. A failure to set it is a note on stderr, not a failed
+launch.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
@@ -241,7 +265,7 @@ source is default, launch.worker, or repo-profile; the text preview prints
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`print the --dry-run preview as {"dry_run","surface","name","target","harness","run_directory","worker"} JSON (needs --dry-run)`)
+		`print what the launch created as {"surface","name","target","harness","ref","workspace_id","tab_id","pane_id","terminal_id","worker"} JSON, or with --dry-run the preview as {"dry_run","surface","name","target","harness","run_directory","worker"}`)
 
 	return cmd
 }
@@ -284,10 +308,6 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
 	}
-	if opts.JSON && !opts.DryRun {
-		return WithExitCode(errors.New("--json prints the --dry-run preview; add --dry-run (a launch prints one line, not JSON)"), exitUsage)
-	}
-
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)
 	}
@@ -364,6 +384,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return err
 	}
 
+	if opts.JSON {
+		return writeJSON(cmd.OutOrStdout(), newLaunchResult(cmd.Context(), adapter, result.Ref(), opts.Backend,
+			displayNameFor(opts.DisplayName, target), target, built.Invocation.Harness))
+	}
 	// One line, to stdout, naming only what the manager already knows. The ref
 	// renders as its backend and recovery tag; it has no accessor that would
 	// print an invocation, an environment, or a server fingerprint.

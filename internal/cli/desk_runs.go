@@ -57,8 +57,8 @@ runs is the progress view; ` + "`desk status`" + ` is the queue view (waiting it
 hashes, WHAT, skip reasons). A pending item is not a run yet, so runs leaves
 it out.
 
-Like status, reading the desk scans it, and a scan fixes the hash of a
-hand-dropped item and moves a changed one to skipped/.
+Like status, runs only reads the desk: it creates, moves, chmods and writes
+nothing.
 
 Exit codes: 0 listed; 1 a source could not be read (the rest are still
 listed); 2 usage.`,

@@ -424,7 +424,7 @@ func TestMenuGroup_KeepsOnlyThatGroupAndUnknownListsTheValidOnes(t *testing.T) {
 		!strings.Contains(bad, "pr,") || !strings.Contains(bad, "review") || !strings.Contains(bad, "repos") {
 		t.Errorf("stderr = %q; want 'unknown menu group' listing the command names and the area names", bad)
 	}
-	if !strings.Contains(bad, `"code": "usage_error"`) {
+	if !strings.Contains(bad, `"code":"usage_error"`) {
 		t.Errorf("unknown menu group must carry the usage_error code like an unknown flag: %q", bad)
 	}
 }

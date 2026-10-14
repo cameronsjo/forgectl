@@ -19,6 +19,20 @@ Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr 
 
 Reading a local clone's git state — `projects list`, `projects pick`, the project inventory, and `projects pull-all` — requires **Git 2.11.0 or newer**. That release introduced `git status --porcelain=v2 --branch`, which reports the working-tree state and the ahead/behind counts in a single command; forgectl reads both from that one call rather than spawning a second `rev-list` per clean repository. On older Git the command fails, the repository's status reads as unknown, and `pull-all` skips it rather than rebasing a tree whose state it could not establish.
 
+## First five minutes
+
+```sh
+forgectl init      # create config.toml; safe to rerun, it only adds missing sections (--dry-run to preview)
+forgectl doctor    # check the wiring: claude, tmux, gh sign-in, config; each ✗ names its fix
+forgectl status    # the daily overview; its first line says what needs you
+forgectl           # the menu, when you don't remember a verb
+```
+
+Two things `status` needs that `init` does not set:
+
+- **Your projects folder.** `status`, `projects`, `audit` and `clean` look for repos under `~/Projects`. If yours live elsewhere, set `PROJECTS_DIR` in your shell profile (`export PROJECTS_DIR=~/code`).
+- **gh signed in.** The PR sections read GitHub through `gh`. Run `gh auth login` once; `doctor` says when it is missing.
+
 ## Command groups
 
 The command groups at a glance. `forgectl --help` lists them from the binary
@@ -30,7 +44,7 @@ deep-dive get a link here.
 | --- | --- | --- |
 | `tmux` | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` | Usage below |
 | `config` | Show every config section, per-key set/default (alias: `cfg`) | Usage below |
-| `init` | Scaffold every `config.toml` section with commented, sensibly-defaulted templates | Usage below |
+| `init` | Create `config.toml`, or add the sections it lacks (safe to rerun; `--dry-run` previews) | Usage below |
 | `status` | Read-only overview: local git state, PRs, reclaimable space, bench health | [status](docs/commands/status.md) |
 | `projects` | Cross-host project inventory: local clones + GitHub + Gitea (alias: `proj`) | [projects and review](docs/commands/projects-and-review.md) |
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
@@ -90,11 +104,13 @@ forgectl config --json     # the same, machine-readable (stable surface)
 # init — scaffold every config.toml section with commented, sensibly-defaulted templates
 forgectl init               # append (or, for the host-scalar preamble, prepend) each
                              #   section's template iff that section is absent —
-                             #   never overwrites or reflows what's already there
+                             #   never overwrites or reflows what's already there;
+                             #   ends with the next step (forgectl doctor)
+forgectl init --dry-run     # list the sections init would add; write nothing
 
 # status — read-only overview across the workbench: local git state, the pr dash
 #   sections, the clean dry-run total, and bench health (see docs/commands/status.md)
-forgectl status                          # one glyph-led line per section, a few detail rows
+forgectl status                          # a "what needs you" verdict, then one glyph-led line per section
 forgectl status --json                   # every section and row; a failed source is a per-section error
 forgectl status --json --strict          # same, but exit 1 when any section degraded or failed
 
@@ -183,7 +199,9 @@ forgectl surface ready x --json    # wait until worker x is at its input prompt;
 forgectl surface brief x "Now run the tests."   # type a one-line follow-up, read it back, then Enter; exit 1 if anything disagrees
 forgectl surface wait x --json     # wait until worker x's turn settles at its prompt
 forgectl surface read x --report   # the REPORT line for x's last brief (check it against git before trusting it)
-forgectl surface list --orphans    # this repo's workers: present, gone, or unreadable (--json adds session id and transcript path)
+forgectl surface list --orphans    # this repo's workers: present, gone, or unreadable (--json adds session id, terminal id and transcript path)
+forgectl surface tag x --token task=PAP-12   # display tokens on x's herdr pane ($task in the sidebar)
+forgectl surface usage x --json    # price x's transcript, no GitHub call
 forgectl surface close x           # close x's workspace; remove its worktree only if no work is lost; never deletes the branch
 
 # recipe — run small built-in workbench recipes (alias: r)
