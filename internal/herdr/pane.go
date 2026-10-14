@@ -80,7 +80,7 @@ func PaneSplit(ctx context.Context, run exec.SensitiveRunner, herdrPath string, 
 		args = append(args, exec.MustFixed("--cwd"), exec.Opaque(s.CWD))
 	}
 	args = append(args, exec.MustFixed("--no-focus"))
-	out, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneSplit, "pane split", args)
+	out, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneSplit, "pane split", args, s.CWD)
 	if err != nil {
 		return Pane{}, err
 	}
@@ -106,7 +106,7 @@ func PaneRename(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID
 		return err
 	}
 	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneRename, "pane rename",
-		[]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("rename"), exec.Opaque(paneID), exec.Opaque(label)})
+		[]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("rename"), exec.Opaque(paneID), exec.Opaque(label)}, label)
 	return err
 }
 
@@ -125,7 +125,7 @@ func PaneRun(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID, c
 		return err
 	}
 	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneRun, "pane run",
-		[]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("run"), exec.Opaque(paneID), exec.Opaque(command)})
+		[]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("run"), exec.Opaque(paneID), exec.Opaque(command)}, command)
 	return err
 }
 
@@ -199,7 +199,7 @@ func PaneReportBlocked(ctx context.Context, run exec.SensitiveRunner, herdrPath,
 	if err != nil {
 		return err
 	}
-	_, err = runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane report-agent", args)
+	_, err = runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane report-agent", args, notificationText(message))
 	return err
 }
 
@@ -385,8 +385,11 @@ func (c *Client) CurrentLayout(ctx context.Context) (Layout, error) {
 
 // runVerb runs one herdr verb through the sensitive seam and returns its
 // complete stdout. herdr's refusal envelope is read from stderr on exit 1, or
-// from stdout on exit 0 (#722); a truncated stream is never parsed.
-func runVerb(ctx context.Context, run exec.SensitiveRunner, herdrPath string, kind exec.CommandKind, what string, args []exec.Arg) ([]byte, error) {
+// from stdout on exit 0 (#722); a truncated stream is never parsed. hide are
+// the plain values of the argv's free-text operands (a command, a label, a
+// message, a cwd): herdr echoes an operand it cannot place ("unknown option:
+// X"), so its stderr is quoted only with these scrubbed (runFailure).
+func runVerb(ctx context.Context, run exec.SensitiveRunner, herdrPath string, kind exec.CommandKind, what string, args []exec.Arg, hide ...string) ([]byte, error) {
 	if !filepath.IsAbs(herdrPath) {
 		return nil, fmt.Errorf("herdr: %s needs an absolute herdr path", what)
 	}
@@ -398,22 +401,14 @@ func runVerb(ctx context.Context, run exec.SensitiveRunner, herdrPath string, ki
 		StderrCap: paneStreamCap,
 	})
 	if err != nil {
-		var se *exec.SensitiveError
-		if errors.As(err, &se) && se.Outcome == exec.OutcomeExit && res.ExitCode == exitFailure {
-			if data, complete := res.Stderr.CopyBytesForParse(); complete {
-				if e := refusal(data); e != nil {
-					e.cause = err
-					return nil, e
-				}
-			}
-		}
-		return nil, fmt.Errorf("herdr %s: %w", what, err)
+		return nil, runFailure(what, res, err, hide...)
 	}
 	data, complete := res.Stdout.CopyBytesForParse()
 	if !complete {
 		return nil, fmt.Errorf("herdr %s: the reply was cut short", what)
 	}
 	if e := refusal(data); e != nil {
+		e.Message = scrubValues(e.Message, hide)
 		return nil, e
 	}
 	return data, nil

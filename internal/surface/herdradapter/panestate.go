@@ -54,3 +54,16 @@ func (a *Adapter) paneAgent(ctx context.Context, verb string, args []exec.Arg) e
 	}
 	return nil
 }
+
+// Notify runs `herdr notification show` on this adapter's pinned session
+// and returns herdr's shown/reason answer. The text is untrusted (a worker's
+// name and the drain's reason) and is rendered inert and capped by
+// herdr.NotificationArgs.
+func (a *Adapter) Notify(ctx context.Context, n herdr.Notification) (herdr.NotificationResult, error) {
+	args, err := herdr.NotificationArgs(n)
+	if err != nil {
+		return herdr.NotificationResult{}, err
+	}
+	res, err := a.run.RunSensitive(ctx, a.command(exec.KindHerdrNotify, args...))
+	return herdr.NotificationOutcome(n, res, err)
+}

@@ -126,3 +126,24 @@ func assertArgv(t *testing.T, cmd exec.SensitiveCommand, want []exec.Arg) {
 		}
 	}
 }
+
+// TestNotifyIsPinnedAndReadsShown: the drain's herdr notification carries
+// the session pin, puts the title first, and returns herdr's answer.
+func TestNotifyIsPinnedAndReadsShown(t *testing.T) {
+	a, run, _ := startClean(t)
+	run.reply1(exec.KindHerdrNotify, []byte(`{"id":"x","result":{"type":"notification_show","shown":false,"reason":"busy"}}`))
+	got, err := a.Notify(context.Background(), herdr.Notification{Title: "forgectl: w needs you", Body: "blocked: prompt", Sound: herdr.SoundRequest})
+	if err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if got.Shown || got.Reason != "busy" {
+		t.Errorf("result = %+v, want not shown, busy", got)
+	}
+	cmd, ok := commandOfKind(run.calls(), exec.KindHerdrNotify)
+	if !ok {
+		t.Fatal("no notification call was made")
+	}
+	assertArgv(t, cmd, []exec.Arg{exec.MustFixed("--session"), exec.Opaque(a.Session()),
+		exec.MustFixed("notification"), exec.MustFixed("show"), exec.Opaque("forgectl: w needs you"),
+		exec.MustFixed("--body"), exec.Opaque("blocked: prompt"), exec.MustFixed("--sound"), exec.MustFixed("request")})
+}

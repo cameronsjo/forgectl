@@ -67,7 +67,13 @@ type drainStatusView struct {
 	// are still live is explainable: surface close frees each.
 	HeldSlots int      `json:"held_slots"`
 	Holding   []string `json:"holding"`
-	Error     string   `json:"error,omitempty"`
+	// SlotsHold is the claude-slots hold on claude launches as the last tick
+	// left it, with HeldFor its length now in whole seconds (present, even
+	// as 0, whenever SlotsHold is). Absent when
+	// claude launches are not held, and when the drain is stopped or stale.
+	SlotsHold *drain.SlotsHold `json:"slots_hold,omitempty"`
+	HeldFor   *int64           `json:"slots_held_seconds,omitempty"`
+	Error     string           `json:"error,omitempty"`
 }
 
 // drainEventsResult is what `drain events --json` prints.
@@ -97,10 +103,11 @@ resolved from the config file at launch; an unknown name pauses claiming.
   forgectl surface drain status
   forgectl surface drain events --since 12
   forgectl surface drain stop
+  forgectl surface drain notify-test
 
 See docs/herdr.md, "Drain".`,
 	}
-	cmd.AddCommand(newSurfaceDrainStartCmd(deps), newSurfaceDrainStopCmd(), newSurfaceDrainStatusCmd(), newSurfaceDrainEventsCmd())
+	cmd.AddCommand(newSurfaceDrainStartCmd(deps), newSurfaceDrainStopCmd(), newSurfaceDrainStatusCmd(), newSurfaceDrainEventsCmd(), newSurfaceDrainNotifyTestCmd(deps))
 	return cmd
 }
 
@@ -367,12 +374,16 @@ older than 3 intervals). It names the pid, process start time, herdr
 session and last tick, counts the queue's rows per state, lists the rows
 in needs-you or failed with their last error, and names the rows holding a
 slot (a failed row whose worker is still live holds one until surface
-close). Counts and rows are read from the queue now, not from the last tick.
+close). When claude-slots holds claude launches it says so, since when, and
+why, separating a full cap (exit 1) from a check that cannot answer. Counts
+and rows are read from the queue now, not from the last tick.
 
 --json prints {"status","pause_reason","pid","process_start","herdr_session",
 "started_at","last_tick","interval_seconds","seq","counts","attention",
-"held_slots","holding","error"}, where attention is
-[{"name","repo","state","last_error","state_at"}].
+"held_slots","holding","slots_hold","slots_held_seconds","error"}, where
+attention is [{"name","repo","state","last_error","state_at"}] and
+slots_hold, present only while claude launches are held, is
+{"cond","reason","since"}.
 
 Exit 0: printed, whatever the state. Exit 2: drain.json or the queue cannot
 be read.
@@ -383,7 +394,7 @@ be read.
 			return runSurfaceDrainStatus(cmd, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","held_slots","holding","error"} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","held_slots","holding","slots_hold","slots_held_seconds","error"} as JSON`)
 	return cmd
 }
 
@@ -414,6 +425,13 @@ func runSurfaceDrainStatus(cmd *cobra.Command, asJSON bool) error {
 			Status: drain.Effective(st, time.Now()), PauseReason: st.PauseReason, PID: st.PID, ProcessStart: st.ProcessStart,
 			HerdrSession: st.HerdrSession, StartedAt: timePtr(st.StartedAt), LastTick: timePtr(st.LastTick),
 			IntervalSeconds: st.IntervalSeconds, Seq: st.Seq, Error: st.Error,
+		}
+		// Only a live drain holds anything: a stopped or stale one (crashed,
+		// killed) left its last hold behind, and its length would only grow.
+		if st.SlotsHold != nil && (view.Status == drain.StatusRunning || view.Status == drain.StatusPaused) {
+			view.SlotsHold = st.SlotsHold
+			held := int64(max(time.Since(st.SlotsHold.Since), 0) / time.Second)
+			view.HeldFor = &held
 		}
 	}
 	view.Counts, view.Attention = drain.Summarize(rows)
@@ -451,6 +469,18 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 	}
 	if v.PauseReason != "" {
 		if _, err := fmt.Fprintf(out, "paused: %s\n", termsafe.SafeLineMax(v.PauseReason, 400)); err != nil {
+			return err
+		}
+	}
+	if h := v.SlotsHold; h != nil {
+		// The reason says which: waiting for a slot (exit 1), or the cap
+		// could not be checked.
+		var secs int64
+		if v.HeldFor != nil {
+			secs = *v.HeldFor
+		}
+		held := drain.HeldFor(time.Duration(secs) * time.Second)
+		if _, err := fmt.Fprintf(out, "claude launches held for %s (since %s): %s\n", held, h.Since.UTC().Format(time.RFC3339), termsafe.SafeLineMax(h.Reason, 400)); err != nil {
 			return err
 		}
 	}
@@ -501,14 +531,18 @@ func newSurfaceDrainEventsCmd() *cobra.Command {
 		Long: `events prints drain-events.jsonl (and the rotated drain-events.jsonl.1 before
 it), oldest first: one event per row state change, pause, resume, drain start
 and stop, a row becoming unreadable, claude-slots holding launches
-(slots-held), a note such as claude-slots missing, and with [surface.merge]
+(slots-held), a check that cannot answer for 15 minutes (slots-stuck), each
+needs-you notification attempt per channel (notify: state names the channel,
+macos, herdr or herdr-pane, error says why it failed, and note marks one
+herdr rate-limited), a note such as
+claude-slots missing, and with [surface.merge]
 mode auto the autopilot's merges (merged) and refusals (merge-refused, once
 per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 
 --json prints {"events":[{"v","ts","seq","kind","name","repo","state",
-"attempt","error"}]}.
+"attempt","error","note"}]}.
 
 Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 
@@ -520,7 +554,7 @@ Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 		},
 	}
 	cmd.Flags().Int64Var(&since, "since", 0, "print only the latest drain run's events after this seq")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error","note"}]} as JSON`)
 	return cmd
 }
 
@@ -569,6 +603,9 @@ func drainEventLine(e drain.Event) string {
 	}
 	if e.Error != "" {
 		line += ": " + termsafe.SafeLineMax(e.Error, 400)
+	}
+	if e.Note != "" {
+		line += " (" + termsafe.SafeLineMax(e.Note, 400) + ")"
 	}
 	return line
 }

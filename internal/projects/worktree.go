@@ -127,10 +127,16 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	}
 
 	worktreeDir := filepath.Join(base, branch)
-	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, branch); err != nil {
+	// Hooks are switched off on both adds (#1049): the checkout fires
+	// post-checkout, and a relative core.hooksPath or hook.<name>.command in
+	// the operator's config (a .githooks or .husky convention) resolves
+	// inside the tree just fetched, so a hook the remote's branch carries
+	// would run as the operator before anyone has looked at it. RunNoHooks
+	// switches off the hooks directory and every configured hook.
+	if _, err := gitenv.RunNoHooks(ctx, c.run, bareDir, "worktree", "add", worktreeDir, branch); err != nil {
 		// The branch may exist only on the remote — create a local branch tracking
 		// origin/<branch> instead.
-		if _, ferr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
+		if _, ferr := gitenv.RunNoHooks(ctx, c.run, bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
 			slog.Error("Failed to add worktree.", "dest", worktreeDir, "branch", branch, "error", ferr)
 			// Categorical (#658): branch may be remote-derived (see above).
 			// bareDir is forgectl-composed and named, as for the fetch.
