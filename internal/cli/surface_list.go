@@ -143,7 +143,10 @@ func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, rep
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
 	}
-	return &workerLedgerContext{herdr: herdr, led: led, top: top}, nil
+	// Every reference this context reads comes from the session's own
+	// ledger, so a changed server incarnation is that session restarting:
+	// close and list settle it by the ownership marker (forgectl#1077).
+	return &workerLedgerContext{herdr: herdr.ForSessionLedger(), led: led, top: top}, nil
 }
 
 func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) error {
@@ -215,8 +218,10 @@ func rowTerminalID(ctx context.Context, tr terminalReader, r worker.Row) string 
 }
 
 // probeWorkspace probes the row's workspace. A row with no reference never
-// started one. An identity mismatch is unreadable: a restarted server or a
-// workspace that does not carry our marker cannot prove ours is gone.
+// started one. An identity mismatch is unreadable: a workspace id that does
+// not carry our marker, or our marker on another id, cannot prove ours is
+// gone. A restarted herdr session is not a mismatch here: the adapter is
+// ledger-bound, so a workspace the new server does not hold is gone.
 func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row *listRow) (string, string) {
 	if len(r.Ref) == 0 {
 		if r.Recovery != "" {
@@ -234,11 +239,15 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 	res := probe.Probe(ctx, ref)
 	switch res.State() {
 	case backend.ProbePresent:
+		if res.Restored() {
+			return workerPresent, "the herdr server behind this session changed (a restart or a live handoff) and holds the workspace again; " +
+				"after a restart the worker is gone, after a handoff it may still be running: check with herdr agent read before closing"
+		}
 		return workerPresent, ""
 	case backend.ProbeGone:
 		return workerGone, "the herdr workspace is gone"
 	case backend.ProbeIdentityMismatch:
-		return workerUnreadable, "herdr restarted, the reference is from another herdr session, or the workspace id no longer carries forgectl's marker (" + causeText(res) + ")"
+		return workerUnreadable, "the workspace cannot be proven to be forgectl's (" + causeText(res) + ")"
 	default:
 		return workerUnreadable, "herdr could not be read (" + causeText(res) + ")"
 	}

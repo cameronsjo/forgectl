@@ -712,6 +712,9 @@ func TestSurfaceLaunchDryRunFromASubfolder(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// An account with no config file: the folder-trust check cannot tell, so
+	// it refuses nothing, whatever the machine's own ~/.claude.json says.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	root, sub := settingsRootRepo(t)
 
 	deps := dryRunDeps(t)

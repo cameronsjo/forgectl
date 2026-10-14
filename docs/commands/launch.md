@@ -277,6 +277,8 @@ sandbox         = "workspace-write" # codex workers; built-in value workspace-wr
 approval_policy = "on-request"    # codex workers; built-in value on-request
 ```
 
+`forgectl launch which` shows what a worker started in the current directory gets: a `worker` row names each field, its value and its source (`default`, `launch.worker`, or `repo-profile`), and says when the worker floor would refuse it. `--json` carries the same as `worker`. `forgectl config` shows the posture with no project block matched.
+
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
 A pi worker takes none of these fields: pi has no permission or sandbox flag, so it runs with pi's own config and extensions, as a claude worker runs with your settings (ADR-0010, 2026-10-08 amendment). It still takes no harness args, and `allow_danger` and `add_dir` are cleared.

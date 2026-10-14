@@ -102,3 +102,22 @@ func TestRunWatch_MissingRunQuitsAsMissing(t *testing.T) {
 		t.Error("a run that is not there should quit as missing")
 	}
 }
+
+// ? opens the run view's key list in the live view too, and q there closes
+// the list instead of quitting (#1158).
+func TestRunWatch_QuestionMarkShowsTheKeysAndQClosesThem(t *testing.T) {
+	src := lensLogSource(t, "go fetch\n")
+	w := newRunWatchModel(t.Context(), src, RunWatchOptions{Poll: time.Millisecond, Theme: theme.Default(), ASCII: true})
+	next, _ := w.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	w = driveWatch(t, next.(runWatchModel), w.Init()) //nolint:forcetypeassert // test
+	next, _ = w.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	w = next.(runWatchModel) //nolint:forcetypeassert // test
+	if view := ansi.Strip(w.View().Content); !strings.Contains(view, "show these keys") {
+		t.Fatalf("? did not show the key list:\n%s", view)
+	}
+	next, cmd := w.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	w = next.(runWatchModel) //nolint:forcetypeassert // test
+	if cmd != nil || w.m.pager != nil || w.m.rv == nil {
+		t.Errorf("q in the key list should close it and keep the live view: cmd %v pager %v", cmd != nil, w.m.pager)
+	}
+}

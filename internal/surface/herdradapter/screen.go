@@ -75,7 +75,7 @@ func (a *Adapter) ownedPane(ctx context.Context, ref backend.Ref) (pane, ws stri
 	case locateFound:
 	case locateAbsent:
 		return "", "", ErrWorkerGone
-	case locateMismatch, locateUnreadable, locateInvalid:
+	case locateMismatch, locateUnreadable, locateInvalid, locateRestored:
 		return "", "", fmt.Errorf("%w: %v", ErrScreenUnreadable, cause)
 	}
 	identity, err := ref.HerdrIdentity()
