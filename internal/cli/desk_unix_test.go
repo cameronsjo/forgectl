@@ -747,6 +747,27 @@ func TestDeskDashboard_RefusesWithoutATerminal(t *testing.T) {
 	}
 }
 
+// TERM=dumb cannot draw the dashboard: it refuses with a usage exit and
+// points at --frame, before the desk dir is opened; --frame still works
+// there (#1152).
+func TestDeskDashboard_RefusesOnADumbTerminal(t *testing.T) {
+	dir := newDeskDir(t)
+	prev := deskHasTerminal
+	deskHasTerminal = func() bool { return true }
+	t.Cleanup(func() { deskHasTerminal = prev })
+	stubTermIsDumb(t, true)
+	_, _, err := deskRun(t, deskDeps())
+	wantExit(t, err, deskExitUsage)
+	if !errors.Is(err, tui.ErrDumbTerminal) || !strings.Contains(err.Error(), "desk --frame") {
+		t.Errorf("err = %v, want the TERM=dumb refusal naming desk --frame", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refusal created the desk dir: %v", err)
+	}
+	_, _, err = deskRun(t, deskDeps(), "--frame")
+	wantExit(t, err, 0)
+}
+
 func TestDeskFrame(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "desk")
 	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "30"})
@@ -837,12 +858,13 @@ func TestDeskNoIconsHonorsConfig(t *testing.T) {
 	}
 }
 
-// desk --help's key paragraph stays within 80 columns (#1107 review: a word
-// was left alone on its own line).
+// desk --help's key list stays within 80 columns (#1107 review: a word
+// was left alone on its own line), and lists every dashboard key from the
+// table the footer and ? draw from, so it cannot drift (#1159).
 func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "--help")
 	wantExit(t, err, 0)
-	_, para, ok := strings.Cut(out, "Dashboard keys:")
+	_, para, ok := strings.Cut(out, "Dashboard keys")
 	para, _, _ = strings.Cut(para, "\n\n")
 	if !ok {
 		t.Fatalf("no dashboard keys paragraph:\n%s", out)
@@ -852,8 +874,10 @@ func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 			t.Errorf("keys paragraph line is %d columns: %q", len(l), l)
 		}
 	}
-	// Every dashboard key, including the timeline's t and the history's h.
-	for _, want := range []string{"t the\ntimeline", "h the finished runs", "j/k move", "? the keys"} {
+	if !strings.Contains(para, tui.DeskKeysHelp(deskHelpWidth)) {
+		t.Errorf("keys paragraph is not the generated key list:\n%s", para)
+	}
+	for _, want := range []string{"\n  t    open the timeline", "\n  h    show the finished runs", "\n  j/k  move", "\n  ?    show these keys", "\n  q    quit"} {
 		if !strings.Contains(para, want) {
 			t.Errorf("keys paragraph lacks %q:\n%s", want, para)
 		}

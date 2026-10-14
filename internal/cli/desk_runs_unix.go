@@ -319,6 +319,9 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 	if o.live && !deskHasTerminal() {
 		return WithExitCode(tui.ErrRunWatchNeedsTerminal, deskExitUsage)
 	}
+	if o.live && termIsDumb() {
+		return WithExitCode(tui.DumbTerminalError("desk show --live", "desk show without --live for one printed view"), deskExitUsage)
+	}
 	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "")
 	defer closeAll()
 	if len(failed) > 0 {

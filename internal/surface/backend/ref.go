@@ -468,7 +468,64 @@ type Ref struct {
 	tmux  TmuxIdentity
 	cmux  CMuxIdentity
 	herdr HerdrIdentity
+
+	// endpoint is a digest of the socket path the selection chain resolved
+	// to when the reference was taken, or zero for a reference from before
+	// it was recorded. The path itself is never stored: see EndpointOf.
+	endpoint EndpointID
 }
+
+// EndpointID is a digest of an endpoint path. The incarnation fingerprint
+// already covers the path, but it also covers the socket's inode and change
+// time, so a reference whose incarnation no longer matches cannot say whether
+// only the server behind the path turned over, or the selection now reaches
+// another path altogether (another config directory, another build of the
+// backend). Comparing this digest says which (forgectl#1077).
+type EndpointID struct{ digest string }
+
+// endpointDomain separates this digest from every other sha256 in the
+// package, so an EndpointID can never be mistaken for a ServerID.
+const endpointDomain = "forgectl-surface-endpoint\x00"
+
+// EndpointOf digests an endpoint path. Hashed rather than kept, because a
+// reference is persisted and printed and carries no raw socket path.
+func EndpointOf(path string) EndpointID {
+	sum := sha256.Sum256([]byte(endpointDomain + path))
+	return EndpointID{digest: hex.EncodeToString(sum[:])}
+}
+
+// Valid reports whether e carries a complete digest.
+func (e EndpointID) Valid() bool {
+	return len(e.digest) == sha256.Size*2 && lowerHex(e.digest)
+}
+
+// Matches reports whether two endpoint digests name the same path. A zero
+// value matches nothing.
+func (e EndpointID) Matches(other EndpointID) bool {
+	return e.Valid() && other.Valid() && e.digest == other.digest
+}
+
+func (e EndpointID) String() string { return e.digest }
+
+// WithEndpoint returns a copy of the reference that records the endpoint it
+// was taken on. Only a herdr reference carries one today.
+func (r Ref) WithEndpoint(e EndpointID) (Ref, error) {
+	if r.kind != KindHerdr {
+		return Ref{}, fmt.Errorf("%w: only a herdr reference records its endpoint", ErrInvalidRef)
+	}
+	if !e.Valid() {
+		return Ref{}, fmt.Errorf("%w: incomplete endpoint digest", ErrInvalidRef)
+	}
+	r.endpoint = e
+	if err := r.Validate(); err != nil {
+		return Ref{}, err
+	}
+	return r, nil
+}
+
+// Endpoint returns the endpoint the reference was taken on, and false for a
+// reference that does not record one.
+func (r Ref) Endpoint() (EndpointID, bool) { return r.endpoint, r.endpoint.Valid() }
 
 // NewTmuxRef builds a validated tmux reference. The identity's session name
 // must carry the same ownership tag as the reference: a mismatch means the
@@ -517,6 +574,9 @@ func (r Ref) Validate() error {
 	}
 	if !r.tag.Valid() {
 		return fmt.Errorf("%w: %w", ErrInvalidRef, ErrInvalidRecoveryTag)
+	}
+	if r.endpoint != (EndpointID{}) && (!r.endpoint.Valid() || r.kind != KindHerdr) {
+		return fmt.Errorf("%w: an endpoint digest on a %s reference, or an incomplete one", ErrInvalidRef, r.kind)
 	}
 
 	// Exactly one identity is populated, and it is the one this kind names. A
@@ -647,6 +707,10 @@ type refWire struct {
 	Workspace string `json:"workspace,omitempty"`
 	Tab       string `json:"tab,omitempty"`
 	Pane      string `json:"pane,omitempty"`
+	// Endpoint is new without a version change: a build from before it
+	// refuses a reference carrying it (unknown fields are refused), which is
+	// the fail-closed direction.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // MarshalJSON encodes a validated reference. An invalid reference refuses to
@@ -672,6 +736,7 @@ func (r Ref) MarshalJSON() ([]byte, error) {
 		w.Workspace = r.herdr.workspace
 		w.Tab = r.herdr.tab
 		w.Pane = r.herdr.pane
+		w.Endpoint = r.endpoint.digest
 	case KindUnspecified:
 		return nil, ErrInvalidRef
 	}
@@ -733,7 +798,7 @@ func DecodeRef(data []byte) (Ref, error) {
 	// it did not expect is the same defect as one that ignores an unknown key.
 	switch kind {
 	case KindTmux:
-		if w.Workspace != "" || w.Tab != "" || w.Pane != "" {
+		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
 			return Ref{}, fmt.Errorf("%w: tmux reference carries workspace fields", ErrInvalidRef)
 		}
 		id, err := NewTmuxIdentity(w.Session)
@@ -742,7 +807,7 @@ func DecodeRef(data []byte) (Ref, error) {
 		}
 		return NewTmuxRef(source, server, tag, id)
 	case KindCmux:
-		if w.Session != "" || w.Tab != "" || w.Pane != "" {
+		if w.Session != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
 			return Ref{}, fmt.Errorf("%w: cmux reference carries foreign fields", ErrInvalidRef)
 		}
 		id, err := NewCMuxIdentity(w.Workspace)
@@ -758,7 +823,11 @@ func DecodeRef(data []byte) (Ref, error) {
 		if err != nil {
 			return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
 		}
-		return NewHerdrRef(source, server, tag, id)
+		ref, err := NewHerdrRef(source, server, tag, id)
+		if err != nil || w.Endpoint == "" {
+			return ref, err
+		}
+		return ref.WithEndpoint(EndpointID{digest: w.Endpoint})
 	case KindUnspecified:
 	}
 	return Ref{}, fmt.Errorf("%w: unknown backend", ErrInvalidRef)

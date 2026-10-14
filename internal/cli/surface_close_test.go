@@ -180,7 +180,7 @@ func TestCloseWorkerGuards(t *testing.T) {
 
 	t.Run("each refusal names its own cause", func(t *testing.T) {
 		for want, result := range map[string]backend.CloseResult{
-			"herdr restarted":   backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch, errors.New("x"))),
+			"cannot be proven":  backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch, errors.New("x"))),
 			"could not be read": backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureUnavailable, errors.New("x"))),
 			"did not close":     backend.NewCloseFailed(backend.NewStartCause(backend.FailureUnavailable, errors.New("x"))),
 		} {

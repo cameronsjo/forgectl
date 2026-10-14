@@ -47,6 +47,15 @@ var isInteractiveTTY = func() bool {
 
 func interactiveTTY(stdinTTY, stdoutTTY bool) bool { return stdinTTY && stdoutTTY }
 
+// termIsDumb reports TERM=dumb, where a full-screen view cannot be drawn, so
+// the hub, the tmux menu, the desk and the cockpit refuse with a pointer to
+// their plain forms (#1152). A seam, so a test pins it either way whatever
+// TERM the test runs under.
+var termIsDumb = func() bool { return tui.DumbTerminal(os.Getenv("TERM")) }
+
+// errHubDumbTerminal is the hub's refusal under TERM=dumb.
+var errHubDumbTerminal = tui.DumbTerminalError("the menu", "forgectl menu for its contents as text, or forgectl --help")
+
 // fangTrustsProbe reports whether to believe the background fang detected.
 // Fang v1.0.0 probes only when os.Stdout is a TTY (and otherwise passes a
 // hard-coded light placeholder), so both halves are required: fang actually
@@ -224,6 +233,9 @@ func execute(ctx context.Context) error {
 
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
+		if termIsDumb() {
+			return preFangFailure(builtRoot, args, WithExitCode(errHubDumbTerminal, classExit(classUsage)))
+		}
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
 		opts := hubRunOptions(ctx, deps, root, tmuxClient)
 		opts.NoIcons = noIcons

@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
 // deskModule declares `desk`: the operator queue for scripts Claude stages but
@@ -43,6 +44,9 @@ const (
 	deskExitBrokenPipe = 141
 	// deskQuoteMax caps an argument quoted back in an error.
 	deskQuoteMax = 120
+	// deskHelpWidth is the column --help's generated key list wraps at, as
+	// the hand-wrapped paragraphs around it do.
+	deskHelpWidth = 80
 )
 
 // Injectable seams, so command tests need no home directory, terminal, or
@@ -122,11 +126,8 @@ The desk directory is --dir, else $DESK_DIR, else $CLAUDE_DESK_DIR, else
 $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
 pending/, running/, done/ and skipped/ subdirectories are touched.
 
-Dashboard keys: y run, s skip (asks first), u undo a skip, v view the script,
-l the latest log, r runs (the run view: flow, events, replay), t the
-timeline (what needs you, then the desk by day), h the finished runs in place
-of the timeline panel (h again goes back), a run everything on screen (asks
-first, listing each full sha256), j/k move, ? the keys, q quit.
+Dashboard keys (? lists them; in the run view, ? lists its own):
+` + tui.DeskKeysHelp(deskHelpWidth) + `
 
 The desk defends against accidents (an item edited after it was queued, an item
 run twice, hostile text in a header); it does not defend against another

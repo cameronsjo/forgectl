@@ -705,7 +705,13 @@ func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, s
 	if err != nil {
 		return backend.Ref{}, err
 	}
-	return backend.NewHerdrRef(a.source, now, tag, id)
+	ref, err := backend.NewHerdrRef(a.source, now, tag, id)
+	if err != nil {
+		return backend.Ref{}, err
+	}
+	// The socket path, as a digest, so a later turnover can be told apart
+	// from a reference reaching another endpoint (locateAfterTurnover).
+	return ref.WithEndpoint(backend.EndpointOf(server.socket))
 }
 
 func (a *Adapter) fingerprint(socket string, info os.FileInfo, version string) (backend.ServerID, error) {
