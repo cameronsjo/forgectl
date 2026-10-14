@@ -205,6 +205,9 @@ Without --dry-run, --json prints what the launch created as one object:
 after the launch and left out when that read fails. worker is
 {"repo","worktree","branch","session_id","transcript","marker"} for
 --worktree and absent otherwise; marker is the first brief's REPORT marker.
+If a worker starts but its ledger row cannot be read back or completed, the
+object is still printed, with the ids and the worktree, and the launch then
+exits 1: check the exit code before trusting the empty fields.
 
 A worker launch also shows the worker's name in herdr's sidebar: it sets the
 workspace token "worker" (herdr workspace report-metadata), which a
