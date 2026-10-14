@@ -217,8 +217,8 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 	switch res.State() {
 	case backend.ProbePresent:
 		if res.Restored() {
-			return workerPresent, "the herdr server behind this session changed and holds the workspace again; " +
-				"if herdr restarted, it restored the workspace with a fresh shell and the worker did not survive: close it"
+			return workerPresent, "the herdr server behind this session changed (a restart or a live handoff) and holds the workspace again; " +
+				"after a restart the worker is gone, after a handoff it may still be running: check with herdr agent read before closing"
 		}
 		return workerPresent, ""
 	case backend.ProbeGone:

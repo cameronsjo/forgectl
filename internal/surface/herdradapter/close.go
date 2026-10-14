@@ -223,9 +223,11 @@ const (
 	locateAbsent
 	locateMismatch
 	locateUnreadable
-	// locateRestored is locateFound for a workspace a restarted server holds
-	// under the reference's id and marker (locateAfterTurnover): ours, but
-	// the worker that ran in it died with the old server.
+	// locateRestored is locateFound for a workspace a new incarnation at the
+	// same socket holds under the reference's id and marker
+	// (locateAfterTurnover): ours, but whether the worker survived is not
+	// known. A restart killed it; a live handoff (`herdr update --handoff`)
+	// carried it across.
 	locateRestored
 )
 
@@ -364,19 +366,22 @@ func (a *Adapter) locateIn(ctx context.Context, ref backend.Ref, view workspaceV
 // locateAfterTurnover answers locate for a reference whose server incarnation
 // changed, when the caller vouches that the reference was taken in this
 // session (ForSessionLedger) and the reference records the same socket path
-// the session resolves to now. The server behind that path turned over: it
+// the session resolves to now. The server behind that path changed: it
 // restarted, and its panes, the worker's harness among them, went with the
-// old one (forgectl#1077). A change in the socket's change time alone, with
-// no restart, lands here too.
+// old one (forgectl#1077), or a live handoff (`herdr update --handoff`)
+// rebound the same path and carried the panes across. A change in the
+// socket's change time alone, with no new server, lands here too.
 //
-// What can remain is the workspace OBJECT: herdr's session restore brings a
-// workspace back under its saved id and label, with fresh shells. So the
+// After a restart, what can remain is the workspace OBJECT: herdr's session
+// restore brings a workspace back under its saved id and label, with fresh
+// shells. After a handoff the workspace keeps its id, label and panes. So the
 // answer comes from the ownership marker, which carries a random tag and
 // cannot be on anybody else's workspace, read from a complete listing:
 //
 //   - no workspace carries the marker: gone. The new server does not hold it.
 //   - exactly one does, at the reference's id: locateRestored. It is ours,
-//     and Close closes it.
+//     and Close closes it; Probe flags it, because the worker in it may be
+//     dead (restart) or alive (handoff).
 //   - anything else (the marker at another id, or on two): a mismatch,
 //     because neither absence nor this id is proved.
 //

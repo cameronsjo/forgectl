@@ -52,10 +52,10 @@ func TestReconcileRow(t *testing.T) {
 	}
 
 	// A workspace herdr restored after a restart is present, but the worker
-	// in it did not survive, and list says so (forgectl#1077).
-	t.Run("a restored workspace is present and says the worker is gone", func(t *testing.T) {
+	// in it may be dead (restart) or alive (handoff), and list says so (forgectl#1077).
+	t.Run("a restored workspace is present and says to check the worker first", func(t *testing.T) {
 		got := reconcileRow(ctx, fakeProber{backend.NewProbePresentRestored()}, launchedRow(t), top, listed, time.Unix(1e9, 0))
-		if got.State != workerPresent || !strings.Contains(got.Reason, "did not survive") {
+		if got.State != workerPresent || !strings.Contains(got.Reason, "herdr agent read") {
 			t.Fatalf("state %q reason %q", got.State, got.Reason)
 		}
 		plain := reconcileRow(ctx, fakeProber{backend.NewProbePresent()}, launchedRow(t), top, listed, time.Unix(1e9, 0))

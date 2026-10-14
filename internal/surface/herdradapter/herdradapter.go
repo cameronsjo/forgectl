@@ -261,8 +261,9 @@ func checkSocketPath(socket string) error {
 // question by forgectl's ownership marker instead: see locateAfterTurnover.
 //
 // Reading and typing into a worker's pane (WorkerScreen, TypeText,
-// PressEnter) still refuse a changed incarnation: a workspace herdr restored
-// after a restart runs a fresh shell, not the worker.
+// PressEnter) still refuse a changed incarnation: after a restart a restored
+// workspace runs a fresh shell, not the worker, and nothing here can tell a
+// restart from a live handoff.
 //
 // The copy is shallow. That is safe because an Adapter holds only its pin and
 // seams, all fixed at construction. A field that must not be copied (a lock,
