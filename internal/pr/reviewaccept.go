@@ -84,8 +84,13 @@ func runClaudeProbe(ctx context.Context, bin, dir string, env []string, args ...
 // Claude session invoked forgectl and must not steer the check, and with
 // TMPDIR pointed into the check's own scratch directory, so the files claude
 // writes there (the spilled --settings document among them) go when it does.
-func probeEnv(base, windowEnv []string, tmpDir string) []string {
-	overlay := make(map[string]bool, len(windowEnv))
+// Every variable in unset is dropped as well, as the window's `env -u` drops
+// it (reviewRelocationEnv), so the check sees no value the reviewer will not.
+func probeEnv(base, windowEnv []string, tmpDir string, unset ...string) []string {
+	overlay := make(map[string]bool, len(windowEnv)+len(unset))
+	for _, k := range unset {
+		overlay[k] = true
+	}
 	for _, e := range windowEnv {
 		key, _, _ := strings.Cut(e, "=")
 		overlay[key] = true
@@ -122,7 +127,7 @@ func probeEnv(base, windowEnv []string, tmpDir string) []string {
 //     keys it does not know, which no validation reports.
 //   - `claude --setting-sources "" --settings <doc> doctor` lists nothing under
 //     "Invalid settings". This validates the exact document, in the exact
-//     argv form, the reviewer is given. It runs in an empty scratch directory
+//     form (the same settings file), the reviewer is given. It runs in an empty scratch directory
 //     so no workspace file is read, and a known-bad document must be flagged
 //     first, or the check could not see a rejection at all.
 //
@@ -131,7 +136,7 @@ func probeEnv(base, windowEnv []string, tmpDir string) []string {
 //
 // Any failure to run, parse, or recognise either answer is a refusal. There
 // is deliberately no path from here that dispatches without the sandbox.
-func claudeAcceptsReviewSettings(ctx context.Context, claudePath, settingsJSON string, windowEnv []string) error {
+func claudeAcceptsReviewSettings(ctx context.Context, claudePath, settingsJSON string, windowEnv, unset []string) error {
 	dir, err := os.MkdirTemp("", "forgectl-review-settings-check-*")
 	if err != nil {
 		return fmt.Errorf("could not create a scratch directory to check claude's settings acceptance: %w", err)
@@ -141,7 +146,7 @@ func claudeAcceptsReviewSettings(ctx context.Context, claudePath, settingsJSON s
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return fmt.Errorf("could not create a scratch directory to check claude's settings acceptance: %w", err)
 	}
-	p := probe{bin: claudePath, dir: dir, env: probeEnv(os.Environ(), windowEnv, tmp)}
+	p := probe{bin: claudePath, dir: dir, env: probeEnv(os.Environ(), windowEnv, tmp, unset...)}
 
 	if err := p.meetsReviewVersion(ctx); err != nil {
 		return err

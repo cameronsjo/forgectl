@@ -175,8 +175,9 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	sess.FindingsDir = findingsDir
 
 	// Nothing is written into the workspace for any reviewer. The Claude
-	// reviewer's whole profile goes on its command line at dispatch
-	// (reviewSettingsJSON in launchInline); Codex gets its posture from its
+	// reviewer's whole profile goes to it at dispatch as a settings file in
+	// a sealed settings dir beside the workspace, outside the reviewer's
+	// private temp dir (writeReviewSettings); Codex gets its posture from its
 	// own flags (launchCodex) and receives no settings document at all.
 
 	bc := Breadcrumb{
@@ -262,20 +263,28 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 
 	// Belt: prefix scan, bounded at the temp root so a $TMPDIR whose own path
 	// happens to contain a "forgectl-*" component does not reject everything
-	// under it.
-	tempRoot := filepath.Clean(osTempDir())
-	if r, err := filepath.EvalSymlinks(tempRoot); err == nil {
-		tempRoot = r
+	// under it. Workspaces are made in reviewWorkspaceRoot, which is the
+	// parent of the temp root when that is Claude Code's shared claude-<uid>
+	// dir, so that root is scanned too.
+	roots := []string{osTempDir()}
+	if root, err := reviewWorkspaceRoot(); err == nil {
+		roots = append(roots, root)
 	}
-	if !sandbox.WithinWorkspace(tempRoot, real) {
-		return nil
-	}
-	for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
-		if strings.HasPrefix(filepath.Base(dir), sandboxPrefix) {
-			return cleanRoomError(absPath, dir)
+	for _, tempRoot := range roots {
+		tempRoot = filepath.Clean(tempRoot)
+		if r, err := filepath.EvalSymlinks(tempRoot); err == nil {
+			tempRoot = r
 		}
-		if parent := filepath.Dir(dir); parent == dir {
-			break
+		if !sandbox.WithinWorkspace(tempRoot, real) {
+			continue
+		}
+		for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
+			if strings.HasPrefix(filepath.Base(dir), sandboxPrefix) {
+				return cleanRoomError(absPath, dir)
+			}
+			if parent := filepath.Dir(dir); parent == dir {
+				break
+			}
 		}
 	}
 	return nil

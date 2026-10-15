@@ -3,12 +3,16 @@ package pr
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // reviewSettings is the whole Claude Code settings document the clean-room
-// reviewer (agent A) runs under, passed as inline JSON with --settings
-// (reviewSettingsJSON). It is DENY-BY-DEFAULT: the agent may only read and
+// reviewer (agent A) runs under, written to a read-only file in a sealed
+// settings dir of its own beside the workspace, outside the private temp dir
+// and every root the sandbox can write, and passed with --settings
+// (reviewSettingsJSON, writeReviewSettings). It is DENY-BY-DEFAULT: the agent may only read and
 // run the listed inspection commands. It has NO permission to post a review,
 // comment, merge, or push — posting is gated exclusively by forgectl's human
 // approval gate, never by the agent itself.
@@ -51,9 +55,9 @@ type permissions struct {
 // (forgectl#694). Treat this list as what the reviewer may ASK to run. What
 // a run can then do is narrowed by the OS sandbox (reviewsandbox.go), and
 // only as far as that file says: its writes are denied in the workspace and
-// the shared git dir but still land in the findings dir and the per-user
-// temp dir, its network is limited to the PR's gh hosts, and its READS are
-// not narrowed at all.
+// the shared git dir but still land in the findings dir and the review's own
+// private temp dir, its network is limited to the PR's gh hosts, and its
+// READS are narrowed only by the credential paths credentialReadDeny names.
 //
 // Neither mode grants `rg`. ripgrep's `--pre COMMAND` runs COMMAND on every
 // searched file, so `rg --pre sh x file` executes a script straight out of a
@@ -179,7 +183,6 @@ var denyPosting = []string{
 	"Bash(wget:*)",
 	"Write",
 	"Edit",
-	"MultiEdit",
 	"NotebookEdit",
 	"WebFetch",
 }
@@ -195,7 +198,7 @@ func remoteProfile(host string, ref Ref) (permissions, error) {
 	return permissions{
 		DefaultMode: "plan",
 		Allow:       append(append([]string{}, allowReadOnly...), ghReads...),
-		Deny:        denyPosting,
+		Deny:        append(append([]string{}, denyPosting...), credentialReadDeny(reviewCredentialPaths(host))...),
 	}, nil
 }
 
@@ -215,10 +218,12 @@ var localAllowReadOnly = append([]string{}, baseReadOnly...)
 // network CLI" requirement for an offline review, applied as defense-in-depth
 // on top of DefaultMode "plan" already blocking anything unlisted.
 //
-// Deliberately no bare "Write" here: Deny takes precedence over Allow, so a
-// blanket Write deny would clobber the scoped Write(findingsDir/**) grant
-// localProfile adds to Allow. Write is handled entirely by scoping to the
-// findings dir, not by omission-then-deny.
+// Deliberately no bare "Write" here: Claude Code checks a Write against Edit
+// path rules, and a blanket deny would risk clobbering the scoped
+// Edit(findingsDir/**) grant localProfile adds to Allow. Writes are handled
+// entirely by scoping to the findings dir. The bare "Edit" deny stays: it
+// refuses the Edit tool itself, and measured on Claude Code 2.1.296 it does
+// not stop the Write tool from creating a file the scoped grant covers.
 var localDenyNetwork = []string{
 	"Bash(gh:*)",
 	"Bash(git push:*)",
@@ -234,20 +239,46 @@ var localDenyNetwork = []string{
 	"Bash(scp:*)",
 	"Bash(nc:*)",
 	"Edit",
-	"MultiEdit",
 	"NotebookEdit",
 	"WebFetch",
 }
 
 // localProfile builds the deny-by-default permission set for a local review
-// session: baseReadOnly (no rg, no gh), plus exactly one scoped Write grant
+// session: baseReadOnly (no rg, no gh), plus exactly one scoped write grant
 // to findingsDir — the sole path outside the reviewed worktree the agent may
 // write to.
-func localProfile(findingsDir string) permissions {
-	allow := append(append([]string{}, localAllowReadOnly...), fmt.Sprintf("Write(%s/**)", findingsDir))
+//
+// The grant is an Edit rule, because Claude Code matches file writes only
+// against Edit(path) rules; a Write(path) rule is accepted and never matched
+// (forgectl#715 item 4). And the path takes the `//` prefix, because a
+// permission path with one leading `/` is relative to the settings file, not
+// the filesystem root. Measured on Claude Code 2.1.296: Edit(//dir/**) let
+// the Write tool create a file in dir, and both Write(//dir/**) and
+// Edit(/dir/**) left it needing a grant.
+func localProfile(findingsDir string) (permissions, error) {
+	grant, err := findingsEditRule(findingsDir)
+	if err != nil {
+		return permissions{}, err
+	}
 	return permissions{
 		DefaultMode: "plan",
-		Allow:       allow,
-		Deny:        localDenyNetwork,
+		Allow:       append(append([]string{}, localAllowReadOnly...), grant),
+		Deny:        append(append([]string{}, localDenyNetwork...), credentialReadDeny(reviewCredentialPaths(""))...),
+	}, nil
+}
+
+// findingsEditRule is the scoped write grant for findingsDir, in the
+// `//`-rooted spelling a permission rule needs for an absolute path. It
+// refuses a relative path, which the rule would read against the settings
+// file, and a path holding a character a permission path treats as a pattern
+// or that would end the rule early: either would widen or break the one
+// write grant the reviewer has.
+func findingsEditRule(findingsDir string) (string, error) {
+	if !filepath.IsAbs(findingsDir) {
+		return "", fmt.Errorf("refusing to grant the reviewer writes to %q: the findings dir is not absolute", findingsDir)
 	}
+	if strings.ContainsAny(findingsDir, permissionPathMeta) {
+		return "", fmt.Errorf("refusing to grant the reviewer writes to %q: the findings dir holds a character a permission rule reads as a pattern", findingsDir)
+	}
+	return "Edit(/" + filepath.Clean(findingsDir) + "/**)", nil
 }

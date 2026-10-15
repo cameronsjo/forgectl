@@ -105,7 +105,7 @@ func TestClaudeAcceptsReviewSettings(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			swapClaudeProbe(t, tc.probe)
-			err := claudeAcceptsReviewSettings(context.Background(), "/usr/local/bin/claude", doc, nil)
+			err := claudeAcceptsReviewSettings(context.Background(), "/usr/local/bin/claude", doc, nil, nil)
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Errorf("unexpected refusal: %v", err)
@@ -130,6 +130,12 @@ func TestProbeEnv(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("probeEnv =\n  %v\nwant\n  %v", got, want)
+	}
+	// A variable the window will unset is dropped from the base too, so the
+	// probe sees the document the way the reviewer will.
+	got = probeEnv(base, window, "/scratch/tmp", "CLAUDE_CONFIG_DIR")
+	if slices.Contains(got, "CLAUDE_CONFIG_DIR=/home/o/.claude") {
+		t.Errorf("probeEnv kept an unset variable from the base: %v", got)
 	}
 }
 
@@ -192,7 +198,7 @@ esac
 echo 'Claude Code doctor'
 sleep 30 &
 sleep 30`)
-	err := claudeAcceptsReviewSettings(t.Context(), bin, `{"sandbox":{"enabled":true}}`, nil)
+	err := claudeAcceptsReviewSettings(t.Context(), bin, `{"sandbox":{"enabled":true}}`, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "could not check the reviewer's settings") {
 		t.Fatalf("err = %v, want a refusal because doctor never answered for the real document", err)
 	}
@@ -348,11 +354,11 @@ func TestClaudeAcceptsReviewSettings_LiveClaude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claudeAcceptsReviewSettings(t.Context(), claude, string(badDoc), nil); err == nil || !strings.Contains(err.Error(), "allowMachLookup") {
+	if err := claudeAcceptsReviewSettings(t.Context(), claude, string(badDoc), nil, nil); err == nil || !strings.Contains(err.Error(), "allowMachLookup") {
 		t.Fatalf("a document the installed claude must reject was not refused (err = %v)", err)
 	}
 	for name, doc := range docs {
-		if err := claudeAcceptsReviewSettings(t.Context(), claude, doc, nil); err != nil {
+		if err := claudeAcceptsReviewSettings(t.Context(), claude, doc, nil, nil); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

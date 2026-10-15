@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -86,7 +88,47 @@ func localReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer)
 // workspace and prints nothing.
 func reviewTempRoot(t *testing.T) {
 	t.Helper()
-	t.Setenv("TMPDIR", t.TempDir())
+	root := t.TempDir()
+	unsealOnCleanup(t, root)
+	t.Setenv("TMPDIR", root)
+}
+
+// unsealOnCleanup releases every review under root before t's
+// earlier-registered cleanups remove it (releaseReviews).
+func unsealOnCleanup(t *testing.T, root string) {
+	t.Helper()
+	t.Cleanup(func() { releaseReviews(root) })
+}
+
+// releaseReviews removes the review dirs of every workspace under root and
+// makes every dir under it writable again, best effort. A Claude dispatch
+// makes a private temp dir that can sit outside root, in /tmp, when root is
+// too long for Claude Code's 44-byte temp dir limit, and seals the
+// reviewer's settings dir 0500 (forgectl#907); a test that does not tear its
+// review down would leak the one and leave the other that RemoveAll cannot
+// empty unless run as root.
+func releaseReviews(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), sandbox.WorkspacePrefix) {
+			_ = pr.RemoveReviewDirs(path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	unsealTree(root)
+}
+
+// unsealTree chmods every dir under root 0700, best effort.
+func unsealTree(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
+		}
+		return nil
+	})
 }
 
 func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {

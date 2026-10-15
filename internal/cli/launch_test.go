@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -48,9 +49,60 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Review workspaces, and the private temp and settings dirs a Claude
+	// dispatch makes beside each (forgectl#907), land under the OS temp root,
+	// and many tests here dispatch without tearing down. Give the package a
+	// temp root of its own, removed after the run, so none of them leaks into
+	// the real one.
+	tmp, err := shortTempRoot()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		panic("create temp root: " + err.Error())
+	}
+	if err := os.Setenv("TMPDIR", tmp); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("set TMPDIR: " + err.Error())
+	}
+
 	code := m.Run()
 	_ = os.RemoveAll(dir)
+	// The settings dir is left 0500, which RemoveAll cannot empty unless
+	// run as root.
+	releaseReviews(tmp)
+	_ = os.RemoveAll(tmp)
 	os.Exit(code)
+}
+
+// shortTempRoot makes the package's temp root directly in a short system temp
+// dir, under a short name. The drain tests bind Unix sockets under TMPDIR,
+// and a Claude review's private temp dir must keep Claude Code's per-uid dir
+// inside it within 44 bytes, or it is made in /tmp instead and outlives the
+// run. macOS's per-user /var/folders/.../T/ is too long for either, so on
+// macOS the root goes under /private/tmp: /tmp itself is a symlink to it, and
+// the drain refuses a symlinked TMPDIR.
+func shortTempRoot() (string, error) {
+	base := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		base = "/private/tmp"
+	}
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for range 64 {
+		var b [4]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = alphabet[int(b[i])%len(alphabet)]
+		}
+		dir := filepath.Join(base, "f"+string(b[:]))
+		err := os.Mkdir(dir, 0o700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return dir, err
+	}
+	return "", errors.New("no free temp root name")
 }
 
 // stubSandboxDeps writes no-op bwrap and socat executables into a directory

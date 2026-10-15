@@ -15,7 +15,7 @@ package pr
 //       workspace, and keeps the forgectl-findings- prefix
 // localProfile (Classification: deny-by-default security control, broader than PR mode)
 //   [x] Denies every gh subcommand; grants none
-//   [x] Exactly one scoped Write(findingsDir/**) grant; no bare "Write" in deny
+//   [x] Exactly one scoped Edit(//findingsDir/**) grant; no bare "Write" in deny
 
 import (
 	"context"
@@ -327,7 +327,7 @@ func TestPrepareLocal_WritesNoSettingsIntoTheWorkspace(t *testing.T) {
 }
 
 func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
-	perms := localProfile("/tmp/forgectl-findings-test")
+	perms := mustLocalProfile(t, "/tmp/forgectl-findings-test")
 	if !contains(perms.Deny, "Bash(gh:*)") {
 		t.Error("deny list must block every gh subcommand via Bash(gh:*)")
 	}
@@ -345,23 +345,29 @@ func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
 
 func TestLocalProfile_FindingsDirIsOnlyWritablePath(t *testing.T) {
 	const dir = "/tmp/forgectl-findings-test"
-	perms := localProfile(dir)
+	perms := mustLocalProfile(t, dir)
 
 	var writeGrants []string
 	for _, a := range perms.Allow {
-		if strings.HasPrefix(a, "Write") {
+		if strings.HasPrefix(a, "Write") || strings.HasPrefix(a, "Edit") || strings.HasPrefix(a, "MultiEdit") {
 			writeGrants = append(writeGrants, a)
 		}
 	}
 	if len(writeGrants) != 1 {
-		t.Fatalf("expected exactly one Write(...) grant, got %v", writeGrants)
+		t.Fatalf("expected exactly one scoped write grant, got %v", writeGrants)
 	}
-	want := "Write(" + dir + "/**)"
+	// An Edit rule, because Claude Code matches file writes only against
+	// Edit(path) rules (a Write rule is inert), and `//`-rooted, because a
+	// single leading `/` is relative to the settings file (forgectl#715).
+	want := "Edit(/" + dir + "/**)"
 	if writeGrants[0] != want {
-		t.Errorf("Write grant = %q, want %q", writeGrants[0], want)
+		t.Errorf("write grant = %q, want %q", writeGrants[0], want)
+	}
+	if !strings.HasPrefix(writeGrants[0], "Edit(//") {
+		t.Errorf("write grant %q is not //-rooted, so it would not name an absolute path", writeGrants[0])
 	}
 	if contains(perms.Deny, "Write") {
-		t.Error(`deny list must not contain bare "Write" — it would clobber the scoped Write(findingsDir/**) allow grant`)
+		t.Error(`deny list must not contain bare "Write" — it would risk clobbering the scoped findings grant`)
 	}
 }
 
@@ -525,5 +531,35 @@ func TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects(t *testing.
 	}
 	if !strings.Contains(err.Error(), "clean-room workspace") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// mustLocalProfile is localProfile for a findings dir the test knows is valid.
+func mustLocalProfile(t *testing.T, findingsDir string) permissions {
+	t.Helper()
+	perms, err := localProfile(findingsDir)
+	if err != nil {
+		t.Fatalf("localProfile(%q): %v", findingsDir, err)
+	}
+	return perms
+}
+
+// TestFindingsEditRule_RefusesWhatWouldWidenOrBreakTheGrant: a relative dir
+// would be read against the settings file, and a pattern character or a
+// closing parenthesis would widen the one write grant or end it early.
+func TestFindingsEditRule_RefusesWhatWouldWidenOrBreakTheGrant(t *testing.T) {
+	for _, dir := range []string{
+		"findings", "./findings", "",
+		"/tmp/f*", "/tmp/f?", "/tmp/f[ab]", "/tmp/f!x", "/tmp/f)x", "/tmp/f(x", "/tmp/f{a,b}", `/tmp/f\x`,
+	} {
+		if rule, err := findingsEditRule(dir); err == nil {
+			t.Errorf("findingsEditRule(%q) = %q, want a refusal", dir, rule)
+		}
+		if _, err := localProfile(dir); err == nil {
+			t.Errorf("localProfile(%q) built a profile, want a refusal", dir)
+		}
+	}
+	if rule, err := findingsEditRule("/tmp/x/../forgectl-findings-1/"); err != nil || rule != "Edit(//tmp/forgectl-findings-1/**)" {
+		t.Errorf("findingsEditRule of an unclean absolute dir = %q, %v; want the cleaned //-rooted rule", rule, err)
 	}
 }

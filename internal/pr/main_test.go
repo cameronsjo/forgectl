@@ -2,7 +2,11 @@ package pr
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -18,7 +22,64 @@ func TestMain(m *testing.M) {
 	sandboxGOOS = "linux"
 	sandboxLookPath = func(file string) (string, error) { return "/usr/bin/" + file, nil }
 	claudeProbe = healthyClaudeProbe
-	os.Exit(m.Run())
+	os.Exit(runInPrivateTempRoot(m))
+}
+
+// runInPrivateTempRoot runs m with the OS temp root pointed at a fresh dir,
+// then removes it. Review workspaces, and the private temp and settings dirs
+// a Claude launch makes beside each (forgectl#907), land under the temp root,
+// and not every test tears its workspace down. The settings dir is left 0500,
+// so removal makes every dir writable first.
+func runInPrivateTempRoot(m *testing.M) int {
+	root, err := os.MkdirTemp("", "forgectl-prtest-*")
+	if err != nil {
+		panic("create temp root: " + err.Error())
+	}
+	defer func() {
+		unsealTestTree(root)
+		_ = os.RemoveAll(root)
+	}()
+	if err := os.Setenv("TMPDIR", root); err != nil {
+		panic("set TMPDIR: " + err.Error())
+	}
+	// A review's private temp dir must stay short (claudeTmpDirMax), and the
+	// root above is too long for it, so it falls back to reviewShortTmpBase:
+	// a short dir of the run's own rather than the real /tmp.
+	// Its name is kept to 4 bytes, so a 10-digit workspace suffix still fits.
+	if reviewShortTmpBase != "" {
+		short, err := makeShortTestBase(reviewShortTmpBase)
+		if err != nil {
+			panic("create the short temp base: " + err.Error())
+		}
+		reviewShortTmpBase = short
+		defer func() {
+			unsealTestTree(short)
+			_ = os.RemoveAll(short)
+		}()
+	}
+	return m.Run()
+}
+
+// makeShortTestBase makes a fresh 0700 dir in base named "p" plus 3 random
+// characters, retrying past names that exist.
+func makeShortTestBase(base string) (string, error) {
+	for range 256 {
+		var b [3]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = reviewTmpAlphabet[int(b[i])%len(reviewTmpAlphabet)]
+		}
+		dir := filepath.Join(base, "p"+string(b[:]))
+		if err := os.Mkdir(dir, 0o700); errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return "", fmt.Errorf("no free short test base name in %q", base)
 }
 
 // healthyClaudeProbe answers the dispatch-time checks as a current claude
@@ -45,4 +106,15 @@ func fakeClaudeAnswer(version string, rejectAll bool, args []string) string {
 		report += "Invalid settings\n- /tmp/claude-settings-x.json \u203a sandbox.enabled: Expected boolean, but received string\n\n"
 	}
 	return report + doctorFooter + "\n"
+}
+
+// unsealTestTree makes every dir under root writable again, best effort, so
+// RemoveAll can empty a sealed settings dir without root.
+func unsealTestTree(root string) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o700) //nolint:gosec // G302: a dir needs its search bit to be emptied; 0700 is owner-only
+		}
+		return nil
+	})
 }

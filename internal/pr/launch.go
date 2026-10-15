@@ -58,12 +58,12 @@ func newDispatch(ref Ref, window tmux.WindowIdentity) Dispatch {
 // localReviewPrompt seeds a local (offline) review — there is no PR to post
 // to, so it directs findings to the writable escape-hatch dir (named
 // explicitly, since that path is the one thing tying the prompt to the
-// scoped Write(findingsDir/**) allowlist grant) instead of a PostReview
+// scoped Edit(//findingsDir/**) allowlist grant) instead of a PostReview
 // approval gate.
 //
 // writesEnforced says whether the harness actually confines writes to
 // findingsDir. Under agent A it does: the reviewer's allowlist (passed with
-// --settings) grants exactly one Write(findingsDir/**) rule, the sandbox
+// --settings) grants exactly one Edit(//findingsDir/**) rule, the sandbox
 // denies Bash writes to the workspace, and --add-dir is what makes that grant
 // reachable at all — so the prompt may state the restriction as fact. Under
 // Codex it does not: --add-dir adds a writable root ALONGSIDE an
@@ -515,6 +515,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
 	}
 	profile.AllowDanger = false
+	// The environment scrub the window pins (reviewEnvScrub) makes Claude Code
+	// override this to default. Plan is still passed, so the posture does not
+	// loosen if that override goes away; under -p, default refuses every tool
+	// call the allow-list does not grant.
 	profile.PermissionMode = "plan"
 	// Refuse every DISCOVERED MCP configuration. The workspace is a third
 	// party's checkout, and Claude Code spawns a discovered server's `command` +
@@ -621,13 +625,16 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	var perms permissions
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
-		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
+		// permission-scoped Edit(//<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all. It is also what
 		// makes the dir writable inside the sandbox, where it is the only
-		// writable root besides the per-user temp directory.
+		// writable root besides the claude-<uid> dir inside the review's
+		// private temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
-		perms = localProfile(sess.FindingsDir)
+		if perms, err = localProfile(sess.FindingsDir); err != nil {
+			return Dispatch{}, err
+		}
 	} else {
 		host, _, err := c.prHost(sess.Ref)
 		if err != nil {
@@ -639,12 +646,46 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 			return Dispatch{}, err
 		}
 	}
-	// The reviewer's whole configuration travels on the command line, and it
-	// loads no settings file at all (--setting-sources ""): the workspace is
+	// Give the window a private, 0700 temp dir of its own (forgectl#907).
+	// Claude Code's default one, claude-<uid> under the system temp dir, is
+	// shared with every other session the operator runs, and its sandbox
+	// leaves it writable, so a hostile review could plant files there for
+	// another session to read, among them the copy of an inline --settings
+	// document Claude Code keeps under a content hash (the reviewer's own
+	// document is a file, so it gets no such copy; see below). Pointed here,
+	// the reviewer's Bash gets the claude-<uid> dir inside this one as its
+	// TMPDIR (measured on Linux, Claude Code 2.1.299). createReviewTmpDir keeps
+	// that path within claudeTmpDirMax, past which 2.1.289 falls back to the
+	// shared /tmp/claude-<uid>. The sandbox's write denies on the shared dirs
+	// back that up (sharedClaudeTmpDirs). It is made before the settings
+	// document, which checks no shared dir is a link holding it. The
+	// dir outlives this call with the review and goes with
+	// the workspace (teardownWorkspace); a refusal before the window opens
+	// removes it, and the settings dir below, here. That removal names only
+	// the dirs this call made, never an entry it merely found under a
+	// matching name.
+	tmpDir, err := createReviewTmpDir(sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	made := []string{tmpDir}
+	windowOpening := false
+	defer func() {
+		if windowOpening {
+			return
+		}
+		for _, dir := range made {
+			if rerr := removeReviewSibling(dir); rerr != nil {
+				slog.Warn("Failed to remove a review dir after a refused dispatch.", "dir", dir, "error", rerr)
+			}
+		}
+	}()
+	// The reviewer's whole configuration is this one document, and it loads
+	// no settings source besides it (--setting-sources ""): the workspace is
 	// the PR head, so any settings file in it is PR-authored, and Claude Code
 	// merges settings arrays and runs hooks from every source it loads. See
 	// reviewSettingSources.
-	settingsJSON, err := reviewSettingsJSON(sess.Workspace, ghHost, perms)
+	settingsJSON, err := reviewSettingsJSON(sess.Workspace, tmpDir, ghHost, perms)
 	if err != nil {
 		return Dispatch{}, err
 	}
@@ -667,12 +708,40 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
-	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
+	// The same pin turns on Claude Code's subprocess environment scrub, so
+	// an allowed `cat /proc/self/environ` cannot print the window's
+	// credentials into the transcript (reviewEnvScrub).
+	windowEnv = pinReviewClaudeEnv(windowEnv, tmpDir)
+	// Pin every credential-store variable the denies followed, so the window
+	// cannot inherit a different store from the tmux server
+	// (reviewRelocationEnv). The unset ones are unset for real, below.
+	relocSet, relocUnset := reviewRelocationEnv()
+	windowEnv = pinEnv(windowEnv, relocSet, relocUnset)
+	// On macOS, point gh at a CA bundle file, or its TLS checks fail under
+	// Seatbelt (reviewCertEnv, forgectl#1253).
+	certSet, certUnset := reviewCertEnv()
+	windowEnv = pinEnv(windowEnv, certSet, certUnset)
+	relocUnset = append(relocUnset, certUnset...)
+	// The document goes to claude as a file forgectl writes 0400 in a 0500
+	// dir of its own beside the workspace, outside CLAUDE_CODE_TMPDIR and
+	// every other root the sandbox can write (writeReviewSettings). Passed inline,
+	// Claude Code keeps a copy at claude-<uid>/claude-settings-<hash>.json,
+	// inside the one dir the reviewer's Bash may write. That copy was
+	// mounted read-only to it (measured on 2.1.296), but a file outside every
+	// writable root leaves no copy to ask about: with it, no settings copy
+	// appeared, and the reviewer's writes, replace and unlink of the file
+	// all failed.
+	settingsPath, settingsDir, err := writeReviewSettings(sess.Workspace, settingsJSON)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	made = append(made, settingsDir)
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsPath, windowEnv, relocUnset); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{
 		"--setting-sources", reviewSettingSources,
-		"--settings", settingsJSON,
+		"--settings", settingsPath,
 		"-p", prompt,
 	})
 
@@ -689,7 +758,13 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	}
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
-	command := append([]string{claudePath}, claudeArgs...)
+	command, err := unsetEnvCommand(relocUnset, append([]string{claudePath}, claudeArgs...))
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	// From here a window may exist even when the call below fails, and its
+	// claude would be using tmpDir, so it stays for teardown to remove.
+	windowOpening = true
 	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)

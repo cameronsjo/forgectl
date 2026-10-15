@@ -36,6 +36,12 @@ var ErrUnsafeTeardown = errors.New("path is not a forgectl sandbox workspace")
 // repo and ref are guarded by RejectOptionLike before reaching git as
 // positionals.
 func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone bool) (string, error) {
+	return SandboxIn(ctx, run, "", repo, ref, alwaysClone)
+}
+
+// SandboxIn is Sandbox with the workspace made in root rather than the OS
+// temp dir; an empty root means the OS temp dir.
+func SandboxIn(ctx context.Context, run exec.Runner, root, repo, ref string, alwaysClone bool) (string, error) {
 	if repo == "" {
 		slog.Warn("Sandbox missing required repo.")
 		return "", errors.New("worktree/clone step requires repo")
@@ -55,7 +61,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	shownRepo := redact.LogRepo(repo)
 	slog.Debug("Preparing to create workspace sandbox.", "repo", shownRepo, "ref", ref, "alwaysClone", alwaysClone)
 
-	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
+	dir, err := os.MkdirTemp(root, WorkspacePrefix+"*")
 	if err != nil {
 		slog.Error("Failed to create sandbox directory.", "error", err)
 		return "", fmt.Errorf("create sandbox dir: %w", err)
