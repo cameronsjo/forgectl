@@ -55,6 +55,22 @@ type Pane struct {
 type Agent struct {
 	Pane
 	StateChangeSeq int64 `json:"state_change_seq"`
+	// Tokens is nil when herdr reports none.
+	Tokens *AgentTokens `json:"tokens"`
+}
+
+// AgentTokens are the display tokens `herdr agent list` reports for an
+// agent's pane. CWD is the agent's own working directory and Worktree the
+// git worktree it is in; the pane's CWD is where the pane started, which can
+// be a parent of both. Session is the agent's session id as a reporter put it
+// in the pane's `session` token (the herdr-bridge mod does, for Claude Code).
+// herdr keeps one token map per pane, not one per reporter, so any program
+// that sets display tokens can set `session` too. Untrusted text, like every
+// herdr field.
+type AgentTokens struct {
+	CWD      string `json:"cwd"`
+	Worktree string `json:"worktree"`
+	Session  string `json:"session"`
 }
 
 // ReadSource selects which text `herdr pane read` returns.

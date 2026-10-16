@@ -22,6 +22,8 @@ import (
 // `history` to a leaf. A state report that matters to agents belongs in its
 // own leaf, where this walk enforces --json.
 var jsonContractExempt = map[string]string{
+	"attention":              "a bare `attention` prints its help and reports no state; it runs only so that an unknown verb is refused (`attention list --json` reports the queue)",
+	"attention rm":           "drops one session's record; the exit code is the outcome (`attention list --json` reports the queue)",
 	"bench open":             "opens a hearth or grafana UI in the browser; nothing to report (`bench status --json` reports the services)",
 	"bench up":               "brings the bench services up; the exit code is the outcome and `bench status --json` reports the result",
 	"desk":                   "a bare `desk` runs the interactive dashboard (`--frame` prints one frame for the eye); `desk status --json` reports the queue",
