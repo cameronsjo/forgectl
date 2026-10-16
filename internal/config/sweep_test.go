@@ -32,6 +32,13 @@ func TestSweepConfigValidateNamesTheKey(t *testing.T) {
 			t.Errorf("%s: err = %v", key, err)
 		}
 	}
+	all := SweepConfig{Owner: "-bad", Since: "yesterday", Briefs: "relative/dir", Reviewers: []string{"Bad Name"}}
+	err := all.Validate()
+	for key := range cases {
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("all four unusable: err = %v, want it to name %s", err, key)
+		}
+	}
 	if err := (SweepConfig{}).Validate(); err != nil {
 		t.Errorf("zero value: %v", err)
 	}

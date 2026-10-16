@@ -1,7 +1,7 @@
 package config
 
 import (
-	"fmt"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -45,23 +45,28 @@ func ValidSweepBriefs(s string) bool {
 	return filepath.IsAbs(s) && filepath.Clean(s) == s && !strings.ContainsAny(s, "\x00\n\r")
 }
 
-// Validate refuses a value that is set but unusable. The error names the key
-// and never echoes the value. An unset key is the caller's to report: it may
-// come from a flag.
+// Validate refuses values that are set but unusable. The error names every
+// such key, joined with "; ", and never echoes a value. An unset key is the
+// caller's to report: it may come from a flag.
 func (c SweepConfig) Validate() error {
+	var bad []string
 	if c.Owner != "" && !ValidSweepOwner(c.Owner) {
-		return fmt.Errorf("sweep.owner is not a GitHub account name")
+		bad = append(bad, "sweep.owner is not a GitHub account name")
 	}
 	if c.Since != "" && !ValidSweepSince(c.Since) {
-		return fmt.Errorf("sweep.since must be a YYYY-MM-DD date")
+		bad = append(bad, "sweep.since must be a YYYY-MM-DD date")
 	}
 	if c.Briefs != "" && !ValidSweepBriefs(c.Briefs) {
-		return fmt.Errorf("sweep.briefs must be a clean absolute path")
+		bad = append(bad, "sweep.briefs must be a clean absolute path")
 	}
 	for _, r := range c.Reviewers {
 		if !SweepReviewerRe.MatchString(r) {
-			return fmt.Errorf("sweep.reviewers entries must be 1 to 40 lowercase letters, digits or '-'")
+			bad = append(bad, "sweep.reviewers entries must be 1 to 40 lowercase letters, digits or '-'")
+			break
 		}
 	}
-	return nil
+	if len(bad) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(bad, "; "))
 }

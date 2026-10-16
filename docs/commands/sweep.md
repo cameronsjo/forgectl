@@ -31,7 +31,11 @@ briefs = "/abs/path/to/briefs"   # one subdirectory per worker
 reviewers = ["pr-reviewer"]      # cadence-review marker names that count
 ```
 
-`--owner`, `--since` and `--briefs` override the first three. A key set by neither exits 2 and names it (`sweep.owner`, `sweep.since`, `sweep.briefs`, `sweep.reviewers`). A value that is set but unusable (an owner that is not a GitHub name, a `since` that is not `YYYY-MM-DD`, a relative `briefs`, a reviewer name outside `[a-z0-9-]`) also exits 2 and names the key without echoing the value.
+`--owner`, `--since` and `--briefs` override the first three. A key set by neither exits 2 and names it (`sweep.owner`, `sweep.since`, `sweep.briefs`, `sweep.reviewers`). A value that is set but unusable (an owner that is not a GitHub name, a `since` that is not `YYYY-MM-DD`, a relative `briefs`, a reviewer name outside `[a-z0-9-]`) also exits 2 and names the key without echoing the value. One refusal names every missing or unusable key at once, so a single fix and rerun is enough:
+
+```text
+sweep: sweep.owner, sweep.since are not set: pass --owner/--since or add them to the [sweep] table of <path>
+```
 
 Workers are the directories under `briefs` whose names start with `[attention] worker_prefix` (default `cos-`) and that hold a `brief.md`, `picks.md`, `go.md` or `report.md` modified at or after `since`. The next section says what else comes from them.
 

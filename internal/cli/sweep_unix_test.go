@@ -227,10 +227,66 @@ func TestSweepExitsTwoNamingTheMissingKey(t *testing.T) {
 			t.Errorf("%s: exit code = %v, want %d", key, err, exitUsage)
 		}
 	}
-	// With nothing configured and no flags, the first missing key is named.
+	// With nothing configured and no flags, every missing key is named in one
+	// refusal, with the flags that can set them.
 	_, _, err := sweepRun(t, module.Deps{Runner: sweepRunner(t)}, "--json")
-	if err == nil || !strings.Contains(err.Error(), "sweep.owner") {
-		t.Errorf("empty config: %v", err)
+	want := "sweep.owner, sweep.since, sweep.briefs, sweep.reviewers are not set: pass --owner/--since/--briefs or add them to the [sweep] table of "
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("empty config: %v\nwant it to contain %q", err, want)
+	}
+}
+
+func TestSweepNamesEveryProblemAtOnce(t *testing.T) {
+	e := newSweepEnv(t)
+	cases := []struct {
+		name string
+		cfg  config.SweepConfig
+		args []string
+		want []string
+		deny []string
+	}{
+		{
+			name: "only reviewers missing names no flag",
+			cfg:  config.SweepConfig{Owner: "acme", Since: "2026-10-14", Briefs: e.briefs},
+			want: []string{"sweep.reviewers is not set: add it to the [sweep] table of "},
+			deny: []string{"pass "},
+		},
+		{
+			name: "two unusable config values",
+			cfg:  config.SweepConfig{Owner: "-bad", Since: "yesterday", Briefs: e.briefs, Reviewers: []string{"r"}},
+			want: []string{"sweep.owner is not a GitHub account name", "sweep.since must be a YYYY-MM-DD date"},
+			deny: []string{"-bad", "yesterday"},
+		},
+		{
+			name: "missing key, bad config value and bad flag together",
+			cfg:  config.SweepConfig{Since: "yesterday", Reviewers: []string{"r"}},
+			args: []string{"--briefs", "relative"},
+			want: []string{"sweep.since must be a YYYY-MM-DD date", "sweep.owner is not set: pass --owner or add it to", "briefs must be a clean absolute path"},
+			deny: []string{"yesterday", "relative"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run := sweepRunner(t)
+			_, _, err := sweepRun(t, module.Deps{Cfg: config.Config{Sweep: c.cfg}, Runner: run}, append([]string{"--json"}, c.args...)...)
+			var ec interface{ ExitCode() int }
+			if err == nil || !errors.As(err, &ec) || ec.ExitCode() != exitUsage {
+				t.Fatalf("err = %v, want exit %d", err, exitUsage)
+			}
+			if len(run.Calls) != 0 {
+				t.Errorf("sweep ran %d commands before refusing", len(run.Calls))
+			}
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %q, want it to contain %q", err, w)
+				}
+			}
+			for _, d := range c.deny {
+				if strings.Contains(err.Error(), d) {
+					t.Errorf("err = %q echoes %q", err, d)
+				}
+			}
+		})
 	}
 }
 
