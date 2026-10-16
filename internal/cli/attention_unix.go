@@ -1,0 +1,385 @@
+// SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
+
+//go:build unix
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
+
+	"github.com/cameronsjo/forgectl/internal/attention"
+	"github.com/cameronsjo/forgectl/internal/desk"
+	"github.com/cameronsjo/forgectl/internal/herdr"
+	"github.com/cameronsjo/forgectl/internal/module"
+)
+
+const (
+	// attentionStdinCap is how much of a reply put keeps: the last 64 KiB,
+	// where the closing block is.
+	attentionStdinCap = 64 << 10
+	// attentionStdinMax is how much stdin put reads before refusing.
+	attentionStdinMax = 16 << 20
+	// attentionSweepMax caps the sweep.json read.
+	attentionSweepMax = 4 << 20
+	// attentionHerdrTimeout bounds the herdr agent list call.
+	attentionHerdrTimeout = 3 * time.Second
+)
+
+// Source states reported by `list --json`.
+const (
+	sourceOK          = "ok"
+	sourceAbsent      = "absent"
+	sourceError       = "error"
+	sourceUnavailable = "unavailable"
+	sourceMalformed   = "malformed"
+)
+
+// Unix-only seams.
+var (
+	attentionStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	// attentionHerdr asks the caller's herdr server for its agents. Known is
+	// false when herdr could not be asked; prune then falls back to the TTL.
+	attentionHerdr = func(ctx context.Context, deps module.Deps) attention.Herdr {
+		h := attention.Herdr{Socket: attentionGetenv("HERDR_SOCKET_PATH")}
+		if deps.Runner == nil {
+			return h
+		}
+		ctx, cancel := context.WithTimeout(ctx, attentionHerdrTimeout)
+		defer cancel()
+		agents, err := herdr.New(deps.Runner).Agents(ctx)
+		if err != nil {
+			return h
+		}
+		h.Known = true
+		for _, a := range agents {
+			h.Agents = append(h.Agents, attentionAgent(a))
+		}
+		return h
+	}
+)
+
+// attentionAgent reduces a herdr agent row to the queue's view. The session
+// is herdr's agent_session value (the Claude Code session id); the names are
+// the worktree and the basenames of the agent's directories, for the
+// worker-prefix match.
+func attentionAgent(a herdr.Agent) attention.Agent {
+	out := attention.Agent{Pane: a.PaneID, Status: a.AgentStatus}
+	if a.AgentSession != nil {
+		out.Session = a.AgentSession.Value
+	}
+	var names []string
+	if a.Tokens != nil {
+		names = append(names, a.Tokens.Worktree, baseName(a.Tokens.CWD))
+	}
+	names = append(names, baseName(a.CWD), baseName(a.ForegroundCWD))
+	for _, n := range names {
+		if n != "" {
+			out.Names = append(out.Names, n)
+		}
+	}
+	return out
+}
+
+func baseName(p string) string {
+	if p == "" {
+		return ""
+	}
+	b := filepath.Base(p)
+	if b == "/" || b == "." {
+		return ""
+	}
+	return b
+}
+
+// attentionUsage is a refused flag: exit 2, usage_error under --json.
+func attentionUsage(format string, args ...any) error {
+	return withJSONUsageCode(WithExitCode(fmt.Errorf(format, args...), exitUsage))
+}
+
+// attentionStateBase resolves the state directory, and refuses a bad
+// [attention] section before anything is read.
+func attentionStateBase(deps module.Deps) (string, error) {
+	if err := deps.Cfg.Attention.Validate(); err != nil {
+		return "", attentionUsage("attention: %v", err)
+	}
+	home, homeErr := attentionUserHome()
+	base, err := attention.StateBase(attentionGetenv, home)
+	if err != nil {
+		return "", errors.Join(err, homeErr)
+	}
+	return base, nil
+}
+
+func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
+	if o.session == "" || o.turn == "" {
+		return attentionUsage("attention put: --session and --turn are required")
+	}
+	if attentionStdinIsTerminal() && cmd.InOrStdin() == os.Stdin {
+		return attentionUsage("attention put: stdin is a terminal; pipe the reply text in")
+	}
+	base, err := attentionStateBase(deps)
+	if err != nil {
+		return err
+	}
+	now := attentionNow().UTC()
+	r := attention.Record{Session: o.session, Pane: o.pane, Socket: o.socket, Cwd: o.cwd, Turn: o.turn, At: now}
+	// Check the flags before reading stdin, so a bad id costs nothing.
+	if err := attention.Validate(r); err != nil {
+		return attentionUsage("attention put: %v", err)
+	}
+	text, err := readTail(cmd.InOrStdin(), attentionStdinCap, attentionStdinMax)
+	if err != nil {
+		return attentionUsage("attention put: %v", err)
+	}
+	p := attention.Parse(text)
+	r.Items = p.Items
+
+	s, err := attention.OpenSpool(base, true)
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // nothing buffered
+	if old, ok, err := s.Get(o.session); err == nil && ok {
+		since := old.At
+		r.Since = &since
+	}
+	if err := s.Put(r); err != nil {
+		return err
+	}
+	if err := s.EvictPane(o.pane, o.socket, o.session); err != nil {
+		return err
+	}
+	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), attentionHerdr(cmd.Context(), deps).Liveness()); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "items=%d seen=%d read=%d\n", len(p.Items), p.Seen, p.Read)
+	return err
+}
+
+func runAttentionRm(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
+	if !attention.ValidSession(o.session) {
+		return attentionUsage("attention rm: --session must be 1 to 64 letters, digits, '_' or '-'")
+	}
+	base, err := attentionStateBase(deps)
+	if err != nil {
+		return err
+	}
+	s, err := attention.OpenSpool(base, false)
+	if errors.Is(err, attention.ErrNoSpool) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer s.Close() //nolint:errcheck // nothing buffered
+	return s.Remove(o.session)
+}
+
+// attentionList is `list --json`.
+type attentionList struct {
+	Rows    []attention.Row  `json:"rows"`
+	Skipped int              `json:"skipped"`
+	Sources attentionSources `json:"sources"`
+}
+
+// attentionSources says which sources were read: ok, absent (nothing there
+// yet), error or malformed (counted in skipped where it is a record or file),
+// unavailable (herdr could not be asked).
+type attentionSources struct {
+	Spool string `json:"spool"`
+	Desk  string `json:"desk"`
+	Herdr string `json:"herdr"`
+	Sweep string `json:"sweep"`
+}
+
+func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
+	if o.session != "" && !attention.ValidSession(o.session) {
+		return attentionUsage("attention list: --session must be 1 to 64 letters, digits, '_' or '-'")
+	}
+	base, err := attentionStateBase(deps)
+	if err != nil {
+		return err
+	}
+	now := attentionNow().UTC()
+	h := attentionHerdr(cmd.Context(), deps)
+	out := attentionList{Sources: attentionSources{Spool: sourceOK, Herdr: sourceOK}}
+	if !h.Known {
+		out.Sources.Herdr = sourceUnavailable
+	}
+
+	var recs []attention.Record
+	s, err := attention.OpenSpool(base, false)
+	switch {
+	case errors.Is(err, attention.ErrNoSpool):
+		out.Sources.Spool = sourceAbsent
+	case err != nil:
+		return err
+	default:
+		recs, out.Skipped, err = s.List(now, deps.Cfg.Attention.TTL(), h.Liveness())
+		_ = s.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	items, deskState := attentionDesk()
+	out.Sources.Desk = deskState
+
+	sw, sweepSkipped, sweepState := attentionSweep(attention.SweepPath(base))
+	out.Sources.Sweep = sweepState
+	out.Skipped += sweepSkipped
+
+	out.Rows = attention.Build(attention.Input{
+		Now: now, Records: recs, Herdr: h, Desk: items, Sweep: sw,
+		WorkerPrefix: deps.Cfg.Attention.Prefix(), Session: o.session,
+	})
+	if out.Rows == nil {
+		out.Rows = []attention.Row{}
+	}
+	if o.asJSON {
+		return writeJSON(cmd.OutOrStdout(), out)
+	}
+	return printAttentionList(cmd.OutOrStdout(), cmd.ErrOrStderr(), out)
+}
+
+// attentionDesk reads the desk's waiting items through a read-only open:
+// desk.OpenReadOnly creates, pins, moves and chmods nothing, and its Scan
+// computes a missing hash in memory and reports a changed item as refused
+// where it lies. A desk that is absent or unreadable gives no rows.
+func attentionDesk() ([]attention.DeskItem, string) {
+	home, _ := attentionUserHome()
+	dir, err := desk.ResolveDir(attentionGetenv, home)
+	if err != nil {
+		return nil, sourceError
+	}
+	d, err := desk.OpenReadOnly(dir)
+	if errors.Is(err, desk.ErrNoDesk) {
+		return nil, sourceAbsent
+	}
+	if err != nil {
+		return nil, sourceError
+	}
+	defer d.Close() //nolint:errcheck // read-only
+	snap, err := d.Scan()
+	if err != nil {
+		return nil, sourceError
+	}
+	var items []attention.DeskItem
+	for _, it := range snap.Pending {
+		if it.State != desk.StateWaiting {
+			continue
+		}
+		di := attention.DeskItem{Name: it.Name, What: it.What, SHA256: it.Meta.SHA256, SignalPane: it.Meta.SignalPane}
+		if it.Meta.AddedAt != nil {
+			di.AddedAt = *it.Meta.AddedAt
+		}
+		items = append(items, di)
+	}
+	return items, sourceOK
+}
+
+// attentionSweep reads `forgectl sweep`'s last result. Absent is no rows; a
+// file that is not a regular file, is too large, or does not validate is
+// one skipped entry.
+func attentionSweep(path string) (*attention.Sweep, int, string) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, 0, sourceAbsent
+	}
+	if err != nil {
+		return nil, 1, sourceMalformed
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close() //nolint:errcheck // read-only
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, 1, sourceMalformed
+	}
+	data, err := io.ReadAll(io.LimitReader(f, attentionSweepMax+1))
+	if err != nil || len(data) > attentionSweepMax {
+		return nil, 1, sourceMalformed
+	}
+	sw, skipped, err := attention.ParseSweep(data)
+	if err != nil {
+		return nil, 1, sourceMalformed
+	}
+	return &sw, skipped, sourceOK
+}
+
+// readTail reads r to EOF and returns its last keep bytes, refusing input
+// over limit. A cut that lands inside a UTF-8 sequence is left to the
+// parser's UTF-8 repair.
+func readTail(r io.Reader, keep, limit int) (string, error) {
+	buf := make([]byte, 0, keep)
+	chunk := make([]byte, 32<<10)
+	total := 0
+	for {
+		n, err := r.Read(chunk)
+		total += n
+		if total > limit {
+			return "", fmt.Errorf("stdin is over %d MiB", limit>>20)
+		}
+		buf = append(buf, chunk[:n]...)
+		if len(buf) > keep {
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+		if errors.Is(err, io.EOF) {
+			return string(buf), nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+	}
+}
+
+// printAttentionList is the text view: one line per row, through safeText.
+func printAttentionList(out, errOut io.Writer, l attentionList) error {
+	w := &stickyWriter{w: out}
+	if len(l.Rows) == 0 {
+		w.printf("nothing waiting\n")
+	}
+	for _, r := range l.Rows {
+		label := r.Tag
+		if r.N > 0 && (r.Kind == attention.KindQuestion || r.Kind == attention.KindAction) {
+			label = fmt.Sprintf("%s%d", r.Tag, r.N)
+		}
+		var extra []string
+		if r.Worker != "" {
+			extra = append(extra, "worker "+r.Worker)
+		} else if r.Origin == attention.OriginWorker {
+			extra = append(extra, "worker")
+		}
+		if r.Pane != "" {
+			extra = append(extra, "pane "+r.Pane)
+		} else if r.Session != "" {
+			extra = append(extra, "not in herdr")
+		}
+		if r.NotOnDesk {
+			extra = append(extra, "not on desk")
+		}
+		line := fmt.Sprintf("%-6s %-10s %s", r.Kind, label, r.Text)
+		if len(extra) > 0 {
+			line += "  (" + strings.Join(extra, ", ") + ")"
+		}
+		w.printf("%s\n", safeText(line))
+	}
+	if w.err != nil {
+		return w.err
+	}
+	if l.Skipped > 0 {
+		_, err := fmt.Fprintf(errOut, "attention: skipped %d malformed entries\n", l.Skipped)
+		return err
+	}
+	return nil
+}

@@ -53,6 +53,7 @@ deep-dive get a link here.
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
+| `attention` | Per-machine attention queue: what each Claude session, the desk and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
 | `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
@@ -337,6 +338,11 @@ forgectl desk show 17-fix --events       # one run as a flow, with its event tim
 forgectl desk status --json              # the queue as JSON
 forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
 forgectl desk layout --below             # herdr: the desk in a full-width row under every pane in the tab
+
+# attention — one queue of what waits on you: session asks, desk items, the sweep (Unix only)
+forgectl attention list --json           # rows by delay cost; skipped counts malformed records
+forgectl attention put --session ID --turn ID < reply.txt   # record a reply's What's next items
+forgectl attention rm --session ID       # drop a session's record when it ends
 
 # tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)

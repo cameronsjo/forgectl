@@ -110,6 +110,9 @@ const logKeepDays = 7
 //	workspace = "forge"
 //	[tasks]              # forgectl tasks — where a keychain credential may be sent
 //	allowed_hosts = []               # hosts allowed besides the built-in default; plain hostnames only
+//	[attention]          # forgectl attention — the per-machine attention queue
+//	ttl_hours = 24                   # keep a record no visible herdr pane vouches for this long (1-720)
+//	worker_prefix = "cos-"           # sessions whose name starts with this are workers
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -134,6 +137,7 @@ type Config struct {
 	Resume    ResumeConfig    `toml:"resume"`
 	Tasks     TasksConfig     `toml:"tasks"`
 	Desk      DeskConfig      `toml:"desk"`
+	Attention AttentionConfig `toml:"attention"`
 	Surface   SurfaceConfig   `toml:"surface"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so
