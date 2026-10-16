@@ -113,6 +113,11 @@ const logKeepDays = 7
 //	[attention]          # forgectl attention — the per-machine attention queue
 //	ttl_hours = 24                   # keep a record no visible herdr pane vouches for this long (1-720)
 //	worker_prefix = "cos-"           # sessions whose name starts with this are workers
+//	[sweep]              # forgectl sweep — the chief-of-staff ledger; nothing is defaulted
+//	owner = "your-login"             # GitHub account whose repos the sweep covers
+//	since = "2026-10-14"             # first day (UTC) whose merges and worker briefs count
+//	briefs = "/abs/path/to/briefs"   # one subdirectory per worker
+//	reviewers = ["pr-reviewer"]      # cadence-review marker names that count (a claim filter)
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -138,6 +143,7 @@ type Config struct {
 	Tasks     TasksConfig     `toml:"tasks"`
 	Desk      DeskConfig      `toml:"desk"`
 	Attention AttentionConfig `toml:"attention"`
+	Sweep     SweepConfig     `toml:"sweep"`
 	Surface   SurfaceConfig   `toml:"surface"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so

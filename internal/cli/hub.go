@@ -37,7 +37,7 @@ var hubGroups = []struct {
 	title string
 	names []string
 }{
-	{"agents", []string{"launch", "resume", "desk", "attention", "tasks", "surface", "workflow", "recipe", "preflight", "quarantine"}},
+	{"agents", []string{"launch", "resume", "desk", "attention", "sweep", "tasks", "surface", "workflow", "recipe", "preflight", "quarantine"}},
 	{"repos", []string{"status", "review", "branch", "clean", "audit", "docker", "k8s"}},
 	{"shell", []string{"env", "y", "pip", "proxy", "net"}},
 	{"setup", []string{"doctor", "config", "init", "update", "upgrade", "bench", "theme", "ghostty", "herdr"}},

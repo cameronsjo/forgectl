@@ -1,0 +1,661 @@
+{
+ "schemaVersion": 2,
+ "generatedAt": "2026-10-16T12:00:00Z",
+ "merged": 133,
+ "dependencyBumps": 21,
+ "reposTouched": 21,
+ "sweepRepos": 25,
+ "openPrs": 12,
+ "filed": 21,
+ "opinions": [
+  {
+   "id": "worker:cos-worker09:report",
+   "tone": "act",
+   "text": "cos-worker09 reported 1d 1h ago; 3 of its PRs await review.",
+   "action": "review",
+   "target": {
+    "repo": "acme/repo10",
+    "number": 35
+   }
+  },
+  {
+   "id": "worker:cos-worker20:report",
+   "tone": "act",
+   "text": "cos-worker20 reported 1d 2h ago; 2 of its PRs await review.",
+   "action": "review",
+   "target": {
+    "repo": "acme/repo07",
+    "number": 11
+   }
+  },
+  {
+   "id": "sweep:pace",
+   "tone": "warn",
+   "text": "Merge pace is down: 0 in the last 3h against 1 in the 3h before.",
+   "action": "none"
+  },
+  {
+   "id": "sweep:quiet",
+   "tone": "warn",
+   "text": "No merge for 5h 30m. Work is in flight, not landing.",
+   "action": "none"
+  },
+  {
+   "id": "pr:acme/repo12#35",
+   "tone": "warn",
+   "text": "Oldest open PR: repo12#35, open 11d 1h. Land it, split it, or close it.",
+   "action": "none"
+  },
+  {
+   "id": "sweep:security",
+   "tone": "warn",
+   "text": "4 of 21 filed issues are security findings. Those outrank new features.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker02:report",
+   "tone": "note",
+   "text": "cos-worker02 reported 1d 1h ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker04:report",
+   "tone": "note",
+   "text": "cos-worker04 reported 22h 56m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker05:report",
+   "tone": "note",
+   "text": "cos-worker05 reported 1d 2h ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker06:report",
+   "tone": "note",
+   "text": "cos-worker06 reported 23h 52m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker07:report",
+   "tone": "note",
+   "text": "cos-worker07 reported 22h 10m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker12:report",
+   "tone": "note",
+   "text": "cos-worker12 reported 1d 0h ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker14:report",
+   "tone": "note",
+   "text": "cos-worker14 reported 22h 12m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker17:report",
+   "tone": "note",
+   "text": "cos-worker17 reported 22h 17m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker19:report",
+   "tone": "note",
+   "text": "cos-worker19 reported 1d 2h ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker23:report",
+   "tone": "note",
+   "text": "cos-worker23 reported 1d 1h ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "worker:cos-worker24:report",
+   "tone": "note",
+   "text": "cos-worker24 reported 22h 20m ago; no PR of its awaits review.",
+   "action": "none"
+  },
+  {
+   "id": "sweep:churn",
+   "tone": "note",
+   "text": "repo13 carries the most churn: 21 of 133 merges (16%).",
+   "action": "none"
+  },
+  {
+   "id": "sweep:untouched",
+   "tone": "note",
+   "text": "4 swept repos have no merge yet: repo08, repo16, repo19, vault-kit.",
+   "action": "none"
+  },
+  {
+   "id": "sweep:drafts",
+   "tone": "note",
+   "text": "1 of 12 open PRs are still drafts.",
+   "action": "none"
+  },
+  {
+   "id": "sweep:bots",
+   "tone": "good",
+   "text": "Only 16% of merges are dependency bumps; the rest is real work.",
+   "action": "none"
+  }
+ ],
+ "workers": [
+  {
+   "name": "cos-worker01",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo01"
+   ],
+   "prs": []
+  },
+  {
+   "name": "cos-worker02",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo01"
+   ],
+   "prs": []
+  },
+  {
+   "name": "cos-worker03",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo04"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo04",
+     "number": 709
+    }
+   ]
+  },
+  {
+   "name": "cos-worker04",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  },
+  {
+   "name": "cos-worker05",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  },
+  {
+   "name": "cos-worker06",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo11"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo11",
+     "number": 75
+    }
+   ]
+  },
+  {
+   "name": "cos-worker07",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  },
+  {
+   "name": "cos-worker08",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo10"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo10",
+     "number": 35
+    },
+    {
+     "repo": "acme/repo10",
+     "number": 39
+    },
+    {
+     "repo": "acme/repo10",
+     "number": 40
+    }
+   ]
+  },
+  {
+   "name": "cos-worker09",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo10"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo10",
+     "number": 35
+    },
+    {
+     "repo": "acme/repo10",
+     "number": 39
+    },
+    {
+     "repo": "acme/repo10",
+     "number": 40
+    }
+   ]
+  },
+  {
+   "name": "cos-worker10",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo11"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo11",
+     "number": 75
+    }
+   ]
+  },
+  {
+   "name": "cos-worker11",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo12"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo12",
+     "number": 35
+    }
+   ]
+  },
+  {
+   "name": "cos-worker12",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo12"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo12",
+     "number": 35
+    }
+   ]
+  },
+  {
+   "name": "cos-worker13",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo13"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo13",
+     "number": 411
+    }
+   ]
+  },
+  {
+   "name": "cos-worker14",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo13"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo13",
+     "number": 411
+    }
+   ]
+  },
+  {
+   "name": "cos-worker15",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo07",
+    "repo08",
+    "repo09",
+    "repo19",
+    "repo20",
+    "repo23"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo07",
+     "number": 11
+    },
+    {
+     "repo": "acme/repo19",
+     "number": 37
+    }
+   ]
+  },
+  {
+   "name": "cos-worker16",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo14",
+    "repo15",
+    "repo16",
+    "repo17",
+    "repo25"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo14",
+     "number": 14
+    },
+    {
+     "repo": "acme/repo17",
+     "number": 10
+    }
+   ]
+  },
+  {
+   "name": "cos-worker17",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  },
+  {
+   "name": "cos-worker18",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo18"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo18",
+     "number": 59
+    }
+   ]
+  },
+  {
+   "name": "cos-worker19",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  },
+  {
+   "name": "cos-worker20",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo02",
+    "repo07",
+    "repo08",
+    "repo14",
+    "repo15",
+    "repo17",
+    "repo19"
+   ],
+   "prs": [
+    {
+     "repo": "acme/repo07",
+     "number": 11
+    },
+    {
+     "repo": "acme/repo14",
+     "number": 14
+    },
+    {
+     "repo": "acme/repo17",
+     "number": 10
+    },
+    {
+     "repo": "acme/repo19",
+     "number": 37
+    }
+   ]
+  },
+  {
+   "name": "cos-worker21",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo02",
+    "repo03",
+    "acme",
+    "acme.github.io",
+    "repo21",
+    "repo22"
+   ],
+   "prs": []
+  },
+  {
+   "name": "cos-worker22",
+   "status": "unknown",
+   "phase": "plan",
+   "repos": [
+    "repo24"
+   ],
+   "prs": []
+  },
+  {
+   "name": "cos-worker23",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [
+    "repo24"
+   ],
+   "prs": []
+  },
+  {
+   "name": "cos-worker24",
+   "status": "unknown",
+   "phase": "report",
+   "repos": [],
+   "prs": []
+  }
+ ],
+ "topRepos": [
+  [
+   "repo13",
+   21
+  ],
+  [
+   "repo04",
+   19
+  ],
+  [
+   "repo12",
+   18
+  ],
+  [
+   "repo11",
+   15
+  ],
+  [
+   "repo24",
+   12
+  ],
+  [
+   "repo10",
+   9
+  ],
+  [
+   "repo18",
+   7
+  ],
+  [
+   "repo01",
+   6
+  ]
+ ],
+ "recent": [
+  {
+   "repo": "repo25",
+   "number": 59,
+   "title": "synthetic merge title 1",
+   "closedAt": "2026-10-16T11:12:57Z"
+  },
+  {
+   "repo": "repo24",
+   "number": 129,
+   "title": "synthetic merge title 2",
+   "closedAt": "2026-10-16T00:38:28Z"
+  },
+  {
+   "repo": "repo04",
+   "number": 715,
+   "title": "synthetic merge title 3",
+   "closedAt": "2026-10-15T22:39:15Z"
+  },
+  {
+   "repo": "repo10",
+   "number": 46,
+   "title": "synthetic merge title 4",
+   "closedAt": "2026-10-15T22:37:59Z"
+  },
+  {
+   "repo": "repo13",
+   "number": 405,
+   "title": "synthetic merge title 5",
+   "closedAt": "2026-10-15T22:34:45Z"
+  },
+  {
+   "repo": "repo04",
+   "number": 721,
+   "title": "synthetic merge title 6",
+   "closedAt": "2026-10-15T21:27:13Z"
+  },
+  {
+   "repo": "repo04",
+   "number": 720,
+   "title": "synthetic merge title 7",
+   "closedAt": "2026-10-15T21:26:40Z"
+  },
+  {
+   "repo": "repo13",
+   "number": 407,
+   "title": "synthetic merge title 8",
+   "closedAt": "2026-10-15T19:46:49Z"
+  }
+ ],
+ "prs": [
+  {
+   "repo": "acme/repo04",
+   "number": 709,
+   "title": "synthetic PR title 1",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": "cos-worker03"
+  },
+  {
+   "repo": "acme/repo07",
+   "number": 11,
+   "title": "synthetic PR title 2",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo10",
+   "number": 35,
+   "title": "synthetic PR title 3",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo10",
+   "number": 39,
+   "title": "synthetic PR title 4",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo10",
+   "number": 40,
+   "title": "synthetic PR title 5",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo11",
+   "number": 75,
+   "title": "synthetic PR title 6",
+   "state": "blocked",
+   "reason": "conflicting",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo12",
+   "number": 35,
+   "title": "synthetic PR title 7",
+   "state": "blocked",
+   "reason": "conflicting",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo13",
+   "number": 411,
+   "title": "synthetic PR title 8",
+   "state": "draft",
+   "reason": "draft",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo14",
+   "number": 14,
+   "title": "synthetic PR title 9",
+   "state": "blocked",
+   "reason": "conflicting",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo17",
+   "number": 10,
+   "title": "synthetic PR title 10",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": ""
+  },
+  {
+   "repo": "acme/repo18",
+   "number": 59,
+   "title": "synthetic PR title 11",
+   "state": "waiting",
+   "reason": "no marker at head",
+   "worker": "cos-worker18"
+  },
+  {
+   "repo": "acme/repo19",
+   "number": 37,
+   "title": "synthetic PR title 12",
+   "state": "blocked",
+   "reason": "checks failing",
+   "worker": ""
+  }
+ ],
+ "sources": {
+  "github": "ok",
+  "herdr": "ok",
+  "desk": "ok",
+  "briefs": "ok"
+ }
+}

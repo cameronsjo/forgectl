@@ -307,6 +307,16 @@ const attentionScaffold = `
 # worker_prefix = "cos-" # sessions whose names start with this are workers
 `
 
+const sweepScaffold = `
+# ── sweep: the chief-of-staff ledger (forgectl sweep) ─────────────────────────
+# Nothing here is defaulted: sweep exits 2 and names any key that is missing.
+[sweep]
+# owner = "your-github-login"          # GitHub account whose repos the sweep covers
+# since = "2026-10-14"                 # first day (UTC) whose merges and worker briefs count
+# briefs = "/abs/path/to/briefs"       # one subdirectory per worker
+# reviewers = ["pr-reviewer"]          # cadence-review marker names that count (a claim filter)
+`
+
 const surfaceScaffold = `
 # ── surface: how "forgectl surface drain" paces and caps workers ────────────
 [surface.drain]
@@ -360,6 +370,7 @@ var initSections = []initSection{
 	{"tasks", "tasks", tasksScaffold},
 	{"desk", "desk", deskScaffold},
 	{"attention", "attention", attentionScaffold},
+	{"sweep", "sweep", sweepScaffold},
 	{"surface", "surface", surfaceScaffold},
 }
 

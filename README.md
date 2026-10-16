@@ -53,6 +53,7 @@ deep-dive get a link here.
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
+| `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
 | `attention` | Per-machine attention queue: what each Claude session, the desk and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
 | `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
@@ -343,6 +344,10 @@ forgectl desk layout --below             # herdr: the desk in a full-width row u
 forgectl attention list --json           # rows by delay cost; skipped counts malformed records
 forgectl attention put --session ID --turn ID < reply.txt   # record a reply's What's next items
 forgectl attention rm --session ID       # drop a session's record when it ends
+
+# sweep — the chief-of-staff ledger: workers, PRs, what waits on you; feeds `attention list` (Unix only)
+forgectl sweep --json                    # needs [sweep] owner, since, briefs, reviewers (or flags); exit 2 names a missing key
+forgectl sweep --owner LOGIN --since 2026-10-14 --briefs /abs/dir   # flags override the [sweep] table
 
 # tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
