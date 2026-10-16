@@ -422,3 +422,19 @@ func TestListReturnsNameOrder(t *testing.T) {
 		t.Fatalf("List order = %+v, %v", recs, err)
 	}
 }
+
+func TestAlwaysRefused(t *testing.T) {
+	s, dir := openTestSpool(t)
+	if err := s.Put(testRecord(testSession)); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.lstat(testSession + ".json"); st == nil || alwaysRefused(st) {
+		t.Errorf("a plain record reads as always refused: %+v", st)
+	}
+	if err := os.Symlink("x", filepath.Join(dir, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.lstat("link.json"); st == nil || !alwaysRefused(st) {
+		t.Error("a symlink does not read as always refused")
+	}
+}

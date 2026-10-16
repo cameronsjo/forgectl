@@ -95,8 +95,8 @@ record whose pane is gone; --cwd is the session's directory name. Each value
 is checked: a session id is 1 to 64 letters, digits, '_' or '-'.
 
 It prints items=, seen= and read= (the block's item lines, and how many the
-parser understood). After writing it prunes the spool, and drops any other
-session's record for the same pane.`, attentionStdinCap>>10, attentionStdinCap>>10),
+parser understood). After writing it prunes the spool and, when herdr lists this session in
+--pane, drops any other session's record for that pane.`, attentionStdinCap>>10, attentionStdinCap>>10),
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {

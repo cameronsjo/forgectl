@@ -453,3 +453,19 @@ func TestAttentionListDegradesOnAnUnsafeSpool(t *testing.T) {
 		t.Errorf("list = %+v, stderr %q; want the sweep row and spool=error", l, errOut)
 	}
 }
+
+func TestAttentionPutEvictsOnlyWhenHerdrVouches(t *testing.T) {
+	e := newAttnEnv(t)
+	// The victim's record, on a pane herdr lists for the victim.
+	victim := module.Deps{Runner: herdrAgents([3]string{"w1:p2", "victim", ""})}
+	if _, _, err := attnRun(t, victim, attnReply, "put", "--session", "victim", "--turn", "t", "--pane", "w1:p2", "--socket", attnSocket); err != nil {
+		t.Fatal(err)
+	}
+	// Another writer claims the same pane; herdr does not list it there.
+	if _, _, err := attnRun(t, victim, attnReply, "put", "--session", "intruder", "--turn", "t", "--pane", "w1:p2", "--socket", attnSocket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(e.spool(), "victim.json")); err != nil {
+		t.Errorf("a put herdr does not vouch for evicted another session's record: %v", err)
+	}
+}

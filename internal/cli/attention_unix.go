@@ -161,16 +161,36 @@ func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) erro
 	// The record is written. Housekeeping after it is best effort: a failure
 	// is reported on stderr and does not turn a published record into a
 	// failed put.
-	if err := s.EvictPane(o.pane, o.socket, o.session); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: evict: %v\n", err) //nolint:errcheck // best-effort note on stderr
+	h := attentionHerdr(cmd.Context(), deps)
+	// Evict the pane's older records only when herdr itself says this
+	// session runs in that pane on this socket: --pane and --socket are the
+	// writer's claim, and any process of yours could name another pane.
+	if herdrRuns(h, o.session, o.pane, o.socket) {
+		if err := s.EvictPane(o.pane, o.socket, o.session); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "attention put: evict: %v\n", err) //nolint:errcheck // best-effort note on stderr
+		}
 	}
-	live := attentionHerdr(cmd.Context(), deps).Liveness()
+	live := h.Liveness()
 	live.Keep = o.session
 	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), live); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: prune: %v\n", err) //nolint:errcheck // best-effort note on stderr
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "items=%d seen=%d read=%d\n", len(p.Items), p.Seen, p.Read)
 	return err
+}
+
+// herdrRuns reports whether the caller's herdr server lists session in pane,
+// and socket is that server.
+func herdrRuns(h attention.Herdr, session, pane, socket string) bool {
+	if !h.Known || pane == "" || socket == "" || socket != h.Socket {
+		return false
+	}
+	for _, a := range h.Agents {
+		if a.Pane == pane && a.Session == session {
+			return true
+		}
+	}
+	return false
 }
 
 func runAttentionRm(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {

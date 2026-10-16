@@ -210,9 +210,14 @@ func (s *Spool) List(now time.Time, ttl time.Duration, live Liveness) ([]Record,
 		case err != nil:
 			skipped++
 			if st == nil {
-				// Refused before a stat (a symlink, a hardlink, another
-				// user's file): age the name itself, never what it points at.
+				// Refused before a stat. Age the name itself, never what it
+				// points at, and only when the name is one the read always
+				// refuses (a symlink, a hardlink, not a regular file, another
+				// user's): a transient open error must not cost a live record.
 				st = s.lstat(name)
+				if st != nil && !alwaysRefused(st) {
+					st = nil
+				}
 			}
 			if st != nil && now.Sub(mtime(st)) > ttl && (live.Keep == "" || name != live.Keep+recordExt) {
 				s.removeSame(name, st)
@@ -334,6 +339,11 @@ func (s *Spool) lstat(name string) *unix.Stat_t {
 		return nil
 	}
 	return &st
+}
+
+// alwaysRefused reports whether privdir.OpenFile refuses st on every read.
+func alwaysRefused(st *unix.Stat_t) bool {
+	return st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || int(st.Uid) != os.Geteuid()
 }
 
 // removeSame unlinks name only while it is still the file that was read, so

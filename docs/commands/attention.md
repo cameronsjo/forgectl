@@ -54,7 +54,7 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 
 `skipped` counts spool records and sweep entries dropped as malformed. `sources` reports `spool`, `desk`, `herdr` and `sweep` as `ok`, `absent` (nothing there yet), `error`, `malformed` or `unavailable` (herdr could not be asked).
 
-**Worker origin.** A row is `origin: worker` when any name its session goes by starts with `[attention] worker_prefix` (default `cos-`). The names come from the session's herdr row (its worktree, and the basenames of its working directory and its pane's directory) and from the record's `--cwd`. The herdr names are checked so a worker cannot shed the tag by reporting a different `--cwd`, and a record whose session herdr does not list is never `own`: it is `unverified` (or `worker`, when its `--cwd` matches), so a worker cannot pass off a record under an unlisted session id as yours. Desk rows take the origin of the herdr session in the pane that queued them; sweep rows from a worker are `worker`.
+**Worker origin.** A row is `origin: worker` when any name its session goes by starts with `[attention] worker_prefix` (default `cos-`). The names come from the session's herdr row (its worktree, and the basenames of its working directory and its pane's directory) and from the record's `--cwd`. The herdr names are checked so a worker cannot shed the tag by reporting a different `--cwd`, and a record whose session herdr does not list is never `own`: it is `unverified` (or `worker`, when its `--cwd` matches), so a worker cannot pass off a record under an unlisted session id as yours. **`own` is not proof of authorship.** It says the record names a session herdr lists and that session is not a worker; any process of yours, a worker included, can write a record under a listed session id (it replaces that session's record). Treat `origin` as a label for sorting and display, never as a reason to act. Desk rows take the origin of the herdr session in the pane that queued them; sweep rows from a worker are `worker`.
 
 ## The parser
 
@@ -83,7 +83,7 @@ Records live in `$XDG_STATE_HOME/cadence/attention` (`~/.local/state/cadence/att
 
 Each session has one file, `<session>.json`, mode `0600`. The session id must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` and is used only as that file name. `put` writes a fresh `O_EXCL` temporary file in the spool, then renames it over the record; a record name that is a symlink or not a regular file is refused by `put` and `rm`.
 
-**The spool is untrusted.** Any process running as you can write it, workers included. On every read, `list` re-checks every field (session, pane `^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$`, socket, directory name, turn, each item), refuses unknown fields, requires the record to name the session its file is named for, and strips and cuts every text again. A record that fails is skipped and counted, and its content is never printed. A record can still claim any session id: the queue trusts it for nothing beyond showing its text.
+**The spool is untrusted.** Any process running as you can write it, workers included. On every read, `list` re-checks every field (session, pane `^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$`, socket, directory name, turn, each item), refuses unknown fields, requires the record to name the session its file is named for, and strips and cuts every text again. A record that fails is skipped and counted, and its content is never printed. A record can still claim any session id, including a live one herdr lists: the queue trusts it for nothing beyond showing its text, and its `origin` is a label, not an authentication (see Worker origin).
 
 ## Pruning
 
@@ -91,7 +91,7 @@ Each session has one file, `<session>.json`, mode `0600`. The session id must ma
 
 - A record that has a `--pane` and whose `--socket` equals the caller's `HERDR_SOCKET_PATH` is judged by herdr alone. It stays while `herdr agent list` reports its pane, however old, and goes as soon as the pane is gone.
 - Any other record (no socket, another herdr server, or herdr not answering) goes once it is older than `[attention] ttl_hours` (default 24).
-- `put` also drops any other session's record for the same pane and socket: the pane now runs the new session (after `/clear`, or a new session in that pane).
+- `put` also drops any other session's record for the same pane and socket, but only when herdr itself lists the putting session in that pane on the caller's socket: the pane now runs the new session (after `/clear`, or a new session in that pane).
 - A malformed or refused record (a symlink or hardlink at a record name), and a leftover temporary file, are removed once older than `ttl_hours`, judged by the name's own mtime; a symlink is unlinked, never followed. Other names in the directory are left alone and counted as skipped.
 
 ## The desk, read without writing
