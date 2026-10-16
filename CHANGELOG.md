@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.47.1](https://github.com/cameronsjo/forgectl/compare/v0.47.0...v0.47.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **pr:** each Claude review window gets a private temp dir, and the sandbox denies writes to the temp dir other Claude Code sessions share ([38e925b](https://github.com/cameronsjo/forgectl/commit/38e925b6503e4e99fd8f580b964c0bcfee000981))
+* **pr:** on macOS, the Claude reviewer's gh reads get a CA bundle file, so they no longer fail certificate verification under the sandbox ([38e925b](https://github.com/cameronsjo/forgectl/commit/38e925b6503e4e99fd8f580b964c0bcfee000981))
+* **pr:** the `pr local` reviewer's findings-dir write grant is now an `Edit(//<dir>/**)` rule Claude Code actually matches ([38e925b](https://github.com/cameronsjo/forgectl/commit/38e925b6503e4e99fd8f580b964c0bcfee000981))
+* **pr:** the Claude reviewer can no longer read common credential stores, including Claude Code's and Codex's logins, or print its window's environment ([38e925b](https://github.com/cameronsjo/forgectl/commit/38e925b6503e4e99fd8f580b964c0bcfee000981))
+
 ## [0.47.0](https://github.com/cameronsjo/forgectl/compare/v0.46.0...v0.47.0) (2026-10-14)
 
 
