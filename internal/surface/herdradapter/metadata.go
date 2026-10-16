@@ -14,9 +14,10 @@ import (
 )
 
 // MetadataSource is the --source forgectl reports herdr metadata under. herdr
-// keeps one token map per pane or workspace, keyed by token name alone, and
-// uses the source only to order each reporter's sequence numbers. A token
-// forgectl sets therefore replaces a same-named token another reporter set.
+// keeps one token map per terminal (a pane's) or workspace, keyed by token
+// name alone, and uses the source only to order each reporter's sequence
+// numbers. A token forgectl sets therefore replaces a same-named token another
+// reporter set, and a token forgectl clears is cleared for every reporter.
 const MetadataSource = "forgectl-surface"
 
 // WorkerNameToken is the workspace token that carries a worker's name. A
