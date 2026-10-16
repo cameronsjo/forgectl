@@ -12,10 +12,12 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -71,13 +73,30 @@ func ParsePriority(s string) (Priority, error) {
 
 // Message is one message as the mailbox stores it.
 type Message struct {
-	V         int       `json:"v"`
-	ID        string    `json:"id"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Body      string    `json:"body"`
-	Priority  Priority  `json:"priority"`
-	CreatedAt time.Time `json:"created_at"`
+	V           int       `json:"v"`
+	ID          string    `json:"id"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	Body        string    `json:"body"`
+	Priority    Priority  `json:"priority"`
+	CreatedAt   time.Time `json:"created_at"`
+	ReplyBinary string    `json:"reply_binary,omitempty"`
+}
+
+// ValidateReplyBinary accepts the absolute forgectl executable persisted with
+// a message. Control characters are rejected before the path reaches a shell
+// hint embedded in the recipient's transcript.
+func ValidateReplyBinary(binary string) error {
+	if binary == "" {
+		return nil
+	}
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("reply binary %s is not absolute", quoteTrunc(binary))
+	}
+	if strings.IndexFunc(binary, unicode.IsControl) >= 0 {
+		return fmt.Errorf("reply binary %s contains a control character", quoteTrunc(binary))
+	}
+	return nil
 }
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -139,7 +158,11 @@ func Render(m Message) string {
 	if m.From != SystemSender {
 		// Single quotes, so a reply the recipient pastes in is not expanded
 		// by the shell.
-		fmt.Fprintf(&b, "Reply with: forgectl surface send %s '<text>'\n", m.From)
+		binary := "forgectl"
+		if m.ReplyBinary != "" {
+			binary = shellQuote(m.ReplyBinary)
+		}
+		fmt.Fprintf(&b, "Reply with: %s surface send %s '<text>'\n", binary, m.From)
 	}
 	b.WriteString("\n")
 	b.WriteString(m.Body)
@@ -148,6 +171,10 @@ func Render(m Message) string {
 	}
 	b.WriteString(EndMarker)
 	return b.String()
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // newID returns a random version 4 UUID.

@@ -184,6 +184,28 @@ func TestSendQueuesThenFlushDelivers(t *testing.T) {
 	}
 }
 
+func TestQueuedFlushUsesReplyBinaryPersistedAtEnqueue(t *testing.T) {
+	adapter := &fakeAdapter{errs: []error{NotReady("not started")}}
+	service, clock := newTestService(t, adapter)
+	first := "/tmp/forge one"
+	second := "/tmp/forge two"
+	service.ReplyBinary = first
+	if result, err := service.Send(context.Background(), "coord", "pi-1", "hello", PriorityNext); err != nil || result.Status != StatusQueued {
+		t.Fatalf("send result = %+v, err = %v", result, err)
+	}
+	service.ReplyBinary = second
+	clock.add(6 * time.Second)
+	if report, err := service.Flush(context.Background()); err != nil || report.Sent != 1 {
+		t.Fatalf("flush report = %+v, err = %v", report, err)
+	}
+	if len(adapter.texts) != 2 {
+		t.Fatalf("adapter received %d renders, want 2", len(adapter.texts))
+	}
+	if !strings.Contains(adapter.texts[1], "'/tmp/forge one' surface send") || strings.Contains(adapter.texts[1], second) {
+		t.Fatalf("flushed render did not retain its original reply binary: %q", adapter.texts[1])
+	}
+}
+
 func TestPermanentErrorFails(t *testing.T) {
 	ad := &fakeAdapter{errs: []error{errors.New("thread id is malformed")}}
 	s, _ := newTestService(t, ad)

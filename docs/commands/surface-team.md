@@ -2,7 +2,7 @@
 
 `forgectl surface team` enrolls named native conversations in a private ledger. It does not launch harnesses, grant tools, change installed integrations, or enable worker-to-worker messaging. A coordinator and its workers may exchange task messages; those messages are not instructions from the operator and cannot authorize privileged actions.
 
-This is an opt-in source-build workflow. Use the same isolated `forgectl` build on every participant's `PATH`; an older installed binary may not have these commands. Keep native sandbox, approval, authentication, and guard extensions enabled.
+This is an opt-in source-build workflow. Use the same isolated `forgectl` build on every participant's `PATH`; an older installed binary may not have these commands. Invoke its absolute path when starting a task because login profiles and aliases may replace `PATH`. New messages retain that executable path in their reply hint, including across queued retries. Keep native sandbox, approval, authentication, and guard extensions enabled.
 
 ## Register members
 
@@ -62,5 +62,7 @@ node scripts/verify-cross-harness-loop.mjs --help
 The behavioral extension test uses the actual embedded TypeScript source with a controlled extension API, including missing native acceptance, lost acknowledgements, duplicate delivery, and session recovery. It is not evidence that a live model completed a task.
 
 The opt-in live verifier requires a fresh private scratch directory, explicit isolated binary paths, a locally installed `ws` module entrypoint through `--websocket-module`, and the installed Pi authentication and safety extensions through repeatable `--pi-extension` arguments. The WebSocket library handles Codex's native Unix transport without a TCP bridge or a new global installation. Prefer the native Codex executable rather than a wrapper so the verifier owns the server process it stops.
+
+Supply `--pi-provider NAME --pi-model ID` together to select an existing authenticated model explicitly. The verifier checks the native selected model and fails on a model error rather than treating a settled failed turn as readiness. It initializes Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. It checks that Codex did not persist the scratch path in global configuration.
 
 The verifier starts only task-owned processes, records native session/model identities, and leaves private evidence on failure. Its acceptance gate requires a real delegation, clarification and answer without human relay, a worker-created executable artifact, an independent positive check and corrupt-input negative control, and interruption/replacement probes. Merely running its syntax or help check does not satisfy that gate.

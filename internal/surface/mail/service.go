@@ -10,10 +10,11 @@ import (
 
 // Service sends and flushes messages for one coordinator ledger.
 type Service struct {
-	Box      Mailbox
-	Roster   Roster
-	Adapters map[Harness]Adapter
-	Policy   Policy
+	Box         Mailbox
+	Roster      Roster
+	Adapters    map[Harness]Adapter
+	Policy      Policy
+	ReplyBinary string
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -49,6 +50,9 @@ func (s *Service) worker(name string) (Worker, error) {
 // Send checks policy, appends the message, and attempts delivery once. A
 // transient failure leaves it queued for the next flush.
 func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority) (SendResult, error) {
+	if err := ValidateReplyBinary(s.ReplyBinary); err != nil {
+		return SendResult{}, err
+	}
 	sender, err := s.worker(from)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("sender: %w", err)
@@ -68,7 +72,7 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 		pri = PriorityNext
 	}
 	now := s.now()
-	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, Body: clean, Priority: pri, CreatedAt: now}
+	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, Body: clean, Priority: pri, CreatedAt: now, ReplyBinary: s.ReplyBinary}
 
 	var res SendResult
 	err = s.Box.Locked(func(tx *Tx) error {
@@ -91,6 +95,10 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 // attempt tries one delivery and records the outcome.
 func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendResult, error) {
 	id := e.Msg.ID
+	if err := ValidateReplyBinary(e.Msg.ReplyBinary); err != nil {
+		detail := oneLine([]byte(err.Error()), 300)
+		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, true, s.now())
+	}
 	ad, ok := s.Adapters[w.Harness]
 	if !ok || ad == nil {
 		detail := fmt.Sprintf("no adapter for harness %s", quoteTrunc(string(w.Harness)))

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { homedir } from "node:os";
 
 const MAX_LOG = 24_000;
 const DEFAULT_TIMEOUT = 180_000;
@@ -13,7 +15,7 @@ const sensitive = /(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|COOKIE|AUTH)/i;
 let activeEvidence;
 let activeCleanup = async () => {};
 
-const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS [--codex ABS] [--pi ABS] [--pi-extension ABS ...]
+const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS [--codex ABS] [--pi ABS] [--pi-provider NAME --pi-model ID] [--pi-extension ABS ...]
 
 Runs the opt-in disposable Codex/Pi collaboration acceptance loop. The root
 must be an existing empty 0700 directory. The script never copies auth files
@@ -34,7 +36,7 @@ function parseArgs(argv) {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out.piExtensions.push(value);
-    } else if (["--forgectl", "--root", "--codex", "--pi", "--websocket-module"].includes(arg)) {
+    } else if (["--forgectl", "--root", "--codex", "--pi", "--websocket-module", "--pi-provider", "--pi-model"].includes(arg)) {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out[arg === "--websocket-module" ? "websocketModule" : arg.slice(2)] = value;
@@ -45,6 +47,7 @@ function parseArgs(argv) {
     if (!out[name] || !out[name].startsWith("/")) fail(`--${name} must be an absolute path`);
   }
   if (out.piExtensions.some((path) => !path.startsWith("/"))) fail("--pi-extension must be an absolute path");
+  if (Boolean(out["pi-provider"]) !== Boolean(out["pi-model"])) fail("--pi-provider and --pi-model must be supplied together");
   return out;
 }
 
@@ -109,9 +112,11 @@ async function moduleFile(path) {
 }
 
 class Evidence {
-  constructor(root) { this.root = root; this.records = []; }
+  constructor(root) { this.root = root; this.records = []; this.nativeFailure = undefined; }
   add(kind, data = {}) {
-    this.records.push({ at: new Date().toISOString(), kind, ...data });
+    const record = { at: new Date().toISOString(), kind, ...data };
+    this.records.push(record);
+    appendFileSync(join(this.root, "events.jsonl"), `${JSON.stringify(record)}\n`, { mode: 0o600 });
   }
   async save(name = "evidence.json") {
     await writeFile(join(this.root, name), `${JSON.stringify({ version: 1, records: this.records }, null, 2)}\n`, { mode: 0o600 });
@@ -153,6 +158,7 @@ class JsonLinesProcess {
     this.waiters = [];
     this.buffer = "";
     this.closed = false;
+    this.lastAssistantError = undefined;
     child.stdout.on("data", (chunk) => this.#data(String(chunk)));
     child.stderr.on("data", (chunk) => evidence.add("native-stderr", { name, text: bounded(chunk) }));
     child.once("close", (code, signal) => {
@@ -175,6 +181,15 @@ class JsonLinesProcess {
       }
       this.lines.push(value);
       this.evidence.add("native-event", { name: this.name, message: value });
+      if (value.type === "message_end" && value.message?.role === "assistant") {
+        this.lastAssistantError = ["error", "aborted"].includes(value.message.stopReason)
+          ? `${value.message.stopReason}: ${value.message.errorMessage ?? "native model turn failed"}`
+          : undefined;
+      }
+      if (value.type === "agent_settled" && this.lastAssistantError) {
+        this.evidence.nativeFailure = `${this.name} ${this.lastAssistantError}`;
+        for (const waiter of this.waiters.splice(0)) waiter.reject(new Error(this.evidence.nativeFailure));
+      }
       if (this.name === "codex-app-server" && value.jsonrpc === "2.0" && value.method && value.id !== undefined && !Object.hasOwn(value, "result") && !Object.hasOwn(value, "error")) {
         this.send({ jsonrpc: "2.0", id: value.id, result: { decision: "decline" } });
         this.evidence.add("codex-request-declined", { method: value.method });
@@ -194,6 +209,7 @@ class JsonLinesProcess {
     this.child.stdin.write(`${JSON.stringify(value)}\n`);
   }
   waitFor(predicate, timeout = DEFAULT_TIMEOUT, afterIndex = 0) {
+    if (this.evidence.nativeFailure) return Promise.reject(new Error(this.evidence.nativeFailure));
     const existing = this.lines.slice(afterIndex).find(predicate);
     if (existing) return Promise.resolve(existing);
     return new Promise((resolvePromise, reject) => {
@@ -355,6 +371,7 @@ async function flushMailbox(evidence, forgectl, env, cwd) {
 async function waitMailbox(evidence, forgectl, ledger, env, cwd, predicate, timeout = DEFAULT_TIMEOUT) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    if (evidence.nativeFailure) fail(evidence.nativeFailure);
     const report = await mailbox(evidence, forgectl, ledger, env, cwd);
     const found = (report.messages ?? []).find(predicate);
     if (found) return found;
@@ -453,6 +470,16 @@ async function recordBinary(evidence, label, executablePath, env, cwd) {
   evidence.add("binary", { label, path: executablePath, sha256: digest, version: bounded(versionResult.stdout) });
 }
 
+async function assertNoScratchTrust(evidence, root) {
+  const configPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+  const contents = await readFile(configPath, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  if (contents.includes(root)) fail("native Codex persisted the scratch directory in its global configuration");
+  evidence.add("codex-global-config-check", { scratchTrustAbsent: true, sha256: createHash("sha256").update(contents).digest("hex") });
+}
+
 async function recordFile(evidence, label, filePath) {
   const digest = createHash("sha256").update(await readFile(filePath)).digest("hex");
   evidence.add("file", { label, path: filePath, sha256: digest });
@@ -474,6 +501,7 @@ async function main() {
   const evidence = new Evidence(root);
   activeEvidence = evidence;
   const forgectl = await executable(args.forgectl, "--forgectl");
+  const forgectlCommand = `'${forgectl.replaceAll("'", "'\\''")}'`;
   const codex = await executable(args.codex, "--codex");
   const pi = await executable(args.pi, "--pi");
   const websocketModulePath = await moduleFile(args.websocketModule);
@@ -492,6 +520,7 @@ async function main() {
   const piReceiptPath = join(root, "pi-receipts.jsonl");
   const piProxySocket = join(root, "pi-proxy.sock");
   const replacementSocket = join(root, "codex-replacement.sock");
+  const codexServerArgs = (socket) => ["app-server", "--config", `projects.${JSON.stringify(coordinatorRoot)}.trust_level="untrusted"`, "--listen", `unix://${socket}`];
   for (const socketPath of [codexSocket, piSocket, piRestartSocket, piProxySocket, replacementSocket]) {
     if (socketPath.length > 103) fail(`Unix socket path exceeds macOS limit: ${socketPath}`);
   }
@@ -499,6 +528,7 @@ async function main() {
   const inheritedEnv = { ...process.env };
   for (const key of ["FORGECTL_LEDGER", "FORGECTL_WORKER", "FORGECTL_COORDINATOR", "FORGECTL_RUN_ID", "FORGECTL_INBOX", "FORGECTL_INBOX_RECEIPTS", "FORGECTL_DRAIN_WORKER"]) delete inheritedEnv[key];
   const baseEnv = childEnv(inheritedEnv, {}, forgectl);
+  await assertNoScratchTrust(evidence, root);
   await recordBinary(evidence, "forgectl", forgectl, baseEnv, coordinatorRoot);
   await recordBinary(evidence, "codex", codex, baseEnv, coordinatorRoot);
   await recordBinary(evidence, "pi", pi, baseEnv, piRoot);
@@ -537,7 +567,8 @@ async function main() {
   };
   proxy = startAckDroppingProxy(evidence, piProxySocket, piSocket);
   const piSessionId = randomUUID();
-  const piArgs = ["--mode", "rpc", "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piSessionId, "--tools", "read,bash,find,grep"];
+  const piModelArgs = args["pi-provider"] ? ["--provider", args["pi-provider"], "--model", args["pi-model"]] : [];
+  const piArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piSessionId, "--tools", "read,bash,find,grep"];
   let piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX: piSocket, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
   piChild = spawn(pi, piArgs, { cwd: piRoot, env: piEnv, stdio: ["pipe", "pipe", "pipe"] });
   piRpc = new JsonLinesProcess(piChild, evidence, "pi-rpc");
@@ -545,11 +576,12 @@ async function main() {
   const initialPiModel = initialPiState?.data?.model;
   const piSessionFile = initialPiState?.data?.sessionFile;
   if (!initialPiState?.data || !initialPiModel || typeof initialPiModel.provider !== "string" || typeof initialPiModel.id !== "string" || !Array.isArray(initialPiModel.input) || !Number.isInteger(initialPiModel.contextWindow) || !Number.isInteger(initialPiModel.maxTokens) || initialPiState.data.sessionId !== piSessionId || typeof piSessionFile !== "string" || !piSessionFile.startsWith(piSessions)) fail("Pi native get_state did not prove the requested session, session file, and model capabilities");
+  if (piModelArgs.length && (initialPiModel.provider !== args["pi-provider"] || initialPiModel.id !== args["pi-model"])) fail("Pi silently selected a different provider or model");
   evidence.add("pi-native-state", { provider: initialPiModel.provider, modelId: initialPiModel.id, reasoning: Boolean(initialPiModel.reasoning), input: initialPiModel.input, contextWindow: initialPiModel.contextWindow, maxTokens: initialPiModel.maxTokens, sessionId: initialPiState.data.sessionId, sessionFile: piSessionFile, explicitExtensions: piExtensions });
-  await piRpc.request({ type: "prompt", id: "pi-role", message: "You are the Pi worker in an explicitly enrolled forgectl team. Do not create files or run tools from this setup prompt. Wait for a [forgectl-msg] from the coordinator; when one arrives, follow its task instructions and ask for clarification before doing any artifact work. Reply only through forgectl surface send." }, DEFAULT_TIMEOUT);
+  await piRpc.request({ type: "prompt", id: "pi-role", message: `You are the Pi worker in an explicitly enrolled forgectl team. Do not create files or run tools from this setup prompt. Wait for a [forgectl-msg] from the coordinator; when one arrives, follow its task instructions and ask for clarification before doing any artifact work. Reply only through ${forgectlCommand} surface send; use that exact absolute executable, not a shell alias or an installed copy.` }, DEFAULT_TIMEOUT);
   await piRpc.waitFor((event) => event.type === "agent_settled", DEFAULT_TIMEOUT);
   const codexEnv = coordinatorEnv;
-  codexChild = spawn(codex, ["app-server", "--listen", `unix://${codexSocket}`], { cwd: coordinatorRoot, env: codexEnv, stdio: ["ignore", "ignore", "pipe"] });
+  codexChild = spawn(codex, codexServerArgs(codexSocket), { cwd: coordinatorRoot, env: codexEnv, stdio: ["ignore", "ignore", "pipe"] });
   codexRpc = new CodexClient(codexChild, evidence, WebSocket);
   const socketReady = async (path) => {
     const deadline = Date.now() + 30_000;
@@ -564,17 +596,20 @@ async function main() {
   const init = await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier", version: "1" }, capabilities: { experimentalApi: false } });
   evidence.add("codex-initialized", { protocol: init?.protocolVersion ?? init?.serverInfo?.version });
   codexRpc.notify("initialized", {});
-  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "workspace-write", ephemeral: true, threadSource: "startup" });
+  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
   const threadId = thread?.thread?.id ?? thread?.id;
   if (!threadId) fail("Codex thread/start returned no thread id");
-  evidence.add("codex-thread", { threadId, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", sandbox: "workspace-write" });
+  await assertNoScratchTrust(evidence, root);
+  evidence.add("codex-thread", { threadId, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
   const rebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", codexSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (rebound.member.run_id !== coordinator.member.run_id || rebound.member.thread_id !== threadId) fail("coordinator replacement changed the process incarnation or thread unexpectedly");
   const fixture = await createFixture(root);
   const utility = join(piRoot, "summarize-mailbox.mjs");
   const taskId = `cross-harness-${randomUUID()}`;
   const delegation = `You are the coordinator of an explicitly enrolled forgectl team. Delegate task ${taskId} to pi-worker by running exactly the available native command forgectl surface send pi-worker '<task text>'; your shell inherits FORGECTL_LEDGER=${ledger}, FORGECTL_COORDINATOR=coordinator, and FORGECTL_RUN_ID for this registered process. Do not create the worker artifact yourself. Tell Pi to ask one meaningful clarification before any artifact work, and require the clarification body to contain exactly CLARIFICATION ${taskId}. Then stop this turn and wait. The next coordinator turn will be started by the worker's queued reply; answer that clarification directly through forgectl surface send pi-worker with a body containing exactly ANSWER ${taskId}, preserving task ID ${taskId}. The worker must create ${utility} with Node builtins only, read fixture ${fixture} in forgectl mailbox JSONL shape, fold final statuses including unconfirmed, reject duplicate message-record IDs (duplicate op:msg IDs, not status records), append exactly one task execution record to ${join(piRoot, "worker-executions.jsonl")} shaped {"taskId":"${taskId}","executionId":"<unique>"}, and reply with a body containing exactly COMPLETED ${taskId}, its artifact path, and execution ID. The standalone utility stdout must be exactly one JSON object shaped {"counts":{"sent":1,"queued":1,"failed":1,"unconfirmed":1},"ids":["fixture-1","fixture-2","fixture-3","fixture-4"]} with no extra output. A successful delegation is transport acceptance, not proof of a completed turn; do not claim completion until the worker reply is visible in the inbox.`;
-  await codexRpc.turn(threadId, delegation, coordinatorRoot, root);
+  const exactBinaryDelegation = delegation.replaceAll("forgectl surface", `${forgectlCommand} surface`);
+  await codexRpc.turn(threadId, `${exactBinaryDelegation} Use that exact absolute executable; a shell alias or login profile may select an older installed copy.`, coordinatorRoot, root);
+  await assertNoScratchTrust(evidence, root);
   const delegated = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "coordinator" && message.to === "pi-worker" && message.body.includes(taskId) && ["sent", "unconfirmed"].includes(message.status), 60_000);
   const droppedId = proxy.droppedId();
   const deliveryJournal = await readReceiptRecords(join(ledger, "mailbox.jsonl"));
@@ -632,7 +667,7 @@ async function main() {
   const stoppedReport = lastJson(stoppedProbe.stdout);
   if (stoppedProbe.code !== 75 || !stoppedReport || stoppedReport.status !== "queued") fail(`stopped receiver was not queued with exit 75: ${bounded(stoppedProbe.stdout)} ${bounded(stoppedProbe.stderr)}`);
   evidence.add("stopped-receiver", { status: stoppedReport.status, code: stoppedProbe.code, id: stoppedReport.id });
-  const piRestartArgs = ["--mode", "rpc", "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session", piSessionFile, "--tools", "read,bash,find,grep"];
+  const piRestartArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session", piSessionFile, "--tools", "read,bash,find,grep"];
   restartedPiChild = spawn(pi, piRestartArgs, { cwd: piRoot, env: piEnv, stdio: ["pipe", "pipe", "pipe"] });
   piRpc = new JsonLinesProcess(restartedPiChild, evidence, "pi-rpc-restart");
   await socketReady(piRestartSocket);
@@ -653,20 +688,20 @@ async function main() {
   const staleSend = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `retired coordinator probe ${taskId}`, "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
   if (staleSend.code === 0) fail("retired coordinator run was allowed to send a message");
   evidence.add("retired-coordinator-rejected", { eventCode: staleEvent.code, sendCode: staleSend.code });
-  replacementChild = spawn(codex, ["app-server", "--listen", `unix://${replacementSocket}`], { cwd: coordinatorRoot, env: childEnv(baseEnv, replacement.environment, forgectl), stdio: ["ignore", "ignore", "pipe"] });
+  replacementChild = spawn(codex, codexServerArgs(replacementSocket), { cwd: coordinatorRoot, env: childEnv(baseEnv, replacement.environment, forgectl), stdio: ["ignore", "ignore", "pipe"] });
   codexRpc = new CodexClient(replacementChild, evidence, WebSocket);
   await socketReady(replacementSocket);
   await codexRpc.connect(replacementSocket);
   await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier-replacement", version: "1" }, capabilities: { experimentalApi: false } });
   codexRpc.notify("initialized", {});
-  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "workspace-write", ephemeral: true, threadSource: "startup" });
+  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
   const replacementThreadId = replacementThread?.thread?.id ?? replacementThread?.id;
   if (!replacementThreadId) fail("replacement Codex thread/start returned no thread id");
   const replacementRebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--thread", replacementThreadId, "--run-id", replacement.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (replacementRebound.member.run_id !== replacement.member.run_id || replacementRebound.member.thread_id !== replacementThreadId) fail("replacement coordinator did not bind its new thread and run");
   evidence.add("coordinator-replacement", { oldRunId: coordinator.member.run_id, runId: replacement.member.run_id, oldThreadId: threadId, threadId: replacementThreadId, socket: replacementSocket });
   const replacementToken = `replacement-${randomUUID()}`;
-  await codexRpc.turn(replacementThreadId, `You are the replacement coordinator. Read the current ledger and delegate the independent recovery check ${replacementToken} to pi-worker with forgectl surface send. Tell Pi to reply with exactly that token and do not modify files. This turn proves the newly registered coordinator thread, not the retired one, can deliver work.`, coordinatorRoot, root);
+  await codexRpc.turn(replacementThreadId, `You are the replacement coordinator. Read the current ledger and delegate the independent recovery check ${replacementToken} to pi-worker with ${forgectlCommand} surface send. Use that exact absolute executable, not a shell alias or an installed copy. Tell Pi to reply with exactly that token and do not modify files. This turn proves the newly registered coordinator thread, not the retired one, can deliver work.`, coordinatorRoot, root);
   const replacementEnv = childEnv(baseEnv, replacement.environment, forgectl);
   coordinatorEnv = replacementEnv;
   const replacementReply = await waitMailbox(evidence, forgectl, ledger, replacementEnv, coordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(replacementToken), 180_000);
@@ -678,6 +713,7 @@ async function main() {
   const acceptedOrVisible = taskMessages.filter((message) => ["sent", "unconfirmed"].includes(message.status));
   evidence.add("acceptance-summary", { taskId, threadId, replacementThreadId, taskMessageIds: ids, visibleDeliveryStatuses: acceptedOrVisible.map((message) => ({ id: message.id, status: message.status })) });
   await activeCleanup();
+  await assertNoScratchTrust(evidence, root);
   await evidence.save();
   await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, replacementThreadId, utility: utilityResult.code, negativeControl: negative.code }, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);

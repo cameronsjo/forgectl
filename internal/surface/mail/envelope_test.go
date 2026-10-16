@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,43 @@ func TestRenderHasOneHeader(t *testing.T) {
 	sys := Render(Message{ID: "id-2", From: SystemSender, To: "coord", Body: "x"})
 	if strings.Contains(sys, "Reply with") {
 		t.Fatalf("system notice offers a reply: %q", sys)
+	}
+}
+
+func TestRenderReplyBinaryIsShellQuoted(t *testing.T) {
+	path := "/tmp/forge tool's; echo injected"
+	out := Render(Message{ID: "id-1", From: "pi-1", To: "coord", Body: "x", ReplyBinary: path})
+	want := `Reply with: '/tmp/forge tool'"'"'s; echo injected' surface send pi-1 '<text>'`
+	if !strings.Contains(out, want) {
+		t.Fatalf("reply hint = %q, want %q", out, want)
+	}
+	if strings.Contains(out, "Reply with: /tmp") {
+		t.Fatalf("reply path was not quoted: %q", out)
+	}
+	output, err := exec.CommandContext(t.Context(), "sh", "-c", "printf '%s' "+shellQuote(path)).Output()
+	if err != nil || string(output) != path {
+		t.Fatalf("shell received %q, want %q: %v", output, path, err)
+	}
+}
+
+func TestValidateReplyBinary(t *testing.T) {
+	for _, binary := range []string{"/tmp/forgectl", "/tmp/forge tool's"} {
+		if err := ValidateReplyBinary(binary); err != nil {
+			t.Errorf("ValidateReplyBinary(%q) = %v", binary, err)
+		}
+	}
+	for _, binary := range []string{"forgectl", "/tmp/forge\nctl"} {
+		if err := ValidateReplyBinary(binary); err == nil {
+			t.Errorf("ValidateReplyBinary(%q) = nil", binary)
+		}
+	}
+}
+
+func TestRenderIDsRemainDistinct(t *testing.T) {
+	first := Render(Message{ID: "id-1", From: "coord", To: "pi-1", Body: "same"})
+	second := Render(Message{ID: "id-2", From: "coord", To: "pi-1", Body: "same"})
+	if first == second {
+		t.Fatal("different message IDs rendered identical text")
 	}
 }
 

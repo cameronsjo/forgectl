@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
 Status: in progress
-Next action: implement explicit team registration and safe delivery recovery, then run the real Codex/Pi acceptance loop.
+Next action: rerun live Codex/Pi acceptance with explicit executable and model selection after correcting the first runtime failures.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
@@ -48,6 +48,9 @@ After the two-harness loop passes, evaluate Agent Board's incremental value, the
 - A wider CLI run completed with one `TestDeskWatch_ClosedPipeExits141` timeout; its isolated fresh rerun passed. This is not recorded as a fully green wider suite.
 - Native Codex probe: installed 0.153.4 completed WebSocket-over-Unix initialization and created an idle ephemeral thread with no model turns; the owned server stopped with exit 0.
 - Live acceptance remains pending. The first live verifier attempt stopped before registration or model turns because plain Pi `--help` exceeded its 30-second preflight timeout. The next preflight loads built-in CLI metadata without unrelated extensions; actual model processes still load the explicit authentication and safety extensions.
+- The second live attempt reached both runtimes but did not delegate work. Pi selected an unsupported `openai-codex/gpt-5.5` model; the verifier now checks explicit model selection and treats native model errors as failures. Codex's login shell selected an older installed forgectl despite the inherited `PATH`; delegation prompts and persisted reply hints now use the isolated executable's absolute path.
+- Starting a workspace-write Codex thread persisted scratch trust entries in global configuration. Codex removed only its own two entries, preserving concurrent unrelated changes. The verifier now starts read-only threads with process-scoped untrusted-project overrides and checks for scratch-path persistence. Task turns retain a scratch-only workspace-write sandbox with network access disabled; this is not a global trust or sandbox change.
+- A fresh no-model probe of the corrected initialization returned an idle read-only thread, left global configuration byte-identical, and stopped its owned server with exit 0. After the reply-path correction, all mail tests, the focused CLI tests, and the embedded-extension behavioral tests passed again; the shell-quoting test executes the rendered argument through a real shell.
 
 ## Implementation review
 

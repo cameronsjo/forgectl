@@ -413,4 +413,15 @@ func TestDefaultMailSessionLedger(t *testing.T) {
 	if ca, ok := sess.svc.Adapters[mail.HarnessCodex].(mail.CodexAdapter); !ok || ca.Runner != runner {
 		t.Fatalf("codex adapter %#v", sess.svc.Adapters[mail.HarnessCodex])
 	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.svc.ReplyBinary != executable {
+		t.Fatalf("reply binary %q, want %q", sess.svc.ReplyBinary, executable)
+	}
 }

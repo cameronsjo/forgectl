@@ -57,6 +57,17 @@ func defaultMailSession(deps module.Deps, getenv func(string) string) (*mailSess
 	if err != nil {
 		return nil, err
 	}
+	replyBinary, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve forgectl executable: %w", err)
+	}
+	replyBinary, err = filepath.Abs(replyBinary)
+	if err != nil {
+		return nil, fmt.Errorf("resolve forgectl executable path: %w", err)
+	}
+	if err := mail.ValidateReplyBinary(replyBinary); err != nil {
+		return nil, err
+	}
 	// No pane adapter yet: the pane driver is the herdr worker verbs from
 	// #536, so a pane worker's message fails with "no adapter" until then.
 	adapters := map[mail.Harness]mail.Adapter{
@@ -66,10 +77,11 @@ func defaultMailSession(deps module.Deps, getenv func(string) string) (*mailSess
 	}
 	return &mailSession{
 		svc: &mail.Service{
-			Box:      mail.Mailbox{Dir: ledger},
-			Roster:   mail.FileRoster{Dir: ledger},
-			Adapters: adapters,
-			Policy:   mail.DefaultPolicy(),
+			Box:         mail.Mailbox{Dir: ledger},
+			Roster:      mail.FileRoster{Dir: ledger},
+			Adapters:    adapters,
+			Policy:      mail.DefaultPolicy(),
+			ReplyBinary: replyBinary,
 		},
 		ledger: ledger,
 		getenv: getenv,
