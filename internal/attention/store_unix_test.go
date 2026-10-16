@@ -368,3 +368,57 @@ func TestGet(t *testing.T) {
 		t.Fatalf("Get = %+v, %v, %v", r, ok, err)
 	}
 }
+
+func TestPruneKeepsTheSessionJustWritten(t *testing.T) {
+	s, dir := openTestSpool(t)
+	r := testRecord(testSession)
+	r.Socket, r.Pane = "/tmp/herdr-test.sock", "w1:p9"
+	if err := s.Put(r); err != nil {
+		t.Fatal(err)
+	}
+	live := Liveness{Known: true, Socket: r.Socket, Panes: map[string]bool{}, Keep: testSession}
+	if recs, _, err := s.List(time.Now(), DefaultTTL, live); err != nil || len(recs) != 1 {
+		t.Fatalf("List = %d records, %v; want the kept one", len(recs), err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, testSession+".json")); err != nil {
+		t.Errorf("the kept record was pruned: %v", err)
+	}
+}
+
+func TestPruneAgesARefusedRecordName(t *testing.T) {
+	s, dir := openTestSpool(t)
+	if err := s.Put(testRecord(testSession)); err != nil {
+		t.Fatal(err)
+	}
+	// A second link makes the record refused (hardlinked) on every read.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Link(filepath.Join(dir, testSession+".json"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, skipped, _ := s.List(time.Now(), DefaultTTL, Liveness{}); skipped != 1 {
+		t.Fatalf("skipped = %d, want the hardlinked record skipped", skipped)
+	}
+	setAge(t, dir, testSession, 48*time.Hour)
+	if _, _, err := s.List(time.Now(), DefaultTTL, Liveness{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, testSession+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused record past the TTL was kept: %v", err)
+	}
+	if data, err := os.ReadFile(link); err != nil || len(data) == 0 { //nolint:gosec // G304: a test path
+		t.Errorf("the other link's content changed: %v", err)
+	}
+}
+
+func TestListReturnsNameOrder(t *testing.T) {
+	s, _ := openTestSpool(t)
+	for _, id := range []string{"c-session", "a-session", "b-session"} {
+		if err := s.Put(testRecord(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs, _, err := s.List(time.Now(), DefaultTTL, Liveness{})
+	if err != nil || len(recs) != 3 || recs[0].Session != "a-session" || recs[2].Session != "c-session" {
+		t.Fatalf("List order = %+v, %v", recs, err)
+	}
+}

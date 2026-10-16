@@ -26,14 +26,21 @@ type Liveness struct {
 	Known  bool
 	Socket string
 	Panes  map[string]bool
+	// Keep is a session whose record is never pruned: the one `put` just
+	// wrote, whose pane herdr may not have detected yet.
+	Keep string
 }
 
 // shouldPrune decides whether a record goes. A record on the caller's own
 // herdr server (same socket) is judged by herdr alone: it stays while its
 // pane is listed, whatever its age, and goes as soon as the pane is gone.
 // Any other record, including every record when herdr is unavailable or the
-// caller is outside herdr, goes only once older than ttl.
+// caller is outside herdr, goes only once older than ttl. live.Keep's record
+// always stays.
 func shouldPrune(r Record, age, ttl time.Duration, live Liveness) bool {
+	if live.Keep != "" && r.Session == live.Keep {
+		return false
+	}
 	if live.Known && live.Socket != "" && r.Socket == live.Socket && r.Pane != "" {
 		return !live.Panes[r.Pane]
 	}

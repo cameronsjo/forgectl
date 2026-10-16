@@ -23,6 +23,10 @@ const (
 const (
 	OriginOwn    = "own"
 	OriginWorker = "worker"
+	// OriginUnverified is a record whose session herdr does not list: nothing
+	// but the record itself vouches for it, and any process of yours can
+	// write one, so it is neither own nor worker.
+	OriginUnverified = "unverified"
 )
 
 // Delay costs, lowest first: what a wait costs while it sits.
@@ -216,7 +220,10 @@ func Build(in Input) []Row {
 			pane = d.SignalPane
 		}
 		if a, ok := byPane[pane]; ok && pane != "" {
-			r.Pane, r.Session = pane, a.Session
+			r.Pane = pane
+			if ValidSession(a.Session) {
+				r.Session = a.Session
+			}
 			if isWorker(a.Names...) {
 				r.Origin = OriginWorker
 			}
@@ -231,9 +238,11 @@ func Build(in Input) []Row {
 
 	for _, rec := range in.Records {
 		agent, inHerdr := bySession[rec.Session]
-		matchPane, origin := rec.Pane, OriginOwn
+		// Only a session herdr lists has a pane to merge on: a record's own
+		// pane is a claim, so it never joins a desk row.
+		matchPane, origin := "", OriginUnverified
 		if inHerdr {
-			matchPane = agent.Pane
+			matchPane, origin = agent.Pane, OriginOwn
 		}
 		if isWorker(rec.Cwd) || (inHerdr && isWorker(agent.Names...)) {
 			origin = OriginWorker
@@ -312,7 +321,10 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent) []Row {
 			r.Text = "blocked by a desk item"
 		}
 		if a, ok := byPane[w.Pane]; ok && w.Pane != "" {
-			r.Pane, r.Session = w.Pane, a.Session
+			r.Pane = w.Pane
+			if ValidSession(a.Session) {
+				r.Session = a.Session
+			}
 		}
 		rows = append(rows, r)
 	}

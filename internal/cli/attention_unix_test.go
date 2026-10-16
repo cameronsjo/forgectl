@@ -415,3 +415,41 @@ func TestAttentionListReadsTheDeskWithoutWriting(t *testing.T) {
 		t.Errorf("desk rows = %v, want the hand-dropped and queued items (the changed one is refused, not waiting)", names)
 	}
 }
+
+func TestAttentionPutKeepsItsRecordBeforeHerdrSeesThePane(t *testing.T) {
+	e := newAttnEnv(t)
+	// herdr is up but has not detected the new session's pane yet.
+	deps := module.Deps{Runner: herdrAgents([3]string{"w1:p1", "other", ""})}
+	if _, _, err := attnRun(t, deps, attnReply, "put", "--session", attnSession, "--turn", "t", "--pane", "w1:p7", "--socket", attnSocket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(e.spool(), attnSession+".json")); err != nil {
+		t.Errorf("put pruned the record it just wrote: %v", err)
+	}
+}
+
+func TestAttentionListDegradesOnAnUnsafeSpool(t *testing.T) {
+	e := newAttnEnv(t)
+	if err := os.MkdirAll(e.spool(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(e.spool(), 0o755); err != nil { //nolint:gosec // G302: the test needs a wide mode to see it refused
+		t.Fatal(err)
+	}
+	sweep := filepath.Join(e.state, "cadence", "sweep.json")
+	good := `{"schemaVersion":2,"generatedAt":"2026-10-16T12:00:00Z","workers":[{"name":"cos-w","blockedBy":"prompt"}]}`
+	if err := os.WriteFile(sweep, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, err := attnRun(t, module.Deps{}, "", "list", "--json")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var l attentionList
+	if err := json.Unmarshal([]byte(out), &l); err != nil {
+		t.Fatal(err)
+	}
+	if l.Sources.Spool != sourceError || len(l.Rows) != 1 || !strings.Contains(errOut, "spool not read") {
+		t.Errorf("list = %+v, stderr %q; want the sweep row and spool=error", l, errOut)
+	}
+}

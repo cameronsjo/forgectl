@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -85,11 +86,11 @@ func OpenSpool(stateBase string, create bool) (*Spool, error) {
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
+		_ = unix.Close(fd) // refusing; the stat error is the one returned
 		return nil, fmt.Errorf("%w: stat: %w", ErrUnsafeSpool, err)
 	}
 	if perm := uint32(st.Mode) & 0o7777; perm != dirMode {
-		_ = unix.Close(fd)
+		_ = unix.Close(fd) // refusing; the mode is the error returned
 		return nil, fmt.Errorf("%w: the spool directory has mode %04o; it must be 0700 (fix it with chmod 700)", ErrUnsafeSpool, perm)
 	}
 	return &Spool{path: path, fd: fd}, nil
@@ -130,11 +131,11 @@ func (s *Spool) Put(r Record) error {
 	_, werr := f.Write(data)
 	cerr := f.Close()
 	if err := errors.Join(werr, cerr); err != nil {
-		_ = unix.Unlinkat(s.fd, tmp, 0)
+		_ = unix.Unlinkat(s.fd, tmp, 0) // cleanup; the write error is the one returned
 		return fmt.Errorf("attention: write %s: %w", tmp, err)
 	}
 	if err := unix.Renameat(s.fd, tmp, s.fd, name); err != nil {
-		_ = unix.Unlinkat(s.fd, tmp, 0)
+		_ = unix.Unlinkat(s.fd, tmp, 0) // cleanup; the rename error is the one returned
 		return fmt.Errorf("attention: rename %s: %w", name, err)
 	}
 	return nil
@@ -208,7 +209,12 @@ func (s *Spool) List(now time.Time, ttl time.Duration, live Liveness) ([]Record,
 			continue // removed since the listing
 		case err != nil:
 			skipped++
-			if st != nil && now.Sub(mtime(st)) > ttl {
+			if st == nil {
+				// Refused before a stat (a symlink, a hardlink, another
+				// user's file): age the name itself, never what it points at.
+				st = s.lstat(name)
+			}
+			if st != nil && now.Sub(mtime(st)) > ttl && (live.Keep == "" || name != live.Keep+recordExt) {
 				s.removeSame(name, st)
 			}
 			continue
@@ -302,6 +308,7 @@ func (s *Spool) names() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("attention: list %s: %w", s.path, err)
 	}
+	slices.Sort(names)
 	return names, nil
 }
 
@@ -320,6 +327,15 @@ func (s *Spool) refuseNonRegular(name string) error {
 	return nil
 }
 
+// lstat is name's own stat, not following a symlink, or nil.
+func (s *Spool) lstat(name string) *unix.Stat_t {
+	var st unix.Stat_t
+	if err := unix.Fstatat(s.fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil
+	}
+	return &st
+}
+
 // removeSame unlinks name only while it is still the file that was read, so
 // a record rewritten since is kept.
 func (s *Spool) removeSame(name string, read *unix.Stat_t) {
@@ -330,7 +346,7 @@ func (s *Spool) removeSame(name string, read *unix.Stat_t) {
 	if now.Dev != read.Dev || now.Ino != read.Ino {
 		return
 	}
-	_ = unix.Unlinkat(s.fd, name, 0)
+	_ = unix.Unlinkat(s.fd, name, 0) // prune is best effort: a record left behind is pruned on the next list
 }
 
 // removeIfOlder unlinks a leftover temporary file older than ttl. A symlink
@@ -341,7 +357,7 @@ func (s *Spool) removeIfOlder(name string, now time.Time, ttl time.Duration) {
 		return
 	}
 	if now.Sub(mtime(&st)) > ttl {
-		_ = unix.Unlinkat(s.fd, name, 0)
+		_ = unix.Unlinkat(s.fd, name, 0) // best effort, as removeSame
 	}
 }
 

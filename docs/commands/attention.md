@@ -28,7 +28,7 @@ Ties go oldest first.
 **One row per wait.** A desk item absorbs the waits that are the same wait:
 
 - a worker the sweep reports `blockedBy: desk` whose pane queued the item (the row takes cost 1);
-- a session's `Action (Cameron)` whose leading verb is `run`, `bash`, `brew`, `restart` or `sudo`, when that session's pane queued a waiting desk item during or after the turn the action came from.
+- a session's `Action (Cameron)` whose leading verb is `run`, `bash`, `brew`, `restart` or `sudo`, when that session's pane queued a waiting desk item during or after the turn the action came from. Only a session herdr lists has a pane for this: a record's own `--pane` is a claim and never merges.
 
 A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the step was asked for in prose instead of being staged on the desk.
 
@@ -50,11 +50,11 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 | `at` | when the wait began: the record's write time, the desk item's `added_at`, or the sweep's `generatedAt` |
 | `cost` | the delay cost above |
 | `notOnDesk` | see above |
-| `origin` | `worker` for rows from a chief-of-staff worker, else `own` |
+| `origin` | `worker` for rows from a chief-of-staff worker; `own` for a session herdr lists that is not a worker; `unverified` for a record whose session herdr does not list (nothing but the record vouches for it) |
 
 `skipped` counts spool records and sweep entries dropped as malformed. `sources` reports `spool`, `desk`, `herdr` and `sweep` as `ok`, `absent` (nothing there yet), `error`, `malformed` or `unavailable` (herdr could not be asked).
 
-**Worker origin.** A row is `origin: worker` when any name its session goes by starts with `[attention] worker_prefix` (default `cos-`). The names come from the session's herdr row (its worktree, and the basenames of its working directory and its pane's directory) and from the record's `--cwd`. The herdr names are checked so a worker cannot shed the tag by reporting a different `--cwd`; the record's name is checked so a worker outside herdr is still tagged.
+**Worker origin.** A row is `origin: worker` when any name its session goes by starts with `[attention] worker_prefix` (default `cos-`). The names come from the session's herdr row (its worktree, and the basenames of its working directory and its pane's directory) and from the record's `--cwd`. The herdr names are checked so a worker cannot shed the tag by reporting a different `--cwd`, and a record whose session herdr does not list is never `own`: it is `unverified` (or `worker`, when its `--cwd` matches), so a worker cannot pass off a record under an unlisted session id as yours. Desk rows take the origin of the herdr session in the pane that queued them; sweep rows from a worker are `worker`.
 
 ## The parser
 
@@ -65,9 +65,9 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 - a lettered option, `**C.** …` (read, not queued: it belongs to the question above it);
 - any other bold lead, `**Nothing owed by me.** …` (read as a note, not queued).
 
-A line that matches none of these counts as seen and not read. A line under an item with no blank line between continues that item. The block ends at a blank line followed by prose, a heading or a fence. `Recommended: X` on an item's line (or a continuation) is cut from its text and mapped. At most 20 items are kept. `put` prints `items=`, `seen=` and `read=`.
+A line that matches none of these counts as seen and not read. A line under an item with no blank line between continues that item. The block ends at a blank line followed by prose, a heading, a thematic break (`---`, `***`, `___`) or a fence. As in CommonMark, a backtick run followed by text that holds a backtick is an inline span, not a fence, and a fence closes only on a bare marker. `Recommended: X` on an item's line (or a continuation) is cut from its text and mapped; a value outside the map stays in the text and sets no `rec`. At most 20 items are kept. `put` prints `items=`, `seen=` and `read=`.
 
-stdin must not be a terminal. A reply over 64 KiB is parsed from its last 64 KiB; one over 16 MiB is refused.
+stdin must not be a terminal. A reply over 64 KiB is parsed from its last 64 KiB, starting at its first whole line; a cut inside a fenced block can hide the header, which is accepted for replies that long. One over 16 MiB is refused. Once the record is written, `put`'s housekeeping (evicting and pruning) is best effort: a failure is reported on stderr and `put` still exits 0. It never prunes the record it just wrote, so a pane herdr has not detected yet does not lose its record.
 
 ### The corpus gate
 
@@ -89,10 +89,10 @@ Each session has one file, `<session>.json`, mode `0600`. The session id must ma
 
 `list`, and `put` after it writes, prune the spool:
 
-- A record whose `--socket` equals the caller's `HERDR_SOCKET_PATH` is judged by herdr alone. It stays while `herdr agent list` reports its pane, however old, and goes as soon as the pane is gone.
+- A record that has a `--pane` and whose `--socket` equals the caller's `HERDR_SOCKET_PATH` is judged by herdr alone. It stays while `herdr agent list` reports its pane, however old, and goes as soon as the pane is gone.
 - Any other record (no socket, another herdr server, or herdr not answering) goes once it is older than `[attention] ttl_hours` (default 24).
 - `put` also drops any other session's record for the same pane and socket: the pane now runs the new session (after `/clear`, or a new session in that pane).
-- A malformed record, and a leftover temporary file, are removed once older than `ttl_hours`. Other names in the directory are left alone and counted as skipped.
+- A malformed or refused record (a symlink or hardlink at a record name), and a leftover temporary file, are removed once older than `ttl_hours`, judged by the name's own mtime; a symlink is unlinked, never followed. Other names in the directory are left alone and counted as skipped.
 
 ## The desk, read without writing
 
@@ -117,5 +117,5 @@ A value out of range exits 2 and names the key.
 | Code | Meaning |
 | ---: | --- |
 | 0 | done |
-| 1 | the spool was refused (a symlink, another user's, wider than `0700`) or could not be written |
+| 1 | `put` or `rm`: the spool was refused (a symlink, another user's, wider than `0700`) or could not be written. `list` does not fail on a refused spool: it reports the desk and sweep rows, sets `sources.spool` to `error`, and names the reason on stderr |
 | 2 | a flag or the `[attention]` config was refused, or `put`'s stdin is a terminal; nothing was written |

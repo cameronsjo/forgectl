@@ -90,6 +90,8 @@ var (
 	recRe      = regexp.MustCompile(`(?i)\s*[(\[]?\s*\**\s*recommended\s*\**\s*:\s*\**\s*([a-z]+)\**\s*[)\]]?\.?`)
 	// leadSepRe is the separator between a lead and its text.
 	leadSepRe = regexp.MustCompile(`^[\s:.\-–—]+`)
+	// ruleRe is a thematic break (spaces removed first); it ends a block.
+	ruleRe = regexp.MustCompile(`^(?:-{3,}|\*{3,}|_{3,})$`)
 )
 
 // Parse reads the last `What's next:` block outside fenced code in a reply.
@@ -99,8 +101,8 @@ func Parse(text string) Parsed {
 	header := -1
 	var fence string
 	for i, line := range lines {
-		if marker, ok := fenceMarker(line); ok {
-			fence = toggleFence(fence, marker)
+		if marker, rest, ok := fenceMarker(line); ok {
+			fence = toggleFence(fence, marker, rest)
 			continue
 		}
 		if fence == "" && headerRe.MatchString(strings.TrimSpace(line)) {
@@ -135,10 +137,10 @@ func (b *blockParser) line(line string) bool {
 	case trimmed == "":
 		b.sawBlank = true
 		return true
-	case strings.HasPrefix(trimmed, "#"):
+	case strings.HasPrefix(trimmed, "#"), ruleRe.MatchString(strings.ReplaceAll(trimmed, " ", "")):
 		return false
 	}
-	if _, ok := fenceMarker(line); ok {
+	if _, _, ok := fenceMarker(line); ok {
 		return false
 	}
 	if m := bulletRe.FindStringSubmatch(line); m != nil {
@@ -206,9 +208,6 @@ func parseItem(num, rest string, ordinal int) (Item, bool) {
 	default:
 		return Item{}, false
 	}
-	if it.N > maxN {
-		return Item{}, false
-	}
 	text, rec := splitRec(leadSepRe.ReplaceAllString(it.Text, ""))
 	it.Text, it.Rec = Clean(text, MaxText), rec
 	return it, true
@@ -249,6 +248,10 @@ func splitRec(text string) (string, string) {
 		return text, ""
 	}
 	rec := mapRec(text[loc[2]:loc[3]])
+	if rec == "" {
+		// An unknown value stays in the text, where a reader can still see it.
+		return text, ""
+	}
 	rest := strings.TrimSpace(text[:loc[0]] + " " + text[loc[1]:])
 	rest = strings.TrimRight(rest, " —–-·,;")
 	return strings.TrimSpace(rest), rec
@@ -268,33 +271,39 @@ func mapRec(s string) string {
 	return ""
 }
 
-// fenceMarker reports whether line opens or closes a fenced code block, and
-// with which marker run (``` or ~~~, three or more).
-func fenceMarker(line string) (string, bool) {
+// fenceMarker reports whether line is a code fence line, with its marker run
+// (``` or ~~~, three or more) and the text after it. As in CommonMark, a
+// backtick run followed by text holding a backtick is not a fence (it is an
+// inline code span).
+func fenceMarker(line string) (marker, rest string, ok bool) {
 	t := strings.TrimLeft(line, " ")
 	if len(line)-len(t) > 3 {
-		return "", false
+		return "", "", false
 	}
 	for _, c := range []string{"`", "~"} {
 		n := 0
 		for n < len(t) && t[n:n+1] == c {
 			n++
 		}
-		if n >= 3 {
-			return t[:n], true
+		if n < 3 {
+			continue
 		}
+		if c == "`" && strings.Contains(t[n:], "`") {
+			return "", "", false
+		}
+		return t[:n], t[n:], true
 	}
-	return "", false
+	return "", "", false
 }
 
-// toggleFence returns the open fence after seeing marker: a marker of the
-// same character, at least as long, closes it; any marker opens one when
+// toggleFence returns the open fence after seeing marker: a bare marker of
+// the same character, at least as long, closes it; any marker opens one when
 // none is open.
-func toggleFence(open, marker string) string {
+func toggleFence(open, marker, rest string) string {
 	if open == "" {
 		return marker
 	}
-	if marker[0] == open[0] && len(marker) >= len(open) {
+	if marker[0] == open[0] && len(marker) >= len(open) && strings.TrimSpace(rest) == "" {
 		return ""
 	}
 	return open

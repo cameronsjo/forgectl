@@ -181,3 +181,33 @@ func assertItems(t *testing.T, p Parsed, want []Item) {
 		}
 	}
 }
+
+func TestParseKeepsAnUnknownRecommendation(t *testing.T) {
+	p := Parse("**What's next:**\n- **Question 1**: Which one? (Recommended: option B)\n")
+	if len(p.Items) != 1 || p.Items[0].Rec != "" || !strings.Contains(p.Items[0].Text, "Recommended: option B") {
+		t.Fatalf("items = %+v, want the unknown value left in the text", p.Items)
+	}
+}
+
+func TestParseStopsAtAThematicBreak(t *testing.T) {
+	p := Parse("**What's next:**\n- **Question 1**: run x?\n---\nSigned off.\n")
+	if len(p.Items) != 1 || p.Items[0].Text != "run x?" {
+		t.Fatalf("items = %+v, want the rule to end the block", p.Items)
+	}
+	p = Parse("**What's next:**\n- **Question 1**: a?\n* * *\n- **Question 2**: b?\n")
+	if p.Seen != 1 {
+		t.Errorf("seen = %d, want the starred rule to end the block", p.Seen)
+	}
+}
+
+func TestParseInlineTripleBacktickIsNotAFence(t *testing.T) {
+	text := "```x``` is an inline span.\n\n**What's next:**\n- **Question 1**: real?\n"
+	if p := Parse(text); !p.Found || len(p.Items) != 1 {
+		t.Fatalf("Parse = %+v, want the header found", p)
+	}
+	// A fence closes only on a bare marker; "```go" inside a fence does not.
+	text = "```\n```go\n**What's next:**\n- **Question 1**: fenced?\n```\n"
+	if p := Parse(text); p.Found {
+		t.Fatalf("Parse = %+v, want the fenced header ignored", p)
+	}
+}
