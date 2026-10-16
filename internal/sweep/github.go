@@ -26,9 +26,13 @@ const (
 )
 
 // openQuery reads open PRs with what the state rule needs: the head commit,
-// mergeability, the head's check rollup and the latest 20 review bodies. A
-// marker pushed past 20 reviews reads as no marker, which fails safe.
-const openQuery = `query($q: String!, $after: String) {
+// mergeability, the head's check rollup and the latest 20 review bodies by
+// the authenticated login only. Anyone who can review a public repo's PR can
+// post a marker, so reviews by other accounts are not read at all; asking for
+// the viewer's own reviews also keeps outsiders from pushing the real marker
+// out of the 20. A marker pushed past 20 of the viewer's own reviews reads as
+// no marker, which fails safe.
+const openQuery = `query($q: String!, $after: String, $author: String!) {
   search(query: $q, type: ISSUE, first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -41,7 +45,7 @@ const openQuery = `query($q: String!, $after: String) {
         createdAt
         repository { nameWithOwner }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-        reviews(last: 20) { nodes { body } }
+        reviews(last: 20, author: $author) { nodes { body author { login } } }
       }
     }
   }
@@ -94,7 +98,10 @@ type gqlPR struct {
 	} `json:"commits"`
 	Reviews struct {
 		Nodes []struct {
-			Body string `json:"body"`
+			Body   string `json:"body"`
+			Author *struct {
+				Login string `json:"login"`
+			} `json:"author"`
 		} `json:"nodes"`
 	} `json:"reviews"`
 }
@@ -106,9 +113,13 @@ func (g GitHub) OpenPRs(ctx context.Context, owner string) (facts []PRFacts, tru
 		return nil, false, errors.New("sweep: owner is not a GitHub account name")
 	}
 	query := "user:" + owner + " is:pr is:open archived:false"
+	viewer, err := g.viewer(ctx)
+	if err != nil {
+		return nil, false, err
+	}
 	after := ""
 	for page := 0; page < maxOpenPages; page++ {
-		args := []string{"api", "graphql", "-f", "query=" + openQuery, "-f", "q=" + query}
+		args := []string{"api", "graphql", "-f", "query=" + openQuery, "-f", "q=" + query, "-f", "author=" + viewer}
 		if after != "" {
 			args = append(args, "-f", "after="+after)
 		}
@@ -121,7 +132,7 @@ func (g GitHub) OpenPRs(ctx context.Context, owner string) (facts []PRFacts, tru
 			return nil, false, errors.New("sweep: GitHub returned an unusable open-PR answer")
 		}
 		for _, n := range resp.Data.Search.Nodes {
-			if f, ok := n.facts(); ok {
+			if f, ok := n.facts(viewer); ok {
 				facts = append(facts, f)
 			}
 		}
@@ -137,7 +148,7 @@ func (g GitHub) OpenPRs(ctx context.Context, owner string) (facts []PRFacts, tru
 	return facts, true, nil
 }
 
-func (n gqlPR) facts() (PRFacts, bool) {
+func (n gqlPR) facts(viewer string) (PRFacts, bool) {
 	if n.Number <= 0 || !validRepoName(n.Repository.NameWithOwner) {
 		return PRFacts{}, false
 	}
@@ -158,6 +169,9 @@ func (n gqlPR) facts() (PRFacts, bool) {
 		}
 	}
 	for _, rv := range n.Reviews.Nodes {
+		if rv.Author == nil || !strings.EqualFold(rv.Author.Login, viewer) {
+			continue
+		}
 		line, _, _ := strings.Cut(rv.Body, "\n")
 		line = strings.TrimSpace(line)
 		if len(line) > maxFirstLine {
@@ -168,6 +182,26 @@ func (n gqlPR) facts() (PRFacts, bool) {
 		}
 	}
 	return f, true
+}
+
+// viewer is the authenticated login: the only account whose reviews are read
+// for markers.
+func (g GitHub) viewer(ctx context.Context) (string, error) {
+	out, err := g.Run.Run(ctx, "gh", "api", "graphql", "-f", "query=query { viewer { login } }")
+	if err != nil {
+		return "", ghFailure(ctx, "gh api graphql")
+	}
+	var resp struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(bytes.NewReader([]byte(out))).Decode(&resp) != nil || !pr.ValidOwnerRepoPart(resp.Data.Viewer.Login) {
+		return "", errors.New("sweep: GitHub did not name the authenticated login")
+	}
+	return resp.Data.Viewer.Login, nil
 }
 
 type ghMerged struct {
@@ -190,7 +224,7 @@ func (g GitHub) MergedPRs(ctx context.Context, owner string, since time.Time) (m
 	}
 	out, err := g.Run.Run(ctx, "gh", "search", "prs", "--owner", owner,
 		"--merged-at", ">="+since.UTC().Format(time.DateOnly),
-		"--limit", fmt.Sprint(maxMerged), "--json", "repository,number,title,closedAt,author,url")
+		"--limit", fmt.Sprint(maxMerged), "--json", "repository,number,title,closedAt,author")
 	if err != nil {
 		return nil, false, ghFailure(ctx, "gh search prs")
 	}
@@ -205,7 +239,7 @@ func (g GitHub) MergedPRs(ctx context.Context, owner string, since time.Time) (m
 		}
 		merged = append(merged, MergedPR{
 			Repo: r.Repository.NameWithOwner, Number: r.Number, Title: r.Title, ClosedAt: closed.UTC(),
-			Bot: r.Author.IsBot || strings.Contains(r.Author.Login, "bot"),
+			Bot: r.Author.IsBot || strings.HasSuffix(r.Author.Login, "[bot]"),
 		})
 	}
 	return merged, len(rows) >= maxMerged, nil

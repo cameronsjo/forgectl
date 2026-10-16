@@ -33,7 +33,7 @@ reviewers = ["pr-reviewer"]      # cadence-review marker names that count
 
 `--owner`, `--since` and `--briefs` override the first three. A key set by neither exits 2 and names it (`sweep.owner`, `sweep.since`, `sweep.briefs`, `sweep.reviewers`). A value that is set but unusable (an owner that is not a GitHub name, a `since` that is not `YYYY-MM-DD`, a relative `briefs`, a reviewer name outside `[a-z0-9-]`) also exits 2 and names the key without echoing the value.
 
-Workers are the directories under `briefs` whose names start with `[attention] worker_prefix` (default `cos-`) and that hold a file newer than `since`. The next section says what else comes from them.
+Workers are the directories under `briefs` whose names start with `[attention] worker_prefix` (default `cos-`) and that hold a `brief.md`, `picks.md`, `go.md` or `report.md` modified at or after `since`. The next section says what else comes from them.
 
 ## What the ledger holds
 
@@ -80,11 +80,11 @@ A PR is the first of these:
 
 `reason` says which test decided it. A PR with no checks is not green, and neither is one whose mergeability GitHub has not computed.
 
-A **marker** is the first line of a review body: `<!-- cadence-review: <name> head=<40 hex> crit=N imp=N -->` (the comment wrapper is optional). It counts only if its `head=` equals the PR's current head commit **and** `<name>` is in `[sweep] reviewers`. A marker for an older head, or from another name, is ignored. The latest 20 reviews are scanned.
+A **marker** is the first line of a review body: `<!-- cadence-review: <name> head=<40 hex> crit=N imp=N -->` (the comment wrapper is optional). It counts only if it was posted by the authenticated `gh` login, its `head=` equals the PR's current head commit, **and** `<name>` is in `[sweep] reviewers`. Reviews by other accounts are not read (anyone who can review a public repo's PR could otherwise post a marker); a marker for an older head, or from another name, is ignored. The latest 20 of your own reviews are scanned. `crit` is summed over the markers at head, so a PR with any `crit>0` marker at its current head stays `blocked` until the head moves.
 
 **This is a claim filter, not an authenticity check.** Any session that can post under your `gh` identity can post any reviewer name with `crit=0`. `marker-clean` therefore means "someone with your login said so", and the ledger never says `ready`. Run your own reviewers at the head before you merge. `imp` is parsed and does not change the state; read the review.
 
-A PR in a repository no brief names is left out. A PR's `worker` is the one worker whose brief names its repository; it is empty when two or more do.
+A PR in a repository no brief names is left out. A PR's `worker` is the one worker whose brief names its repository; it is empty when two or more do. The link is by repository, not authorship: a PR opened by someone else in that repository is attributed to the worker too.
 
 ### Opinions
 
@@ -93,8 +93,8 @@ Each opinion has a stable `id`: `pr:<owner/repo>#<n>`, `worker:<name>:<state>` (
 | Situation | `action` | `target` |
 | --- | --- | --- |
 | a worker is blocked (`prompt` or `desk`) | `unblock` | `{worker}` |
-| a worker's report is in and a PR of its is `waiting` | `review` | `{repo, number}` of the lowest-numbered such PR |
-| a worker's plan has been ready 10 minutes or more with no GO, and its agent is up | `none` | none |
+| a worker's report is in (its agent is idle, `done` or gone) and an open `waiting` PR sits in its repositories | `review` | `{repo, number}` of the lowest-numbered such PR |
+| a worker's plan has been ready 10 minutes or more with no GO, and its agent is up and idle or `done` | `none` | none |
 | anything else | `none` | none |
 
 A plan with no GO never yields an action. A GO is an approval, so the row offers Jump only, and no field in the ledger can stand in for it. A worker with no live agent counts as idle for the report opinion; a plan opinion needs a live agent, since a dead worker is not waiting on a GO.
@@ -102,7 +102,7 @@ A plan with no GO never yields an action. A GO is an approval, so the row offers
 ## Safety
 
 - **Text is untrusted.** PR titles and brief text are stripped of control, bidi and invisible characters and cut before they enter the ledger, with the same cleaner `attention` uses. Opinion text names workers and repositories (validated names), never a title. GitHub's own error text is never echoed.
-- **The briefs directory is workers' territory.** Symlinks are refused, reads are capped (256 KiB of `brief.md`, the last 4 KiB of each phase file, 500 directories, 50 repositories per brief), and repository names must be GitHub-shaped.
+- **The briefs directory is workers' territory.** Symlinks are refused, files are opened without blocking (a FIFO is refused), reads are capped (256 KiB of `brief.md`, the last 4 KiB of each phase file, 500 worker directories, 50 repositories per brief), and repository names must be GitHub-shaped.
 - **The desk is read, never written.** `sweep` opens it with the same read-only scan as `attention list`: nothing is pinned, moved, run or skipped, and a test pins the directory byte for byte.
 - **The write is atomic.** `sweep` writes a fresh `O_EXCL` temporary file (`0600`) next to `sweep.json` and renames it over the target, so a reader sees the old file or the new one. A symlink at `sweep.json` is replaced, never followed. `$XDG_STATE_HOME/cadence` is shared with the attention spool, so it is not narrowed; `sweep` creates it at `0700` when absent and refuses one that is a symlink, another user's, or writable by group or others.
 - **A failed read leaves the last ledger alone.** If GitHub cannot be read, `sweep` exits 1 before writing, so a half-empty ledger never replaces a good one. A herdr or desk failure degrades the ledger (see `sources`) and does not stop it.

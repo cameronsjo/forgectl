@@ -379,3 +379,25 @@ func TestMarshalIsStableAndHasNoNilLists(t *testing.T) {
 		}
 	}
 }
+
+func TestABlockedPaneBeatsAnotherPaneOnTheSameBrief(t *testing.T) {
+	in := base()
+	in.Briefs = []Brief{brief("cos-a", PhaseGo, "acme/a")}
+	in.Agents = []Agent{
+		{Pane: "w1:p1", Status: "idle", Names: []string{"cos-a-1"}},
+		{Pane: "w1:p2", Status: "blocked", Names: []string{"cos-a-2"}},
+	}
+	w := workerOf(t, Build(in), "cos-a")
+	if w.Pane != "w1:p2" || w.BlockedBy != attention.BlockedByPrompt {
+		t.Errorf("worker = %+v", w)
+	}
+}
+
+func TestPaneIsValidatedBeforeItIsWritten(t *testing.T) {
+	in := base()
+	in.Briefs = []Brief{brief("cos-a", PhaseGo, "acme/a")}
+	in.Agents = []Agent{{Pane: "bad pane\x1b", Status: "idle", Names: []string{"cos-a"}}}
+	if p := workerOf(t, Build(in), "cos-a").Pane; p != "" {
+		t.Errorf("pane = %q", p)
+	}
+}

@@ -99,7 +99,9 @@ func Build(in Input) Ledger {
 			if w.Status == "" {
 				w.Status = "unknown"
 			}
-			w.Pane = a.Pane
+			if attention.ValidPane(a.Pane) {
+				w.Pane = a.Pane
+			}
 			switch {
 			case a.Pane != "" && in.DeskPanes[a.Pane]:
 				w.BlockedBy = attention.BlockedByDesk
@@ -174,7 +176,20 @@ func openPRs(in Input, sweepRepos map[string]bool, repoWorkers map[string][]stri
 // so cos-bosun668-12 belongs to cos-bosun668 and not to cos-bosun.
 func matchAgents(briefs []Brief, agents []Agent) map[string]Agent {
 	out := map[string]Agent{}
-	for _, a := range agents {
+	// A blocked agent is matched first, then a working one, so a second pane
+	// on the same brief cannot hide the one that waits on the operator.
+	ranked := slices.Clone(agents)
+	rank := func(a Agent) int {
+		switch a.Status {
+		case "blocked":
+			return 0
+		case "working":
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return rank(ranked[i]) < rank(ranked[j]) })
+	for _, a := range ranked {
 		best := ""
 		for _, b := range briefs {
 			for _, n := range a.Names {

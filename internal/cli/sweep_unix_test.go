@@ -93,7 +93,7 @@ func sweepRunner(t *testing.T, agents ...[3]string) *exec.FakeRunner {
 			"createdAt":  "2026-10-16T09:00:00Z",
 			"repository": map[string]any{"nameWithOwner": "acme/widget"},
 			"commits":    map[string]any{"nodes": []any{map[string]any{"commit": map[string]any{"statusCheckRollup": map[string]any{"state": "SUCCESS"}}}}},
-			"reviews":    map[string]any{"nodes": []any{map[string]any{"body": review}}},
+			"reviews":    map[string]any{"nodes": []any{map[string]any{"body": review, "author": map[string]any{"login": "acme-owner"}}}},
 		}
 	}
 	clean := "<!-- cadence-review: pr-reviewer head=" + sweepHead + " crit=0 imp=0 -->\n\nfine"
@@ -105,6 +105,8 @@ func sweepRunner(t *testing.T, agents ...[3]string) *exec.FakeRunner {
 		switch {
 		case name == "herdr" && strings.Join(args, " ") == "agent list":
 			return string(herdrBody), nil
+		case name == "gh" && strings.Contains(strings.Join(args, " "), "viewer { login }"):
+			return `{"data":{"viewer":{"login":"acme-owner"}}}`, nil
 		case name == "gh" && len(args) > 1 && args[0] == "api" && args[1] == "graphql":
 			return string(gql), nil
 		case name == "gh" && len(args) > 1 && args[0] == "search" && args[1] == "prs":
@@ -207,8 +209,15 @@ func TestSweepExitsTwoNamingTheMissingKey(t *testing.T) {
 	} {
 		c := full
 		mut(&c)
-		deps := module.Deps{Cfg: config.Config{Sweep: c}, Runner: sweepRunner(t)}
+		run := sweepRunner(t)
+		deps := module.Deps{Cfg: config.Config{Sweep: c}, Runner: run}
 		_, _, err := sweepRun(t, deps, "--json")
+		if len(run.Calls) != 0 {
+			t.Errorf("%s: sweep ran %d commands before refusing", key, len(run.Calls))
+		}
+		if _, statErr := os.Stat(filepath.Join(e.state, "cadence", "sweep.json")); statErr == nil {
+			t.Errorf("%s: sweep wrote a ledger before refusing", key)
+		}
 		if err == nil || !strings.Contains(err.Error(), key) {
 			t.Errorf("%s: err = %v", key, err)
 			continue

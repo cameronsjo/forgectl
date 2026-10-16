@@ -52,16 +52,19 @@ func ReadBriefs(dir, prefix string, since time.Time) (briefs []Brief, skipped in
 	if err != nil {
 		return nil, 0, fmt.Errorf("read briefs directory: %w", errors.Unwrap(err))
 	}
-	for i, e := range entries {
-		if i >= maxBriefDirs {
-			skipped += len(entries) - i
-			break
-		}
+	seen := 0
+	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasPrefix(name, prefix) || !workerNameRe.MatchString(name) {
 			continue
 		}
 		if e.Type()&os.ModeSymlink != 0 || !e.IsDir() {
+			skipped++
+			continue
+		}
+		// The cap counts worker directories only, so other entries in the
+		// directory cannot push a worker out.
+		if seen++; seen > maxBriefDirs {
 			skipped++
 			continue
 		}
@@ -120,7 +123,7 @@ func openRegular(path string) (*os.File, os.FileInfo, bool) {
 	if err != nil || !li.Mode().IsRegular() {
 		return nil, nil, false
 	}
-	f, err := os.Open(path) //nolint:gosec // G304: path is under a validated worker directory
+	f, err := openNoBlock(path)
 	if err != nil {
 		return nil, nil, false
 	}

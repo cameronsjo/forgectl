@@ -11,7 +11,7 @@
   {
    "id": "worker:cos-worker09:report",
    "tone": "act",
-   "text": "cos-worker09 reported 1d 1h ago; 3 of its PRs await review.",
+   "text": "cos-worker09 reported 1d 1h ago; 3 open PRs in its repos await review.",
    "action": "review",
    "target": {
     "repo": "acme/repo10",
@@ -21,7 +21,7 @@
   {
    "id": "worker:cos-worker20:report",
    "tone": "act",
-   "text": "cos-worker20 reported 1d 2h ago; 2 of its PRs await review.",
+   "text": "cos-worker20 reported 1d 2h ago; 2 open PRs in its repos await review.",
    "action": "review",
    "target": {
     "repo": "acme/repo07",
@@ -37,7 +37,7 @@
   {
    "id": "sweep:quiet",
    "tone": "warn",
-   "text": "No merge for 5h 30m. Work is in flight, not landing.",
+   "text": "No merge for 5h 40m. Work is in flight, not landing.",
    "action": "none"
   },
   {
@@ -55,13 +55,13 @@
   {
    "id": "worker:cos-worker02:report",
    "tone": "note",
-   "text": "cos-worker02 reported 1d 1h ago; no PR of its awaits review.",
+   "text": "cos-worker02 reported 1d 2h ago; no PR of its awaits review.",
    "action": "none"
   },
   {
    "id": "worker:cos-worker04:report",
    "tone": "note",
-   "text": "cos-worker04 reported 22h 56m ago; no PR of its awaits review.",
+   "text": "cos-worker04 reported 23h 06m ago; no PR of its awaits review.",
    "action": "none"
   },
   {
@@ -73,13 +73,13 @@
   {
    "id": "worker:cos-worker06:report",
    "tone": "note",
-   "text": "cos-worker06 reported 23h 52m ago; no PR of its awaits review.",
+   "text": "cos-worker06 reported 1d 0h ago; no PR of its awaits review.",
    "action": "none"
   },
   {
    "id": "worker:cos-worker07:report",
    "tone": "note",
-   "text": "cos-worker07 reported 22h 10m ago; no PR of its awaits review.",
+   "text": "cos-worker07 reported 22h 21m ago; no PR of its awaits review.",
    "action": "none"
   },
   {
@@ -91,13 +91,13 @@
   {
    "id": "worker:cos-worker14:report",
    "tone": "note",
-   "text": "cos-worker14 reported 22h 12m ago; no PR of its awaits review.",
+   "text": "cos-worker14 reported 22h 22m ago; no PR of its awaits review.",
    "action": "none"
   },
   {
    "id": "worker:cos-worker17:report",
    "tone": "note",
-   "text": "cos-worker17 reported 22h 17m ago; no PR of its awaits review.",
+   "text": "cos-worker17 reported 22h 28m ago; no PR of its awaits review.",
    "action": "none"
   },
   {
@@ -115,7 +115,7 @@
   {
    "id": "worker:cos-worker24:report",
    "tone": "note",
-   "text": "cos-worker24 reported 22h 20m ago; no PR of its awaits review.",
+   "text": "cos-worker24 reported 22h 30m ago; no PR of its awaits review.",
    "action": "none"
   },
   {

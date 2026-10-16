@@ -18,7 +18,7 @@ func gqlNode(repo string, n int, mut func(map[string]any)) map[string]any {
 		"createdAt":  "2026-10-15T10:00:00Z",
 		"repository": map[string]any{"nameWithOwner": repo},
 		"commits":    map[string]any{"nodes": []any{map[string]any{"commit": map[string]any{"statusCheckRollup": map[string]any{"state": "SUCCESS"}}}}},
-		"reviews":    map[string]any{"nodes": []any{map[string]any{"body": marker("pr-reviewer", headA, 0, 0) + "\n\nLooks fine."}}},
+		"reviews":    map[string]any{"nodes": []any{map[string]any{"body": marker("pr-reviewer", headA, 0, 0) + "\n\nLooks fine.", "author": map[string]any{"login": "Me"}}}},
 	}
 	if mut != nil {
 		mut(node)
@@ -37,6 +37,9 @@ func fakeGH(answer func(args []string) (string, error)) (*exec.FakeRunner, *[][]
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "gh" {
 			return "", fmt.Errorf("unexpected binary %s", name)
+		}
+		if strings.Contains(strings.Join(args, " "), "viewer { login }") {
+			return `{"data":{"viewer":{"login":"me"}}}`, nil
 		}
 		calls = append(calls, args)
 		return answer(args)
@@ -152,5 +155,37 @@ func TestMergedPRs(t *testing.T) {
 	}
 	if j := strings.Join((*calls)[0], " "); !strings.Contains(j, "--owner acme") || !strings.Contains(j, "--merged-at >=2026-10-14") {
 		t.Errorf("argv = %s", j)
+	}
+}
+
+func TestOpenPRsReadsOnlyTheViewersReviews(t *testing.T) {
+	forged := map[string]any{"body": marker("pr-reviewer", headA, 0, 0), "author": map[string]any{"login": "outsider"}}
+	noAuthor := map[string]any{"body": marker("pr-reviewer", headA, 0, 0), "author": nil}
+	run, calls := fakeGH(func([]string) (string, error) {
+		return gqlPage("", gqlNode("acme/widget", 1, func(n map[string]any) {
+			n["reviews"] = map[string]any{"nodes": []any{forged, noAuthor}}
+		})), nil
+	})
+	facts, _, err := GitHub{Run: run}.OpenPRs(context.Background(), "acme")
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("facts=%v err=%v", facts, err)
+	}
+	if len(facts[0].Reviews) != 0 {
+		t.Errorf("a marker by another account was kept: %q", facts[0].Reviews)
+	}
+	if got := strings.Join((*calls)[0], " "); !strings.Contains(got, "author=me") {
+		t.Errorf("the reviews query was not scoped to the viewer: %s", got)
+	}
+}
+
+func TestMergedBotDetectionUsesTheBotFlagOrSuffix(t *testing.T) {
+	out := `[
+ {"repository":{"nameWithOwner":"acme/w"},"number":1,"title":"a","closedAt":"2026-10-15T09:00:00Z","author":{"login":"abbott","is_bot":false}},
+ {"repository":{"nameWithOwner":"acme/w"},"number":2,"title":"b","closedAt":"2026-10-15T09:00:00Z","author":{"login":"renovate[bot]","is_bot":false}}
+]`
+	run, _ := fakeGH(func([]string) (string, error) { return out, nil })
+	got, _, err := GitHub{Run: run}.MergedPRs(context.Background(), "acme", time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(got) != 2 || got[0].Bot || !got[1].Bot {
+		t.Errorf("merged = %+v err = %v", got, err)
 	}
 }

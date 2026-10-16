@@ -79,7 +79,7 @@ func opinions(in Input, briefs []Brief, workers []Worker, prs []PR, merged []Mer
 			}
 			return awaiting[i].Number < awaiting[j].Number
 		})
-		add(id, ToneAct, fmt.Sprintf("%s reported %s; %d of its PRs await review.", w.Name, when, len(awaiting)),
+		add(id, ToneAct, fmt.Sprintf("%s reported %s; %d open PRs in its repos await review.", w.Name, when, len(awaiting)),
 			ActionReview, &Target{Repo: awaiting[0].Repo, Number: awaiting[0].Number})
 	}
 
@@ -190,7 +190,7 @@ func opinions(in Input, briefs []Brief, workers []Worker, prs []PR, merged []Mer
 	return out
 }
 
-// oldestOpen is the oldest open PR in a swept repo.
+// oldestOpen is the oldest open, non-draft PR in a swept repo.
 func oldestOpen(in Input) (PRFacts, time.Duration, bool) {
 	swept := map[string]bool{}
 	for _, b := range in.Briefs {
@@ -201,7 +201,7 @@ func oldestOpen(in Input) (PRFacts, time.Duration, bool) {
 	var best PRFacts
 	var bestAt time.Time
 	for _, f := range in.Open {
-		if !swept[f.Repo] {
+		if !swept[f.Repo] || f.Draft {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, f.CreatedAt)

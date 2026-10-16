@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,5 +143,19 @@ func TestReadFiled(t *testing.T) {
 	}
 	if got := ReadFiled(t.TempDir()); len(got) != 0 {
 		t.Errorf("absent filed.txt gave %v", got)
+	}
+}
+
+func TestReadBriefsCapCountsWorkersOnly(t *testing.T) {
+	root := t.TempDir()
+	for i := range maxBriefDirs + 20 {
+		if err := os.Mkdir(filepath.Join(root, "aaa-other-"+strconv.Itoa(i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(t, filepath.Join(root, "cos-zlast"), "brief.md", briefBody, t0)
+	briefs, skipped, err := ReadBriefs(root, "cos-", t0.Add(-time.Hour))
+	if err != nil || len(briefs) != 1 || skipped != 0 {
+		t.Errorf("briefs=%d skipped=%d err=%v: non-worker entries must not use up the cap", len(briefs), skipped, err)
 	}
 }
