@@ -23,7 +23,7 @@ The ledger must be an absolute, non-symlink directory private to its owner (mode
 
 Registration returns a `member` and an `environment` object. Supply that environment to the corresponding harness process, preserving its normal environment. It contains `FORGECTL_LEDGER`, `FORGECTL_RUN_ID`, and either `FORGECTL_COORDINATOR` or `FORGECTL_WORKER`; Pi also receives `FORGECTL_INBOX`. These variables and owner-private files prevent accidental role or session confusion, not impersonation by another process running as the same operating-system user.
 
-A Codex socket selects the dedicated app-server via `codex queue --remote unix://PATH`. Its thread may be omitted only during initial enrollment. Once the native thread is created, repeat registration with `--replace --thread THREAD_ID --run-id ORIGINAL_RUN_ID` to bind that same process. An omitted socket retains the legacy default Codex-daemon behavior; isolated teams should always supply one.
+A Codex socket selects the dedicated app-server via `codex queue --remote unix://PATH`. Codex queueing requires a persistent native thread; `ephemeral: true` threads reject queued submissions. Its thread may be omitted only during initial enrollment. Once the native thread is created, repeat registration with `--replace --thread THREAD_ID --run-id ORIGINAL_RUN_ID` to bind that same process. An omitted socket retains the legacy default Codex-daemon behavior; isolated teams should always supply one.
 
 For a replacement process, register the same name with `--replace` and omit `--run-id` to generate a new incarnation. Old processes then fail identity checks for sends and events. Replacement preserves the member's coordinator role and watchers. It does not resume native conversation history: resume the intended session using the harness's own facilities and verify that identity separately.
 
@@ -57,6 +57,7 @@ Run the focused checks from the forgectl repository:
 ```sh
 TERM=xterm-256color go test ./internal/surface/mail ./internal/cli -count=1
 node --experimental-strip-types scripts/test-forgectl-inbox.mjs
+node scripts/test-cross-harness-verifier.mjs
 go build -o /absolute/isolated/bin/forgectl .
 node scripts/verify-cross-harness-loop.mjs --help
 ```
@@ -65,6 +66,6 @@ The behavioral extension test uses the actual embedded TypeScript source with a 
 
 The opt-in live verifier requires a fresh private scratch directory, explicit isolated binary paths, a locally installed `ws` module entrypoint through `--websocket-module`, and the installed Pi authentication and safety extensions through repeatable `--pi-extension` arguments. The WebSocket library handles Codex's native Unix transport without a TCP bridge or a new global installation. Prefer the native Codex executable rather than a wrapper so the verifier owns the server process it stops.
 
-Supply the required `--codex-model ID` and the paired `--pi-provider NAME --pi-model ID` to select existing authenticated models explicitly. The verifier checks the native selected models and fails on a model error rather than treating a settled failed turn as readiness. It initializes Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. It checks that Codex did not persist the scratch path in global configuration.
+Supply the required `--codex-model ID` and the paired `--pi-provider NAME --pi-model ID` to select existing authenticated models explicitly. The verifier checks the native selected models and fails on a model error rather than treating a settled failed turn as readiness. It initializes persistent Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. Their native session records remain in Codex's normal history. It checks that Codex did not persist the scratch path in global configuration.
 
 The verifier starts only task-owned processes, records native session/model identities, and leaves private evidence on failure. Its acceptance gate requires a real delegation, clarification and answer without human relay, a worker-created executable artifact, an independent positive check and corrupt-input negative control, and interruption/replacement probes. Merely running its syntax or help check does not satisfy that gate.

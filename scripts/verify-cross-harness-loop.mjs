@@ -606,12 +606,13 @@ async function main() {
   const init = await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier", version: "1" }, capabilities: { experimentalApi: false } });
   evidence.add("codex-initialized", { protocol: init?.protocolVersion ?? init?.serverInfo?.version });
   codexRpc.notify("initialized", {});
-  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
+  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
   const threadId = thread?.thread?.id ?? thread?.id;
   if (!threadId) fail("Codex thread/start returned no thread id");
+  if (thread.thread?.ephemeral !== false) fail("Codex queue delivery requires a persistent native thread");
   if (thread.model !== args["codex-model"]) fail("Codex silently selected a different model");
   await assertNoScratchTrust(evidence, root);
-  evidence.add("codex-thread", { threadId, model: thread.model, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
+  evidence.add("codex-thread", { threadId, model: thread.model, ephemeral: thread.thread.ephemeral, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
   const rebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", codexSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (rebound.member.run_id !== coordinator.member.run_id || rebound.member.thread_id !== threadId) fail("coordinator replacement changed the process incarnation or thread unexpectedly");
   const fixture = await createFixture(root);
@@ -709,9 +710,10 @@ async function main() {
   await codexRpc.connect(replacementSocket);
   await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier-replacement", version: "1" }, capabilities: { experimentalApi: false } });
   codexRpc.notify("initialized", {});
-  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
+  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
   const replacementThreadId = replacementThread?.thread?.id ?? replacementThread?.id;
   if (!replacementThreadId) fail("replacement Codex thread/start returned no thread id");
+  if (replacementThread.thread?.ephemeral !== false) fail("replacement Codex queue delivery requires a persistent native thread");
   if (replacementThread.model !== args["codex-model"]) fail("replacement Codex silently selected a different model");
   const replacementRebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--thread", replacementThreadId, "--run-id", replacement.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (replacementRebound.member.run_id !== replacement.member.run_id || replacementRebound.member.thread_id !== replacementThreadId) fail("replacement coordinator did not bind its new thread and run");
