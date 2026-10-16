@@ -7,6 +7,7 @@ forgectl attention list                      # one line per wait, by delay cost
 forgectl attention list --json               # {"rows": [...], "skipped": N, "sources": {...}}
 forgectl attention list --session ID --json  # one session's rows
 forgectl attention put --session ID --turn ID [--pane ID] [--socket PATH] [--cwd NAME] < reply.txt
+forgectl attention put --session ID --turn ID --json < reply.txt   # echo the recorded items as JSON
 forgectl attention rm --session ID
 ```
 
@@ -68,6 +69,26 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 - any other bold lead, `**Nothing owed by me.** …` (read as a note, not queued).
 
 A line that matches none of these counts as seen and not read. A line under an item with no blank line between continues that item. The block ends at a blank line followed by prose, a heading, a thematic break (`---`, `***`, `___`) or a fence. As in CommonMark, a backtick run followed by text that holds a backtick is an inline span, not a fence, and a fence closes only on a bare marker. `Recommended: X` on an item's line (or a continuation) is cut from its text and mapped; a value outside the map stays in the text and sets no `rec`. At most 20 items are kept. `put` prints `items=`, `seen=` and `read=`.
+
+### `put --json`
+
+With `--json`, a successful `put` prints exactly one JSON object on stdout and nothing else there:
+
+```json
+{
+  "session": "s1",
+  "turn": "t1",
+  "items": [
+    {"kind": "a", "n": 1, "actor": "Claude", "text": "do a thing.", "rec": "later"}
+  ],
+  "seen": 1,
+  "read": 1
+}
+```
+
+`items` holds the question (`q`) and action (`a`) items exactly as the record stores them: the same parse, the same cleaning and 200-character cut, the same order. Notes and options are stored in the record but are not rows, so they are left out. Every key is always present: `actor` and `rec` are `""` when the item has none, and `items` is `[]` when the reply had no block. `seen` and `read` are the parser's counts, as in the plain output.
+
+The echo exists so a viewer can keep its own session's items in memory and compare spool rows against them: the spool can be rewritten by any process of yours after `put` returns, and the echo cannot. A refused `put --json` prints nothing on stdout and one `{"error", "code", "path"}` object on stderr, with the same exit code as without `--json`. Housekeeping notes (evict, prune) still go to stderr as plain lines.
 
 stdin must not be a terminal. A reply over 64 KiB is parsed from its last 64 KiB, starting at its first whole line; a cut inside a fenced block can hide the header, which is accepted for replies that long. One over 16 MiB is refused. Once the record is written, `put`'s housekeeping (evicting and pruning) is best effort: a failure is reported on stderr and `put` still exits 0. It never prunes the record it just wrote, so a pane herdr has not detected yet does not lose its record.
 

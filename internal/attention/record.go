@@ -130,3 +130,9 @@ func Validate(r Record) error {
 	_, err := r.sanitize()
 	return err
 }
+
+// Sanitize returns r exactly as Put would write it: the same checks, the
+// same item cap and the same cleaning, without writing anything.
+func Sanitize(r Record) (Record, error) {
+	return r.sanitize()
+}

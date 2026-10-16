@@ -48,7 +48,7 @@ and the last ` + "`forgectl sweep`" + ` result, one row per wait, ordered by wha
 delay costs: a blocked worker, a desk item, a marker-clean PR, an action of
 yours, a question.
 
-  forgectl attention put --session ID --turn ID [--pane ID] [--socket PATH] [--cwd NAME]
+  forgectl attention put --session ID --turn ID [--pane ID] [--socket PATH] [--cwd NAME] [--json]
                                  parse the reply on stdin and record its items
   forgectl attention rm --session ID
                                  drop a session's record
@@ -95,7 +95,10 @@ record whose pane is gone; --cwd is the session's directory name. Each value
 is checked: a session id is 1 to 64 letters, digits, '_' or '-'.
 
 It prints items=, seen= and read= (the block's item lines, and how many the
-parser understood). After writing it prunes the spool and, when herdr lists this session in
+parser understood). With --json it prints one object instead:
+{"session", "turn", "items": [{"kind", "n", "actor", "text", "rec"}], "seen",
+"read"}, the question and action items exactly as the record stores them.
+After writing it prunes the spool and, when herdr lists this session in
 --pane, drops any other session's record for that pane.`, attentionStdinCap>>10, attentionStdinCap>>10),
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
@@ -108,6 +111,7 @@ parser understood). After writing it prunes the spool and, when herdr lists this
 	cmd.Flags().StringVar(&o.pane, "pane", "", "the session's herdr pane ($HERDR_PANE_ID)")
 	cmd.Flags().StringVar(&o.socket, "socket", "", "the session's herdr socket ($HERDR_SOCKET_PATH)")
 	cmd.Flags().StringVar(&o.cwd, "cwd", "", "the session's directory name")
+	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the recorded items as JSON")
 	return cmd
 }
 

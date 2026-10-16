@@ -532,3 +532,147 @@ func TestAttentionListMatchesATokenOnlySession(t *testing.T) {
 		}
 	}
 }
+
+// attnPutJSON runs `put --json` and decodes stdout strictly: exactly one
+// object with only the contract's keys, and nothing after it.
+func attnPutJSON(t *testing.T, stdin string, args ...string) (attentionPut, string) {
+	t.Helper()
+	out, errOut, err := attnRun(t, module.Deps{}, stdin, append([]string{"put", "--json"}, args...)...)
+	if err != nil {
+		t.Fatalf("put --json: %v\n%s", err, errOut)
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
+	var got attentionPut
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("put --json stdout is not one contract object: %v\n%s", err, out)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err == nil {
+		t.Fatalf("put --json printed more than one JSON value:\n%s", out)
+	}
+	if rest := out[dec.InputOffset():]; strings.TrimSpace(rest) != "" {
+		t.Fatalf("put --json printed text after the object: %q", rest)
+	}
+	return got, out
+}
+
+func TestAttentionPutJSONEchoesTheRecordedItems(t *testing.T) {
+	e := newAttnEnv(t)
+	long := strings.Repeat("word ", 80)
+	reply := "Body.\n\n**What's next:**\n" +
+		"- **Question 1**: Ship it\u200b today? Recommended: yes\n" +
+		"- **A.** Red\n" +
+		"- **Action 2 (Cameron)**: merge the widget PR\n" +
+		"- **Action 3 (Claude)**: " + long + "Recommended: later\n" +
+		"- **Action 4**: tidy \x1b[31mthe\x1b[0m docs\n" +
+		"5. **Nothing owed by me.** The gizmo branch is merged.\n"
+	got, _ := attnPutJSON(t, reply, "--session", attnSession, "--turn", "turn-7")
+	if got.Session != attnSession || got.Turn != "turn-7" {
+		t.Errorf("session/turn = %q/%q", got.Session, got.Turn)
+	}
+
+	data, err := os.ReadFile(filepath.Join(e.spool(), attnSession+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec attention.Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	var want []attentionPutItem
+	for _, it := range rec.Items {
+		if it.Kind == attention.KindQuestion || it.Kind == attention.KindAction {
+			want = append(want, attentionPutItem{Kind: it.Kind, N: it.N, Actor: it.Actor, Text: it.Text, Rec: it.Rec})
+		}
+	}
+	if len(want) != 4 {
+		t.Fatalf("fixture recorded %d question/action items, want 4: %+v", len(want), rec.Items)
+	}
+	if len(got.Items) != len(want) {
+		t.Fatalf("items = %+v, want %+v", got.Items, want)
+	}
+	for i := range want {
+		if got.Items[i] != want[i] {
+			t.Errorf("item %d = %+v, record holds %+v", i, got.Items[i], want[i])
+		}
+	}
+	if a := got.Items[2]; a.Actor != attention.ActorClaude || a.Rec != attention.RecLater || len([]rune(a.Text)) > attention.MaxText {
+		t.Errorf("Claude action = %+v, want actor Claude, rec later, text at most %d runes", a, attention.MaxText)
+	}
+	if a := got.Items[3]; a.Actor != "" || a.Rec != "" || strings.ContainsRune(a.Text, '\x1b') {
+		t.Errorf("unattributed action = %+v, want empty actor and rec, no escape", a)
+	}
+	if got.Seen != 6 || got.Read != 6 {
+		t.Errorf("seen/read = %d/%d, want 6/6", got.Seen, got.Read)
+	}
+}
+
+func TestAttentionPutJSONWithNoBlockGivesEmptyItems(t *testing.T) {
+	newAttnEnv(t)
+	got, out := attnPutJSON(t, "No closing block here.\n", "--session", attnSession, "--turn", "t")
+	if got.Items == nil || len(got.Items) != 0 {
+		t.Errorf("items = %#v, want []", got.Items)
+	}
+	if !strings.Contains(out, `"items": []`) {
+		t.Errorf("stdout has no literal empty items array:\n%s", out)
+	}
+	for _, key := range []string{`"session"`, `"turn"`, `"seen": 0`, `"read": 0`} {
+		if !strings.Contains(out, key) {
+			t.Errorf("stdout lacks %s:\n%s", key, out)
+		}
+	}
+}
+
+func TestAttentionPutJSONKeepsEmptyFieldsPresent(t *testing.T) {
+	newAttnEnv(t)
+	_, out := attnPutJSON(t, "**What's next:**\n- **Action 1**: tidy the docs\n", "--session", attnSession, "--turn", "t")
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Items) != 1 {
+		t.Fatalf("items = %v", raw.Items)
+	}
+	for _, key := range []string{"kind", "n", "actor", "text", "rec"} {
+		if _, ok := raw.Items[0][key]; !ok {
+			t.Errorf("item lacks %q: %v", key, raw.Items[0])
+		}
+	}
+}
+
+func TestAttentionPutWithoutJSONIsUnchanged(t *testing.T) {
+	newAttnEnv(t)
+	out, errOut, err := attnRun(t, module.Deps{}, attnReply, "put", "--session", attnSession, "--turn", "t")
+	if err != nil || out != "items=2 seen=2 read=2\n" {
+		t.Fatalf("put = %q %v\n%s", out, err, errOut)
+	}
+}
+
+// A refused put --json keeps the --json error contract: nothing on stdout,
+// one failure object on stderr, the human run's exit code.
+func TestAttentionPutJSONRefusalIsOneStderrObject(t *testing.T) {
+	isolateJSONContractEnv(t)
+	oldTTY := attentionStdinIsTerminal
+	attentionStdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { attentionStdinIsTerminal = oldTTY })
+	root := productionJSONRoot(herdrDown())
+	root.SetIn(strings.NewReader(attnReply))
+	out, errOut, err := runJSONThroughFang(t, root, "attention", "put", "--json", "--session", "../x", "--turn", "t")
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	if ExitCode(err) != exitUsage {
+		t.Errorf("exit %d (%v), want %d", ExitCode(err), err, exitUsage)
+	}
+	got := decodeOneStderrObject(t, errOut)
+	if got["code"] != jsonCodeUsage {
+		t.Errorf("code = %v, want %s", got["code"], jsonCodeUsage)
+	}
+	// The refusal must be put's own, not an unknown-command error.
+	if msg, _ := got["error"].(string); !strings.Contains(msg, "session is not a session id") {
+		t.Errorf("error = %q, want put's session refusal", msg)
+	}
+}

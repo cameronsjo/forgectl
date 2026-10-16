@@ -164,6 +164,13 @@ func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) erro
 	}
 	p := attention.Parse(text)
 	r.Items = p.Items
+	// written is the record as Put stores it, so --json echoes the stored
+	// items rather than the parser's view of them.
+	// A refusal here is the one Put would return, with the same exit code.
+	written, err := attention.Sanitize(r)
+	if err != nil {
+		return err
+	}
 
 	s, err := attention.OpenSpool(base, true)
 	if err != nil {
@@ -194,8 +201,45 @@ func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) erro
 	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), live); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: prune: %v\n", err) //nolint:errcheck // best-effort note on stderr
 	}
+	if o.asJSON {
+		return writeJSON(cmd.OutOrStdout(), attentionPutEcho(written, p))
+	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "items=%d seen=%d read=%d\n", len(p.Items), p.Seen, p.Read)
 	return err
+}
+
+// attentionPut is `put --json`: the session, the turn and the question and
+// action items of the record as written, in record order. Every field is
+// always present: actor and rec are "" when the item has none, and items is
+// [] when the reply had no block. A viewer holds this copy in memory and
+// compares spool rows against it, so its text is the stored, cleaned text.
+type attentionPut struct {
+	Session string             `json:"session"`
+	Turn    string             `json:"turn"`
+	Items   []attentionPutItem `json:"items"`
+	Seen    int                `json:"seen"`
+	Read    int                `json:"read"`
+}
+
+type attentionPutItem struct {
+	Kind  string `json:"kind"`
+	N     int    `json:"n"`
+	Actor string `json:"actor"`
+	Text  string `json:"text"`
+	Rec   string `json:"rec"`
+}
+
+// attentionPutEcho builds the --json echo from the written record. Notes and
+// options are stored but are not rows, so they are left out.
+func attentionPutEcho(r attention.Record, p attention.Parsed) attentionPut {
+	out := attentionPut{Session: r.Session, Turn: r.Turn, Items: []attentionPutItem{}, Seen: p.Seen, Read: p.Read}
+	for _, it := range r.Items {
+		if it.Kind != attention.KindQuestion && it.Kind != attention.KindAction {
+			continue
+		}
+		out.Items = append(out.Items, attentionPutItem{Kind: it.Kind, N: it.N, Actor: it.Actor, Text: it.Text, Rec: it.Rec})
+	}
+	return out
 }
 
 // herdrRuns reports whether the caller's herdr server lists session in pane,

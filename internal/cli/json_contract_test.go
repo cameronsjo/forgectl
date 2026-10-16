@@ -23,7 +23,6 @@ import (
 // own leaf, where this walk enforces --json.
 var jsonContractExempt = map[string]string{
 	"attention":              "a bare `attention` prints its help and reports no state; it runs only so that an unknown verb is refused (`attention list --json` reports the queue)",
-	"attention put":          "records one session's items from stdin; the printed items= line is informational and the exit code is the outcome (`attention list --json` reports the queue)",
 	"attention rm":           "drops one session's record; the exit code is the outcome (`attention list --json` reports the queue)",
 	"bench open":             "opens a hearth or grafana UI in the browser; nothing to report (`bench status --json` reports the services)",
 	"bench up":               "brings the bench services up; the exit code is the outcome and `bench status --json` reports the result",
