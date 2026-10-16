@@ -676,3 +676,19 @@ func TestAttentionPutJSONRefusalIsOneStderrObject(t *testing.T) {
 		t.Errorf("error = %q, want put's session refusal", msg)
 	}
 }
+
+// A session two herdr panes claim vouches for no pane, so put evicts nothing
+// on its behalf.
+func TestHerdrRunsRefusesAnAmbiguousSession(t *testing.T) {
+	one := attention.Herdr{Known: true, Socket: attnSocket, Agents: []attention.Agent{{Pane: "w1:p2", Session: "s"}}}
+	if !herdrRuns(one, "s", "w1:p2", attnSocket) {
+		t.Fatal("a session herdr lists in one pane did not vouch for it")
+	}
+	two := one
+	two.Agents = append(two.Agents, attention.Agent{Pane: "w9:p9", Session: "s"})
+	for _, pane := range []string{"w1:p2", "w9:p9"} {
+		if herdrRuns(two, "s", pane, attnSocket) {
+			t.Errorf("a session two panes claim vouched for %s", pane)
+		}
+	}
+}

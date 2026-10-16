@@ -242,18 +242,15 @@ func attentionPutEcho(r attention.Record, p attention.Parsed) attentionPut {
 	return out
 }
 
-// herdrRuns reports whether the caller's herdr server lists session in pane,
-// and socket is that server.
+// herdrRuns reports whether the caller's herdr server lists session in pane
+// and in no other pane, and socket is that server. A session two panes claim
+// is ambiguous and vouches for nothing.
 func herdrRuns(h attention.Herdr, session, pane, socket string) bool {
 	if !h.Known || pane == "" || socket == "" || socket != h.Socket {
 		return false
 	}
-	for _, a := range h.Agents {
-		if a.Pane == pane && a.Session == session {
-			return true
-		}
-	}
-	return false
+	got, ok := h.SessionPane(session)
+	return ok && got == pane
 }
 
 func runAttentionRm(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {

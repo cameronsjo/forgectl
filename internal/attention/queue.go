@@ -109,6 +109,50 @@ type Herdr struct {
 	Agents []Agent
 }
 
+// index maps sessions and panes to the one herdr row each belongs to. A
+// session that two or more panes report is ambiguous: any process of yours
+// can report a session id over the herdr socket, so herdr cannot say which
+// pane is the session's, and the session gets no entry. A pane listed by two
+// rows that disagree (session or names) is ambiguous the same way and gets no
+// entry. Rows with an invalid pane id are ignored.
+func (h Herdr) index() (bySession, byPane map[string]Agent) {
+	bySession, byPane = map[string]Agent{}, map[string]Agent{}
+	badSession, badPane := map[string]bool{}, map[string]bool{}
+	for _, a := range h.Agents {
+		if !ValidPane(a.Pane) {
+			continue
+		}
+		if prev, dup := byPane[a.Pane]; dup && (prev.Session != a.Session || !slices.Equal(prev.Names, a.Names)) {
+			badPane[a.Pane] = true
+		} else if !dup {
+			byPane[a.Pane] = a
+		}
+		if !ValidSession(a.Session) {
+			continue
+		}
+		if prev, dup := bySession[a.Session]; dup && prev.Pane != a.Pane {
+			badSession[a.Session] = true
+		} else if !dup {
+			bySession[a.Session] = a
+		}
+	}
+	for p := range badPane {
+		delete(byPane, p)
+	}
+	for s := range badSession {
+		delete(bySession, s)
+	}
+	return bySession, byPane
+}
+
+// SessionPane is the one pane herdr lists session in. ok is false when herdr
+// does not list the session, or lists it in more than one pane.
+func (h Herdr) SessionPane(session string) (pane string, ok bool) {
+	bySession, _ := h.index()
+	a, ok := bySession[session]
+	return a.Pane, ok
+}
+
 // Liveness is the prune view of h.
 func (h Herdr) Liveness() Liveness {
 	panes := map[string]bool{}
@@ -177,19 +221,18 @@ type deskRow struct {
 // and a session's run-type `Action (Cameron)` when that session's pane
 // queued the item during or after the turn. Notes and options are not waits.
 func Build(in Input) []Row {
-	bySession, byPane := map[string]Agent{}, map[string]Agent{}
-	for _, a := range in.Herdr.Agents {
-		if !ValidPane(a.Pane) {
-			continue
+	// An ambiguous session or pane has no entry here, so a session two panes
+	// claim has no pane, is not own and merges with no desk item, and a desk
+	// or worker row naming an ambiguous pane gets no pane (see index).
+	bySession, byPane := in.Herdr.index()
+	// paneSession is the session a herdr pane runs, or "" when that session
+	// is ambiguous: a desk or worker row is not given a session another pane
+	// also claims.
+	paneSession := func(a Agent) string {
+		if b, ok := bySession[a.Session]; ok && b.Pane == a.Pane {
+			return a.Session
 		}
-		if _, dup := byPane[a.Pane]; !dup {
-			byPane[a.Pane] = a
-		}
-		if ValidSession(a.Session) {
-			if _, dup := bySession[a.Session]; !dup {
-				bySession[a.Session] = a
-			}
-		}
+		return ""
 	}
 	isWorker := func(names ...string) bool {
 		if in.WorkerPrefix == "" {
@@ -221,9 +264,7 @@ func Build(in Input) []Row {
 		}
 		if a, ok := byPane[pane]; ok && pane != "" {
 			r.Pane = pane
-			if ValidSession(a.Session) {
-				r.Session = a.Session
-			}
+			r.Session = paneSession(a)
 			if isWorker(a.Names...) {
 				r.Origin = OriginWorker
 			}
@@ -233,7 +274,7 @@ func Build(in Input) []Row {
 
 	var rows []Row
 	if sw := in.Sweep; sw != nil {
-		rows = append(rows, sweepRows(*sw, desk, byPane)...)
+		rows = append(rows, sweepRows(*sw, desk, byPane, paneSession)...)
 	}
 
 	for _, rec := range in.Records {
@@ -295,7 +336,7 @@ func Build(in Input) []Row {
 // sweepRows turns the sweep's blocked workers and marker-clean PRs into
 // rows. A worker blocked on the desk whose pane queued a desk item is merged
 // into that item's row instead.
-func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent) []Row {
+func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession func(Agent) string) []Row {
 	var rows []Row
 	for _, w := range sw.Workers {
 		if w.BlockedBy == "" {
@@ -322,9 +363,7 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent) []Row {
 		}
 		if a, ok := byPane[w.Pane]; ok && w.Pane != "" {
 			r.Pane = w.Pane
-			if ValidSession(a.Session) {
-				r.Session = a.Session
-			}
+			r.Session = paneSession(a)
 		}
 		rows = append(rows, r)
 	}
