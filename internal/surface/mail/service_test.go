@@ -1,9 +1,11 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,126 @@ func TestSendDelivers(t *testing.T) {
 	}
 	if len(ad.texts) != 1 || !strings.HasPrefix(ad.texts[0], Marker+" from=coord to=pi-1 ") {
 		t.Fatalf("rendered %q", ad.texts)
+	}
+}
+
+type writeAheadAdapter struct {
+	fakeAdapter
+	box      Mailbox
+	observed bool
+}
+
+func (adapter *writeAheadAdapter) Deliver(context context.Context, worker Worker, message Message, rendered string) (string, error) {
+	data, err := os.ReadFile(adapter.box.logPath())
+	if err != nil {
+		return "", err
+	}
+	adapter.observed = bytes.Contains(data, []byte(`"status":"unconfirmed"`))
+	return "ok", nil
+}
+
+type receiptTestAdapter struct {
+	fakeAdapter
+	detail   string
+	accepted bool
+	err      error
+	receipts int
+}
+
+func (adapter *receiptTestAdapter) Receipt(context context.Context, worker Worker, message Message) (string, bool, error) {
+	adapter.receipts++
+	return adapter.detail, adapter.accepted, adapter.err
+}
+
+func TestSendWritesUnconfirmedBeforeDeliverAndCountsOneAttempt(t *testing.T) {
+	adapter := &writeAheadAdapter{}
+	s, _ := newTestService(t, adapter)
+	adapter.box = s.Box
+	result, err := s.Send(context.Background(), "coord", "pi-1", "hello", PriorityNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusSent || !adapter.observed {
+		t.Fatalf("result = %+v, write-ahead observed = %t", result, adapter.observed)
+	}
+	entries, err := s.Messages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusSent || entries[0].Attempts != 1 {
+		t.Fatalf("entries = %+v, want one sent attempt", entries)
+	}
+}
+
+func TestUnconfirmedFlushUsesReceiptWithoutRedelivery(t *testing.T) {
+	adapter := &receiptTestAdapter{
+		fakeAdapter: fakeAdapter{errs: []error{Unconfirmed("ack lost")}},
+		detail:      "receipt accepted",
+		accepted:    true,
+	}
+	s, _ := newTestService(t, adapter)
+	result, err := s.Send(context.Background(), "coord", "pi-1", "hello", PriorityNext)
+	if err != nil || result.Status != StatusUnconfirmed {
+		t.Fatalf("send result = %+v, err = %v", result, err)
+	}
+	report, err := s.Flush(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Sent != 1 || report.Unconfirmed != 0 || adapter.calls != 1 || adapter.receipts != 1 {
+		t.Fatalf("report = %+v, deliver calls = %d, receipt calls = %d", report, adapter.calls, adapter.receipts)
+	}
+	entries, err := s.Messages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusSent || entries[0].Attempts != 1 {
+		t.Fatalf("entries = %+v, want one sent attempt", entries)
+	}
+}
+
+func TestUnconfirmedWithoutReceiptStaysVisibleAfterReload(t *testing.T) {
+	first := &fakeAdapter{errs: []error{Unconfirmed("ack lost")}}
+	s, _ := newTestService(t, first)
+	if result, err := s.Send(context.Background(), "coord", "pi-1", "hello", PriorityNext); err != nil || result.Status != StatusUnconfirmed {
+		t.Fatalf("send result = %+v, err = %v", result, err)
+	}
+	second := &fakeAdapter{}
+	reloaded := &Service{
+		Box:      s.Box,
+		Roster:   s.Roster,
+		Adapters: map[Harness]Adapter{HarnessClaude: second, HarnessPi: second, HarnessCodex: second},
+		Policy:   s.Policy,
+		Now:      s.Now,
+	}
+	report, err := reloaded.Flush(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Unconfirmed != 1 || second.calls != 0 {
+		t.Fatalf("report = %+v, redelivery calls = %d", report, second.calls)
+	}
+	before, err := os.ReadFile(reloaded.Box.logPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := reloaded.Flush(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(reloaded.Box.logPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Unconfirmed != 1 || !bytes.Equal(before, after) {
+		t.Fatalf("repeated flush = %+v, mailbox changed without new receipt evidence", repeated)
+	}
+	entries, err := reloaded.Messages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusUnconfirmed || entries[0].Attempts != 1 {
+		t.Fatalf("entries = %+v, want one visible unconfirmed attempt", entries)
 	}
 }
 
@@ -197,6 +319,38 @@ func TestApplyEventRecordsCodexThread(t *testing.T) {
 	}
 	if _, err := s.ApplyEvent(ctx, Event{Worker: "codex-1", State: StateIdle, ThreadID: "--exec=x"}); err == nil {
 		t.Fatal("accepted a thread id that starts with a dash")
+	}
+}
+
+func TestApplyEventRejectsMissingOrStaleRunIDBeforeMutation(t *testing.T) {
+	s, _ := newTestService(t, &fakeAdapter{})
+	if err := s.Roster.Update("codex-1", func(worker *Worker) error {
+		worker.RunID = "run-1"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"", "run-old"} {
+		if _, err := s.ApplyEvent(context.Background(), Event{Worker: "codex-1", State: StateIdle, ThreadID: "th_stale", RunID: runID}); !errors.Is(err, ErrRunIDMismatch) {
+			t.Fatalf("run id %q: err = %v, want ErrRunIDMismatch", runID, err)
+		}
+		worker, err := s.Roster.Get("codex-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if worker.State != "" || worker.ThreadID != "" {
+			t.Fatalf("run id %q mutated worker = %+v", runID, worker)
+		}
+	}
+	if _, err := s.ApplyEvent(context.Background(), Event{Worker: "codex-1", State: StateIdle, ThreadID: "th_current", RunID: "run-1"}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := s.Roster.Get("codex-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.State != StateIdle || worker.ThreadID != "th_current" {
+		t.Fatalf("matching run did not apply: %+v", worker)
 	}
 }
 

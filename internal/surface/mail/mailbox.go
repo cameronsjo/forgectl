@@ -21,6 +21,10 @@ const (
 	// StatusSent was handed to the recipient's harness. Whether the agent has
 	// read it is the harness's business.
 	StatusSent Status = "sent"
+	// StatusUnconfirmed means a delivery may have reached the harness, but no
+	// receipt established whether it was accepted. It is never redelivered
+	// automatically.
+	StatusUnconfirmed Status = "unconfirmed"
 	// StatusFailed will not be retried; Detail says why.
 	StatusFailed Status = "failed"
 	// StatusExpired stayed queued past the policy TTL.

@@ -24,8 +24,8 @@ Agent Board stays out of this first hot path. It can remain a directory, bulleti
 
 ## Work
 
-- [ ] Register an explicit Codex coordinator and Pi teammate, including an isolated Codex endpoint; preserve legacy Claude identity and default-deny peer policy.
-- [ ] Add write-ahead uncertain-delivery state, receiver receipt reconciliation, and negative tests for lost acknowledgements and restart ambiguity.
+- [x] Register an explicit Codex coordinator and Pi teammate, including an isolated Codex endpoint; preserve legacy Claude identity and default-deny peer policy.
+- [x] Add write-ahead uncertain-delivery state, receiver receipt reconciliation, and negative tests for lost acknowledgements and restart ambiguity.
 - [ ] Harden the Pi extension's message-ID handling and socket ownership; verify against the installed runtime rather than only source declarations.
 - [ ] Run a real Codex-to-Pi task, clarification, answer, artifact, and independent executable check. Record the exact build, harness versions, session identities, and mailbox outcomes.
 - [ ] Exercise busy delivery, stopped receiver, lost acknowledgement, receiver restart, and coordinator replacement without a human message relay. State any unresolved uncertainty honestly.
@@ -44,4 +44,15 @@ After the two-harness loop passes, evaluate Agent Board's incremental value, the
 ## Completion evidence
 
 - Baseline: `go test ./internal/surface/mail` passed on the unmodified base. The first sandbox attempt could not write Go's cache; the permitted retry using the normal cache passed.
-- Implementation and live acceptance: pending.
+- Implementation checks: the focused mail/team/send/inbox/flush/event tests pass, the actual embedded-extension behavioral script passes, and `go build` produces the isolated executable. The repository-pinned golangci-lint 2.13.1 reports `0 issues` with Go 1.26.8; the machine's default Go 1.27 export format is newer than that linter supports.
+- A wider CLI run completed with one `TestDeskWatch_ClosedPipeExits141` timeout; its isolated fresh rerun passed. This is not recorded as a fully green wider suite.
+- Native Codex probe: installed 0.153.4 completed WebSocket-over-Unix initialization and created an idle ephemeral thread with no model turns; the owned server stopped with exit 0.
+- Live acceptance remains pending. The first live verifier attempt stopped before registration or model turns because plain Pi `--help` exceeded its 30-second preflight timeout. The next preflight loads built-in CLI metadata without unrelated extensions; actual model processes still load the explicit authentication and safety extensions.
+
+## Implementation review
+
+The first implementation adds run-scoped registration, a dedicated Codex endpoint, write-ahead `unconfirmed` state, and receipt-only reconciliation. Its API and limitations are documented in [surface team](../commands/surface-team.md). Targeted Go checks cover coordinator/worker identity, stale run rejection, registration replacement, private ledger handling, crash ambiguity, and no-redelivery receipt reconciliation.
+
+Inspection of the installed Pi runtime found that `sendUserMessage` returns before asynchronous acceptance. The extension therefore waits for an exact native user-message match rather than treating the API return as success. A `message_start` receipt still precedes transcript persistence and is labeled accordingly. Independent review also covers session binding and socket ownership; these are gates before live acceptance.
+
+The installed Codex Unix transport uses WebSocket framing, not JSON lines. The live verifier must complete a real initialization against its dedicated socket before any model task. Neither a raw socket connection nor a zero-exit proxy with empty output counts as that evidence.

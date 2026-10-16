@@ -8,10 +8,21 @@ import (
 // The extension and PiAdapter speak one protocol, so the shipped copy must
 // name the same environment variable and request types the adapter uses.
 func TestPiExtensionEmbedded(t *testing.T) {
-	for _, want := range []string{EnvInbox, EnvWorker, `"deliver"`, `"state"`, "--harness", `retry: true`} {
+	for _, want := range []string{EnvInbox, EnvWorker, `"deliver"`, `"receipt"`, `"state"`, "--harness", `retry: true`, "accepted", "unconfirmed", "message_start", "session_start", "getEntries", "getSessionId", "session_id"} {
 		if !bytes.Contains(PiExtension, []byte(want)) {
 			t.Errorf("embedded pi extension does not mention %s", want)
 		}
+	}
+}
+
+func TestPiExtensionKeepsReceiptAndSocketOwnershipState(t *testing.T) {
+	for _, want := range []string{"FORGECTL_INBOX_RECEIPTS", "receiptPath", "messageDigest", "ownedSocket", "statSync"} {
+		if !bytes.Contains(PiExtension, []byte(want)) {
+			t.Errorf("embedded pi extension does not mention %s", want)
+		}
+	}
+	if !bytes.Contains(PiExtension, []byte("inbox path already exists; register a fresh socket path for this process")) {
+		t.Error("extension does not fail closed on an existing socket")
 	}
 }
 
@@ -28,5 +39,8 @@ func TestPiExtensionClosesTheIdleRace(t *testing.T) {
 	}
 	if !bytes.Contains(PiExtension, []byte(`pi.on("agent_settled"`)) {
 		t.Error("extension does not wait for agent_settled")
+	}
+	if !bytes.Contains(PiExtension, []byte("current pi session identity is unavailable")) {
+		t.Error("extension does not require a current session identity")
 	}
 }

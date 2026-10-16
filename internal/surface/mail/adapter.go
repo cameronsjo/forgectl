@@ -16,6 +16,14 @@ type Adapter interface {
 	State(ctx context.Context, w Worker) (WorkerState, error)
 }
 
+// ReceiptAdapter reconciles a delivery whose transport outcome was uncertain.
+// It must not deliver the message again. An accepted receipt proves only that
+// the harness accepted the message, not that the agent read it or completed a
+// turn.
+type ReceiptAdapter interface {
+	Receipt(ctx context.Context, worker Worker, message Message) (detail string, accepted bool, err error)
+}
+
 type retryable struct{ err error }
 
 func (r retryable) Error() string { return r.err.Error() }
@@ -31,4 +39,21 @@ func NotReady(format string, a ...any) error {
 func IsRetryable(err error) bool {
 	var r retryable
 	return errors.As(err, &r)
+}
+
+type unconfirmed struct{ err error }
+
+func (uncertain unconfirmed) Error() string { return uncertain.err.Error() }
+func (uncertain unconfirmed) Unwrap() error { return uncertain.err }
+
+// Unconfirmed marks a delivery whose external outcome cannot be established.
+// The mailbox must not automatically deliver it again.
+func Unconfirmed(format string, args ...any) error {
+	return unconfirmed{fmt.Errorf(format, args...)}
+}
+
+// IsUnconfirmed reports whether err carries an uncertain external outcome.
+func IsUnconfirmed(err error) bool {
+	var uncertain unconfirmed
+	return errors.As(err, &uncertain)
 }

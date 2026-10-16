@@ -27,7 +27,7 @@ type SendResult struct {
 
 // FlushReport counts what one flush did.
 type FlushReport struct {
-	Sent, Requeued, Failed, Expired int
+	Sent, Requeued, Failed, Expired, Unconfirmed int
 	// Skipped is the number of mailbox lines that could not be read.
 	Skipped int
 }
@@ -96,11 +96,15 @@ func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendR
 		detail := fmt.Sprintf("no adapter for harness %s", quoteTrunc(string(w.Harness)))
 		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, true, s.now())
 	}
+	started := s.now()
+	if err := tx.Mark(id, StatusUnconfirmed, "delivery attempt in progress", true, started); err != nil {
+		return SendResult{ID: id, Status: StatusUnconfirmed, Detail: "delivery attempt could not be recorded"}, err
+	}
 	detail, err := ad.Deliver(ctx, w, e.Msg, Render(e.Msg))
 	now := s.now()
 	switch {
 	case err == nil:
-		return SendResult{ID: id, Status: StatusSent, Detail: detail}, tx.Mark(id, StatusSent, detail, true, now)
+		return SendResult{ID: id, Status: StatusSent, Detail: detail}, tx.Mark(id, StatusSent, detail, false, now)
 	case IsRetryable(err):
 		detail = oneLine([]byte(err.Error()), 300)
 		st := StatusQueued
@@ -108,11 +112,57 @@ func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendR
 			st = StatusFailed
 			detail = fmt.Sprintf("gave up after %d attempts: %s", e.Attempts+1, detail)
 		}
-		return SendResult{ID: id, Status: st, Detail: detail}, tx.Mark(id, st, detail, true, now)
+		return SendResult{ID: id, Status: st, Detail: detail}, tx.Mark(id, st, detail, false, now)
+	case IsUnconfirmed(err):
+		detail = oneLine([]byte(err.Error()), 300)
+		return SendResult{ID: id, Status: StatusUnconfirmed, Detail: detail}, tx.Mark(id, StatusUnconfirmed, detail, false, now)
 	default:
 		detail = oneLine([]byte(err.Error()), 300)
-		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, true, now)
+		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, false, now)
 	}
+}
+
+func (s *Service) reconcile(ctx context.Context, tx *Tx, worker Worker, entry Entry) (SendResult, error) {
+	adapter, ok := s.Adapters[worker.Harness]
+	if !ok || adapter == nil {
+		detail := fmt.Sprintf("no adapter for harness %s", quoteTrunc(string(worker.Harness)))
+		return s.retainUnconfirmed(tx, entry, detailIfMissing(entry, detail))
+	}
+	receiptAdapter, ok := adapter.(ReceiptAdapter)
+	if !ok {
+		detail := fmt.Sprintf("no receipt adapter for harness %s", quoteTrunc(string(worker.Harness)))
+		return s.retainUnconfirmed(tx, entry, detailIfMissing(entry, detail))
+	}
+	detail, accepted, err := receiptAdapter.Receipt(ctx, worker, entry.Msg)
+	if err != nil {
+		detail = oneLine([]byte(err.Error()), 300)
+		return s.retainUnconfirmed(tx, entry, detail)
+	}
+	if !accepted {
+		if detail == "" {
+			detail = "receipt did not confirm harness acceptance"
+		}
+		return s.retainUnconfirmed(tx, entry, detail)
+	}
+	return SendResult{ID: entry.Msg.ID, Status: StatusSent, Detail: detail}, tx.Mark(entry.Msg.ID, StatusSent, detail, false, s.now())
+}
+
+func (s *Service) retainUnconfirmed(tx *Tx, entry Entry, detail string) (SendResult, error) {
+	if detail == "" {
+		detail = entry.Detail
+	}
+	result := SendResult{ID: entry.Msg.ID, Status: StatusUnconfirmed, Detail: detail}
+	if detail == entry.Detail {
+		return result, nil
+	}
+	return result, tx.Mark(entry.Msg.ID, StatusUnconfirmed, detail, false, s.now())
+}
+
+func detailIfMissing(entry Entry, fallback string) string {
+	if entry.Detail != "" {
+		return entry.Detail
+	}
+	return fallback
 }
 
 // Flush retries every queued message that is due, expires the ones past the
@@ -128,6 +178,31 @@ func (s *Service) Flush(ctx context.Context) (FlushReport, error) {
 		for _, e := range entries {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if e.Status == StatusUnconfirmed {
+				recipient, err := s.Roster.Get(e.Msg.To)
+				if err != nil && !errors.Is(err, ErrUnknownWorker) {
+					return fmt.Errorf("roster: %w", err)
+				}
+				if err != nil {
+					detail := "recipient is no longer in the roster"
+					if _, err := s.retainUnconfirmed(tx, e, detail); err != nil {
+						return err
+					}
+					rep.Unconfirmed++
+					continue
+				}
+				receiptResult, err := s.reconcile(ctx, tx, recipient, e)
+				if err != nil {
+					return err
+				}
+				switch receiptResult.Status {
+				case StatusSent:
+					rep.Sent++
+				default:
+					rep.Unconfirmed++
+				}
+				continue
 			}
 			if !e.Pending() {
 				continue
@@ -168,6 +243,8 @@ func (s *Service) Flush(ctx context.Context) (FlushReport, error) {
 				rep.Sent++
 			case StatusFailed:
 				rep.Failed++
+			case StatusUnconfirmed:
+				rep.Unconfirmed++
 			default:
 				rep.Requeued++
 			}
@@ -212,11 +289,14 @@ func (s *Service) Watch(target, watcher string) error {
 	})
 }
 
+var ErrRunIDMismatch = errors.New("worker event run id does not match the registered run")
+
 // Event is one turn boundary a harness hook reported.
 type Event struct {
 	Worker   string
 	State    WorkerState
 	ThreadID string
+	RunID    string
 }
 
 // ApplyEvent records a worker's new state (and a codex thread id), queues
@@ -237,6 +317,9 @@ func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 	now := s.now()
 	var watchers []string
 	err := s.Roster.Update(ev.Worker, func(w *Worker) error {
+		if w.RunID != "" && ev.RunID != w.RunID {
+			return fmt.Errorf("worker event does not match the registered run: %w", ErrRunIDMismatch)
+		}
 		// A Codex worker's thread is fixed by its first turn. A notify from
 		// another thread (an internal one Codex starts beside it) says
 		// nothing about the worker, and taking it would point sends at the

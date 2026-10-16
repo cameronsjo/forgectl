@@ -28,10 +28,16 @@ type piRequest struct {
 }
 
 type piResponse struct {
-	OK    bool   `json:"ok"`
-	As    string `json:"as,omitempty"`
-	Idle  *bool  `json:"idle,omitempty"`
-	Error string `json:"error,omitempty"`
+	OK          bool   `json:"ok"`
+	ID          string `json:"id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	As          string `json:"as,omitempty"`
+	Accepted    *bool  `json:"accepted,omitempty"`
+	Evidence    string `json:"evidence,omitempty"`
+	Idle        *bool  `json:"idle,omitempty"`
+	Known       bool   `json:"known,omitempty"`
+	Unconfirmed bool   `json:"unconfirmed,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// Retry marks a refusal pi may not repeat, such as a send that raced
 	// the start or end of a run; the message stays queued.
 	Retry bool `json:"retry,omitempty"`
@@ -40,9 +46,15 @@ type piResponse struct {
 // Deliver hands text to the extension, which prompts when pi is idle, steers
 // when it is busy, and queues a follow-up for PriorityLater.
 func (a PiAdapter) Deliver(ctx context.Context, w Worker, m Message, text string) (string, error) {
-	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "deliver", ID: m.ID, Text: text, Priority: string(m.Priority)})
+	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "deliver", ID: m.ID, Text: text, Priority: string(m.Priority)}, true)
 	if err != nil {
 		return "", err
+	}
+	if resp.ID != m.ID {
+		return "", Unconfirmed("pi inbox answered for message %s, not %s", quoteTrunc(resp.ID), quoteTrunc(m.ID))
+	}
+	if resp.Unconfirmed {
+		return "", Unconfirmed("pi has not confirmed message %s: %s", quoteTrunc(m.ID), oneLine([]byte(resp.Error), 200))
 	}
 	if !resp.OK && resp.Retry {
 		return "", NotReady("pi could not take it yet: %s", oneLine([]byte(resp.Error), 200))
@@ -50,16 +62,51 @@ func (a PiAdapter) Deliver(ctx context.Context, w Worker, m Message, text string
 	if !resp.OK {
 		return "", fmt.Errorf("pi extension refused it: %s", oneLine([]byte(resp.Error), 200))
 	}
+	if resp.Accepted == nil || !*resp.Accepted || (resp.Evidence != "message_start" && resp.Evidence != "history") {
+		return "", Unconfirmed("pi has no native-consumption evidence for message %s", quoteTrunc(m.ID))
+	}
+	if resp.SessionID == "" {
+		return "", Unconfirmed("pi accepted message %s without a session identity", quoteTrunc(m.ID))
+	}
 	as := resp.As
 	if as == "" {
 		as = "prompt"
 	}
-	return "pi took it as " + oneLine([]byte(as), 20), nil
+	return "pi native consumption observed via " + oneLine([]byte(resp.Evidence), 20) + " as " + oneLine([]byte(as), 20) + "; transcript durability/completion is not confirmed", nil
+}
+
+// Receipt asks pi whether it observed native consumption of a message ID. An
+// accepted receipt does not prove a completed model turn, and message_start
+// precedes transcript persistence.
+func (a PiAdapter) Receipt(ctx context.Context, w Worker, m Message) (string, bool, error) {
+	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "receipt", ID: m.ID}, true)
+	if err != nil {
+		return "", false, err
+	}
+	if resp.ID != m.ID {
+		return "", false, Unconfirmed("pi receipt answered for message %s, not %s", quoteTrunc(resp.ID), quoteTrunc(m.ID))
+	}
+	if resp.OK && resp.Accepted != nil && resp.Known {
+		if !*resp.Accepted {
+			return "pi receipt confirms rejection: " + oneLine([]byte(resp.Error), 200), false, nil
+		}
+		if resp.Evidence != "message_start" && resp.Evidence != "history" {
+			return "", false, Unconfirmed("pi receipt for %s has no native-consumption evidence", quoteTrunc(m.ID))
+		}
+		if resp.SessionID == "" {
+			return "", false, Unconfirmed("pi receipt accepted %s without a session identity", quoteTrunc(m.ID))
+		}
+		return "pi receipt confirms native consumption via " + resp.Evidence + "; transcript durability/completion is not confirmed", true, nil
+	}
+	if resp.Unconfirmed {
+		return "", false, Unconfirmed("pi receipt for %s is unconfirmed: %s", quoteTrunc(m.ID), oneLine([]byte(resp.Error), 200))
+	}
+	return "", false, Unconfirmed("pi has no confirmed receipt for %s", quoteTrunc(m.ID))
 }
 
 // State asks the extension whether pi is idle.
 func (a PiAdapter) State(ctx context.Context, w Worker) (WorkerState, error) {
-	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "state"})
+	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "state"}, false)
 	if err != nil {
 		if IsRetryable(err) {
 			return StateAbsent, nil
@@ -75,7 +122,7 @@ func (a PiAdapter) State(ctx context.Context, w Worker) (WorkerState, error) {
 	return StateBusy, nil
 }
 
-func (a PiAdapter) call(ctx context.Context, socket string, req piRequest) (piResponse, error) {
+func (a PiAdapter) call(ctx context.Context, socket string, req piRequest, uncertain bool) (piResponse, error) {
 	if socket == "" || !filepath.IsAbs(socket) {
 		return piResponse{}, NotReady("no pi inbox socket recorded for this worker")
 	}
@@ -96,19 +143,44 @@ func (a PiAdapter) call(ctx context.Context, socket string, req piRequest) (piRe
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(append(line, '\n')); err != nil {
+		if uncertain {
+			return piResponse{}, Unconfirmed("pi inbox write outcome is unknown: %v", err)
+		}
 		return piResponse{}, NotReady("write pi inbox: %v", err)
 	}
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 0, 4096), 64*1024)
 	if !sc.Scan() {
 		if err := sc.Err(); err != nil {
+			if uncertain {
+				return piResponse{}, Unconfirmed("pi inbox response outcome is unknown: %v", err)
+			}
 			return piResponse{}, NotReady("read pi inbox: %v", err)
+		}
+		if uncertain {
+			return piResponse{}, Unconfirmed("pi inbox closed without answering")
 		}
 		return piResponse{}, NotReady("pi inbox closed without answering")
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(sc.Bytes(), &fields); err != nil {
+		if uncertain {
+			return piResponse{}, Unconfirmed("pi inbox answered with something that is not JSON")
+		}
+		return piResponse{}, errors.New("pi inbox answered with something that is not JSON")
+	}
+	if _, ok := fields["ok"]; !ok {
+		if uncertain {
+			return piResponse{}, Unconfirmed("pi inbox answered without an ok field")
+		}
+		return piResponse{}, errors.New("pi inbox answered without an ok field")
+	}
 	var resp piResponse
 	if err := json.Unmarshal(sc.Bytes(), &resp); err != nil {
-		return piResponse{}, errors.New("pi inbox answered with something that is not JSON")
+		if uncertain {
+			return piResponse{}, Unconfirmed("pi inbox answered with an invalid response")
+		}
+		return piResponse{}, errors.New("pi inbox answered with an invalid response")
 	}
 	return resp, nil
 }

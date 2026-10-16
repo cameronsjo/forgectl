@@ -38,8 +38,10 @@ type Worker struct {
 	Harness     Harness `json:"harness"`
 	Worktree    string  `json:"worktree"`
 	Coordinator bool    `json:"coordinator,omitempty"`
+	RunID       string  `json:"run_id,omitempty"`
 	// Socket is the claude inbox socket when known directly (the coordinator's
-	// own CLAUDE_CODE_MESSAGING_SOCKET), or the pi extension's socket.
+	// own CLAUDE_CODE_MESSAGING_SOCKET), the pi extension's socket, or a
+	// dedicated Codex app-server socket selected by --remote.
 	Socket string `json:"socket,omitempty"`
 	// ThreadID is the codex thread, learned from its first turn-complete notify.
 	ThreadID string      `json:"thread_id,omitempty"`

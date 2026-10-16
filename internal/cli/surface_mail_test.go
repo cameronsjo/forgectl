@@ -47,6 +47,8 @@ func (f *mailFakeAdapter) State(context.Context, mail.Worker) (mail.WorkerState,
 func useMailLedger(t *testing.T) (*mail.Service, *mailFakeAdapter) {
 	t.Helper()
 	t.Setenv(mail.EnvWorker, "")
+	t.Setenv(mail.EnvCoordinator, "")
+	t.Setenv(mail.EnvRunID, "")
 	dir := t.TempDir()
 	roster := mail.FileRoster{Dir: dir}
 	for _, w := range []mail.Worker{

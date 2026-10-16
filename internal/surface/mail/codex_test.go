@@ -47,8 +47,8 @@ func TestCodexDeliver(t *testing.T) {
 
 	runErr = errors.New("no such thread\x1b[0m\n")
 	_, err = a.Deliver(ctx, Worker{Name: "codex-1", ThreadID: "th_1"}, Message{}, "hi")
-	if !IsRetryable(err) || !strings.Contains(err.Error(), "no such thread") || strings.Contains(err.Error(), "\x1b") {
-		t.Fatalf("runner failure: err = %v", err)
+	if !IsUnconfirmed(err) || !strings.Contains(err.Error(), "no such thread") || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("runner failure: err = %v, want unconfirmed without control characters", err)
 	}
 }
 
@@ -61,8 +61,8 @@ func TestCodexDeliverMasksBodyInFailure(t *testing.T) {
 	}}
 	a := CodexAdapter{Runner: r}
 	_, err := a.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1"}, Message{}, body)
-	if !IsRetryable(err) || !strings.Contains(err.Error(), "thread not loaded") {
-		t.Fatalf("err = %v, want retryable with codex's stderr", err)
+	if !IsUnconfirmed(err) || !strings.Contains(err.Error(), "thread not loaded") {
+		t.Fatalf("err = %v, want unconfirmed with codex's stderr", err)
 	}
 	// The fake records the real argv; the mask applies where the production
 	// runner renders it, which the next assertion drives through OSRunner.
@@ -81,8 +81,50 @@ func TestCodexDeliverTimesOut(t *testing.T) {
 	a := CodexAdapter{Runner: r, Timeout: 50 * time.Millisecond}
 	start := time.Now()
 	_, err := a.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1"}, Message{}, "hi")
-	if !IsRetryable(err) || time.Since(start) > 2*time.Second {
-		t.Fatalf("err = %v after %s, want a retryable timeout", err, time.Since(start))
+	if !IsUnconfirmed(err) || time.Since(start) > 2*time.Second {
+		t.Fatalf("err = %v after %s, want an unconfirmed timeout", err, time.Since(start))
+	}
+}
+
+func TestCodexDeliverUsesValidatedRemoteEndpoint(t *testing.T) {
+	runner := &fexec.FakeRunner{}
+	adapter := CodexAdapter{Runner: runner}
+	_, err := adapter.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1", Socket: "/tmp/codex.sock"}, Message{}, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"queue", "--remote=unix:///tmp/codex.sock", "--thread=th_1", "--message=hi"}
+	if !reflect.DeepEqual(runner.Last().Args, want) {
+		t.Fatalf("args = %q, want %q", runner.Last().Args, want)
+	}
+}
+
+func TestCodexDeliverKeepsRemoteEndpointsIsolated(t *testing.T) {
+	runner := &fexec.FakeRunner{}
+	adapter := CodexAdapter{Runner: runner}
+	endpoints := []string{"/tmp/codex-a.sock", "/tmp/codex-b.sock"}
+	for _, endpoint := range endpoints {
+		if _, err := adapter.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1", Socket: endpoint}, Message{}, "hi"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(runner.Calls) != len(endpoints) {
+		t.Fatalf("runner calls = %d, want %d", len(runner.Calls), len(endpoints))
+	}
+	for index, endpoint := range endpoints {
+		want := "--remote=unix://" + endpoint
+		if got := runner.Calls[index].Args[1]; got != want {
+			t.Errorf("call %d remote = %q, want %q", index, got, want)
+		}
+	}
+}
+
+func TestCodexDeliverRejectsUnsafeRemoteEndpoint(t *testing.T) {
+	adapter := CodexAdapter{Runner: &fexec.FakeRunner{}}
+	for _, socket := range []string{"relative.sock", "/tmp/../codex.sock", "/tmp/codex\n.sock"} {
+		if _, err := adapter.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1", Socket: socket}, Message{}, "hi"); err == nil {
+			t.Errorf("socket %q was accepted", socket)
+		}
 	}
 }
 

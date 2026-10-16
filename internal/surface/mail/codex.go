@@ -3,7 +3,9 @@ package mail
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
@@ -36,6 +38,11 @@ var threadPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 // the worker's first turn-complete notify, so a message sent before that stays
 // queued rather than failing.
 func (a CodexAdapter) Deliver(ctx context.Context, w Worker, m Message, text string) (string, error) {
+	if w.Socket != "" {
+		if err := validateCodexSocketPath(w.Socket); err != nil {
+			return "", err
+		}
+	}
 	if w.ThreadID == "" {
 		return "", NotReady("codex thread for %s is not known yet; forgectl records it from the first turn-complete notify", w.Name)
 	}
@@ -61,10 +68,30 @@ func (a CodexAdapter) Deliver(ctx context.Context, w Worker, m Message, text str
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ctx = fexec.WithMaskedAssignments(ctx, []string{message})
-	if _, err := a.Runner.Run(ctx, bin, "queue", "--thread="+w.ThreadID, message); err != nil {
-		return "", NotReady("codex queue: %s", oneLine([]byte(err.Error()), 300))
+	args := []string{"queue"}
+	if w.Socket != "" {
+		args = append(args, "--remote=unix://"+w.Socket)
+	}
+	args = append(args, "--thread="+w.ThreadID, message)
+	if _, err := a.Runner.Run(ctx, bin, args...); err != nil {
+		return "", Unconfirmed("codex queue outcome is unknown: %s", oneLine([]byte(err.Error()), 300))
 	}
 	return "queued on codex thread " + w.ThreadID, nil
+}
+
+const codexSocketPathMaxLen = 103
+
+func validateCodexSocketPath(socket string) error {
+	if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
+		return fmt.Errorf("codex socket path must be absolute and clean")
+	}
+	if len(socket) > codexSocketPathMaxLen {
+		return fmt.Errorf("codex socket path exceeds %d bytes", codexSocketPathMaxLen)
+	}
+	if strings.ContainsAny(socket, "\x00\n\r\t%?#") {
+		return fmt.Errorf("codex socket path contains a control character or URL delimiter")
+	}
+	return nil
 }
 
 // State is the last state a notify event recorded; Codex has no registry

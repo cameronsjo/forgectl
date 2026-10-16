@@ -10,9 +10,11 @@ import (
 
 // Environment variables forgectl sets when it launches a worker.
 const (
-	EnvLedger = "FORGECTL_LEDGER"
-	EnvWorker = "FORGECTL_WORKER"
-	EnvInbox  = "FORGECTL_INBOX"
+	EnvLedger      = "FORGECTL_LEDGER"
+	EnvWorker      = "FORGECTL_WORKER"
+	EnvInbox       = "FORGECTL_INBOX"
+	EnvCoordinator = "FORGECTL_COORDINATOR"
+	EnvRunID       = "FORGECTL_RUN_ID"
 	// EnvDrainWorker is launch.DrainWorkerEnv, which forgectl sets on every
 	// worker it launches. Repeated here so mail does not import launch; a
 	// cli test pins the two together.
@@ -25,7 +27,7 @@ const (
 var ErrNoSelf = errors.New("cannot tell who is sending")
 
 // ErrNoLedger is returned outside a coordinator session or a launched worker.
-var ErrNoLedger = errors.New("no coordinator ledger here: run this from the coordinator's Claude session or from a worker forgectl launched")
+var ErrNoLedger = errors.New("no mail ledger here: use the environment from surface team register, or run from a legacy Claude coordinator session")
 
 // LedgerDir finds the coordinator ledger this process belongs to. A worker
 // carries FORGECTL_LEDGER from launch. The coordinator is a Claude session
@@ -46,21 +48,41 @@ func LedgerDir(stateDir string, getenv func(string) string) (string, error) {
 	return "", ErrNoLedger
 }
 
-// SelfName is the caller's name in the roster: FORGECTL_WORKER for a worker,
-// else the roster's coordinator entry.
+// SelfName is the caller's explicit worker or coordinator identity, with the
+// roster's coordinator entry as the legacy Claude fallback.
 //
 // Only the coordinator may resolve as the coordinator. A process with
-// FORGECTL_LEDGER or FORGECTL_DRAIN_WORKER but no FORGECTL_WORKER is refused:
-// the coordinator finds its ledger from its inbox socket and carries neither,
-// so only a launched worker has them, and unsetting its name must not make it
-// the hub. A FORGECTL_WORKER that names the coordinator is refused for the
-// same reason.
+// FORGECTL_LEDGER but neither explicit identity is refused. A drain worker
+// cannot become the coordinator by unsetting its worker name. Registered run
+// IDs must match, and FORGECTL_WORKER cannot name the coordinator.
 //
 // These are courtesy refusals, not a boundary: every worker runs as the
 // operator, can edit its own environment and can write the mailbox directly.
 // They stop a worker passing as the hub by accident or by a careless prompt,
 // not one set on it.
 func SelfName(r Roster, getenv func(string) string) (string, error) {
+	if name := getenv(EnvCoordinator); name != "" {
+		if getenv(EnvWorker) != "" || getenv(EnvDrainWorker) != "" {
+			return "", fmt.Errorf("%w: coordinator and worker identities cannot be combined", ErrNoSelf)
+		}
+		if !filepath.IsAbs(getenv(EnvLedger)) {
+			return "", fmt.Errorf("%w: %s requires an absolute %s", ErrNoSelf, EnvCoordinator, EnvLedger)
+		}
+		if err := ValidateName(name); err != nil {
+			return "", err
+		}
+		coordinator, err := r.Get(name)
+		if err != nil {
+			return "", err
+		}
+		if !coordinator.Coordinator {
+			return "", fmt.Errorf("%w: %s is not the registered coordinator", ErrNoSelf, quoteTrunc(name))
+		}
+		if err := checkRunIdentity(coordinator, getenv); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
 	if name := getenv(EnvWorker); name != "" {
 		if err := ValidateName(name); err != nil {
 			return "", fmt.Errorf("%s: %w", EnvWorker, err)
@@ -71,6 +93,11 @@ func SelfName(r Roster, getenv func(string) string) (string, error) {
 		}
 		if err == nil && w.Coordinator {
 			return "", fmt.Errorf("%w: %s names the coordinator; a worker cannot send as it", ErrNoSelf, EnvWorker)
+		}
+		if err == nil {
+			if err := checkRunIdentity(w, getenv); err != nil {
+				return "", err
+			}
 		}
 		return name, nil
 	}
@@ -88,7 +115,14 @@ func SelfName(r Roster, getenv func(string) string) (string, error) {
 			return w.Name, nil
 		}
 	}
-	return "", fmt.Errorf("%w: the roster has no coordinator entry yet; surface launch writes it", ErrNoSelf)
+	return "", fmt.Errorf("%w: the roster has no coordinator entry yet; use surface team register --coordinator", ErrNoSelf)
+}
+
+func checkRunIdentity(member Worker, getenv func(string) string) error {
+	if member.RunID != "" && member.RunID != getenv(EnvRunID) {
+		return fmt.Errorf("%w: stale or missing %s for %s", ErrNoSelf, EnvRunID, quoteTrunc(member.Name))
+	}
+	return nil
 }
 
 // CoordinatorSelf is the roster entry `surface launch` writes for the calling

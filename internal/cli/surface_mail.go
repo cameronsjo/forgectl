@@ -113,9 +113,10 @@ a Claude Code worker through its inbox socket, a Codex worker through
 codex queue, a pi worker through the forgectl extension.
 
 The text is the second argument, @path to read a file, or - for stdin.
-The sender is $FORGECTL_WORKER in a worker forgectl launched, else the
-coordinator. Workers message the coordinator and the coordinator messages
-any worker.
+The sender is $FORGECTL_WORKER for a registered worker, or
+$FORGECTL_COORDINATOR with an explicit $FORGECTL_LEDGER. Legacy Claude
+coordinators derive the ledger from their socket. Workers message the
+coordinator and the coordinator messages any worker.
 
 The recipient sees a header saying the text came from another agent, not
 the operator, so it can never approve anything.
@@ -124,7 +125,7 @@ send first retries anything already queued. A message the recipient's
 harness cannot take yet stays queued and later verbs retry it.
 
 Exit codes: 0 sent, 75 queued (not delivered yet; a later verb retries
-it), 1 failed (a delivery that failed for good, a rate limit, a duplicate),
+it), 1 failed or unconfirmed (acceptance is unknown; never blindly resend),
 2 usage (a bad call, an unknown or malformed name, no ledger here, an
 empty or oversized body), 4 refused (worker-to-worker messages are off).
 A --watch that does not register is a warning on stderr, not a new code.`,
@@ -192,7 +193,7 @@ func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) st
 			return err
 		}
 	} else {
-		verb := map[mail.Status]string{mail.StatusSent: "sent", mail.StatusQueued: "queued", mail.StatusFailed: "failed"}[res.Status]
+		verb := string(res.Status)
 		line := fmt.Sprintf("%s %s to %s", verb, res.ID, to)
 		if res.Detail != "" {
 			line += ": " + res.Detail
@@ -214,6 +215,8 @@ func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) st
 		return WithExitCode(fmt.Errorf("message %s to %s failed", res.ID, safeLabel(to)), classExit(classFailed))
 	case mail.StatusQueued:
 		return newSilentCodedError(mailExitQueued)
+	case mail.StatusUnconfirmed:
+		return newSilentCodedError(classExit(classFailed))
 	}
 	return nil
 }
@@ -254,8 +257,8 @@ func newSurfaceInboxCmd(deps module.Deps) *cobra.Command {
 		Use:   "inbox [name]",
 		Short: "Show messages to and from an agent, and where each one is",
 		Long: `inbox lists the messages in this coordinator's ledger that a name sent
-or received, oldest first, with each one's status: queued, sent, failed or
-expired. The name defaults to the caller; --all lists every message.
+or received, oldest first, with each one's status: queued, sent, unconfirmed,
+failed or expired. The name defaults to the caller; --all lists every message.
 
 It only reads. Run flush, or any send, to retry what is queued.`,
 		Args:         cobra.MaximumNArgs(1),
@@ -373,6 +376,9 @@ one that reached its attempt cap, and expires one older than the TTL,
 sending its sender a notice. There is no daemon: send, event and flush
 are what move the queue.
 
+Unconfirmed delivery is queried for receiver evidence when supported,
+never automatically resent. Sent means transport acceptance, not task completion.
+
 Exit 0 means the flush ran. A message still queued afterwards is counted,
 not an error.`,
 		Args:         cobra.NoArgs,
@@ -387,10 +393,11 @@ not an error.`,
 
 // flushReport is flush's --json shape.
 type flushReport struct {
-	Sent     int `json:"sent"`
-	Requeued int `json:"requeued"`
-	Failed   int `json:"failed"`
-	Expired  int `json:"expired"`
+	Unconfirmed int `json:"unconfirmed"`
+	Sent        int `json:"sent"`
+	Requeued    int `json:"requeued"`
+	Failed      int `json:"failed"`
+	Expired     int `json:"expired"`
 	// Skipped counts mailbox lines that could not be read.
 	Skipped int `json:"skipped"`
 }
@@ -404,11 +411,11 @@ func runSurfaceFlush(cmd *cobra.Command, deps module.Deps, getenv func(string) s
 	if err != nil {
 		return mailError(err)
 	}
-	out := flushReport{Sent: rep.Sent, Requeued: rep.Requeued, Failed: rep.Failed, Expired: rep.Expired, Skipped: rep.Skipped}
+	out := flushReport{Sent: rep.Sent, Requeued: rep.Requeued, Failed: rep.Failed, Expired: rep.Expired, Skipped: rep.Skipped, Unconfirmed: rep.Unconfirmed}
 	if asJSON {
 		return writeJSON(cmd.OutOrStdout(), out)
 	}
-	line := fmt.Sprintf("sent %d, still queued %d, failed %d, expired %d", out.Sent, out.Requeued, out.Failed, out.Expired)
+	line := fmt.Sprintf("sent %d, still queued %d, unconfirmed %d, failed %d, expired %d", out.Sent, out.Requeued, out.Unconfirmed, out.Failed, out.Expired)
 	if out.Skipped > 0 {
 		line += fmt.Sprintf(", %d unreadable mailbox lines skipped", out.Skipped)
 	}
@@ -521,7 +528,7 @@ func runSurfaceEvent(cmd *cobra.Command, deps module.Deps, getenv func(string) s
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	notified, err := sess.svc.ApplyEvent(cmd.Context(), mail.Event{Worker: self, State: st, ThreadID: threadID})
+	notified, err := sess.svc.ApplyEvent(cmd.Context(), mail.Event{Worker: self, State: st, ThreadID: threadID, RunID: getenv(mail.EnvRunID)})
 	if errors.Is(err, mail.ErrNotTurnEvent) {
 		if asJSON {
 			return writeJSON(cmd.OutOrStdout(), eventResult{Ignored: err.Error()})
