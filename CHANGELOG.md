@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.0](https://github.com/cameronsjo/forgectl/compare/v0.47.1...v0.48.0) (2026-10-16)
+
+
+### Features
+
+* attention queue and sweep ledger commands ([#1284](https://github.com/cameronsjo/forgectl/issues/1284)) ([a91f3f9](https://github.com/cameronsjo/forgectl/commit/a91f3f97b3cb423264a22dbff4b7c12527f54d09))
+
 ## [0.47.1](https://github.com/cameronsjo/forgectl/compare/v0.47.0...v0.47.1) (2026-10-16)
 
 
