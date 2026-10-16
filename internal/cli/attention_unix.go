@@ -71,14 +71,11 @@ var (
 )
 
 // attentionAgent reduces a herdr agent row to the queue's view. The session
-// is herdr's agent_session value (the Claude Code session id); the names are
-// the worktree and the basenames of the agent's directories, for the
+// is the Claude Code session id (attentionSession); the names are the
+// worktree and the basenames of the agent's directories, for the
 // worker-prefix match.
 func attentionAgent(a herdr.Agent) attention.Agent {
-	out := attention.Agent{Pane: a.PaneID, Status: a.AgentStatus}
-	if a.AgentSession != nil {
-		out.Session = a.AgentSession.Value
-	}
+	out := attention.Agent{Pane: a.PaneID, Status: a.AgentStatus, Session: attentionSession(a)}
 	var names []string
 	if a.Tokens != nil {
 		names = append(names, a.Tokens.Worktree, baseName(a.Tokens.CWD))
@@ -90,6 +87,28 @@ func attentionAgent(a herdr.Agent) attention.Agent {
 		}
 	}
 	return out
+}
+
+// attentionAgentClaude is herdr's agent label for Claude Code, the only
+// agent whose session tokens the queue reads.
+const attentionAgentClaude = "claude"
+
+// attentionSession picks the session id herdr associates with an agent row.
+// herdr's agent_session wins whenever herdr reports one, even when the
+// pane's `session` token names a different id. Without it, a Claude row
+// falls back to that token: with herdr's own Claude integration
+// uninstalled, the herdr-bridge mod reports the session only there. Both
+// are reports a process of yours sends over the herdr socket, so neither
+// proves anything (docs/commands/attention.md, Which pane a session is in).
+// A token that is not a valid session id is ignored.
+func attentionSession(a herdr.Agent) string {
+	if a.AgentSession != nil && a.AgentSession.Value != "" {
+		return a.AgentSession.Value
+	}
+	if a.Agent == attentionAgentClaude && a.Tokens != nil && attention.ValidSession(a.Tokens.Session) {
+		return a.Tokens.Session
+	}
+	return ""
 }
 
 func baseName(p string) string {

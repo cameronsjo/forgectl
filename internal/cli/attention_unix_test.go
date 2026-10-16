@@ -22,6 +22,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/attention"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
@@ -467,5 +468,67 @@ func TestAttentionPutEvictsOnlyWhenHerdrVouches(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.spool(), "victim.json")); err != nil {
 		t.Errorf("a put herdr does not vouch for evicted another session's record: %v", err)
+	}
+}
+
+// TestAttentionSessionSources pins where an agent row's session comes from:
+// herdr's agent_session when present, else a Claude pane's `session` token.
+func TestAttentionSessionSources(t *testing.T) {
+	const tok = "70c3e550-aaaa-4bbb-8ccc-000000000002"
+	sess := func(v string) *herdr.AgentSession {
+		return &herdr.AgentSession{Agent: "claude", Kind: "id", Source: "herdr:claude", Value: v}
+	}
+	cases := []struct {
+		name  string
+		agent string
+		as    *herdr.AgentSession
+		tok   *herdr.AgentTokens
+		want  string
+	}{
+		{"agent_session only", "claude", sess(attnSession), nil, attnSession},
+		{"token only", "claude", nil, &herdr.AgentTokens{Session: tok}, tok},
+		{"both equal", "claude", sess(attnSession), &herdr.AgentTokens{Session: attnSession}, attnSession},
+		{"both differ: agent_session wins", "claude", sess(attnSession), &herdr.AgentTokens{Session: tok}, attnSession},
+		{"empty agent_session value: token", "claude", sess(""), &herdr.AgentTokens{Session: tok}, tok},
+		{"invalid token ignored", "claude", nil, &herdr.AgentTokens{Session: "-rf /"}, ""},
+		{"token on a non-claude agent ignored", "codex", nil, &herdr.AgentTokens{Session: tok}, ""},
+		{"neither", "claude", nil, &herdr.AgentTokens{Worktree: "wt"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := herdr.Agent{Pane: herdr.Pane{PaneID: "w1:p2", Agent: c.agent, AgentSession: c.as}, Tokens: c.tok}
+			if got := attentionAgent(a).Session; got != c.want {
+				t.Errorf("session = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAttentionListMatchesATokenOnlySession is the live shape: herdr's own
+// Claude integration is off, so the row has no agent_session and the
+// herdr-bridge mod's `session` token is the only place the id appears.
+func TestAttentionListMatchesATokenOnlySession(t *testing.T) {
+	newAttnEnv(t)
+	body, _ := json.Marshal(map[string]any{"id": "cli:agent:list", "result": map[string]any{"agents": []map[string]any{{
+		"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle", "cwd": "/Users/x/Projects/widget",
+		"agent_session": nil, "tokens": map[string]any{"session": attnSession, "cwd": "/Users/x/Projects/widget"},
+	}}}})
+	deps := module.Deps{Runner: &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "herdr" && strings.Join(args, " ") == "agent list" {
+			return string(body), nil
+		}
+		return "", fmt.Errorf("unexpected %s %v", name, args)
+	}}}
+	if _, errOut, err := attnRun(t, deps, attnReply, "put", "--session", attnSession, "--turn", "t1", "--pane", "w1:p2", "--socket", attnSocket); err != nil {
+		t.Fatalf("put: %v\n%s", err, errOut)
+	}
+	rows := attnList(t, deps).Rows
+	if len(rows) == 0 {
+		t.Fatal("list has no rows")
+	}
+	for _, r := range rows {
+		if r.Pane != "w1:p2" || r.Origin != attention.OriginOwn || r.Session != attnSession {
+			t.Errorf("row = %+v, want pane w1:p2, origin own", r)
+		}
 	}
 }
