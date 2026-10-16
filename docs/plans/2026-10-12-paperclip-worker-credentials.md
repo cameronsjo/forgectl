@@ -13,6 +13,8 @@ machine: cf6e768835c7
 
 # Paperclip worker credentials: let pane workers report status
 
+> **Code removed 2026-10-15** with the rest of `integrations/paperclip/`; see `2026-10-12-paperclip-components.md`.
+
 ## Goal
 
 A Paperclip agent running as a forgectl herdr worker sets its own issue to `in_review` at the end of a turn, with a one-line comment. Today it cannot: forgectl's worker environment allowlist (`internal/launch/invocation.go` `workerEnvKeys`) drops every Paperclip variable. Paperclip then answers each finished turn with an `issue_disposition_repair` wake (P0 baseline: runs `b5711052` and `3aee211f`, both `automation`, after codex turn `1f05abb6`), and a repair that fails parks the issue as `blocked`.

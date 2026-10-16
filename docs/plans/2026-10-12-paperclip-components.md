@@ -1,13 +1,15 @@
 ---
-status: in-flight
-next: "P1 is done (forgectl#1244). Next: P2-P5 per forgectl#1245."
+status: done
+next: "Dropped 2026-10-15 after P1: not worth the upkeep. integrations/paperclip removed; see forgectl#1245."
 branch: feat/paperclip-p1-close
 date: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-15
 source_plan: "Paperclip analysis artifact (claude.ai, 2026-10-12); this session's step 1-3 brief"
 ---
 
 # Paperclip components: what to run, extend, borrow, or skip
+
+> **Dropped 2026-10-15.** P1 shipped (#1258) and worked end to end, but running Paperclip cost a launchd service with its own Postgres, a herdr session to restart by hand, and a second Claude login. The operator dropped it; P2-P5 will not be built and `integrations/paperclip/` is removed. The forgectl gaps found here (#1237-#1241) stand on their own. Read the rest as history.
 
 ## Goal
 
