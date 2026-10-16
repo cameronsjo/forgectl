@@ -48,6 +48,8 @@ Pi receipts retain message ID and exact rendered-text digest. The rendered envel
 
 No background broker is installed. Sends and native boundary events trigger flushing, and an operator or an existing supervisor may invoke `flush`. An entirely stopped team needs an explicit restart and flush. Unresolvable uncertainty must not be converted into a fresh message merely to obtain a green status: inspect native evidence first.
 
+A network-disabled Codex sandbox can write its authorized mailbox while refusing the receiver's Unix-socket connection. The message then stays `queued`; this is not native acceptance. The live verifier acts as a task-scoped delivery supervisor by flushing the private team's queue while waiting for replies. It never writes message bodies on an agent's behalf or expands the agent's network permissions. This supervised transport, rather than direct socket access from the sandboxed shell, is part of that acceptance topology.
+
 ## Source-build verification
 
 Run the focused checks from the forgectl repository:
@@ -63,6 +65,6 @@ The behavioral extension test uses the actual embedded TypeScript source with a 
 
 The opt-in live verifier requires a fresh private scratch directory, explicit isolated binary paths, a locally installed `ws` module entrypoint through `--websocket-module`, and the installed Pi authentication and safety extensions through repeatable `--pi-extension` arguments. The WebSocket library handles Codex's native Unix transport without a TCP bridge or a new global installation. Prefer the native Codex executable rather than a wrapper so the verifier owns the server process it stops.
 
-Supply `--pi-provider NAME --pi-model ID` together to select an existing authenticated model explicitly. The verifier checks the native selected model and fails on a model error rather than treating a settled failed turn as readiness. It initializes Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. It checks that Codex did not persist the scratch path in global configuration.
+Supply the required `--codex-model ID` and the paired `--pi-provider NAME --pi-model ID` to select existing authenticated models explicitly. The verifier checks the native selected models and fails on a model error rather than treating a settled failed turn as readiness. It initializes Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. It checks that Codex did not persist the scratch path in global configuration.
 
 The verifier starts only task-owned processes, records native session/model identities, and leaves private evidence on failure. Its acceptance gate requires a real delegation, clarification and answer without human relay, a worker-created executable artifact, an independent positive check and corrupt-input negative control, and interruption/replacement probes. Merely running its syntax or help check does not satisfy that gate.

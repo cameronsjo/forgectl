@@ -15,7 +15,7 @@ const sensitive = /(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|COOKIE|AUTH)/i;
 let activeEvidence;
 let activeCleanup = async () => {};
 
-const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS [--codex ABS] [--pi ABS] [--pi-provider NAME --pi-model ID] [--pi-extension ABS ...]
+const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS --codex-model ID [--codex ABS] [--pi ABS] [--pi-provider NAME --pi-model ID] [--pi-extension ABS ...]
 
 Runs the opt-in disposable Codex/Pi collaboration acceptance loop. The root
 must be an existing empty 0700 directory. The script never copies auth files
@@ -26,7 +26,7 @@ function fail(message) {
   throw new Error(message);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const out = { live: false, codex: "/opt/homebrew/bin/codex", pi: "/opt/homebrew/bin/pi", websocketModule: "", piExtensions: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -36,7 +36,7 @@ function parseArgs(argv) {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out.piExtensions.push(value);
-    } else if (["--forgectl", "--root", "--codex", "--pi", "--websocket-module", "--pi-provider", "--pi-model"].includes(arg)) {
+    } else if (["--forgectl", "--root", "--codex", "--codex-model", "--pi", "--websocket-module", "--pi-provider", "--pi-model"].includes(arg)) {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out[arg === "--websocket-module" ? "websocketModule" : arg.slice(2)] = value;
@@ -47,6 +47,7 @@ function parseArgs(argv) {
     if (!out[name] || !out[name].startsWith("/")) fail(`--${name} must be an absolute path`);
   }
   if (out.piExtensions.some((path) => !path.startsWith("/"))) fail("--pi-extension must be an absolute path");
+  if (!out["codex-model"]) fail("--codex-model is required to avoid mutable global model defaults");
   if (Boolean(out["pi-provider"]) !== Boolean(out["pi-model"])) fail("--pi-provider and --pi-model must be supplied together");
   return out;
 }
@@ -334,7 +335,7 @@ class CodexClient {
     const turnId = result?.turn?.id ?? result?.id;
     const completion = await this.waitFor((event) => event.method === "turn/completed" && (!turnId || event.params?.turn?.id === turnId), DEFAULT_TIMEOUT);
     const status = completion.params?.turn?.status;
-    if (status !== "completed") fail(`Codex turn ${turnId ?? "unknown"} ended with status ${status ?? "missing"}`);
+    if (status !== "completed") fail(`Codex turn ${turnId ?? "unknown"} ended with status ${status ?? "missing"}: ${bounded(completion.params?.turn?.error?.message ?? "no native error detail")}`);
     return { turnId, result, completion };
   }
   stop(signal = "SIGTERM") {
@@ -369,9 +370,12 @@ async function flushMailbox(evidence, forgectl, env, cwd) {
 }
 
 async function waitMailbox(evidence, forgectl, ledger, env, cwd, predicate, timeout = DEFAULT_TIMEOUT) {
+  if (env.FORGECTL_LEDGER !== ledger) fail("supervisor ledger does not match the enrolled team");
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (evidence.nativeFailure) fail(evidence.nativeFailure);
+    const delivery = await flushMailbox(evidence, forgectl, env, cwd);
+    evidence.add("supervisor-flush", { ledger, delivery });
     const report = await mailbox(evidence, forgectl, ledger, env, cwd);
     const found = (report.messages ?? []).find(predicate);
     if (found) return found;
@@ -455,6 +459,12 @@ async function createFixture(root) {
 async function readReceiptRecords(path) {
   const contents = await readFile(path, "utf8").catch(() => "");
   return contents.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+export function assertRoundtripOrder(messageOrder, roundtripIds) {
+  const positions = roundtripIds.map((id) => messageOrder.indexOf(id));
+  if (positions.some((position, index) => position < 0 || (index > 0 && position <= positions[index - 1]))) fail("delegation, clarification, answer, and completion did not occur in causal mailbox order");
+  return positions;
 }
 
 function contentText(content) {
@@ -596,11 +606,12 @@ async function main() {
   const init = await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier", version: "1" }, capabilities: { experimentalApi: false } });
   evidence.add("codex-initialized", { protocol: init?.protocolVersion ?? init?.serverInfo?.version });
   codexRpc.notify("initialized", {});
-  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
+  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
   const threadId = thread?.thread?.id ?? thread?.id;
   if (!threadId) fail("Codex thread/start returned no thread id");
+  if (thread.model !== args["codex-model"]) fail("Codex silently selected a different model");
   await assertNoScratchTrust(evidence, root);
-  evidence.add("codex-thread", { threadId, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
+  evidence.add("codex-thread", { threadId, model: thread.model, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
   const rebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", codexSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (rebound.member.run_id !== coordinator.member.run_id || rebound.member.thread_id !== threadId) fail("coordinator replacement changed the process incarnation or thread unexpectedly");
   const fixture = await createFixture(root);
@@ -608,7 +619,7 @@ async function main() {
   const taskId = `cross-harness-${randomUUID()}`;
   const delegation = `You are the coordinator of an explicitly enrolled forgectl team. Delegate task ${taskId} to pi-worker by running exactly the available native command forgectl surface send pi-worker '<task text>'; your shell inherits FORGECTL_LEDGER=${ledger}, FORGECTL_COORDINATOR=coordinator, and FORGECTL_RUN_ID for this registered process. Do not create the worker artifact yourself. Tell Pi to ask one meaningful clarification before any artifact work, and require the clarification body to contain exactly CLARIFICATION ${taskId}. Then stop this turn and wait. The next coordinator turn will be started by the worker's queued reply; answer that clarification directly through forgectl surface send pi-worker with a body containing exactly ANSWER ${taskId}, preserving task ID ${taskId}. The worker must create ${utility} with Node builtins only, read fixture ${fixture} in forgectl mailbox JSONL shape, fold final statuses including unconfirmed, reject duplicate message-record IDs (duplicate op:msg IDs, not status records), append exactly one task execution record to ${join(piRoot, "worker-executions.jsonl")} shaped {"taskId":"${taskId}","executionId":"<unique>"}, and reply with a body containing exactly COMPLETED ${taskId}, its artifact path, and execution ID. The standalone utility stdout must be exactly one JSON object shaped {"counts":{"sent":1,"queued":1,"failed":1,"unconfirmed":1},"ids":["fixture-1","fixture-2","fixture-3","fixture-4"]} with no extra output. A successful delegation is transport acceptance, not proof of a completed turn; do not claim completion until the worker reply is visible in the inbox.`;
   const exactBinaryDelegation = delegation.replaceAll("forgectl surface", `${forgectlCommand} surface`);
-  await codexRpc.turn(threadId, `${exactBinaryDelegation} Use that exact absolute executable; a shell alias or login profile may select an older installed copy.`, coordinatorRoot, root);
+  await codexRpc.turn(threadId, `${exactBinaryDelegation} Use that exact absolute executable; a shell alias or login profile may select an older installed copy. Your network-disabled sandbox may enqueue the message with exit 75 because it cannot connect to the local receiver socket. The task supervisor automatically flushes this private team mailbox after your turn. If queued, do not resend or expand permissions; end the turn and wait for the native reply.`, coordinatorRoot, root);
   await assertNoScratchTrust(evidence, root);
   const delegated = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "coordinator" && message.to === "pi-worker" && message.body.includes(taskId) && ["sent", "unconfirmed"].includes(message.status), 60_000);
   const droppedId = proxy.droppedId();
@@ -631,7 +642,11 @@ async function main() {
   evidence.add("clarification-received", { id: clarification.id });
   const answer = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "coordinator" && message.to === "pi-worker" && message.status === "sent" && message.body.includes(`ANSWER ${taskId}`) && message.body !== delegated.body, 180_000);
   evidence.add("clarification-answered", { clarificationId: clarification.id, answerId: answer.id, mechanism: "codex-queue-started-native-next-turn" });
-  await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(`COMPLETED ${taskId}`), 240_000);
+  const completed = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(`COMPLETED ${taskId}`), 240_000);
+  const messageOrder = (await readReceiptRecords(join(ledger, "mailbox.jsonl"))).filter((record) => record.op === "msg").map((record) => record.msg.id);
+  const roundtripIds = [delegated.id, clarification.id, answer.id, completed.id];
+  const roundtripPositions = assertRoundtripOrder(messageOrder, roundtripIds);
+  evidence.add("task-roundtrip-order", { ids: roundtripIds, positions: roundtripPositions });
   const executionLog = join(piRoot, "worker-executions.jsonl");
   const executionRecords = (await readFile(executionLog, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
   const executions = executionRecords.filter((record) => record.taskId === taskId);
@@ -694,14 +709,15 @@ async function main() {
   await codexRpc.connect(replacementSocket);
   await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier-replacement", version: "1" }, capabilities: { experimentalApi: false } });
   codexRpc.notify("initialized", {});
-  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
+  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: true, threadSource: "startup" });
   const replacementThreadId = replacementThread?.thread?.id ?? replacementThread?.id;
   if (!replacementThreadId) fail("replacement Codex thread/start returned no thread id");
+  if (replacementThread.model !== args["codex-model"]) fail("replacement Codex silently selected a different model");
   const replacementRebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--thread", replacementThreadId, "--run-id", replacement.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (replacementRebound.member.run_id !== replacement.member.run_id || replacementRebound.member.thread_id !== replacementThreadId) fail("replacement coordinator did not bind its new thread and run");
   evidence.add("coordinator-replacement", { oldRunId: coordinator.member.run_id, runId: replacement.member.run_id, oldThreadId: threadId, threadId: replacementThreadId, socket: replacementSocket });
   const replacementToken = `replacement-${randomUUID()}`;
-  await codexRpc.turn(replacementThreadId, `You are the replacement coordinator. Read the current ledger and delegate the independent recovery check ${replacementToken} to pi-worker with ${forgectlCommand} surface send. Use that exact absolute executable, not a shell alias or an installed copy. Tell Pi to reply with exactly that token and do not modify files. This turn proves the newly registered coordinator thread, not the retired one, can deliver work.`, coordinatorRoot, root);
+  await codexRpc.turn(replacementThreadId, `You are the replacement coordinator. Read the current ledger and delegate the independent recovery check ${replacementToken} to pi-worker with ${forgectlCommand} surface send. Use that exact absolute executable, not a shell alias or an installed copy. Tell Pi to reply with exactly that token and do not modify files. This turn proves the newly registered coordinator thread, not the retired one, can deliver work. Your network-disabled sandbox may return queued with exit 75; the task supervisor automatically flushes this private mailbox after your turn, so do not resend or expand permissions.`, coordinatorRoot, root);
   const replacementEnv = childEnv(baseEnv, replacement.environment, forgectl);
   coordinatorEnv = replacementEnv;
   const replacementReply = await waitMailbox(evidence, forgectl, ledger, replacementEnv, coordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(replacementToken), 180_000);
@@ -719,10 +735,13 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);
 }
 
-main().catch(async (error) => {
-  if (activeEvidence) activeEvidence.add("failure", { error: bounded(error.stack ?? error) });
-  await activeCleanup().catch(() => undefined);
-  if (activeEvidence) await activeEvidence.save().catch(() => undefined);
-  process.stderr.write(`cross-harness acceptance failed: ${error.stack ?? error}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(async (error) => {
+    if (activeEvidence) activeEvidence.add("failure", { error: bounded(error.stack ?? error) });
+    await activeCleanup().catch((cleanupError) => activeEvidence?.add("cleanup-failure", { error: bounded(String(cleanupError)) }));
+    if (activeEvidence) await assertNoScratchTrust(activeEvidence, activeEvidence.root).catch((configError) => activeEvidence.add("configuration-check-failure", { error: bounded(String(configError)) }));
+    if (activeEvidence) await activeEvidence.save().catch(() => undefined);
+    process.stderr.write(`cross-harness acceptance failed: ${error.stack ?? error}\n`);
+    process.exitCode = 1;
+  });
+}
