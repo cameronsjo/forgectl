@@ -87,7 +87,9 @@ func TestRenderReplyBinaryIsShellQuoted(t *testing.T) {
 	if strings.Contains(out, "Reply with: /tmp") {
 		t.Fatalf("reply path was not quoted: %q", out)
 	}
-	output, err := exec.CommandContext(t.Context(), "sh", "-c", "printf '%s' "+shellQuote(path)).Output()
+	command := exec.CommandContext(t.Context(), "sh")
+	command.Stdin = strings.NewReader("printf '%s' " + shellQuote(path))
+	output, err := command.Output()
 	if err != nil || string(output) != path {
 		t.Fatalf("shell received %q, want %q: %v", output, path, err)
 	}
