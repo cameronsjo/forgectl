@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
-Status: first milestone accepted; later harnesses and Projects remain staged
-Next action: apply the proven delivery contract to the next harness without treating a same-harness coordinator replacement as harness-neutral acceptance.
+Status: Codex/Pi collaboration and native Codex-to-Pi coordinator handoff accepted; Claude, Hermes, and Projects remain staged
+Next action: resolve the Hermes native-auth setup choice while preserving Cameron's OpenAI-only traffic constraint; do not skip the remaining harness acceptance gates to build Projects.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
@@ -43,23 +43,49 @@ After the two-harness loop passes, evaluate Agent Board's incremental value, the
 
 The accepted loop does not need Agent Board in its delivery path: forgectl supplies the durable mailbox and each native harness supplies conversation delivery. Keep Agent Board available for discovery, cross-session announcements, or human-facing audit; do not rewrite or remove it on the strength of this experiment. This proves that the configured Board integrations are not a prerequisite for automatic task replies, not that every Board capability is redundant.
 
-Remaining acceptance gates are a different-harness coordinator swap, Claude and Hermes participation under Cameron's provider and native-permission constraints, herdr launch wiring, and a persistent Projects/thread interface. The first run replaces Codex with a new Codex process and thread; it does not prove any of those later gates.
+The different-harness coordinator swap is now accepted in the second live receipt below. Remaining acceptance gates are Claude and Hermes participation under Cameron's provider and native-permission constraints, herdr launch wiring, and a persistent Projects/thread interface. Neither accepted run proves those later gates.
 
-### Next bounded unit: replace Codex with Pi
+### Accepted bounded unit: replace Codex with Pi
 
 The next unit uses the already approved selectable-coordinator contract without adding a new transport or provider. Registration already supports a Pi coordinator, but the embedded inbox currently requires `FORGECTL_WORKER` and therefore remains inert for the emitted coordinator environment. Codex will correct that role mismatch and prove a native cross-harness handoff before adding Hermes.
 
 - [x] Activate the Pi inbox for exactly one explicit worker or coordinator identity; reject mixed coordinator/worker identities, and require the explicit ledger/run fields for a coordinator. Preserve the existing worker path and all receipt, socket, and permission controls.
 - [x] Add behavioral role controls against the embedded extension, including missing and conflicting identities.
 - [x] Extend the live verifier after its existing Codex replacement: retire that coordinator, register the same role with a fresh run and Pi session, and have Pi read the existing task ledger, delegate a bounded recovery check, receive its worker's native reply, and settle successfully. No native private-history conversion is implied.
-- [ ] Verify that the retired Codex run can no longer send or report events, that the Pi coordinator's reply is consumed in its own native session, and that cleanup includes every newly owned process.
-- [ ] Commit and push the verified unit; keep installed tools and services unchanged. Keep all model traffic on OpenAI.
+- [x] Verify that the retired Codex run can no longer send or report events, that the Pi coordinator's reply is consumed in its own native session, and that cleanup includes every newly owned process.
+- [x] Commit and push the verified unit; keep installed tools and services unchanged. Keep all model traffic on OpenAI.
 
-The implementation's independent mail-package tests and embedded-extension behavioral checks pass. The role-denial tests synchronize with completed child initialization and assert no registered callbacks before checking absent endpoints, so slow startup cannot impersonate a denial. The parent's first behavioral run timed out on an existing ownership-socket readiness check under heavy host load; an unchanged rerun passed. Registration-envelope negative controls and verifier syntax also pass. The new cross-harness live gate remains pending until its own run writes `ACCEPTED`.
+The implementation's independent mail-package tests and embedded-extension behavioral checks pass. The role-denial tests synchronize with completed child initialization and assert no registered callbacks before checking absent endpoints, so slow startup cannot impersonate a denial. The parent's first behavioral run timed out on an existing ownership-socket readiness check under heavy host load; an unchanged rerun passed. Registration-envelope negative controls and verifier syntax also pass. The cross-harness live gate passed on 2026-10-17, followed by an independent receipt audit and fresh artifact checks after cleanup.
 
 The first extended live run correctly failed before the handoff: the worker hardcoded the positive fixture path, so the independent duplicate-input check exited zero. The delegation had not explicitly specified the input-path argument. Codex made the CLI contract explicit rather than changing the generated worker artifact or weakening the check; the negative check now also requires a duplicate-specific diagnostic, not an arbitrary failure or signal. Cleanup requested termination of both owned processes; Pi exited immediately and Codex exited zero after 46 seconds, beyond the old 30-second wait. The bounded exit wait now matches the two-minute startup allowance. This failed run never wrote `ACCEPTED`.
 
 A retry launched inside the terminal tool sandbox failed to bind its private Unix socket with `EPERM`, before collaboration began. The verifier now awaits actual proxy listening before reporting startup or spawning native children, and a negative test requires a bind error to reject normally without a startup receipt. The live loop needs an approved host-level process; the nested Codex task sandbox remains restricted as described above.
+
+The next approved host-level attempt received an OpenAI usage-limit error during Pi setup at 2026-10-17 01:01 UTC, before delegation. It stopped its owned Pi process and left the global configuration hash unchanged. Cameron resumed the task with “Continue”; the fresh 13:25 UTC run completed successfully without changing provider or model.
+
+### Remaining provider and authentication gates
+
+Cameron requested that model traffic stay on OpenAI. Codex has not enabled Anthropic or OpenRouter traffic, installed a translation gateway, or changed global authentication. No verified OpenAI-only native Claude route is available from this investigation; Claude live acceptance remains deferred under that constraint, not declared impossible.
+
+On the 2026-10-17 continuation, read-only checks still found no `hermes` executable, no `~/.hermes/auth.json`, and no `OPENAI_API_KEY` in the process environment. The inspected Hermes source supports a native import of existing Codex credentials into Hermes's own auth store, but that import is a new credential copy. Codex asked whether Cameron permits a disposable Hermes environment and this native credential import; no answer has been received. Do not perform the import, mutate the third-party Hermes checkout, or route through a production relay without the corresponding authorization. A native configured OpenAI credential path is required before Hermes live acceptance.
+
+Projects remains behind the agreed harness acceptance sequence. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items are deferred here, not silently dropped or marked complete.
+
+## Accepted cross-harness handoff receipt
+
+On 2026-10-17 at 08:32 America/Chicago (13:32 UTC), `node scripts/verify-cross-harness-loop.mjs --live ...` exited `0` and wrote `ACCEPTED` in `/private/tmp/fctl-live.KPUAyy`. This run repeats the entire original task and interruption sequence, then replaces the coordinator with a different native harness. Raw native events remain private.
+
+- Product build: clean commit `83cc69016e7a5e9f356f3abd69d37fac8570fdd6`, executable SHA-256 `8e039772931a6ec2e5015118f7f8d7fdb565f53c8a7104aea90efed85dc386f0`. Compiled product source is unchanged at verifier commit `fea2e3495f54466ad2c56ce81fc7d09ca448d3c5`; verifier SHA-256 is `5bb72eeabc06b10e14a0e1925d5458c34be344b2311b947163396521b673c1dd`.
+- Native runtimes: Codex `0.153.4` with `gpt-6-astra`; Pi `0.84.4` with direct `openai-codex/gpt-5.6-sol` and the four existing authentication/safety extensions. No other model provider was used.
+- Task `cross-harness-ede02dd0-1096-4f73-bed2-309bde38c69e` completed in delegation/clarification/answer/completion order `0,1,2,3`. The utility passed its positive check with exit `0` and rejected the separate duplicate-input fixture with exit `1` and a duplicate-specific diagnostic. Codex independently reran both checks after cleanup. The execution journal contains one record for the task.
+- Lost acknowledgement reconciliation observed one proxy delivery, one native user message, and one pending/accepted receipt pair. Busy delivery reconciled to `sent`; stopped delivery returned `queued`/exit `75`; restarting Pi reopened its original native session and consumed the queued message. These are observations, not a distributed exactly-once guarantee.
+- Original Codex thread `01a14a0b-d94e-7933-9eeb-8f86906fa8e1` was replaced by thread `01a14a0e-75ea-7751-8ab2-7f2de58facd4`, which consumed its own worker reply and completed the native turn. That replacement was then retired before Pi assumed the coordinator role.
+- Fresh Pi coordinator session `a634edc2-31de-4707-8613-cdb725641d0c` recovered the earlier completed task ID from the durable inbox; its initial prompt did not contain that task ID. It delegated a recovery check, received exactly one matching native reply, completed an acknowledgement containing the recovery marker, and settled. The original artifact and execution journal remained unchanged. Retired Codex sends and events failed specifically for stale `FORGECTL_RUN_ID` (send exit `2`, event exit `1`).
+- The actual Codex sandbox allowed a scratch write and denied an adjacent write. Four configuration checks recorded the same global-config hash and no persisted scratch trust. All five owned native processes exited: two Codex servers with `0`, three Pi processes with `143` after requested termination. No failure or cleanup-failure receipts were present.
+- The independent audit checked all 20 required milestones, native reply ordering, fresh-session task discovery, one execution record, and five owned-process exits. Removing the cross-harness roundtrip receipt made that audit fail. Its initial stale-send assertion incorrectly expected exit `1`; inspection confirmed the CLI's stale-send exit `2` with the required diagnostic, and the corrected full audit passed.
+- Receipt hashes: `events.jsonl` SHA-256 `fe8dc2d62b31fa51b11eff635ae99229e08ce3bdbdc54c4e667fb90daad6aa7a`; `ACCEPTED` SHA-256 `748c9c80e6a0e2d78c69eb309bfec94c119b7f4707028088bccc996b73e1f553`; worker utility SHA-256 `c66de1076a35ac2ef15dbc8ebb2867b4a7fddbaf6938115470ad46e6ef4b3c9a`.
+
+Codex pushed the tested feature branch and independently verified remote head `fea2e3495f54466ad2c56ce81fc7d09ca448d3c5` before this receipt-only documentation update. No PR, merge, production installation, or deployment was performed.
 
 ## Accepted live receipt
 

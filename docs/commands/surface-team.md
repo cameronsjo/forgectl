@@ -83,7 +83,7 @@ node scripts/verify-cross-harness-loop.mjs --live \
   --pi-extension "$PI_PLAN_EXTENSION"
 ```
 
-All path variables must be absolute. Include every authentication and safety extension required by the local Pi setup; these arguments are not permission to disable existing protections. Successful completion writes `ACCEPTED` only after owned-process cleanup and the final configuration check. The [first accepted run](../plans/2026-10-16-cross-harness-collaboration-loop.md#accepted-live-receipt) records the exact tested build and its limitations.
+All path variables must be absolute. Include every authentication and safety extension required by the local Pi setup; these arguments are not permission to disable existing protections. Successful completion writes `ACCEPTED` only after owned-process cleanup and the final configuration check. The [first accepted run](../plans/2026-10-16-cross-harness-collaboration-loop.md#accepted-live-receipt) and [accepted Codex-to-Pi coordinator handoff](../plans/2026-10-16-cross-harness-collaboration-loop.md#accepted-cross-harness-handoff-receipt) record their exact tested builds and limitations.
 
 Supply the required `--codex-model ID` and the paired `--pi-provider NAME --pi-model ID` to select existing authenticated models explicitly. The verifier checks the native selected models and fails on a model error rather than treating a settled failed turn as readiness. It initializes persistent Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. Their native session records remain in Codex's normal history. It checks that Codex did not persist the scratch path in global configuration.
 
