@@ -497,7 +497,9 @@ function contentText(content) {
 }
 
 async function recordBinary(evidence, label, executablePath, env, cwd) {
-  const versionResult = await runCommand(evidence, executablePath, ["--version"], { cwd, env });
+  const metadataArgs = label === "pi" ? ["--no-extensions", "--version"] : ["--version"];
+  const metadataEnv = label === "pi" ? { ...env, PI_OFFLINE: "1" } : env;
+  const versionResult = await runCommand(evidence, executablePath, metadataArgs, { cwd, env: metadataEnv, timeout: STARTUP_TIMEOUT });
   if (versionResult.code !== 0) fail(`${label} --version failed: ${bounded(versionResult.stderr)}`);
   const digest = createHash("sha256").update(await readFile(executablePath)).digest("hex");
   evidence.add("binary", { label, path: executablePath, sha256: digest, version: bounded(versionResult.stdout) });
@@ -519,7 +521,7 @@ async function recordFile(evidence, label, filePath) {
 }
 
 async function verifyPiFlags(evidence, pi, env, cwd) {
-  const help = await runCommand(evidence, pi, ["--no-extensions", "--help"], { cwd, env: { ...env, PI_OFFLINE: "1" } });
+  const help = await runCommand(evidence, pi, ["--no-extensions", "--help"], { cwd, env: { ...env, PI_OFFLINE: "1" }, timeout: STARTUP_TIMEOUT });
   if (help.code !== 0) fail(`pi --help failed: ${bounded(help.stderr)}`);
   const requiredFlags = ["--mode", "--no-extensions", "--extension", "--session", "--session-dir", "--session-id", "--tools"];
   const missingFlags = requiredFlags.filter((flag) => !help.stdout.includes(flag));
