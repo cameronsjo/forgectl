@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { assertRoundtripOrder, parseArgs } from "./verify-cross-harness-loop.mjs";
+import { assertRoundtripOrder, parseArgs, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
 assert.throws(() => parseArgs(flags), /--codex-model is required/);
@@ -20,5 +20,6 @@ assert.throws(() => assertRoundtripOrder(["delegate", "answer", "clarify", "comp
 assert.throws(() => assertRoundtripOrder(["delegate", "clarify", "complete", "answer"], messages), /causal mailbox order/);
 assert.throws(() => assertRoundtripOrder(messages.slice(0, 3), messages), /causal mailbox order/);
 assert.throws(() => assertRoundtripOrder(messages, ["delegate", "clarify", "answer", "answer"]), /causal mailbox order/);
+assert.deepEqual(workspaceSandbox("/test/root"), { type: "workspaceWrite", networkAccess: false, writableRoots: ["/test/root"], excludeTmpdirEnvVar: true, excludeSlashTmp: true });
 
 process.stdout.write("cross-harness verifier contract tests passed\n");

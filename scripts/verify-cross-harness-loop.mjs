@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 
 const MAX_LOG = 24_000;
 const DEFAULT_TIMEOUT = 180_000;
+const STARTUP_TIMEOUT = 120_000;
 const sensitive = /(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|COOKIE|AUTH)/i;
 let activeEvidence;
 let activeCleanup = async () => {};
@@ -71,7 +72,7 @@ function lastJson(text) {
 
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
-function waitClosed(processHandle, timeout = 15_000) {
+function waitClosed(processHandle, timeout = 30_000) {
   if (processHandle.exitCode !== null || processHandle.signalCode !== null) return Promise.resolve();
   return new Promise((resolvePromise, reject) => {
     const timer = setTimeout(() => reject(new Error(`owned process ${processHandle.pid ?? "unknown"} did not exit within ${timeout}ms`)), timeout);
@@ -329,7 +330,7 @@ class CodexClient {
       threadId,
       cwd,
       approvalPolicy: "never",
-      sandboxPolicy: { type: "workspaceWrite", networkAccess: false, writableRoots: [writableRoot] },
+      sandboxPolicy: workspaceSandbox(writableRoot),
       input: [{ type: "text", text: message }],
     }, DEFAULT_TIMEOUT);
     const turnId = result?.turn?.id ?? result?.id;
@@ -338,9 +339,31 @@ class CodexClient {
     if (status !== "completed") fail(`Codex turn ${turnId ?? "unknown"} ended with status ${status ?? "missing"}: ${bounded(completion.params?.turn?.error?.message ?? "no native error detail")}`);
     return { turnId, result, completion };
   }
+  async waitForThreadIdle(threadId) {
+    const started = this.lines.filter((event) => event.method === "turn/started" && event.params?.threadId === threadId).at(-1);
+    const turnId = started?.params?.turn?.id;
+    if (!turnId) fail("cannot establish the coordinator's latest native turn");
+    const completed = await this.waitFor((event) => event.method === "turn/completed" && event.params?.threadId === threadId && event.params?.turn?.id === turnId);
+    if (completed.params.turn.status !== "completed") fail(`coordinator turn ${turnId} did not complete before replacement`);
+    this.evidence.add("coordinator-idle", { threadId, turnId });
+  }
   stop(signal = "SIGTERM") {
     if (this.socket) this.socket.terminate();
     if (!this.closed) this.child.kill(signal);
+  }
+}
+
+export function workspaceSandbox(writableRoot) {
+  return { type: "workspaceWrite", networkAccess: false, writableRoots: [writableRoot], excludeTmpdirEnvVar: true, excludeSlashTmp: true };
+}
+
+async function pathExists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
   }
 }
 
@@ -582,7 +605,7 @@ async function main() {
   let piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX: piSocket, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
   piChild = spawn(pi, piArgs, { cwd: piRoot, env: piEnv, stdio: ["pipe", "pipe", "pipe"] });
   piRpc = new JsonLinesProcess(piChild, evidence, "pi-rpc");
-  const initialPiState = await piRpc.request({ type: "get_state" }, 30_000);
+  const initialPiState = await piRpc.request({ type: "get_state" }, STARTUP_TIMEOUT);
   const initialPiModel = initialPiState?.data?.model;
   const piSessionFile = initialPiState?.data?.sessionFile;
   if (!initialPiState?.data || !initialPiModel || typeof initialPiModel.provider !== "string" || typeof initialPiModel.id !== "string" || !Array.isArray(initialPiModel.input) || !Number.isInteger(initialPiModel.contextWindow) || !Number.isInteger(initialPiModel.maxTokens) || initialPiState.data.sessionId !== piSessionId || typeof piSessionFile !== "string" || !piSessionFile.startsWith(piSessions)) fail("Pi native get_state did not prove the requested session, session file, and model capabilities");
@@ -594,7 +617,7 @@ async function main() {
   codexChild = spawn(codex, codexServerArgs(codexSocket), { cwd: coordinatorRoot, env: codexEnv, stdio: ["ignore", "ignore", "pipe"] });
   codexRpc = new CodexClient(codexChild, evidence, WebSocket);
   const socketReady = async (path) => {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + STARTUP_TIMEOUT;
     while (Date.now() < deadline) {
       try { const socket = createConnection(path); await new Promise((resolvePromise, reject) => { socket.once("connect", resolvePromise); socket.once("error", reject); }); socket.destroy(); return; } catch { await sleep(100); }
     }
@@ -606,6 +629,16 @@ async function main() {
   const init = await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier", version: "1" }, capabilities: { experimentalApi: false } });
   evidence.add("codex-initialized", { protocol: init?.protocolVersion ?? init?.serverInfo?.version });
   codexRpc.notify("initialized", {});
+  const allowedProbe = join(coordinatorRoot, "sandbox-write-probe");
+  const outsideProbe = `${root}-outside-write-probe`;
+  if (await pathExists(outsideProbe)) fail("sandbox negative-control path already exists");
+  const sandboxProbe = await codexRpc.rpc("command/exec", {
+    command: ["/bin/sh", "-c", 'printf allowed > "$1"; printf forbidden > "$2"', "sandbox-probe", allowedProbe, outsideProbe],
+    cwd: coordinatorRoot,
+    sandboxPolicy: workspaceSandbox(root),
+  });
+  if (await readFile(allowedProbe, "utf8") !== "allowed" || sandboxProbe.exitCode === 0 || !/Operation not permitted|Permission denied/.test(sandboxProbe.stderr) || await pathExists(outsideProbe)) fail("native sandbox did not permit scratch writes while denying adjacent temporary-directory writes");
+  evidence.add("sandbox-write-boundary", { allowedProbe, outsideProbe, outsideWriteExit: sandboxProbe.exitCode, outsideWriteDenied: true, sandboxPolicy: workspaceSandbox(root) });
   const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
   const threadId = thread?.thread?.id ?? thread?.id;
   if (!threadId) fail("Codex thread/start returned no thread id");
@@ -667,7 +700,7 @@ async function main() {
   const busyToken = `busy-${randomUUID()}`;
   await piRpc.request({ type: "prompt", id: "busy-probe", message: `Use the bash tool to run sleep 5 for the busy-delivery probe. Do not read the mailbox, modify files, or send messages until the sleep finishes.` }, 30_000);
   await piRpc.waitForAfter((event) => event.type === "agent_start", busyStartIndex, 30_000);
-  const busySend = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `busy delivery probe ${busyToken}`, "--priority", "next", "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
+  const busySend = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `busy delivery probe ${busyToken}. Consume this probe without running tools or sending a reply.`, "--priority", "next", "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
   const busyReport = lastJson(busySend.stdout);
   if (!busyReport || !["sent", "unconfirmed"].includes(busyReport.status)) fail(`busy receiver did not accept a delivery: ${bounded(busySend.stdout)} ${bounded(busySend.stderr)}`);
   await piRpc.waitForAfter((event) => event.type === "agent_settled", busyStartIndex, DEFAULT_TIMEOUT);
@@ -679,7 +712,7 @@ async function main() {
   const directWorker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piRestartSocket, "--replace"], baseEnv, piRoot);
   worker = directWorker;
   piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
-  const stoppedProbe = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `recovery probe ${taskId}`, "--priority", "next", "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
+  const stoppedProbe = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `recovery probe ${taskId}. Consume this probe without running tools or sending a reply.`, "--priority", "next", "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
   const stoppedReport = lastJson(stoppedProbe.stdout);
   if (stoppedProbe.code !== 75 || !stoppedReport || stoppedReport.status !== "queued") fail(`stopped receiver was not queued with exit 75: ${bounded(stoppedProbe.stdout)} ${bounded(stoppedProbe.stderr)}`);
   evidence.add("stopped-receiver", { status: stoppedReport.status, code: stoppedProbe.code, id: stoppedReport.id });
@@ -687,7 +720,7 @@ async function main() {
   restartedPiChild = spawn(pi, piRestartArgs, { cwd: piRoot, env: piEnv, stdio: ["pipe", "pipe", "pipe"] });
   piRpc = new JsonLinesProcess(restartedPiChild, evidence, "pi-rpc-restart");
   await socketReady(piRestartSocket);
-  const restartedPiState = await piRpc.request({ type: "get_state" }, 30_000);
+  const restartedPiState = await piRpc.request({ type: "get_state" }, STARTUP_TIMEOUT);
   if (restartedPiState?.data?.sessionId !== piSessionId || restartedPiState?.data?.sessionFile !== piSessionFile) fail("Pi restart did not reopen the saved native session file");
   const restartedMessages = (await piRpc.request({ type: "get_messages", id: "messages-after-restart" }, 30_000))?.data?.messages;
   const restartedDelegationCount = Array.isArray(restartedMessages) ? restartedMessages.filter((message) => message?.role === "user" && contentText(message.content).includes(`id=${delegated.id}`)).length : 0;
@@ -696,6 +729,7 @@ async function main() {
   const restartedFlush = await flushUntilSent(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, stoppedReport.id);
   const recoveredProbe = restartedFlush.message;
   evidence.add("receiver-restart", { id: recoveredProbe.id, flush: restartedFlush });
+  await codexRpc.waitForThreadIdle(threadId);
   codexRpc.stop();
   await waitClosed(codexChild);
   const replacement = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--replace"], baseEnv, coordinatorRoot);
@@ -723,7 +757,12 @@ async function main() {
   const replacementEnv = childEnv(baseEnv, replacement.environment, forgectl);
   coordinatorEnv = replacementEnv;
   const replacementReply = await waitMailbox(evidence, forgectl, ledger, replacementEnv, coordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(replacementToken), 180_000);
-  evidence.add("replacement-roundtrip", { token: replacementToken, replyId: replacementReply.id, threadId: replacementThreadId, runId: replacement.member.run_id });
+  const replacementInput = await codexRpc.waitFor((event) => event.method === "item/completed" && event.params?.threadId === replacementThreadId && event.params?.item?.type === "userMessage" && contentText(event.params.item.content).includes(`id=${replacementReply.id}`));
+  const replacementTurnId = replacementInput.params.turnId;
+  if (!replacementTurnId) fail("replacement reply has no native turn identity");
+  const replacementCompleted = await codexRpc.waitFor((event) => event.method === "turn/completed" && event.params?.threadId === replacementThreadId && event.params?.turn?.id === replacementTurnId);
+  if (replacementCompleted.params.turn.status !== "completed") fail("replacement coordinator did not finish the native reply turn");
+  evidence.add("replacement-roundtrip", { token: replacementToken, replyId: replacementReply.id, threadId: replacementThreadId, runId: replacement.member.run_id, nativeReplyTurnId: replacementTurnId, nativeReplyCompleted: true });
   const report = await mailbox(evidence, forgectl, ledger, replacementEnv, coordinatorRoot);
   const taskMessages = (report.messages ?? []).filter((message) => message.body.includes(taskId));
   const ids = taskMessages.map((message) => message.id);
