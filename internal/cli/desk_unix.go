@@ -280,6 +280,13 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		defer cleanup()
 		src = tmp
 	}
+	data, err := desk.ReadSource(src)
+	if err != nil {
+		return err
+	}
+	if err := requireAddHeaders(o, data); err != nil {
+		return err
+	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
@@ -290,6 +297,9 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		d.SetSignalPane(pane)
 	}
 	what, why := strings.TrimSpace(o.what), strings.TrimSpace(o.why)
+	if what == "" {
+		what = desk.ParseHeaders(data).What // the signal names the item by its WHAT
+	}
 	var (
 		a         desk.Added
 		duplicate bool

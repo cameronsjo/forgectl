@@ -198,6 +198,10 @@ refused, never read. FILE "-" reads the item from stdin; --name then gives its
 file name (deploy.sh, nightly.manifest), whose extension picks the kind. stdin
 must not be a terminal.
 
+--what and --why are required unless the file carries its own "# WHAT:" or
+"# WHY:" line, which add then uses unchanged. A flag that matches the file's line
+is accepted; one that differs is refused.
+
 When an item is queued, add tells the operator: a herdr notification and the
 queuing pane's needs-you state (inside herdr), and a macOS notification
 (macOS only). A failed signal prints "warning: operator signal failed:" and
@@ -265,13 +269,29 @@ func checkFlagText(flag, v string) error {
 	return nil
 }
 
+// requireAddHeaders is the second half of add's usage check, once the source
+// is read: each of WHAT and WHY must come from its flag or the file's own line
+// (#1278).
+func requireAddHeaders(o deskAddOpts, data []byte) error {
+	have := desk.ParseHeaders(data)
+	if strings.TrimSpace(o.what) == "" && have.What == "" {
+		return deskUsage("desk add: --what is required unless the file has a '# WHAT:' line (one line: what the script does)")
+	}
+	if strings.TrimSpace(o.why) == "" && have.Why == "" {
+		return deskUsage("desk add: --why is required unless the file has a '# WHY:' line (one line: why it needs the operator)")
+	}
+	return nil
+}
+
 // checkAddFlags is add's usage check, before anything is read.
 func checkAddFlags(file string, o deskAddOpts) error {
-	if strings.TrimSpace(o.what) == "" {
-		return deskUsage("desk add: --what is required and must not be empty (one line: what the script does)")
+	// An empty flag is fine here: the file's own header may supply it
+	// (requireAddHeaders checks once the file is read). A blank one is not.
+	if o.what != "" && strings.TrimSpace(o.what) == "" {
+		return deskUsage("desk add: --what must not be blank (one line: what the script does)")
 	}
-	if strings.TrimSpace(o.why) == "" {
-		return deskUsage("desk add: --why is required and must not be empty (one line: why it needs the operator)")
+	if o.why != "" && strings.TrimSpace(o.why) == "" {
+		return deskUsage("desk add: --why must not be blank (one line: why it needs the operator)")
 	}
 	if err := checkFlagText("--what", o.what); err != nil {
 		return err

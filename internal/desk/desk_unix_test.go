@@ -442,7 +442,7 @@ func TestAddValidates(t *testing.T) {
 		{"bad stem", "../x.sh", "true", "w", "y", false, ""},
 		{"missing why", "x.sh", "true", "w", "", false, "WHAT and WHY"},
 		{"multi-line what", "x.sh", "true", "w\nrm -rf /", "y", false, "one line"},
-		{"header twice", "x.sh", "# WHAT: here\ntrue", "w", "y", false, "already has"},
+		{"header differs", "x.sh", "# WHAT: here\ntrue", "w", "y", false, "differs from --what"},
 		{"tty batch", "b.manifest", "a -- true", "w", "y", true, "TTY"},
 		{"bad manifest", "b.manifest", "a after=zz -- true", "w", "y", false, "unknown dependency"},
 	} {

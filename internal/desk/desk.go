@@ -283,15 +283,17 @@ func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
 	}
 	have := ParseHeaders(body)
 	var lines []string
-	if what != "" {
+	// A flag that repeats the file's own line is accepted and adds nothing; one
+	// that differs is refused, since either value could be the one meant.
+	if what != "" && strings.TrimSpace(have.What) != what {
 		if have.What != "" {
-			return nil, errors.New("desk: the file already has a '# WHAT:' line; drop --what or the line")
+			return nil, errors.New("desk: the file's '# WHAT:' line differs from --what; make them match, or drop --what to use the file's")
 		}
 		lines = append(lines, "# WHAT: "+what)
 	}
-	if why != "" {
+	if why != "" && strings.TrimSpace(have.Why) != why {
 		if have.Why != "" {
-			return nil, errors.New("desk: the file already has a '# WHY:' line; drop --why or the line")
+			return nil, errors.New("desk: the file's '# WHY:' line differs from --why; make them match, or drop --why to use the file's")
 		}
 		lines = append(lines, "# WHY: "+why)
 	}
