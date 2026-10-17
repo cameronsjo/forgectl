@@ -516,7 +516,7 @@ func checkSchemaKeys(data []byte) error {
 		if err := json.Unmarshal(projectRaw, &object); err != nil {
 			return fmt.Errorf("projects[%d]: %w", projectIndex, err)
 		}
-		if err := checkKeys(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads", "workspace", "surface_operations"); err != nil {
+		if err := checkKeys(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads", "workspace", "surface_operations", "evidence"); err != nil {
 			return fmt.Errorf("projects[%d]: %w", projectIndex, err)
 		}
 		if err := requireFields(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads"); err != nil {
@@ -580,6 +580,50 @@ func checkSchemaKeys(data []byte) error {
 								return fmt.Errorf("projects[%d].surface_operations[%d].retirement.%s is null", projectIndex, operationIndex, key)
 							}
 						}
+					}
+				}
+			}
+		}
+		if evidenceRows, present := object["evidence"]; present {
+			if bytes.Equal(bytes.TrimSpace(evidenceRows), []byte("null")) {
+				return fmt.Errorf("projects[%d].evidence is null", projectIndex)
+			}
+			var rows []json.RawMessage
+			if err := json.Unmarshal(evidenceRows, &rows); err != nil {
+				return fmt.Errorf("projects[%d].evidence: %w", projectIndex, err)
+			}
+			for evidenceIndex, evidenceRaw := range rows {
+				var evidence map[string]json.RawMessage
+				if err := json.Unmarshal(evidenceRaw, &evidence); err != nil {
+					return fmt.Errorf("projects[%d].evidence[%d]: %w", projectIndex, evidenceIndex, err)
+				}
+				if evidence == nil {
+					return fmt.Errorf("projects[%d].evidence[%d] is null", projectIndex, evidenceIndex)
+				}
+				if err := checkKeys(evidence, "thread_id", "run_id", "native_session_id", "harness", "source", "turn_id", "status", "provider", "model", "observed_at", "artifact"); err != nil {
+					return fmt.Errorf("projects[%d].evidence[%d]: %w", projectIndex, evidenceIndex, err)
+				}
+				if err := requireFields(evidence, "thread_id", "run_id", "harness", "source", "status", "observed_at"); err != nil {
+					return fmt.Errorf("projects[%d].evidence[%d]: %w", projectIndex, evidenceIndex, err)
+				}
+				for key, value := range evidence {
+					if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+						return fmt.Errorf("projects[%d].evidence[%d].%s is null", projectIndex, evidenceIndex, key)
+					}
+				}
+				if artifact, present := evidence["artifact"]; present {
+					var artifactObject map[string]json.RawMessage
+					if err := json.Unmarshal(artifact, &artifactObject); err != nil {
+						return fmt.Errorf("projects[%d].evidence[%d].artifact: %w", projectIndex, evidenceIndex, err)
+					}
+					if artifactObject == nil {
+						return fmt.Errorf("projects[%d].evidence[%d].artifact is null", projectIndex, evidenceIndex)
+					}
+					if err := checkKeys(artifactObject, "relative_path", "size", "sha256"); err != nil {
+						return fmt.Errorf("projects[%d].evidence[%d].artifact: %w", projectIndex, evidenceIndex, err)
+					}
+					if err := requireFields(artifactObject, "relative_path", "size", "sha256"); err != nil {
+						return fmt.Errorf("projects[%d].evidence[%d].artifact: %w", projectIndex, evidenceIndex, err)
 					}
 				}
 			}

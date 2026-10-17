@@ -81,6 +81,7 @@ func threadViewCommand(test *testing.T, store project.Store, created projectRepo
 
 func TestSurfaceProjectThreadViewRoundTripAndSameRunReopen(test *testing.T) {
 	store, created, member, presentation, fixture := prepareProjectThreadView(test)
+	presentation.metadataError = errors.New("metadata unavailable")
 	fixture.start = func(ctx context.Context, spec backend.StartSpec) backend.StartResult {
 		registry, err := store.Snapshot(ctx)
 		if err != nil {
@@ -94,10 +95,10 @@ func TestSurfaceProjectThreadViewRoundTripAndSameRunReopen(test *testing.T) {
 		return backend.NewRefKnown(projectPresentationTestRef(test, spec.Tag(), "w1:t2", "w1:p2", "terminal-2"))
 	}
 	opened, stderr, code := threadViewCommand(test, store, created, "open", "--view", "timeline")
-	if code != 0 || opened.Operation == nil || !opened.Focused || opened.ProcessLiveness != project.ProcessLivenessUnknown {
+	if code != 0 || opened.Operation == nil || !opened.Focused || opened.ProcessLiveness != project.ProcessLivenessUnknown || len(presentation.threadNames) != 1 || presentation.threadNames[0] != created.Project.Threads[0].Name || len(opened.Warnings) != 1 || opened.Warnings[0] != projectMetadataWarning {
 		test.Fatalf("open exit=%d stderr=%s report=%#v", code, stderr, opened)
 	}
-	if reopened, stderr, code := threadViewCommand(test, store, created, "open", "--view", "timeline"); code != 0 || fixture.starts != 1 || presentation.threadFocus != 2 || reopened.Operation.ID != opened.Operation.ID {
+	if reopened, stderr, code := threadViewCommand(test, store, created, "open", "--view", "timeline"); code != 0 || fixture.starts != 1 || presentation.threadFocus != 2 || len(presentation.threadNames) != 2 || presentation.threadNames[1] != created.Project.Threads[0].Name || len(reopened.Warnings) != 1 || reopened.Warnings[0] != projectMetadataWarning || reopened.Operation.ID != opened.Operation.ID {
 		test.Fatalf("reopen duplicated view: exit=%d stderr=%s report=%#v", code, stderr, reopened)
 	}
 	fixture.close = func(ctx context.Context, ref backend.Ref) backend.CloseResult {

@@ -4,6 +4,8 @@ package projectview
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -139,6 +141,103 @@ func TestSourceMakesMalformedMailboxPartialAndVisible(test *testing.T) {
 	if !delta.Partial || delta.Err == nil || len(delta.Events) == 0 {
 		test.Fatalf("malformed delta = %#v", delta)
 	}
+}
+
+func TestSourceKeepsNativeTurnsArtifactsAndHistoricalRunsDistinct(test *testing.T) {
+	store, created := sourceProject(test)
+	teamPath := filepath.Join(store.Root, created.ID, "team")
+	if err := os.MkdirAll(teamPath, 0o700); err != nil {
+		test.Fatal(err)
+	}
+	roster := mail.FileRoster{Dir: teamPath}
+	worker := mail.Worker{Name: "lead", Harness: mail.HarnessCodex, Worktree: created.Worktree, Coordinator: true, RunID: "original-run", ThreadID: "original-native"}
+	if err := roster.Put(worker); err != nil {
+		test.Fatal(err)
+	}
+	if _, _, err := store.Bind(test.Context(), created.ID, created.CoordinatorThreadID, worker.Name, worker.RunID, ""); err != nil {
+		test.Fatal(err)
+	}
+	input := project.NativeEvidenceInput{NativeSessionID: worker.ThreadID, Source: project.EvidenceSourceCodexThreadRead, TurnID: "native-turn", Status: project.EvidenceCompleted, ObservedAt: time.Now().UTC()}
+	if _, _, err := store.RecordNativeEvidence(test.Context(), created.ID, created.CoordinatorThreadID, worker.RunID, input); err != nil {
+		test.Fatal(err)
+	}
+	contents := []byte("source independently checked elsewhere\n")
+	if err := os.WriteFile(filepath.Join(created.Worktree, "result.txt"), contents, 0o600); err != nil {
+		test.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	if _, _, err := store.RecordVerifiedArtifact(test.Context(), created.ID, created.CoordinatorThreadID, worker.RunID, "result.txt", hex.EncodeToString(digest[:])); err != nil {
+		test.Fatal(err)
+	}
+	source := NewSource(store, created.ID)
+	refs, err := source.List()
+	if err != nil {
+		test.Fatal(err)
+	}
+	before := snapshotTree(test, store.Root)
+	delta, err := source.Load(refs[1], &runview.Cursor{})
+	if err != nil {
+		test.Fatal(err)
+	}
+	if !hasEvent(delta.Events, "NATIVE-TURN-COMPLETED") || !hasEvent(delta.Events, "ARTIFACT-BYTES-MATCHED") || delta.Live != runview.LiveUnknown || len(source.(*Source).Spec(refs[1]).On) != 0 {
+		test.Fatalf("missing or overclaimed evidence: %#v", delta)
+	}
+	for _, event := range delta.Events {
+		if event.Step == nativeTurnStep || event.Step == artifactStep {
+			if eventField(event, "currently_enrolled") != "true" || eventField(event, "run_id") != "original-run" || eventField(event, "native_session_id") != "original-native" {
+				test.Fatalf("evidence identity lost: %#v", event)
+			}
+		}
+	}
+	if after := snapshotTree(test, store.Root); after != before {
+		test.Fatal("timeline mutated durable evidence")
+	}
+	unrelated, err := source.Load(refs[2], &runview.Cursor{})
+	if err != nil || hasEvent(unrelated.Events, "NATIVE-TURN-COMPLETED") || hasEvent(unrelated.Events, "ARTIFACT-BYTES-MATCHED") {
+		test.Fatalf("unrelated thread inherited evidence: %v %#v", err, unrelated)
+	}
+	worker.RunID, worker.ThreadID = "replacement-run", "replacement-native"
+	if err := roster.Put(worker); err != nil {
+		test.Fatal(err)
+	}
+	if _, _, err := store.Bind(test.Context(), created.ID, created.CoordinatorThreadID, worker.Name, worker.RunID, "original-run"); err != nil {
+		test.Fatal(err)
+	}
+	delta, err = source.Load(refs[1], &runview.Cursor{})
+	if err != nil {
+		test.Fatal(err)
+	}
+	if !hasEvent(delta.Events, "PROJECT-THREAD-CURRENT") || !hasEvent(delta.Events, "NATIVE-TURN-COMPLETED") {
+		test.Fatalf("replacement lost history or current state: %#v", delta)
+	}
+	for _, event := range delta.Events {
+		if event.Step == nativeTurnStep || event.Step == artifactStep {
+			if eventField(event, "currently_enrolled") != "false" || eventField(event, "run_id") != "original-run" {
+				test.Fatalf("old evidence rebound to replacement: %#v", event)
+			}
+		}
+	}
+	valid := snapshotTree(test, store.Root)
+	corrupt := strings.Replace(valid, `"status":"completed"`, `"status":"invented-success"`, 1)
+	if corrupt == valid {
+		test.Fatal("negative control did not alter the serialized evidence status")
+	}
+	if err := os.WriteFile(filepath.Join(store.Root, "registry.json"), []byte(corrupt), 0o600); err != nil {
+		test.Fatal(err)
+	}
+	invalid, err := source.Load(refs[1], &runview.Cursor{})
+	if err == nil || len(invalid.Events) != 0 {
+		test.Fatalf("malformed evidence became rendered success: %v %#v", err, invalid)
+	}
+}
+
+func eventField(event runview.Event, key string) string {
+	for _, field := range event.Fields {
+		if field.Key == key {
+			return field.Value
+		}
+	}
+	return ""
 }
 
 func sourceProject(test *testing.T) (project.Store, project.Project) {

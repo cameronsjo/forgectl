@@ -61,9 +61,28 @@ forgectl surface project --root /absolute/private/projects \
 
 The timeline reuses Desk's renderer without opening its approval queue. With no `--thread`, it shows all logical thread states and the project's bounded mailbox transport evidence. A thread view includes only messages whose saved sender or recipient run ID matches that thread's binding history. Legacy messages without run IDs remain project-level evidence; names and timestamps never invent a thread attribution.
 
-`waiting`, `transport_accepted`, `delivery_failed`, and `delivery_unknown` describe delivery, not completed model turns or verified artifacts. Enrollment and native-session identity remain separate from process liveness, which is explicitly `unknown`. Message bodies, delivery diagnostics, native histories, and project instructions do not enter the projection. The current projection does not yet collect model-turn or artifact-verification evidence.
+`waiting`, `transport_accepted`, `delivery_failed`, and `delivery_unknown` describe delivery, not completed model turns or verified artifacts. Explicit native observations and artifact checks appear as separate event categories. Enrollment and native-session identity remain separate from process liveness, which is explicitly `unknown`. Message bodies, delivery diagnostics, native histories, and project instructions do not enter the projection. A completed native turn is not a successful overall task; an artifact digest match is not a correctness or authorship judgment.
 
 JSON includes `version`, `project_id`, optional `thread_id`, and Desk's `view` with sanitized events, unknown liveness, `partial`, `held`, and dropped-record counts. It is not an atomic revision of both registry and mailbox. Malformed, over-cap, or unterminated input remains visible; the command prints the partial report and exits `1`. Reads are bounded to 8 MiB of mailbox data, 1 MiB per record, and 50,000 messages. `--live` requires a terminal and cannot be combined with `--json`. Neither snapshot nor live mode registers, launches, focuses, repairs state, or approves work.
+
+## Observe native turns and check artifact bytes
+
+```sh
+forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID observe THREAD_ID --run-id CURRENT_RUN_ID --json
+
+forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID verify-artifact THREAD_ID --run-id CURRENT_RUN_ID \
+  --path result.txt --sha256 EXPECTED_LOWERCASE_SHA256 --json
+```
+
+`observe` queries the exact current bound native session without sending a prompt, resuming history, or launching a process. Codex uses its private Unix app-server endpoint and metadata-only thread/turn reads. Pi uses its enrolled inbox extension; Hermes uses its enrolled supervisor. Other harnesses explicitly refuse this capability. A missing native-session ID, stale run, wrong native identity, or binding change during the query records nothing.
+
+Current provider/model metadata is returned separately from a terminal-turn result. A selected model does not establish which model produced a historical turn. Metadata alone never adds durable completion evidence. Native terminal outcomes are `completed`, `failed`, `incomplete`, or `unknown`, bound to the original project/thread/run/native-session/turn identities. Pi uses a persisted native entry ID, not its resettable turn counter. An in-progress turn is not completion evidence. Process liveness remains unknown even when the query succeeds.
+
+`verify-artifact` hashes a regular file beneath that run's bound worktree, then rechecks the exact enrollment before recording its relative path, size, and matching digest. It rejects traversal, outside paths, symlinks, hardlinks, oversized files, a changed path/file identity, and mismatched hashes. The check is capped at 32 MiB. This proves byte identity at verification time only; correctness, authorship, and continued freshness require separate checks. No native model result is inferred from the file.
+
+The registry retains at most 256 evidence records per project. Exact repeated evidence is a no-op; a conflicting result for the same native turn or artifact path within the same run is refused. Replacement retains old evidence without attributing it to the new run. Timeline events expose exact evidence IDs and `currently_enrolled`, distinguishing historical observations from the current enrollment. The timeline itself never polls native endpoints or performs artifact checks.
 
 ## Explicit herdr presentation
 
@@ -88,6 +107,8 @@ forgectl surface project --root /absolute/private/projects \
 
 References bind generated ownership markers to the server incarnation, endpoint, workspace, tab, pane, and stable terminal. Display labels are not ownership. Changed or duplicate markers, moved/replaced terminals, or server turnover are refused. An ambiguous creation remains `unknown` rather than allowing an automatic retry. Inspect `show --json` for `surface_operations`; do not delete the registry or manually alter phases to force a retry. Automatic recovery/retirement of unresolved operations is not provided by this slice.
 
+After successful creation or focus, the bridge reapplies bounded human-readable project/thread names through herdr metadata. The workspace's `forgectl_project` token is available to herdr's existing sidebar grouping, and each root pane receives its project or thread display name. The generated workspace/tab ownership labels are never renamed. Display names are sanitized and capped at herdr's 80-character limit; the registry keeps the full name. Metadata failure is a cosmetic `warnings` entry, not permission to create another workspace/tab. These commands do not edit global herdr configuration.
+
 `thread open --view timeline` explicitly creates a read-only thread timeline tab inside the saved project workspace. It requires current enrollment, journals intent before the tab mutation, and keeps the logical thread and native run separate from the view's operation ID. Repeating the command focuses its existing verified view. Unsupported views fail rather than silently choosing a different native interface or starting another history writer.
 
 `thread close-view` closes only the exact saved presentation operation, never the project workspace or enrolled native server. It may retire an old run's view after enrollment replacement, but cannot focus that stale run. Closure has its own `pending`/`closed`/`already_gone`/`unknown` evidence and preserves the original creation reference. Proven closure permits reopening a view of the same current RunID; closing a UI is not native process replacement. An unresolved close blocks another view. Legacy operations without a recorded presentation kind cannot be closed automatically. These are surface-identity checks, not native-process termination evidence.
@@ -104,6 +125,6 @@ Exit codes: `0` for completed creation, binding, or inspection; `1` for state/st
 
 ## Remaining integration
 
-These commands remain a source-build integration, not a complete accepted Projects interface. Native thread attachment, model-turn and artifact-verification evidence, and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
+These commands remain a source-build integration, not a complete accepted Projects interface. Native thread attachment and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
 
 The existing [team mailbox](surface-team.md) remains the communication authority. Project context and teammate messages never count as operator approval. Desk's human approval queue remains separate from read-only project monitoring.

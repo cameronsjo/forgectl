@@ -1,7 +1,6 @@
 // Package projectview adapts project-owned, read-only observations to Desk's
-// runview renderer. It intentionally exposes transport evidence only: a
-// mailbox handoff is not a model-turn completion or an independently checked
-// artifact.
+// runview renderer. Transport, native turns, and checked artifact bytes remain
+// distinct evidence; none establishes overall correctness or process liveness.
 package projectview
 
 import (
@@ -17,6 +16,8 @@ import (
 const (
 	projectStateStep = "project-state"
 	mailEventStep    = "mail-transport"
+	nativeTurnStep   = "native-turn"
+	artifactStep     = "artifact-bytes"
 )
 
 type Source struct {
@@ -74,6 +75,8 @@ func (source *Source) Load(ref runview.RunRef, _ *runview.Cursor) (runview.Delta
 		Defs: []runview.StepDef{
 			{ID: projectStateStep, Note: "project state evidence"},
 			{ID: mailEventStep, Note: "mail transport evidence"},
+			{ID: nativeTurnStep, Note: "native terminal-turn evidence, not task correctness"},
+			{ID: artifactStep, Note: "checked file bytes, not authorship or correctness"},
 		},
 		Dropped: timeline.Skipped,
 		Partial: timeline.Partial,
@@ -84,6 +87,7 @@ func (source *Source) Load(ref runview.RunRef, _ *runview.Cursor) (runview.Delta
 			continue
 		}
 		event := stateEvent(thread)
+		event.Fields = append(event.Fields, runview.Field{Key: "project_name", Value: safe(timeline.ProjectName)})
 		event.Seq = len(delta.Events) + 1
 		delta.Events = append(delta.Events, event)
 	}
@@ -92,6 +96,14 @@ func (source *Source) Load(ref runview.RunRef, _ *runview.Cursor) (runview.Delta
 			continue
 		}
 		event := eventForObservation(observation)
+		event.Seq = len(delta.Events) + 1
+		delta.Events = append(delta.Events, event)
+	}
+	for _, evidence := range timeline.Evidence {
+		if ref.Name != source.projectID && evidence.ThreadID != ref.Name {
+			continue
+		}
+		event := eventForEvidence(evidence, timeline.ThreadSummaries)
 		event.Seq = len(delta.Events) + 1
 		delta.Events = append(delta.Events, event)
 	}
@@ -121,6 +133,8 @@ func stateEvent(thread project.MailThreadSummary) runview.Event {
 		Step: projectStateStep,
 		Fields: []runview.Field{
 			{Key: "thread_id", Value: safe(thread.ThreadID)},
+			{Key: "thread_name", Value: safe(thread.Name)},
+			{Key: "active_run_id", Value: safe(thread.ActiveRunID)},
 			{Key: "role", Value: safe(string(thread.Role))},
 			{Key: "enrollment", Value: safe(string(thread.Enrollment))},
 			{Key: "native_session_known", Value: fmt.Sprintf("%t", thread.NativeSessionKnown)},
@@ -179,3 +193,42 @@ func eventName(status project.MailStatus) string {
 }
 
 func safe(value string) string { return termsafe.SafeLineMax(value, 256) }
+
+func eventForEvidence(evidence project.Evidence, threads []project.MailThreadSummary) runview.Event {
+	event := runview.Event{Time: evidence.ObservedAt, Step: nativeTurnStep, Name: "NATIVE-TURN-UNKNOWN"}
+	current := false
+	for _, thread := range threads {
+		if thread.ThreadID == evidence.ThreadID && thread.ActiveRunID == evidence.RunID && thread.Enrollment == project.EnrollmentCurrent {
+			current = true
+		}
+	}
+	event.Fields = []runview.Field{
+		{Key: "thread_id", Value: safe(evidence.ThreadID)},
+		{Key: "run_id", Value: safe(evidence.RunID)},
+		{Key: "native_session_id", Value: safe(evidence.NativeSessionID)},
+		{Key: "source", Value: safe(string(evidence.Source))},
+		{Key: "status", Value: safe(string(evidence.Status))},
+		{Key: "currently_enrolled", Value: fmt.Sprintf("%t", current)},
+	}
+	if evidence.Source == project.EvidenceSourceArtifactDigest {
+		event.Step = artifactStep
+		event.Name = "ARTIFACT-BYTES-MATCHED"
+		event.Fields = append(event.Fields,
+			runview.Field{Key: "relative_path", Value: safe(evidence.Artifact.RelativePath)},
+			runview.Field{Key: "sha256", Value: evidence.Artifact.SHA256},
+			runview.Field{Key: "size", Value: fmt.Sprintf("%d", evidence.Artifact.Size)},
+			runview.Field{Key: "scope", Value: "byte identity at verification time; not correctness or authorship"},
+		)
+		return event
+	}
+	switch evidence.Status {
+	case project.EvidenceCompleted:
+		event.Name = "NATIVE-TURN-COMPLETED"
+	case project.EvidenceFailed:
+		event.Name = "NATIVE-TURN-FAILED"
+	case project.EvidenceIncomplete:
+		event.Name = "NATIVE-TURN-INCOMPLETE"
+	}
+	event.Fields = append(event.Fields, runview.Field{Key: "turn_id", Value: safe(evidence.TurnID)}, runview.Field{Key: "scope", Value: "native turn outcome; not task correctness"})
+	return event
+}

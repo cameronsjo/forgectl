@@ -33,6 +33,8 @@ type MailObservation struct {
 // liveness evidence.
 type MailThreadSummary struct {
 	ThreadID           string          `json:"thread_id"`
+	Name               string          `json:"name"`
+	ActiveRunID        string          `json:"active_run_id,omitempty"`
 	Role               Role            `json:"role"`
 	Enrollment         Enrollment      `json:"enrollment"`
 	NativeSessionKnown bool            `json:"native_session_known"`
@@ -45,9 +47,11 @@ type MailThreadSummary struct {
 // an apparently complete successful timeline.
 type MailTimeline struct {
 	ProjectID       string              `json:"project_id"`
+	ProjectName     string              `json:"project_name"`
 	ObservedAt      time.Time           `json:"observed_at"`
 	ThreadSummaries []MailThreadSummary `json:"thread_summaries"`
 	Entries         []MailObservation   `json:"entries"`
+	Evidence        []Evidence          `json:"evidence,omitempty"`
 	Skipped         int                 `json:"skipped,omitempty"`
 	Partial         bool                `json:"partial,omitempty"`
 	Held            bool                `json:"held,omitempty"`

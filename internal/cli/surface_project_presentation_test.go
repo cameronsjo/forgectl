@@ -15,6 +15,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
 )
@@ -28,6 +29,24 @@ type projectPresentationFixture struct {
 	lastParent     backend.Ref
 	lastChild      backend.Ref
 	threadAdapter  backend.Capabilities
+	workspaceNames []string
+	threadNames    []string
+	metadataError  error
+}
+
+func TestSurfaceProjectPresentationNamesAreBoundedCosmeticText(test *testing.T) {
+	for _, name := range []string{"Project Alpha", strings.Repeat("界", 80), strings.Repeat("界", 128), "  Project \u202e name  ", "line\nbreak"} {
+		name := name
+		test.Run(name, func(test *testing.T) {
+			safe := projectMetadataName(name)
+			if err := herdradapter.CheckTokenValue("forgectl_project", safe); err != nil {
+				test.Fatalf("display name %q is invalid: %v", safe, err)
+			}
+			if name == "Project Alpha" && safe != name {
+				test.Fatal("ordinary human name was changed")
+			}
+		})
+	}
 }
 
 func (fixture *projectPresentationFixture) ThreadAdapter(backend.Ref) (backend.Capabilities, error) {
@@ -52,6 +71,16 @@ func (fixture *projectPresentationFixture) FocusThread(_ context.Context, parent
 	fixture.threadFocus++
 	fixture.lastParent, fixture.lastChild = parent, child
 	return fixture.focusError
+}
+
+func (fixture *projectPresentationFixture) ShowProjectWorkspace(_ context.Context, _ backend.Ref, projectName string) error {
+	fixture.workspaceNames = append(fixture.workspaceNames, projectName)
+	return fixture.metadataError
+}
+
+func (fixture *projectPresentationFixture) ShowProjectThread(_ context.Context, _ backend.Ref, _ backend.Ref, threadName string) error {
+	fixture.threadNames = append(fixture.threadNames, threadName)
+	return fixture.metadataError
 }
 
 func installProjectPresentationFixture(test *testing.T, fixture *projectPresentationFixture) {
@@ -122,7 +151,7 @@ func TestSurfaceProjectOpenPersistsBeforeCreateAndReopensExactWorkspace(test *te
 	}
 	installProjectPresentationFixture(test, fixture)
 	report, stderr, code := openCLIProject(test, root, created.Project.ID)
-	if code != 0 || !report.Focused || fixture.workspaceFocus != 1 || report.Workspace == nil || report.Operation == nil || report.Operation.Phase != project.SurfacePhaseVerified || report.ProcessLiveness != project.ProcessLivenessUnknown {
+	if code != 0 || !report.Focused || fixture.workspaceFocus != 1 || len(fixture.workspaceNames) != 1 || fixture.workspaceNames[0] != created.Project.Name || len(report.Warnings) != 0 || report.Workspace == nil || report.Operation == nil || report.Operation.Phase != project.SurfacePhaseVerified || report.ProcessLiveness != project.ProcessLivenessUnknown {
 		test.Fatalf("open exit=%d stderr=%s report=%#v", code, stderr, report)
 	}
 	revision := report.Revision
@@ -132,12 +161,37 @@ func TestSurfaceProjectOpenPersistsBeforeCreateAndReopensExactWorkspace(test *te
 	}
 	report, stderr, code = openCLIProject(test, root, created.Project.ID)
 	focusedJSON, err := fixture.lastParent.MarshalJSON()
-	if err != nil || code != 0 || !report.Focused || fixture.starts != 1 || fixture.workspaceFocus != 2 || report.Action != "focused" || report.Revision != revision || string(refJSON) != string(focusedJSON) {
+	if err != nil || code != 0 || !report.Focused || fixture.starts != 1 || fixture.workspaceFocus != 2 || len(fixture.workspaceNames) != 2 || fixture.workspaceNames[1] != created.Project.Name || len(report.Warnings) != 0 || report.Action != "focused" || report.Revision != revision || string(refJSON) != string(focusedJSON) {
 		test.Fatalf("reopen duplicated or changed workspace: exit=%d stderr=%s report=%#v fixture=%#v err=%v", code, stderr, report, fixture, err)
 	}
 	fixture.focusError = errors.New("server incarnation changed")
 	if _, _, code := openCLIProject(test, root, created.Project.ID); code != exitFailed || fixture.starts != 1 {
 		test.Fatalf("stale workspace was recreated: exit=%d starts=%d", code, fixture.starts)
+	}
+}
+
+func TestSurfaceProjectOpenMetadataFailureIsWarningAndDoesNotDuplicateCreate(test *testing.T) {
+	root := filepath.Join(test.TempDir(), "registry")
+	created := createCLIProject(test, root, test.TempDir(), "Metadata warning")
+	fixture := &projectPresentationFixture{metadataError: errors.New("metadata unavailable")}
+	fixture.start = func(ctx context.Context, spec backend.StartSpec, before func(backend.ServerID, backend.EndpointID) error) backend.StartResult {
+		ref := projectPresentationTestRef(test, spec.Tag(), "w1:t1", "w1:p1", "terminal-1")
+		endpoint, _ := ref.Endpoint()
+		if err := before(ref.Server(), endpoint); err != nil {
+			test.Fatal(err)
+		}
+		return backend.NewRefKnown(ref)
+	}
+	installProjectPresentationFixture(test, fixture)
+
+	first, stderr, code := openCLIProject(test, root, created.Project.ID)
+	if code != 0 || stderr != "" || !first.Focused || fixture.starts != 1 || len(fixture.workspaceNames) != 1 || fixture.workspaceNames[0] != created.Project.Name || len(first.Warnings) != 1 || first.Warnings[0] != projectMetadataWarning {
+		test.Fatalf("metadata failure was not best effort: exit=%d stderr=%s report=%#v fixture=%#v", code, stderr, first, fixture)
+	}
+
+	second, stderr, code := openCLIProject(test, root, created.Project.ID)
+	if code != 0 || stderr != "" || !second.Focused || fixture.starts != 1 || fixture.workspaceFocus != 2 || len(fixture.workspaceNames) != 2 || len(second.Warnings) != 1 || second.Warnings[0] != projectMetadataWarning {
+		test.Fatalf("metadata failure caused duplicate create or was not reapplied: exit=%d stderr=%s report=%#v fixture=%#v", code, stderr, second, fixture)
 	}
 }
 

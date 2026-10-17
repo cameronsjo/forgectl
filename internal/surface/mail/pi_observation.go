@@ -86,8 +86,8 @@ func (adapter PiAdapter) Inspect(ctx context.Context, worker Worker) (PiObservat
 	}, nil
 }
 
-func safePiObservationString(value string, max int) bool {
-	if value == "" || len(value) > max || !utf8.ValidString(value) {
+func safePiObservationString(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) {
 		return false
 	}
 	for _, character := range value {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type projectPresentation interface {
@@ -25,6 +27,11 @@ type projectPresentation interface {
 	FocusProjectWorkspace(context.Context, backend.Ref) error
 	FocusThread(context.Context, backend.Ref, backend.Ref) error
 	ThreadAdapter(backend.Ref) (backend.Capabilities, error)
+}
+
+type projectMetadataPresentation interface {
+	ShowProjectWorkspace(context.Context, backend.Ref, string) error
+	ShowProjectThread(context.Context, backend.Ref, backend.Ref, string) error
 }
 
 type projectHerdrPresentation struct{ *herdradapter.Adapter }
@@ -39,6 +46,18 @@ func (presentation projectHerdrPresentation) FocusThread(ctx context.Context, pa
 		return err
 	}
 	return adapter.Focus(ctx, child)
+}
+
+func (presentation projectHerdrPresentation) ShowProjectWorkspace(ctx context.Context, ref backend.Ref, projectName string) error {
+	return presentation.Adapter.ShowProjectWorkspace(ctx, ref, projectName)
+}
+
+func (presentation projectHerdrPresentation) ShowProjectThread(ctx context.Context, parent, child backend.Ref, threadName string) error {
+	adapter, err := presentation.ForProjectTab(parent)
+	if err != nil {
+		return err
+	}
+	return adapter.ShowProjectThread(ctx, child, threadName)
 }
 
 var projectPresentationFor = newProjectPresentation
@@ -104,6 +123,40 @@ type projectPresentationReport struct {
 	Operation       *project.SurfaceOperation `json:"operation,omitempty"`
 	Workspace       *project.Workspace        `json:"workspace,omitempty"`
 	ProcessLiveness project.ProcessLiveness   `json:"process_liveness"`
+	Warnings        []string                  `json:"warnings,omitempty"`
+}
+
+const projectMetadataWarning = "project display metadata could not be updated"
+
+func projectWorkspaceMetadataWarning(presentation projectPresentation, ctx context.Context, ref backend.Ref, projectName string) string {
+	metadata, ok := presentation.(projectMetadataPresentation)
+	if !ok {
+		return ""
+	}
+	if err := metadata.ShowProjectWorkspace(ctx, ref, projectMetadataName(projectName)); err != nil {
+		return projectMetadataWarning
+	}
+	return ""
+}
+
+func projectThreadMetadataWarning(presentation projectPresentation, ctx context.Context, parent, child backend.Ref, threadName string) string {
+	metadata, ok := presentation.(projectMetadataPresentation)
+	if !ok {
+		return ""
+	}
+	if err := metadata.ShowProjectThread(ctx, parent, child, projectMetadataName(threadName)); err != nil {
+		return projectMetadataWarning
+	}
+	return ""
+}
+
+func projectMetadataName(name string) string {
+	name = strings.TrimSpace(name)
+	safe := termsafe.SafeLine(name)
+	if utf8.RuneCountInString(safe) > herdradapter.MaxTokenValueLen {
+		safe = termsafe.SafeLineMax(name, herdradapter.MaxTokenValueLen-utf8.RuneCountInString(termsafe.TruncatedMarker))
+	}
+	return safe
 }
 
 func newSurfaceProjectOpenCmd(deps module.Deps, root *string) *cobra.Command {
@@ -132,7 +185,11 @@ func newSurfaceProjectOpenCmd(deps module.Deps, root *string) *cobra.Command {
 				if err := presentation.FocusProjectWorkspace(command.Context(), record.Workspace.Ref); err != nil {
 					return projectError(err)
 				}
-				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, Action: "focused", Focused: true, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown}, options.JSON)
+				warnings := []string{}
+				if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), record.Workspace.Ref, record.Name); warning != "" {
+					warnings = append(warnings, warning)
+				}
+				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, Action: "focused", Focused: true, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 			}
 			return createProjectWorkspace(command, store, record, presentation, options)
 		},
@@ -186,11 +243,18 @@ func createProjectWorkspace(command *cobra.Command, store project.Store, record 
 	}
 	report := projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, Action: "create", Operation: &completed, ProcessLiveness: project.ProcessLivenessUnknown}
 	var focusError error
+	warnings := []string{}
 	if completed.Phase == project.SurfacePhaseVerified {
 		report.Workspace = &project.Workspace{Session: options.Session, Ref: *completed.Ref}
 		focusError = presentation.FocusProjectWorkspace(command.Context(), *completed.Ref)
 		report.Focused = focusError == nil
+		if focusError == nil {
+			if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), *completed.Ref, record.Name); warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
 	}
+	report.Warnings = warnings
 	if err := writeProjectPresentation(command.OutOrStdout(), report, options.JSON); err != nil {
 		return err
 	}
@@ -286,10 +350,11 @@ func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) 
 			if record.Workspace == nil || record.Workspace.Session != options.Session {
 				return projectError(fmt.Errorf("%w: project has no verified workspace in that named session", project.ErrConflict))
 			}
-			var runID string
+			var runID, threadDisplayName string
 			for _, thread := range record.Threads {
 				if thread.ID == arguments[0] {
 					runID = thread.ActiveRunID
+					threadDisplayName = thread.Name
 					break
 				}
 			}
@@ -310,7 +375,11 @@ func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) 
 			if err := presentation.FocusThread(command.Context(), record.Workspace.Ref, *operation.Ref); err != nil {
 				return projectError(err)
 			}
-			return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: arguments[0], RunID: runID, Action: "focused", Focused: true, Operation: operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown}, options.JSON)
+			warnings := []string{}
+			if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *operation.Ref, threadDisplayName); warning != "" {
+				warnings = append(warnings, warning)
+			}
+			return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: arguments[0], RunID: runID, Action: "focused", Focused: true, Operation: operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 		},
 	}
 	options.flags(command)
@@ -329,5 +398,13 @@ func writeProjectPresentation(output io.Writer, report projectPresentationReport
 		}
 	}
 	_, err := fmt.Fprintf(output, "project %s: %s (%s), focused=%t; process liveness remains unknown\n", report.ProjectID, report.Action, phase, report.Focused)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, warning := range report.Warnings {
+		if _, err := fmt.Fprintf(output, "warning: %s\n", termsafe.SafeLineMax(warning, 256)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

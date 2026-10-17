@@ -57,7 +57,11 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 				if err := presentation.FocusThread(command.Context(), record.Workspace.Ref, *operation.Ref); err != nil {
 					return projectError(err)
 				}
-				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "focused", Focused: true, Operation: &operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown}, options.JSON)
+				warnings := []string{}
+				if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *operation.Ref, thread.Name); warning != "" {
+					warnings = append(warnings, warning)
+				}
+				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "focused", Focused: true, Operation: &operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 			}
 			return createProjectThreadTimeline(command, store, record, thread, binding, presentation, options)
 		},
@@ -121,6 +125,7 @@ func createProjectThreadTimeline(command *cobra.Command, store project.Store, re
 	}
 	report := projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "create-view", Operation: &completed, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown}
 	var focusError error
+	warnings := []string{}
 	if completed.Phase == project.SurfacePhaseVerified {
 		_, freshProject, observations, inspectError := store.Inspect(command.Context(), record.ID)
 		focusError = inspectError
@@ -135,7 +140,13 @@ func createProjectThreadTimeline(command *cobra.Command, store project.Store, re
 			focusError = presentation.FocusThread(command.Context(), record.Workspace.Ref, *completed.Ref)
 		}
 		report.Focused = focusError == nil
+		if focusError == nil {
+			if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *completed.Ref, thread.Name); warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
 	}
+	report.Warnings = warnings
 	if err := writeProjectPresentation(command.OutOrStdout(), report, options.JSON); err != nil {
 		return err
 	}

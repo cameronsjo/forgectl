@@ -67,6 +67,7 @@ type Project struct {
 	Threads             []Thread           `json:"threads"`
 	Workspace           *Workspace         `json:"workspace,omitempty"`
 	SurfaceOperations   []SurfaceOperation `json:"surface_operations,omitempty"`
+	Evidence            []Evidence         `json:"evidence,omitempty"`
 }
 
 // Workspace is the durable identity of a project's native parent surface.
@@ -722,6 +723,9 @@ func validateRegistry(registry Registry) error {
 		}
 		if err := validateSurfaceOperations(record); err != nil {
 			return fmt.Errorf("%w: project %s surface operations: %v", ErrInvalidState, record.ID, err)
+		}
+		if err := validateEvidence(record); err != nil {
+			return fmt.Errorf("%w: project %s evidence: %v", ErrInvalidState, record.ID, err)
 		}
 		for _, operation := range record.SurfaceOperations {
 			if operation.Kind == SurfaceKindThread {

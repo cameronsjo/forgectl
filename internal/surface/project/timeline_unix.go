@@ -67,9 +67,11 @@ func (store Store) MailTimeline(ctx context.Context, projectID string) (MailTime
 	}
 	result := MailTimeline{
 		ProjectID:       projectID,
+		ProjectName:     safeTimelineValue(target.Name),
 		ObservedAt:      time.Now().UTC(),
 		ThreadSummaries: summaries,
 		Entries:         make([]MailObservation, 0),
+		Evidence:        target.Evidence,
 	}
 	projectFD, err := openPrivateDirectory(directoryFD, projectID)
 	if errors.Is(err, privdir.ErrAbsent) {
@@ -190,6 +192,8 @@ func inspectProjectAt(directoryFD int, projectID string) (Registry, Project, []M
 		}
 		summaries = append(summaries, MailThreadSummary{
 			ThreadID:           safeTimelineValue(thread.ID),
+			Name:               safeTimelineValue(thread.Name),
+			ActiveRunID:        safeTimelineValue(thread.ActiveRunID),
 			Role:               thread.Role,
 			Enrollment:         observation.Enrollment,
 			NativeSessionKnown: observation.NativeSessionKnown,
