@@ -110,3 +110,62 @@ func TestTasksReads_StalenessCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestEnforceStaleCeiling_Boundary: exactly the ceiling is served, one
+// nanosecond past it is refused.
+func TestEnforceStaleCeiling_Boundary(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	orig := tasksNow
+	tasksNow = func() time.Time { return now }
+	t.Cleanup(func() { tasksNow = orig })
+
+	cause := fmt.Errorf("%w: timeout", tasks.ErrUnreachable)
+	for _, tt := range []struct {
+		name    string
+		age     time.Duration
+		refused bool
+	}{
+		{"exactly 72h is served", tasksStaleCeiling, false},
+		{"72h+1ns is refused", tasksStaleCeiling + time.Nanosecond, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			err := enforceStaleCeiling(&buf, "h.example", cause, tasks.Snapshot{FetchedAt: now.Add(-tt.age)}, false)
+			if (err != nil) != tt.refused {
+				t.Fatalf("err = %v, want refused=%v", err, tt.refused)
+			}
+			if tt.refused && ExitCode(err) != exitTasksStale {
+				t.Errorf("exit = %d, want %d", ExitCode(err), exitTasksStale)
+			}
+		})
+	}
+}
+
+// TestTasksReads_LiveReadIgnoresOldCache: a 100h-old cache exists but the
+// live read succeeds, so the ceiling never applies.
+func TestTasksReads_LiveReadIgnoresOldCache(t *testing.T) {
+	isolateTasksConfigDir(t)
+	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
+	deps := module.Deps{Runner: runner, Theme: theme.Default()}
+	if _, _, err := runTasksCmd(t, deps, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	cachePath, err := config.TasksCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := tasks.LoadCache(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.FetchedAt = time.Now().Add(-100 * time.Hour)
+	if err := tasks.SaveCache(cachePath, snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"ls"}, {"ready", "--json"}, {"show", "1", "--json"}} {
+		stdout, stderr, err := runTasksCmd(t, deps, args...)
+		if err != nil || stderr != "" || stdout == "" {
+			t.Errorf("%v: err=%v stderr=%q stdout=%q, want a clean live read", args, err, stderr, stdout)
+		}
+	}
+}

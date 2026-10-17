@@ -48,6 +48,10 @@ const (
 // --allow-stale. A constant: forgectl has no [tasks] knob for it (#1289).
 const tasksStaleCeiling = 72 * time.Hour
 
+// tasksNow is the clock enforceStaleCeiling reads, a seam so a test can pin
+// the boundary exactly.
+var tasksNow = time.Now
+
 // tasksModule declares the tasks extension (ADR-0005): a credentialed Vikunja
 // client, a local cache, three read verbs (ls/show/ready), one write verb
 // (done), and an MCP server over the same client (mcp). It owns the [tasks]
@@ -568,7 +572,7 @@ func cachedTasksSnapshot(cause error) (snap tasks.Snapshot, cacheCause error, er
 
 func addAllowStaleFlag(cmd *cobra.Command, v *bool) {
 	cmd.Flags().BoolVar(v, "allow-stale", false,
-		"serve a cache older than "+tasksStaleCeiling.String()+" instead of refusing (exit 7)")
+		"serve a cache older than "+strconv.Itoa(int(tasksStaleCeiling.Hours()))+"h instead of refusing (exit 7)")
 }
 
 // enforceStaleCeiling prints the cache-fallback notice and, when the cache is
@@ -576,7 +580,7 @@ func addAllowStaleFlag(cmd *cobra.Command, v *bool) {
 // refuses with exit 7. The caller returns before writing anything to stdout.
 func enforceStaleCeiling(stderr io.Writer, host string, cause error, snap tasks.Snapshot, allowStale bool) error {
 	reportCacheFallback(stderr, host, cause, snap)
-	if cause == nil || allowStale || time.Since(snap.FetchedAt) <= tasksStaleCeiling {
+	if cause == nil || allowStale || tasksNow().Sub(snap.FetchedAt) <= tasksStaleCeiling {
 		return nil
 	}
 	return WithExitCode(fmt.Errorf("tasks: refusing data older than %dh; pass --allow-stale to use it",
