@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -314,5 +315,54 @@ func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
 	}
 	if got := ExitCode(err); got != exitTasksHostRefused {
 		t.Fatalf("ExitCode = %d, want %d (host refused)", got, exitTasksHostRefused)
+	}
+}
+
+// TestTasksLs_CacheFallbackNamesCauseAndAge pins #1289: a fallback to cache
+// names the underlying error and the cache age, and is marked STALE so it can
+// never read as fresh data. A later live read after that failure serves fresh
+// data with no notice (the failure leaves nothing sticky).
+func TestTasksLs_CacheFallbackNamesCauseAndAge(t *testing.T) {
+	isolateTasksConfigDir(t)
+	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
+	deps := module.Deps{Runner: runner, Theme: theme.Default()}
+
+	if _, stderr, err := runTasksCmd(t, deps, "ls"); err != nil || stderr != "" {
+		t.Fatalf("seeding live read: err=%v stderr=%q", err, stderr)
+	}
+
+	cachePath, err := config.TasksCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := tasks.LoadCache(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.FetchedAt = time.Now().Add(-286 * time.Hour)
+	if err := tasks.SaveCache(cachePath, snap); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := newTasksClient
+	t.Cleanup(func() { newTasksClient = orig })
+	newTasksClient = func(context.Context, exec.Runner, string, tasks.Token) (*tasks.Client, error) {
+		return nil, fmt.Errorf("%w: dial tcp 192.168.1.102:443: connect: no route to host", tasks.ErrUnreachable)
+	}
+	_, stderr, err := runTasksCmd(t, deps, "ls")
+	if err != nil {
+		t.Fatalf("fallback ls: %v", err)
+	}
+	for _, want := range []string{"STALE", "no route to host", "286h", "Local Network"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("fallback notice %q lacks %q", stderr, want)
+		}
+	}
+
+	newTasksClient = orig
+	_, runner2 := withFakeTasksBackend(t, fakeVikunjaHandler(t))
+	deps.Runner = runner2
+	if _, stderr, err := runTasksCmd(t, deps, "ls"); err != nil || stderr != "" {
+		t.Fatalf("live read after a prior failure: err=%v stderr=%q, want fresh data and no notice", err, stderr)
 	}
 }
