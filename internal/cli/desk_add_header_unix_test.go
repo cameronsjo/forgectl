@@ -24,6 +24,7 @@ func TestDeskAdd_FileHeaderAndFlagCombinations(t *testing.T) {
 		wantErr  string // substring of stderr on refusal
 	}{
 		{"file only", nil, 0, true, ""},
+		{"file only, padded values", nil, 0, true, ""},
 		{"flags match the file", []string{"--what", "merge it", "--why", "you own merges"}, 0, true, ""},
 		{"what differs", []string{"--what", "something else"}, 1, false, "differs from --what"},
 		{"why differs", []string{"--why", "another reason"}, 1, false, "differs from --why"},
@@ -31,7 +32,11 @@ func TestDeskAdd_FileHeaderAndFlagCombinations(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			newDeskDir(t)
-			src := writeTemp(t, "m.sh", body)
+			b := body
+			if strings.Contains(c.name, "padded") {
+				b = "#!/bin/bash\n# WHAT: merge it \n# WHY:\tyou own merges  \necho hi\n"
+			}
+			src := writeTemp(t, "m.sh", b)
 			args := append([]string{"add", src, "--json"}, c.args...)
 			out, errOut, err := deskRun(t, deskDeps(), args...)
 			wantExit(t, err, c.wantExit)
@@ -49,8 +54,8 @@ func TestDeskAdd_FileHeaderAndFlagCombinations(t *testing.T) {
 			if rerr != nil {
 				t.Fatal(rerr)
 			}
-			if c.wantSame && string(got) != body {
-				t.Errorf("queued bytes differ from the source:\n%q\nwant\n%q", got, body)
+			if c.wantSame && string(got) != b {
+				t.Errorf("queued bytes differ from the source:\n%q\nwant\n%q", got, b)
 			}
 		})
 	}
