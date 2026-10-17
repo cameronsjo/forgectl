@@ -2,7 +2,9 @@ package mail
 
 import (
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRegisterTeamRebindsExplicitly(t *testing.T) {
@@ -33,6 +35,148 @@ func TestRegisterTeamRebindsExplicitly(t *testing.T) {
 	if err != nil || stored.RunID != rebound.RunID || !stored.Coordinator {
 		t.Fatalf("refused registration changed stored identity: %#v, %v", stored, err)
 	}
+}
+
+func TestRegisterSameRunSupportsNoOpAndSessionEnrichment(test *testing.T) {
+	roster := FileRoster{Dir: test.TempDir()}
+	initialMember := Worker{
+		Name:        "lead",
+		Harness:     HarnessCodex,
+		Worktree:    test.TempDir(),
+		Coordinator: true,
+		RunID:       "run-1",
+		Socket:      "/tmp/isolated.sock",
+		PaneID:      "pane-1",
+	}
+	registeredMember, err := roster.Register(initialMember, false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	stateAt := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	if err := roster.Update(initialMember.Name, func(currentMember *Worker) error {
+		currentMember.State = StateIdle
+		currentMember.StateAt = stateAt
+		currentMember.Watchers = []string{"observer"}
+		return nil
+	}); err != nil {
+		test.Fatal(err)
+	}
+	beforeEnrichment, err := roster.Get(initialMember.Name)
+	if err != nil {
+		test.Fatal(err)
+	}
+
+	noOpResult, err := roster.Register(initialMemberWithRunID(initialMember, registeredMember.RunID), true)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if !reflect.DeepEqual(noOpResult, beforeEnrichment) {
+		test.Fatalf("same-run no-op result = %#v, want %#v", noOpResult, beforeEnrichment)
+	}
+	noOpStored, err := roster.Get(initialMember.Name)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if !reflect.DeepEqual(noOpStored, beforeEnrichment) {
+		test.Fatalf("same-run no-op changed roster: %#v, want %#v", noOpStored, beforeEnrichment)
+	}
+
+	enrichmentRequest := initialMemberWithRunID(initialMember, registeredMember.RunID)
+	enrichmentRequest.ThreadID = "thread-1"
+	enrichedMember, err := roster.Register(enrichmentRequest, true)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if enrichedMember.RunID != registeredMember.RunID || enrichedMember.ThreadID != enrichmentRequest.ThreadID || enrichedMember.State != beforeEnrichment.State || !enrichedMember.StateAt.Equal(beforeEnrichment.StateAt) || !reflect.DeepEqual(enrichedMember.Watchers, beforeEnrichment.Watchers) {
+		test.Fatalf("session enrichment result = %#v, want run/session and preserved state %#v", enrichedMember, beforeEnrichment)
+	}
+	storedEnrichedMember, err := roster.Get(initialMember.Name)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if !reflect.DeepEqual(storedEnrichedMember, enrichedMember) {
+		test.Fatalf("stored enrichment = %#v, returned %#v", storedEnrichedMember, enrichedMember)
+	}
+}
+
+func TestRegisterSameRunRefusalsDoNotMutateRoster(test *testing.T) {
+	roster := FileRoster{Dir: test.TempDir()}
+	registeredMember, err := roster.Register(Worker{
+		Name:        "lead",
+		Harness:     HarnessCodex,
+		Worktree:    test.TempDir(),
+		Coordinator: true,
+		RunID:       "run-1",
+		Socket:      "/tmp/isolated.sock",
+		PaneID:      "pane-1",
+		ThreadID:    "thread-1",
+	}, false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	beforeRefusal, err := roster.List()
+	if err != nil {
+		test.Fatal(err)
+	}
+	otherWorktree := test.TempDir()
+	refusalCases := []struct {
+		name   string
+		mutate func(*Worker)
+	}{
+		{name: "native-session-change", mutate: func(request *Worker) { request.ThreadID = "thread-2" }},
+		{name: "native-session-clear", mutate: func(request *Worker) { request.ThreadID = "" }},
+		{name: "worktree-change", mutate: func(request *Worker) { request.Worktree = otherWorktree }},
+		{name: "pane-change", mutate: func(request *Worker) { request.PaneID = "pane-2" }},
+		{name: "socket-change", mutate: func(request *Worker) { request.Socket = "/tmp/other.sock" }},
+		{name: "harness-change", mutate: func(request *Worker) { request.Harness = HarnessPi }},
+		{name: "coordinator-role-change", mutate: func(request *Worker) { request.Coordinator = false }},
+	}
+	assertRefusal := func(caseName string, refusalRequest Worker) {
+		if _, err := roster.Register(refusalRequest, true); err == nil {
+			test.Fatalf("refusal case %s was accepted: %#v", caseName, refusalRequest)
+		}
+		afterRefusal, listErr := roster.List()
+		if listErr != nil {
+			test.Fatal(listErr)
+		}
+		if !reflect.DeepEqual(afterRefusal, beforeRefusal) {
+			test.Fatalf("refusal case %s mutated roster: %#v, want %#v", caseName, afterRefusal, beforeRefusal)
+		}
+	}
+	for _, refusalCase := range refusalCases {
+		refusalRequest := registeredMember
+		refusalCase.mutate(&refusalRequest)
+		assertRefusal(refusalCase.name, refusalRequest)
+	}
+	assertRefusal("duplicate-run-member", Worker{
+		Name:     "other",
+		Harness:  HarnessCodex,
+		RunID:    registeredMember.RunID,
+		Socket:   "/tmp/other.sock",
+		ThreadID: "thread-other",
+		Worktree: otherWorktree,
+	})
+}
+
+func TestRegisterFreshRunAllowsIdentityReplacement(test *testing.T) {
+	roster := FileRoster{Dir: test.TempDir()}
+	initialMember := Worker{Name: "lead", Harness: HarnessCodex, Worktree: test.TempDir(), Coordinator: true, RunID: "run-1", Socket: "/tmp/isolated.sock", ThreadID: "thread-1"}
+	if _, err := roster.Register(initialMember, false); err != nil {
+		test.Fatal(err)
+	}
+	replacementMember := Worker{Name: initialMember.Name, Harness: HarnessCodex, Worktree: test.TempDir(), Coordinator: true, RunID: "run-2", Socket: "/tmp/replacement.sock", ThreadID: "thread-2"}
+	replacedMember, err := roster.Register(replacementMember, true)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if replacedMember.RunID != replacementMember.RunID || replacedMember.Worktree != replacementMember.Worktree || replacedMember.Socket != replacementMember.Socket || replacedMember.ThreadID != replacementMember.ThreadID {
+		test.Fatalf("fresh-run replacement = %#v, want %#v", replacedMember, replacementMember)
+	}
+}
+
+func initialMemberWithRunID(member Worker, runID string) Worker {
+	member.RunID = runID
+	return member
 }
 
 func TestExplicitTeamIdentity(t *testing.T) {

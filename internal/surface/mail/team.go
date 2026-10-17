@@ -50,6 +50,9 @@ func (roster FileRoster) Register(member Worker, replace bool) (Worker, error) {
 	err := roster.locked(func(contents *rosterFile) error {
 		index := -1
 		for position, existing := range contents.Workers {
+			if existing.RunID != "" && existing.RunID == member.RunID && existing.Name != member.Name {
+				return fmt.Errorf("run id %s already belongs to member %s", quoteTrunc(member.RunID), quoteTrunc(existing.Name))
+			}
 			if existing.Name == member.Name {
 				if !replace {
 					return fmt.Errorf("member %s already exists; use --replace to rebind it", quoteTrunc(member.Name))
@@ -60,10 +63,27 @@ func (roster FileRoster) Register(member Worker, replace bool) (Worker, error) {
 			}
 		}
 		if index >= 0 {
-			if contents.Workers[index].Coordinator != member.Coordinator {
+			existing := contents.Workers[index]
+			if existing.Coordinator != member.Coordinator {
 				return errors.New("replacement must preserve the member's coordinator role")
 			}
-			member.Watchers = contents.Workers[index].Watchers
+			if existing.RunID == member.RunID {
+				if !sameRunIdentity(existing, member) {
+					return errors.New("same run id cannot change the member identity")
+				}
+				switch {
+				case existing.ThreadID == member.ThreadID:
+					member = existing
+				case existing.ThreadID == "" && member.ThreadID != "":
+					existing.ThreadID = member.ThreadID
+					member = existing
+					contents.Workers[index] = existing
+				default:
+					return errors.New("same run id cannot change the native session")
+				}
+				return nil
+			}
+			member.Watchers = existing.Watchers
 			contents.Workers[index] = member
 		} else {
 			contents.Workers = append(contents.Workers, member)
@@ -71,4 +91,13 @@ func (roster FileRoster) Register(member Worker, replace bool) (Worker, error) {
 		return nil
 	})
 	return member, err
+}
+
+func sameRunIdentity(existing, candidate Worker) bool {
+	return existing.Name == candidate.Name &&
+		existing.Coordinator == candidate.Coordinator &&
+		existing.Harness == candidate.Harness &&
+		existing.Worktree == candidate.Worktree &&
+		existing.Socket == candidate.Socket &&
+		existing.PaneID == candidate.PaneID
 }

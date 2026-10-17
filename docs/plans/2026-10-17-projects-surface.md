@@ -39,6 +39,8 @@ P1 uses `internal/surface/project` for the versioned registry and `internal/cli/
 
 The registry stores logical identity and bounded context only in P1, not speculative herdr fields or native liveness. P2 introduces immutable run binding snapshots/history plus capability-specific native observations. Enrollment status (`unbound`, `current`, or `stale`) is separate from missing native evidence and unknown process liveness.
 
+P2 binding snapshots never update automatically. An explicit repeat bind of the active RunID may fill an empty native-session field once, with an exact match of every other identity field; a known native session never changes within a run. Until that explicit refresh, a changed roster tuple is stale. Project membership comes from the deterministic private ledger, not a shared working directory: a worker may have its own Git worktree, whose exact path is captured in the binding. Standalone team registration rejects current-member RunID collisions; the project's history additionally rejects historical RunID reuse. These are same-user consistency guards, not authentication against manual state edits.
+
 ## Requirements and acceptance
 
 1. Project and thread IDs MUST survive fresh CLI processes and native-session replacement. Two projects using the same working directory MUST remain distinct. A thread MUST belong to exactly one project; run identities MUST not be rebound to another thread.
@@ -82,3 +84,5 @@ Native source/help evidence establishes different UI capabilities: Codex `resume
 ## Completion evidence
 
 None yet for the Projects interface. The accepted Hermes and Codex/Pi receipts are prerequisites, not substitutes for this plan's acceptance.
+
+P2 enrollment prerequisite: team registration now permits a same-RunID replacement only as an exact identity no-op or one-way native-session discovery. It preserves observed state and watchers, rejects identity/session changes and another current member's RunID, and still mints a fresh ID when omitted. Codex independently ran `go test ./internal/surface/mail -count=1`, the `TestRegister` race tests, and both verifier contract scripts successfully on the changed source. These checks use fixtures and local sockets; they do not replace P5 live acceptance. Project binding and historical-run validation remain pending.
