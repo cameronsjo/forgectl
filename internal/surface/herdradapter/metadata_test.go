@@ -33,7 +33,7 @@ func TestShowWorkerName(t *testing.T) {
 		assertArgv(t, cmd, []exec.Arg{exec.MustFixed("--session"), exec.Opaque(a.Session()),
 			exec.MustFixed("workspace"), exec.MustFixed("report-metadata"), exec.Opaque(wsA),
 			exec.MustFixed("--source"), exec.MustFixed(MetadataSource),
-			exec.MustFixed("--token"), exec.Opaque("worker=fix-login")})
+			exec.MustFixed("--token"), exec.Opaque("forgectl_worker=fix-login")})
 	})
 
 	t.Run("a workspace without our marker is never written", func(t *testing.T) {

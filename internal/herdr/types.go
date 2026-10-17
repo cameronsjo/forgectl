@@ -35,11 +35,14 @@ type AgentSession struct {
 // Agent, AgentSession, and the cwd fields are empty for a pane that has none
 // (herdr reports them as null).
 type Pane struct {
-	PaneID                string        `json:"pane_id"`
-	TabID                 string        `json:"tab_id"`
-	WorkspaceID           string        `json:"workspace_id"`
-	TerminalID            string        `json:"terminal_id"`
-	Agent                 string        `json:"agent"`
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	TerminalID  string `json:"terminal_id"`
+	Agent       string `json:"agent"`
+	// Name is the agent's herdr name (`herdr agent rename`); empty when it has
+	// none. Untrusted text, like every herdr field.
+	Name                  string        `json:"name"`
 	AgentSession          *AgentSession `json:"agent_session"`
 	AgentStatus           string        `json:"agent_status"`
 	CWD                   string        `json:"cwd"`

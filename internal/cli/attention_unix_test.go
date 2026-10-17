@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -689,6 +690,56 @@ func TestHerdrRunsRefusesAnAmbiguousSession(t *testing.T) {
 	for _, pane := range []string{"w1:p2", "w9:p9"} {
 		if herdrRuns(two, "s", pane, attnSocket) {
 			t.Errorf("a session two panes claim vouched for %s", pane)
+		}
+	}
+}
+
+// TestAttentionAgentNames pins that herdr's agent name leads the names the
+// worker-prefix match reads, and that a row with no name falls back to the
+// worktree and directory basenames (forgectl#1286).
+func TestAttentionAgentNames(t *testing.T) {
+	cases := []struct {
+		name string
+		a    herdr.Agent
+		want []string
+	}{
+		{"name first", herdr.Agent{Pane: herdr.Pane{PaneID: "w1:p2", Name: "cos-x", CWD: "/r/free-form"}}, []string{"cos-x", "free-form"}},
+		{"no name: basenames", herdr.Agent{Pane: herdr.Pane{PaneID: "w1:p2", CWD: "/r/free-form"}}, []string{"free-form"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := attentionAgent(c.a).Names; !slices.Equal(got, c.want) {
+				t.Errorf("names = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAttentionWorkerOriginFromAgentName: a worker whose worktree is not
+// named cos-* is still tagged worker by the name `herdr agent list` reports
+// (forgectl#1286). This is the live path: herdr JSON in, row origin out.
+func TestAttentionWorkerOriginFromAgentName(t *testing.T) {
+	newAttnEnv(t)
+	body, _ := json.Marshal(map[string]any{"id": "cli:agent:list", "result": map[string]any{"agents": []map[string]any{{
+		"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle", "cwd": "/Users/x/wt/free-form", "name": "cos-fix-12",
+		"agent_session": map[string]any{"agent": "claude", "kind": "id", "source": "herdr:claude", "value": attnSession},
+	}}}})
+	deps := module.Deps{Runner: &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "herdr" && strings.Join(args, " ") == "agent list" {
+			return string(body), nil
+		}
+		return "", fmt.Errorf("unexpected %s %v", name, args)
+	}}}
+	if _, errOut, err := attnRun(t, deps, attnReply, "put", "--session", attnSession, "--turn", "t1", "--pane", "w1:p2", "--socket", attnSocket); err != nil {
+		t.Fatalf("put: %v\n%s", err, errOut)
+	}
+	rows := attnList(t, deps).Rows
+	if len(rows) == 0 {
+		t.Fatal("no rows")
+	}
+	for _, r := range rows {
+		if r.Origin != attention.OriginWorker {
+			t.Errorf("row from agent cos-fix-12 in a free-form worktree = %+v, want origin worker", r)
 		}
 	}
 }
