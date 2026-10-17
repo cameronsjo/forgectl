@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
 Status: Codex/Pi collaboration and native Codex-to-Pi coordinator handoff accepted; Claude, Hermes, and Projects remain staged
-Next action: resolve the Hermes native-auth setup choice while preserving Cameron's OpenAI-only traffic constraint; do not skip the remaining harness acceptance gates to build Projects.
+Next action: create the authorized isolated Hermes environment, import credentials through its native flow, and prove the same collaboration contract while preserving OpenAI-only traffic.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
@@ -67,7 +67,15 @@ The next approved host-level attempt received an OpenAI usage-limit error during
 
 Cameron requested that model traffic stay on OpenAI. Codex has not enabled Anthropic or OpenRouter traffic, installed a translation gateway, or changed global authentication. No verified OpenAI-only native Claude route is available from this investigation; Claude live acceptance remains deferred under that constraint, not declared impossible.
 
-On the 2026-10-17 continuation, read-only checks still found no `hermes` executable, no `~/.hermes/auth.json`, and no `OPENAI_API_KEY` in the process environment. The inspected Hermes source supports a native import of existing Codex credentials into Hermes's own auth store, but that import is a new credential copy. Codex asked whether Cameron permits a disposable Hermes environment and this native credential import; no answer has been received. Do not perform the import, mutate the third-party Hermes checkout, or route through a production relay without the corresponding authorization. A native configured OpenAI credential path is required before Hermes live acceptance.
+On the 2026-10-17 continuation, read-only checks found no `hermes` executable, no `~/.hermes/auth.json`, and no `OPENAI_API_KEY` in the process environment. Codex asked whether Cameron permits an isolated Hermes setup and its native import of Codex credentials into a private authentication store. Cameron answered “Make it happen,” authorizing that setup. This does not authorize another model provider, changes to existing global authentication, mutation of the third-party Hermes checkout, or use of a production relay.
+
+### Next bounded unit: native Hermes participation
+
+- [ ] Install the pinned, locally inspected Hermes source into a private temporary environment, without modifying the third-party source checkout or installing a global command.
+- [ ] Use Hermes's native Codex-credential import into a separate private `HERMES_HOME`; verify the native selected provider and model without printing tokens or placing them in the task ledger. Preserve the existing Codex auth file.
+- [ ] Reuse the smallest verified native session protocol and existing forgectl delivery contract; retain native permission checks and distinguish receipt, native consumption, turn completion, and independently checked output.
+- [ ] Prove real Hermes participation, interruption/restart behavior, and selected-session delivery with disposable task-owned processes. Keep uncertain delivery visible rather than resending blindly.
+- [ ] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
 
 Projects remains behind the agreed harness acceptance sequence. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items are deferred here, not silently dropped or marked complete.
 
