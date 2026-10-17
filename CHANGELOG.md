@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.50.0](https://github.com/cameronsjo/forgectl/compare/v0.49.0...v0.50.0) (2026-10-17)
+
+
+### Features
+
+* **tasks:** refuse a board cache older than 72h unless --allow-stale ([ab6a380](https://github.com/cameronsjo/forgectl/commit/ab6a38022501cac6c59115622453a776487716b2))
+* **tasks:** refuse a board cache older than 72h unless --allow-stale ([c8dbb5b](https://github.com/cameronsjo/forgectl/commit/c8dbb5b869d26df1bb4f248a003b06b37e340533))
+
+
+### Bug Fixes
+
+* **herdradapter:** rename WorkerNameToken to WorkerNameKey; wrap help ([8298c25](https://github.com/cameronsjo/forgectl/commit/8298c258c2520766ba594b6cc6dee078b74385cf))
+* **herdradapter:** tag workers by agent name; namespace the worker token ([7a78531](https://github.com/cameronsjo/forgectl/commit/7a785317277f8212fc4fa387f700301e973f6365))
+* **herdradapter:** tag workers by herdr agent name; namespace the worker token ([9b14f72](https://github.com/cameronsjo/forgectl/commit/9b14f72de59e87c651a9f50d02091a21e0db214f))
+* **tasks:** add stale field to show --json, gate the hint, tighten tests ([bcca30a](https://github.com/cameronsjo/forgectl/commit/bcca30af7bb00a35b839e1f6f03bbd0d362bb46a))
+* **tasks:** name the cause and mark stale data on cache fallback ([42623f3](https://github.com/cameronsjo/forgectl/commit/42623f30c1c860f1f752dec61e393b570883f176))
+* **tasks:** name the cause and mark stale data when serving the cache ([e77a7fe](https://github.com/cameronsjo/forgectl/commit/e77a7fedcf955416c008a6b4993b428bb73abe54))
+* **tasks:** pin the 72h ceiling boundary with a clock seam ([469ac2b](https://github.com/cameronsjo/forgectl/commit/469ac2b3b18993a5ac57c7781c5f6f8ee72b6a38))
+
 ## [0.49.0](https://github.com/cameronsjo/forgectl/compare/v0.48.0...v0.49.0) (2026-10-16)
 
 
