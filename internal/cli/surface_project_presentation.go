@@ -24,9 +24,14 @@ type projectPresentation interface {
 	StartProjectWorkspace(context.Context, backend.StartSpec, func(backend.ServerID, backend.EndpointID) error) backend.StartResult
 	FocusProjectWorkspace(context.Context, backend.Ref) error
 	FocusThread(context.Context, backend.Ref, backend.Ref) error
+	ThreadAdapter(backend.Ref) (backend.Capabilities, error)
 }
 
 type projectHerdrPresentation struct{ *herdradapter.Adapter }
+
+func (presentation projectHerdrPresentation) ThreadAdapter(parent backend.Ref) (backend.Capabilities, error) {
+	return presentation.ForProjectTab(parent)
+}
 
 func (presentation projectHerdrPresentation) FocusThread(ctx context.Context, parent, child backend.Ref) error {
 	adapter, err := presentation.ForProjectTab(parent)
@@ -236,7 +241,14 @@ func projectWorkspaceFinish(result backend.StartResult, tag backend.RecoveryTag)
 }
 
 func projectTimelineBootstrap(self, root, projectID string) (backend.BootstrapCommand, error) {
+	return projectThreadTimelineBootstrap(self, root, projectID, "")
+}
+
+func projectThreadTimelineBootstrap(self, root, projectID, threadID string) (backend.BootstrapCommand, error) {
 	words := []string{self, "surface", "project", "--root", root, "timeline", projectID, "--live"}
+	if threadID != "" {
+		words = append(words, "--thread", threadID)
+	}
 	for index, word := range words {
 		quoted, err := shellQuote(word)
 		if err != nil {
@@ -284,7 +296,7 @@ func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) 
 			var operation *project.SurfaceOperation
 			for index := range record.SurfaceOperations {
 				candidate := &record.SurfaceOperations[index]
-				if candidate.Kind == project.SurfaceKindThread && candidate.ThreadID == arguments[0] && candidate.RunID == runID && candidate.Phase == project.SurfacePhaseVerified {
+				if candidate.Kind == project.SurfaceKindThread && candidate.ThreadID == arguments[0] && candidate.RunID == runID && candidate.Phase == project.SurfacePhaseVerified && candidate.Retirement == nil {
 					operation = candidate
 				}
 			}
@@ -312,6 +324,9 @@ func writeProjectPresentation(output io.Writer, report projectPresentationReport
 	phase := "verified surface identity"
 	if report.Operation != nil {
 		phase = string(report.Operation.Phase)
+		if report.Operation.Retirement != nil {
+			phase += "; view retirement=" + string(report.Operation.Retirement.Phase)
+		}
 	}
 	_, err := fmt.Fprintf(output, "project %s: %s (%s), focused=%t; process liveness remains unknown\n", report.ProjectID, report.Action, phase, report.Focused)
 	return err

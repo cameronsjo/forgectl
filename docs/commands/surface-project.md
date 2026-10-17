@@ -72,7 +72,15 @@ forgectl surface project --root /absolute/private/projects \
   open PROJECT_ID --session projects-test --herdr-binary /absolute/herdr --json
 
 forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID open THREAD_ID --view timeline \
+  --session projects-test --herdr-binary /absolute/herdr --json
+
+forgectl surface project --root /absolute/private/projects \
   thread --project PROJECT_ID focus THREAD_ID \
+  --session projects-test --herdr-binary /absolute/herdr --json
+
+forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID close-view THREAD_ID --operation OPERATION_ID \
   --session projects-test --herdr-binary /absolute/herdr --json
 ```
 
@@ -80,7 +88,11 @@ forgectl surface project --root /absolute/private/projects \
 
 References bind generated ownership markers to the server incarnation, endpoint, workspace, tab, pane, and stable terminal. Display labels are not ownership. Changed or duplicate markers, moved/replaced terminals, or server turnover are refused. An ambiguous creation remains `unknown` rather than allowing an automatic retry. Inspect `show --json` for `surface_operations`; do not delete the registry or manually alter phases to force a retry. Automatic recovery/retirement of unresolved operations is not provided by this slice.
 
-Presentation reports include the registry revision, exact IDs, `focused`, and any operation/workspace identity. `verified` describes the saved surface, not proof that its viewer or a native harness is still running. If creation is recorded but focus fails, the command reports `focused: false` and exits `1`; a later `open` attempts only focus. Thread focus requires a current enrollment and a verified tab for that exact active run. It never silently creates a tab, resumes native history, or launches another writer. Native thread launch/attachment remains under integration.
+`thread open --view timeline` explicitly creates a read-only thread timeline tab inside the saved project workspace. It requires current enrollment, journals intent before the tab mutation, and keeps the logical thread and native run separate from the view's operation ID. Repeating the command focuses its existing verified view. Unsupported views fail rather than silently choosing a different native interface or starting another history writer.
+
+`thread close-view` closes only the exact saved presentation operation, never the project workspace or enrolled native server. It may retire an old run's view after enrollment replacement, but cannot focus that stale run. Closure has its own `pending`/`closed`/`already_gone`/`unknown` evidence and preserves the original creation reference. Proven closure permits reopening a view of the same current RunID; closing a UI is not native process replacement. An unresolved close blocks another view. Legacy operations without a recorded presentation kind cannot be closed automatically. These are surface-identity checks, not native-process termination evidence.
+
+Presentation reports include the registry revision, exact IDs, `focused`, and any operation/workspace identity. `verified` describes the saved surface, not proof that its viewer or a native harness is still running. If creation is recorded but focus fails, the command reports `focused: false` and exits `1`; a later `open` attempts only focus. Thread focus requires a current enrollment and a verified, non-retired tab for that exact active run. It never silently creates a tab, resumes native history, or launches another writer. Native thread attachment remains under integration.
 
 ## Persistence and refusals
 
@@ -92,6 +104,6 @@ Exit codes: `0` for completed creation, binding, or inspection; `1` for state/st
 
 ## Remaining integration
 
-These commands remain a source-build integration, not a complete accepted Projects interface. Native thread launch/attachment, model-turn and artifact-verification evidence, explicit surface retirement, and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
+These commands remain a source-build integration, not a complete accepted Projects interface. Native thread attachment, model-turn and artifact-verification evidence, and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
 
 The existing [team mailbox](surface-team.md) remains the communication authority. Project context and teammate messages never count as operator approval. Desk's human approval queue remains separate from read-only project monitoring.

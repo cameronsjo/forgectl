@@ -220,6 +220,8 @@ func newSurfaceProjectThreadCmd(deps module.Deps, root *string) *cobra.Command {
 	command.AddCommand(newSurfaceProjectThreadBindCmd(root, &projectID))
 	command.AddCommand(newSurfaceProjectThreadContextCmd(root, &projectID))
 	command.AddCommand(newSurfaceProjectThreadFocusCmd(deps, root, &projectID))
+	command.AddCommand(newSurfaceProjectThreadOpenCmd(deps, root, &projectID))
+	command.AddCommand(newSurfaceProjectThreadCloseViewCmd(deps, root, &projectID))
 	return command
 }
 

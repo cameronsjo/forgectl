@@ -27,6 +27,14 @@ type projectPresentationFixture struct {
 	focusError     error
 	lastParent     backend.Ref
 	lastChild      backend.Ref
+	threadAdapter  backend.Capabilities
+}
+
+func (fixture *projectPresentationFixture) ThreadAdapter(backend.Ref) (backend.Capabilities, error) {
+	if fixture.threadAdapter == nil {
+		return nil, errors.New("thread adapter is not configured")
+	}
+	return fixture.threadAdapter, nil
 }
 
 func (fixture *projectPresentationFixture) StartProjectWorkspace(ctx context.Context, spec backend.StartSpec, before func(backend.ServerID, backend.EndpointID) error) backend.StartResult {
@@ -182,7 +190,7 @@ func TestSurfaceProjectFocusChecksBindingAndNeverCreates(test *testing.T) {
 		test.Fatal(err)
 	}
 	child := projectPresentationTestRef(test, childTag, "w1:t2", "w1:p2", "terminal-2")
-	_, operation, err = store.BeginThread(test.Context(), created.Project.ID, created.Project.CoordinatorThreadID, member.RunID, "projects-test", childTag, parent)
+	_, operation, err = store.BeginThread(test.Context(), created.Project.ID, created.Project.CoordinatorThreadID, member.RunID, "projects-test", project.SurfacePresentationTimeline, childTag, parent)
 	if err != nil {
 		test.Fatal(err)
 	}

@@ -550,16 +550,35 @@ func checkSchemaKeys(data []byte) error {
 				if err := json.Unmarshal(operationRaw, &operation); err != nil {
 					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
 				}
-				if err := checkKeys(operation, "id", "kind", "thread_id", "run_id", "session", "tag", "expected_server", "expected_endpoint", "parent", "phase", "ref", "started_at", "finished_at", "error_category"); err != nil {
+				if err := checkKeys(operation, "id", "kind", "thread_id", "run_id", "presentation", "session", "tag", "expected_server", "expected_endpoint", "parent", "phase", "ref", "started_at", "finished_at", "error_category", "retirement"); err != nil {
 					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
 				}
 				if err := requireFields(operation, "id", "kind", "session", "tag", "expected_server", "expected_endpoint", "phase", "started_at"); err != nil {
 					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
 				}
 				for key, value := range operation {
-					if key == "thread_id" || key == "run_id" || key == "expected_endpoint" || key == "parent" || key == "ref" || key == "finished_at" || key == "error_category" {
+					if key == "thread_id" || key == "run_id" || key == "presentation" || key == "expected_endpoint" || key == "parent" || key == "ref" || key == "finished_at" || key == "error_category" || key == "retirement" {
 						if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 							return fmt.Errorf("projects[%d].surface_operations[%d].%s is null", projectIndex, operationIndex, key)
+						}
+					}
+				}
+				if retirement, present := operation["retirement"]; present {
+					var retirementObject map[string]json.RawMessage
+					if err := json.Unmarshal(retirement, &retirementObject); err != nil {
+						return fmt.Errorf("projects[%d].surface_operations[%d].retirement: %w", projectIndex, operationIndex, err)
+					}
+					if err := checkKeys(retirementObject, "id", "phase", "started_at", "finished_at", "error_category"); err != nil {
+						return fmt.Errorf("projects[%d].surface_operations[%d].retirement: %w", projectIndex, operationIndex, err)
+					}
+					if err := requireFields(retirementObject, "id", "phase", "started_at"); err != nil {
+						return fmt.Errorf("projects[%d].surface_operations[%d].retirement: %w", projectIndex, operationIndex, err)
+					}
+					for key, value := range retirementObject {
+						if key == "finished_at" || key == "error_category" {
+							if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+								return fmt.Errorf("projects[%d].surface_operations[%d].retirement.%s is null", projectIndex, operationIndex, key)
+							}
 						}
 					}
 				}

@@ -84,6 +84,13 @@ const (
 	SurfaceKindThread    SurfaceKind = "thread"
 )
 
+type SurfacePresentation string
+
+const (
+	SurfacePresentationTimeline    SurfacePresentation = "timeline"
+	SurfacePresentationCodexRemote SurfacePresentation = "codex-remote"
+)
+
 type SurfacePhase string
 
 const (
@@ -91,6 +98,15 @@ const (
 	SurfacePhaseVerified SurfacePhase = "verified"
 	SurfacePhaseFailed   SurfacePhase = "failed"
 	SurfacePhaseUnknown  SurfacePhase = "unknown"
+)
+
+type SurfaceRetirementPhase string
+
+const (
+	RetirementPending     SurfaceRetirementPhase = "pending"
+	RetirementClosed      SurfaceRetirementPhase = "closed"
+	RetirementAlreadyGone SurfaceRetirementPhase = "already_gone"
+	RetirementUnknown     SurfaceRetirementPhase = "unknown"
 )
 
 // SurfaceErrorCategory is deliberately closed. It records a bounded operator
@@ -115,6 +131,7 @@ type SurfaceOperation struct {
 	Kind             SurfaceKind          `json:"kind"`
 	ThreadID         string               `json:"thread_id,omitempty"`
 	RunID            string               `json:"run_id,omitempty"`
+	Presentation     SurfacePresentation  `json:"presentation,omitempty"`
 	Session          string               `json:"session"`
 	Tag              string               `json:"tag"`
 	ExpectedServer   string               `json:"expected_server"`
@@ -125,6 +142,15 @@ type SurfaceOperation struct {
 	StartedAt        time.Time            `json:"started_at"`
 	FinishedAt       *time.Time           `json:"finished_at,omitempty"`
 	ErrorCategory    SurfaceErrorCategory `json:"error_category,omitempty"`
+	Retirement       *SurfaceRetirement   `json:"retirement,omitempty"`
+}
+
+type SurfaceRetirement struct {
+	ID            string                 `json:"id"`
+	Phase         SurfaceRetirementPhase `json:"phase"`
+	StartedAt     time.Time              `json:"started_at"`
+	FinishedAt    *time.Time             `json:"finished_at,omitempty"`
+	ErrorCategory SurfaceErrorCategory   `json:"error_category,omitempty"`
 }
 
 type Thread struct {
@@ -720,6 +746,7 @@ func validateWorkspace(workspace Workspace) error {
 
 func validateSurfaceOperations(project Project) error {
 	seen := make(map[string]struct{}, len(project.SurfaceOperations))
+	retirementSeen := make(map[string]struct{}, len(project.SurfaceOperations))
 	active := make(map[string]struct{})
 	threads := make(map[string]Thread, len(project.Threads))
 	for _, thread := range project.Threads {
@@ -740,10 +767,17 @@ func validateSurfaceOperations(project Project) error {
 		if operation.Kind == SurfaceKindWorkspace && (operation.ThreadID != "" || operation.RunID != "" || operation.Parent != nil) {
 			return fmt.Errorf("workspace operation %s carries thread fields", operation.ID)
 		}
+		if operation.Kind == SurfaceKindWorkspace && operation.Presentation != "" {
+			return fmt.Errorf("workspace operation %s carries a presentation", operation.ID)
+		}
 		if operation.Kind == SurfaceKindThread && (operation.ThreadID == "" || operation.RunID == "" || operation.Parent == nil) {
 			return fmt.Errorf("thread operation %s is missing thread identity or parent", operation.ID)
 		}
-		if operation.Phase == SurfacePhasePending || operation.Phase == SurfacePhaseUnknown || operation.Phase == SurfacePhaseVerified {
+		if operation.Kind == SurfaceKindThread && operation.Presentation != "" && !validSurfacePresentation(operation.Presentation) {
+			return fmt.Errorf("thread operation %s has unknown presentation", operation.ID)
+		}
+		if operation.Phase == SurfacePhasePending || operation.Phase == SurfacePhaseUnknown ||
+			(operation.Phase == SurfacePhaseVerified && !retirementProven(operation.Retirement)) {
 			logicalID := string(operation.Kind)
 			if operation.Kind == SurfaceKindThread {
 				logicalID += ":" + operation.ThreadID
@@ -852,6 +886,15 @@ func validateSurfaceOperations(project Project) error {
 		if operation.FinishedAt != nil && operation.FinishedAt.Before(operation.StartedAt) {
 			return fmt.Errorf("operation %s finished before it started", operation.ID)
 		}
+		if err := validateSurfaceRetirement(operation); err != nil {
+			return fmt.Errorf("operation %s retirement: %v", operation.ID, err)
+		}
+		if operation.Retirement != nil {
+			if _, exists := retirementSeen[operation.Retirement.ID]; exists {
+				return fmt.Errorf("duplicate retirement ID %s", operation.Retirement.ID)
+			}
+			retirementSeen[operation.Retirement.ID] = struct{}{}
+		}
 	}
 	if project.Workspace != nil && verifiedWorkspace != 1 {
 		return fmt.Errorf("saved project workspace has %d verified workspace operations", verifiedWorkspace)
@@ -860,6 +903,55 @@ func validateSurfaceOperations(project Project) error {
 		return fmt.Errorf("verified workspace operation has no saved project workspace")
 	}
 	return nil
+}
+
+func validateSurfaceRetirement(operation SurfaceOperation) error {
+	retirement := operation.Retirement
+	if retirement == nil {
+		return nil
+	}
+	if operation.Kind != SurfaceKindThread {
+		return errors.New("retirement is only valid for thread operations")
+	}
+	if operation.Phase != SurfacePhaseVerified || operation.Ref == nil {
+		return errors.New("retirement requires a verified thread operation with a reference")
+	}
+	if !validSurfacePresentation(operation.Presentation) {
+		return errors.New("retirement requires a supported presentation")
+	}
+	if err := validateStateID(retirement.ID, "surface retirement ID"); err != nil {
+		return err
+	}
+	if retirement.StartedAt.IsZero() {
+		return errors.New("retirement has no start time")
+	}
+	if operation.FinishedAt != nil && retirement.StartedAt.Before(*operation.FinishedAt) {
+		return errors.New("retirement started before the surface operation finished")
+	}
+	if retirement.FinishedAt != nil && retirement.FinishedAt.Before(retirement.StartedAt) {
+		return errors.New("retirement finished before it started")
+	}
+	switch retirement.Phase {
+	case RetirementPending:
+		if retirement.FinishedAt != nil || retirement.ErrorCategory != "" {
+			return errors.New("pending retirement carries a terminal outcome")
+		}
+	case RetirementClosed, RetirementAlreadyGone:
+		if retirement.FinishedAt == nil || retirement.ErrorCategory != "" {
+			return fmt.Errorf("%s retirement has an incomplete outcome", retirement.Phase)
+		}
+	case RetirementUnknown:
+		if retirement.FinishedAt == nil || !validErrorCategory(retirement.ErrorCategory) {
+			return errors.New("unknown retirement has an incomplete failure")
+		}
+	default:
+		return fmt.Errorf("retirement has unknown phase %q", retirement.Phase)
+	}
+	return nil
+}
+
+func retirementProven(retirement *SurfaceRetirement) bool {
+	return retirement != nil && (retirement.Phase == RetirementClosed || retirement.Phase == RetirementAlreadyGone)
 }
 
 func validDigest(value string) bool {
@@ -872,6 +964,15 @@ func validDigest(value string) bool {
 		}
 	}
 	return true
+}
+
+func validSurfacePresentation(presentation SurfacePresentation) bool {
+	switch presentation {
+	case SurfacePresentationTimeline, SurfacePresentationCodexRemote:
+		return true
+	default:
+		return false
+	}
 }
 
 func validErrorCategory(category SurfaceErrorCategory) bool {

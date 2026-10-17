@@ -34,6 +34,26 @@ func SurfaceUnknown(tag backend.RecoveryTag, category SurfaceErrorCategory, ref 
 	return SurfaceFinish{phase: SurfacePhaseUnknown, tag: tag.String(), category: category, ref: ref}
 }
 
+// SurfaceRetirementFinish is the terminal outcome of a thread-surface close.
+// A close is deliberately separate from the original surface operation so its
+// creation evidence and reference remain immutable.
+type SurfaceRetirementFinish struct {
+	phase    SurfaceRetirementPhase
+	category SurfaceErrorCategory
+}
+
+func RetirementClosedOutcome() SurfaceRetirementFinish {
+	return SurfaceRetirementFinish{phase: RetirementClosed}
+}
+
+func RetirementAlreadyGoneOutcome() SurfaceRetirementFinish {
+	return SurfaceRetirementFinish{phase: RetirementAlreadyGone}
+}
+
+func RetirementUnknownOutcome(category SurfaceErrorCategory) SurfaceRetirementFinish {
+	return SurfaceRetirementFinish{phase: RetirementUnknown, category: category}
+}
+
 // BeginWorkspace records intent before a native workspace is created.
 func (store Store) BeginWorkspace(ctx context.Context, projectID, session string, tag backend.RecoveryTag, expectedServer backend.ServerID, expectedEndpoint backend.EndpointID) (Registry, SurfaceOperation, error) {
 	if err := checkContext(ctx); err != nil {
@@ -91,7 +111,7 @@ func (store Store) BeginWorkspace(ctx context.Context, projectID, session string
 
 // BeginThread records intent for a child surface after verifying the enrolled
 // member and the exact current project workspace identity.
-func (store Store) BeginThread(ctx context.Context, projectID, threadID, runID, session string, tag backend.RecoveryTag, parent backend.Ref) (Registry, SurfaceOperation, error) {
+func (store Store) BeginThread(ctx context.Context, projectID, threadID, runID, session string, presentation SurfacePresentation, tag backend.RecoveryTag, parent backend.Ref) (Registry, SurfaceOperation, error) {
 	if err := checkContext(ctx); err != nil {
 		return Registry{}, SurfaceOperation{}, err
 	}
@@ -113,6 +133,9 @@ func (store Store) BeginThread(ctx context.Context, projectID, threadID, runID, 
 	}
 	if err := validateRunID(session, "surface session"); err != nil {
 		return Registry{}, SurfaceOperation{}, err
+	}
+	if !validSurfacePresentation(presentation) {
+		return Registry{}, SurfaceOperation{}, fmt.Errorf("%w: invalid surface presentation", ErrInvalidInput)
 	}
 	if !tag.Valid() {
 		return Registry{}, SurfaceOperation{}, fmt.Errorf("%w: invalid recovery tag", ErrInvalidInput)
@@ -166,13 +189,16 @@ func (store Store) BeginThread(ctx context.Context, projectID, threadID, runID, 
 			case SurfacePhasePending, SurfacePhaseUnknown:
 				return fmt.Errorf("%w: thread has an unresolved surface operation", ErrConflict)
 			case SurfacePhaseVerified:
+				if retirementProven(existing.Retirement) {
+					continue
+				}
 				return fmt.Errorf("%w: thread has an active verified surface; close it before starting another", ErrConflict)
 			}
 		}
 		endpoint, _ := project.Workspace.Ref.Endpoint()
 		operation := SurfaceOperation{
 			ID: operationID, Kind: SurfaceKindThread, ThreadID: threadID, RunID: runID,
-			Session: session, Tag: tag.String(), ExpectedServer: project.Workspace.Ref.Server().String(),
+			Presentation: presentation, Session: session, Tag: tag.String(), ExpectedServer: project.Workspace.Ref.Server().String(),
 			ExpectedEndpoint: endpoint.String(), Phase: SurfacePhasePending,
 			StartedAt: time.Now().UTC(), Parent: refPtr(parent),
 		}
@@ -183,6 +209,151 @@ func (store Store) BeginThread(ctx context.Context, projectID, threadID, runID, 
 		return Registry{}, SurfaceOperation{}, err
 	}
 	return findOperation(registry, projectID, operationID)
+}
+
+// BeginThreadClose records intent to close a verified child surface. It does
+// not close a native tab or make any process-liveness claim.
+func (store Store) BeginThreadClose(ctx context.Context, projectID, operationID string) (Registry, SurfaceRetirement, error) {
+	if err := checkContext(ctx); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	root, err := validateRoot(store.Root)
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateID(projectID, "project ID"); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateID(operationID, "surface operation ID"); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	retirementID, err := newID()
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, fmt.Errorf("%w: generate surface retirement ID: %v", ErrConflict, err)
+	}
+	retirement := SurfaceRetirement{ID: retirementID, Phase: RetirementPending, StartedAt: time.Now().UTC()}
+	registry, err := updateRegistry(ctx, root, false, func(registry *Registry, _ int) error {
+		project, err := registryProject(registry, projectID)
+		if err != nil {
+			return err
+		}
+		operationIndex := -1
+		for index := range project.SurfaceOperations {
+			if project.SurfaceOperations[index].ID == operationID {
+				operationIndex = index
+				break
+			}
+		}
+		if operationIndex < 0 {
+			return fmt.Errorf("%w: surface operation %s", ErrNotFound, operationID)
+		}
+		operation := &project.SurfaceOperations[operationIndex]
+		if operation.Kind != SurfaceKindThread {
+			return fmt.Errorf("%w: only thread surfaces can be retired", ErrConflict)
+		}
+		if operation.Phase != SurfacePhaseVerified || operation.Ref == nil {
+			return fmt.Errorf("%w: thread surface is not verified", ErrConflict)
+		}
+		if operation.Retirement != nil {
+			return fmt.Errorf("%w: thread surface already has a retirement", ErrConflict)
+		}
+		if !validSurfacePresentation(operation.Presentation) {
+			return fmt.Errorf("%w: thread surface presentation is not closable", ErrConflict)
+		}
+		if err := validateChildReference(*operation, *operation.Ref); err != nil {
+			return fmt.Errorf("%w: thread surface reference: %v", ErrConflict, err)
+		}
+		operation.Retirement = &retirement
+		return nil
+	})
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	return registry, retirement, nil
+}
+
+// FinishThreadClose atomically completes the exact pending retirement. The
+// original thread operation remains verified with its original reference.
+func (store Store) FinishThreadClose(ctx context.Context, projectID, operationID, retirementID string, result SurfaceRetirementFinish) (Registry, SurfaceRetirement, error) {
+	if err := checkContext(ctx); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	root, err := validateRoot(store.Root)
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateID(projectID, "project ID"); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateID(operationID, "surface operation ID"); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateID(retirementID, "surface retirement ID"); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	if err := validateRetirementFinish(result); err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	registry, err := updateRegistry(ctx, root, false, func(registry *Registry, _ int) error {
+		project, err := registryProject(registry, projectID)
+		if err != nil {
+			return err
+		}
+		operationIndex := -1
+		for index := range project.SurfaceOperations {
+			if project.SurfaceOperations[index].ID == operationID {
+				operationIndex = index
+				break
+			}
+		}
+		if operationIndex < 0 {
+			return fmt.Errorf("%w: surface operation %s", ErrNotFound, operationID)
+		}
+		operation := &project.SurfaceOperations[operationIndex]
+		if operation.Kind != SurfaceKindThread || operation.Phase != SurfacePhaseVerified || operation.Ref == nil {
+			return fmt.Errorf("%w: surface operation is not a verified thread", ErrConflict)
+		}
+		if operation.Retirement == nil || operation.Retirement.Phase != RetirementPending {
+			return fmt.Errorf("%w: thread surface retirement is not pending", ErrConflict)
+		}
+		if operation.Retirement.ID != retirementID {
+			return fmt.Errorf("%w: thread surface retirement ID does not match", ErrConflict)
+		}
+		finishedAt := time.Now().UTC()
+		operation.Retirement.Phase = result.phase
+		operation.Retirement.FinishedAt = &finishedAt
+		operation.Retirement.ErrorCategory = result.category
+		return nil
+	})
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	project, err := registryProject(&registry, projectID)
+	if err != nil {
+		return Registry{}, SurfaceRetirement{}, err
+	}
+	for _, operation := range project.SurfaceOperations {
+		if operation.ID == operationID && operation.Retirement != nil {
+			return registry, *operation.Retirement, nil
+		}
+	}
+	return Registry{}, SurfaceRetirement{}, fmt.Errorf("%w: surface operation %s", ErrNotFound, operationID)
+}
+
+func validateRetirementFinish(result SurfaceRetirementFinish) error {
+	switch result.phase {
+	case RetirementClosed, RetirementAlreadyGone:
+		if result.category != "" {
+			return fmt.Errorf("%w: successful retirement cannot carry an error category", ErrInvalidInput)
+		}
+	case RetirementUnknown:
+		if !validErrorCategory(result.category) {
+			return fmt.Errorf("%w: invalid retirement error category", ErrInvalidInput)
+		}
+	default:
+		return fmt.Errorf("%w: invalid retirement terminal outcome", ErrInvalidInput)
+	}
+	return nil
 }
 
 // FinishSurface performs an exact compare-and-swap from pending to one
