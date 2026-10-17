@@ -47,7 +47,7 @@ The different-harness coordinator swap is now accepted in the second live receip
 
 ### Accepted bounded unit: replace Codex with Pi
 
-The next unit uses the already approved selectable-coordinator contract without adding a new transport or provider. Registration already supports a Pi coordinator, but the embedded inbox currently requires `FORGECTL_WORKER` and therefore remains inert for the emitted coordinator environment. Codex will correct that role mismatch and prove a native cross-harness handoff before adding Hermes.
+This unit reused the approved selectable-coordinator contract without adding a new transport or provider. Registration supported a Pi coordinator, but the embedded inbox required `FORGECTL_WORKER` and remained inert for the emitted coordinator environment. Codex corrected that role mismatch and proved a native cross-harness handoff before adding Hermes.
 
 - [x] Activate the Pi inbox for exactly one explicit worker or coordinator identity; reject mixed coordinator/worker identities, and require the explicit ledger/run fields for a coordinator. Preserve the existing worker path and all receipt, socket, and permission controls.
 - [x] Add behavioral role controls against the embedded extension, including missing and conflicting identities.
