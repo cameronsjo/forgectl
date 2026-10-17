@@ -139,8 +139,43 @@ The next run at `/private/tmp/fcpair.8U5lqt` completed real Codex/Pi delegation,
 
 The first Projects Hermes run at `/private/tmp/fchproj.V5UzXa` completed the real delegated artifact and executable positive, duplicate, missing-input, and clarification checks, then failed a verifier expectation: native observation separates `provider=openai-codex` and `model=gpt-5.6-sol`, while the verifier expected the launch-only combined selector `openai-codex:gpt-5.6-sol` as its model. Both observation assertions now require the exact separate provider and unqualified requested model; startup and ACP-history assertions retain their combined selector. The product observation contract is unchanged. Full Hermes Projects acceptance remains pending.
 
-Codex/Pi Projects acceptance passed at `/private/tmp/fcpair.BboVz3`: `node scripts/verify-cross-harness-loop.mjs --live ... --projects --herdr /opt/homebrew/Cellar/herdr/0.9.3-palette.1/bin/herdr`, exit 0. The complete arguments are in this session's command receipt; verifier source is `6a516940`, and the canonical binary retains clean Go revision `42815e47` with no subsequent Go/module changes. Logical project `ded22f76-de69-4241-bef8-0b676a5704b7`, coordinator thread `09c1ff2a-9262-4a8b-adbb-dff4a590e9dd`, and worker thread `1c63db4b-2030-4d69-a0ee-1851c43693ee` survived five distinct runs, including Codex-to-Codex replacement, Pi receiver restart, and Codex-to-Pi coordinator replacement. The artifact SHA-256 is `542f1b5dd9248aa828cd10f6152bbfaff41fb61bbe042096935c185c5e418b76`.
+Codex/Pi Projects acceptance passed at `/private/tmp/fcpair.BboVz3`: `node scripts/verify-cross-harness-loop.mjs --live ... --projects --herdr /opt/homebrew/Cellar/herdr/0.9.3-palette.1/bin/herdr`, exit 0. The complete invocation is retained below; verifier source is `6a516940`, and the canonical binary retains clean Go revision `42815e47` with no subsequent Go/module changes. Logical project `ded22f76-de69-4241-bef8-0b676a5704b7`, coordinator thread `09c1ff2a-9262-4a8b-adbb-dff4a590e9dd`, and worker thread `1c63db4b-2030-4d69-a0ee-1851c43693ee` survived five distinct runs, including Codex-to-Codex replacement, Pi receiver restart, and Codex-to-Pi coordinator replacement. The artifact SHA-256 is `542f1b5dd9248aa828cd10f6152bbfaff41fb61bbe042096935c185c5e418b76`.
 
 Codex's separate receipt audit reread the registry and six reconstructed render files, rehashed and reran the authored utility against valid and duplicate fixtures (exit 0/1), and checked six native workspace-write policy snapshots, five process exits, and the disappeared named-server PID. Four native renders show exact original/replacement history markers; both UI reconnect pairs retain OpenAI model, approval, and sandbox posture. Two final renders show the worker and replacement Pi coordinator timelines. An independent read-only agent audit additionally checked exact-once lost-ack/restart delivery, one worker execution record, stale-run/digest refusals, unchanged unrelated state, and absent residual sockets. Direct native observations identify Codex `openai/gpt-6-astra` and Pi `openai-codex/gpt-5.6-sol`; no catalog listing is substituted for the selected runtime model. No trust prompt was approved or global configuration changed. This closes P3; P5 still requires the Hermes run.
 
 Hermes retry `/private/tmp/fchproj.0Akz4y` delivered its exact source payload and Codex materialized and exercised it, but the Codex `gpt-6-astra` completion turn did not finish within the existing five-minute event deadline. The verifier failed rather than treating tool output as completed native work; Codex and the Hermes supervisor both exited 0 during cleanup. Inspection also found the materialized file used default mode 0644, so the prompt now explicitly requires 0600 and the verifier checks that before artifact acceptance. The strict product artifact check remains unchanged. The next isolated attempt selects available OpenAI `gpt-5.6-sol` for the Codex coordinator, retaining all native completion, permission, and timeout requirements.
+
+Hermes Projects acceptance at `/private/tmp/fchproj.olDibJ` passed on verifier revision `2bb3b609`, including the native round trip, exact worker-authored source, executable controls, denied edit, restart, selected-session refusal, and rendered presentation. The independent audit found no cleanup failure in that run, but identified a verifier defect: the success marker preceded final cleanup and cleanup errors were only logged. Codex moved success publication after all cleanup attempts and evidence persistence, made cleanup failures reject, and added deterministic cleanup-failure, save-failure, task-failure, success-ordering, private-mode, and existing-receipt controls. `node scripts/test-hermes-verifier.mjs` and syntax/diff checks pass; a final live run of the corrected verifier remains required before P5 closes.
+
+## Local acceptance commands
+
+Run from this feature worktree. These are machine-local evidence paths, not installations or portable credential provisioning. Each live run makes model requests and requires a fresh owner-private root. The Hermes preflight must still pass; it refuses expiring access-only credentials and does not import or refresh credentials.
+
+```sh
+forge=/private/tmp/fcproj-bin.cCQ99K/forgectl
+herdr=/opt/homebrew/Cellar/herdr/0.9.3-palette.1/bin/herdr
+codex=/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
+websocket=/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/ws/wrapper.mjs
+
+node scripts/verify-project-presentation.mjs --live \
+  --forgectl "$forge" --herdr "$herdr" \
+  --root "$(mktemp -d /private/tmp/fcp.XXXXXX)"
+
+node scripts/verify-cross-harness-loop.mjs --live \
+  --forgectl "$forge" --root "$(mktemp -d /private/tmp/fcpair.XXXXXX)" \
+  --websocket-module "$websocket" --codex "$codex" --codex-model gpt-6-astra \
+  --pi /opt/homebrew/bin/pi --pi-provider openai-codex --pi-model gpt-5.6-sol \
+  --pi-extension /Users/cameron/Projects/pi-extensions/extensions/pi-estate-auth/index.ts \
+  --pi-extension /Users/cameron/Projects/pi-extensions/extensions/pi-cadence-guards/index.ts \
+  --pi-extension /Users/cameron/Projects/pi-extensions/extensions/pi-rules/src/index.ts \
+  --pi-extension /Users/cameron/Projects/pi-extensions/extensions/pi-plan-mode/src/index.ts \
+  --projects --herdr "$herdr"
+
+node scripts/verify-hermes-collaboration.mjs --live \
+  --forgectl "$forge" --root "$(mktemp -d /private/tmp/fchproj.XXXXXX)" \
+  --websocket-module "$websocket" --codex "$codex" --codex-model gpt-5.6-sol \
+  --hermes /private/tmp/fctl-hermes.TwuIsK/venv/bin/hermes-acp \
+  --hermes-python /private/tmp/fctl-hermes.TwuIsK/venv/bin/python \
+  --hermes-home /private/tmp/fctl-hermes.TwuIsK/home --hermes-model gpt-5.6-sol \
+  --projects --herdr "$herdr"
+```

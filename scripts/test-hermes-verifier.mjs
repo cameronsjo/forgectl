@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, createServer } from "node:net";
-import { artifactPayload, assertNativeDelivery, closeProxy, parseHermesArgs } from "./verify-hermes-collaboration.mjs";
+import { artifactPayload, assertNativeDelivery, closeProxy, finalizeHermesAcceptance, parseHermesArgs } from "./verify-hermes-collaboration.mjs";
 import { HermesACPClient } from "./hermes-acp-client.mjs";
 
 const flags = ["--live", "--root", "/private/test", "--forgectl", "/bin/forgectl", "--codex", "/bin/codex", "--codex-model", "coordinator-model", "--hermes", "/bin/hermes-acp", "--hermes-python", "/bin/python", "--hermes-home", "/private/hermes", "--hermes-model", "worker-model", "--websocket-module", "/private/ws.mjs"];
@@ -75,6 +75,30 @@ for await (const line of createInterface({input:process.stdin})) {
 }
 `, { mode: 0o700 });
 try {
+  for (const mode of ["success", "cleanup-failed", "save-failed", "task-failed"]) {
+    const receiptRoot = await mkdtemp(join(root, "receipt-"));
+    const calls = [];
+    const events = [];
+    const evidence = {
+      add: (kind, value) => events.push({ kind, ...value }),
+      save: async () => { calls.push("save"); if (mode === "save-failed") throw new Error("save failed"); },
+    };
+    const receipt = mode === "task-failed" ? undefined : { taskId: "finalizer-test" };
+    const finalize = () => finalizeHermesAcceptance(evidence, receiptRoot, receipt, [
+      ["first", async () => { calls.push("first"); if (mode === "cleanup-failed") throw new Error("cleanup failed"); }],
+      ["second", async () => { calls.push("second"); await assert.rejects(stat(join(receiptRoot, "ACCEPTED")), { code: "ENOENT" }); }],
+    ]);
+    if (["cleanup-failed", "save-failed"].includes(mode)) await assert.rejects(finalize(), /cleanup failed|save failed/);
+    else await finalize();
+    assert.deepEqual(calls, ["first", "second", "save"]);
+    assert.equal(events.filter((event) => event.kind === "cleanup-failed").length, mode === "cleanup-failed" ? 1 : 0);
+    if (mode === "success") {
+      assert.deepEqual(JSON.parse(await readFile(join(receiptRoot, "ACCEPTED"), "utf8")), receipt);
+      assert.equal((await stat(join(receiptRoot, "ACCEPTED"))).mode & 0o777, 0o600);
+      await assert.rejects(finalizeHermesAcceptance(evidence, receiptRoot, { taskId: "replacement" }, []), { code: "EEXIST" });
+      assert.deepEqual(JSON.parse(await readFile(join(receiptRoot, "ACCEPTED"), "utf8")), receipt);
+    } else await assert.rejects(stat(join(receiptRoot, "ACCEPTED")), { code: "ENOENT" });
+  }
   const proxyPath = join(root, "proxy.sock");
   const server = createServer();
   server.ownedSockets = new Set();

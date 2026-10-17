@@ -95,6 +95,20 @@ function privateNativeEvidence(evidence) {
   };
 }
 
+export async function finalizeHermesAcceptance(evidence, root, receipt, actions) {
+  const failures = [];
+  for (const [component, action] of actions) {
+    try { await action(); } catch (error) {
+      failures.push(error);
+      evidence.add("cleanup-failed", { error: String(error), component });
+    }
+  }
+  if (failures.length === 0) evidence.add("cleanup-completed", { components: actions.length });
+  await evidence.save();
+  if (failures.length) throw new AggregateError(failures, `Hermes cleanup failed; private evidence: ${root}`);
+  if (receipt) await writeFile(join(root, "ACCEPTED"), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+}
+
 async function socketReady(path) {
   const deadline = Date.now() + startupTimeout;
   while (Date.now() < deadline) {
@@ -136,7 +150,8 @@ async function run(args) {
   let proxy;
   let coordinatorClient;
   let projects;
-  let accepted = false;
+  let receipt;
+  let summary;
   const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
   const protectedAuth = join(codexHome, "auth.json");
   const authBefore = digest(await readFile(protectedAuth));
@@ -372,25 +387,23 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     assert.equal(digest(await readFile(join(codexHome, "config.toml"))), codexConfigBefore, "global Codex config changed during this run");
     for (const child of processes) assert(child.exitCode !== null || child.signalCode !== null);
     evidence.add("acceptance-summary", { taskId, threadId, nativeSession, artifact, artifactHash, globalAuthUnchanged: true, globalConfigUnchanged: true, workerAuthoredSource: true, coordinatorMaterialized: true });
-    await evidence.save();
-    await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, nativeSession, projectId: projects?.project.id, artifact, artifactHash, worker_file_created: false, worker_authored_source: true, coordinator_materialized: true }, null, 2)}\n`, { mode: 0o600 });
-    accepted = true;
-    process.stdout.write(`${JSON.stringify({ root, taskId, nativeSession, artifact: "verified", source: "Hermes", materializedBy: "Codex", recovery: "verified" })}\n`);
+    receipt = { taskId, threadId, nativeSession, projectId: projects?.project.id, artifact, artifactHash, worker_file_created: false, worker_authored_source: true, coordinator_materialized: true };
+    summary = { root, taskId, nativeSession, artifact: "verified", source: "Hermes", materializedBy: "Codex", recovery: "verified" };
   } catch (error) {
     evidence.add("acceptance-failed", { error: String(error) });
     throw error;
   } finally {
-    try { await projects?.cleanup(); } catch (error) { evidence.add("cleanup-failed", { error: String(error), component: "project-presentation" }); }
-    coordinatorClient?.stop();
-    try { await closeProxy(proxy); } catch (error) { evidence.add("cleanup-failed", { error: String(error), component: "proxy" }); }
-    for (const audit of nativeAuditors) if (!audit.closed) audit.child.kill("SIGTERM");
-    for (const child of processes) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    for (const child of [...processes, ...nativeAuditors.map((audit) => audit.child)]) {
-      try { await waitClosed(child); } catch (error) { evidence.add("cleanup-failed", { error: String(error), pid: child.pid }); }
-    }
-    await evidence.save();
-    if (!accepted) process.stderr.write(`Hermes collaboration was not accepted; private evidence: ${root}\n`);
+    if (!receipt) process.stderr.write(`Hermes collaboration was not accepted; private evidence: ${root}\n`);
+    await finalizeHermesAcceptance(evidence, root, receipt, [
+      ["project-presentation", () => projects?.cleanup()],
+      ["coordinator-stop", () => coordinatorClient?.stop()],
+      ["proxy", () => closeProxy(proxy)],
+      ...nativeAuditors.map((audit) => [`auditor-stop-${audit.child.pid}`, () => { if (!audit.closed) audit.child.kill("SIGTERM"); }]),
+      ...processes.map((child) => [`process-stop-${child.pid}`, () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); }]),
+      ...[...processes, ...nativeAuditors.map((audit) => audit.child)].map((child) => [`process-wait-${child.pid}`, () => waitClosed(child)]),
+    ]);
   }
+  process.stdout.write(`${JSON.stringify(summary)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
