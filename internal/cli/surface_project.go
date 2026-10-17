@@ -14,17 +14,19 @@ import (
 )
 
 type projectReport struct {
-	Version  int             `json:"version"`
-	Revision uint64          `json:"revision"`
-	Project  project.Project `json:"project"`
-	Ledger   string          `json:"ledger"`
+	Version      int                   `json:"version"`
+	Revision     uint64                `json:"revision"`
+	Project      project.Project       `json:"project"`
+	Ledger       string                `json:"ledger"`
+	Observations []project.Observation `json:"observations,omitempty"`
 }
 
 type projectThreadReport struct {
-	Version   int            `json:"version"`
-	Revision  uint64         `json:"revision"`
-	ProjectID string         `json:"project_id"`
-	Thread    project.Thread `json:"thread"`
+	Version     int                  `json:"version"`
+	Revision    uint64               `json:"revision"`
+	ProjectID   string               `json:"project_id"`
+	Thread      project.Thread       `json:"thread"`
+	Observation *project.Observation `json:"observation,omitempty"`
 }
 
 func newSurfaceProjectCmd() *cobra.Command {
@@ -125,7 +127,7 @@ func newSurfaceProjectCreateCmd(root *string) *cobra.Command {
 				return projectError(err)
 			}
 			if asJSON {
-				return writeJSON(command.OutOrStdout(), projectReport{registry.Version, registry.Revision, created, filepath.Join(filepath.Clean(*root), created.ID, "team")})
+				return writeJSON(command.OutOrStdout(), projectReport{Version: registry.Version, Revision: registry.Revision, Project: created, Ledger: projectLedger(*root, created.ID)})
 			}
 			_, err = fmt.Fprintf(command.OutOrStdout(), "created project %s (%s), coordinator thread %s; no agent launched\n", created.ID, safeLabel(created.Name), created.CoordinatorThreadID)
 			return err
@@ -163,17 +165,8 @@ func newSurfaceProjectListCmd(root *string) *cobra.Command {
 	return withProjectRoot(root, command)
 }
 
-func loadSurfaceProject(command *cobra.Command, root, projectID string) (project.Registry, project.Project, error) {
-	registry, err := (project.Store{Root: root}).Snapshot(command.Context())
-	if err != nil {
-		return project.Registry{}, project.Project{}, projectError(err)
-	}
-	for _, record := range registry.Projects {
-		if record.ID == projectID {
-			return registry, record, nil
-		}
-	}
-	return project.Registry{}, project.Project{}, projectError(project.ErrNotFound)
+func projectLedger(root, projectID string) string {
+	return filepath.Join(filepath.Clean(root), projectID, "team")
 }
 
 func newSurfaceProjectShowCmd(root *string) *cobra.Command {
@@ -183,18 +176,22 @@ func newSurfaceProjectShowCmd(root *string) *cobra.Command {
 		Short: "Show a project by exact ID, without inferring process liveness",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, arguments []string) error {
-			registry, record, err := loadSurfaceProject(command, *root, arguments[0])
+			registry, record, observations, err := (project.Store{Root: *root}).Inspect(command.Context(), arguments[0])
 			if err != nil {
-				return err
+				return projectError(err)
 			}
 			if asJSON {
-				return writeJSON(command.OutOrStdout(), projectReport{registry.Version, registry.Revision, record, filepath.Join(filepath.Clean(*root), record.ID, "team")})
+				return writeJSON(command.OutOrStdout(), projectReport{Version: registry.Version, Revision: registry.Revision, Project: record, Ledger: projectLedger(*root, record.ID), Observations: observations})
 			}
 			if _, err := fmt.Fprintf(command.OutOrStdout(), "%s %s\n", record.ID, safeLabel(record.Name)); err != nil {
 				return err
 			}
 			for _, thread := range record.Threads {
-				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s %s %s\n", thread.ID, thread.Role, safeLabel(thread.Name)); err != nil {
+				observation, err := projectObservation(observations, thread.ID)
+				if err != nil {
+					return projectError(err)
+				}
+				if err := printProjectThread(command.OutOrStdout(), thread, observation); err != nil {
 					return err
 				}
 			}
@@ -217,6 +214,8 @@ func newSurfaceProjectThreadCmd(root *string) *cobra.Command {
 	command.AddCommand(newSurfaceProjectThreadCreateCmd(root, &projectID))
 	command.AddCommand(newSurfaceProjectThreadReadCmd(root, &projectID, false))
 	command.AddCommand(newSurfaceProjectThreadReadCmd(root, &projectID, true))
+	command.AddCommand(newSurfaceProjectThreadBindCmd(root, &projectID))
+	command.AddCommand(newSurfaceProjectThreadContextCmd(root, &projectID))
 	return command
 }
 
@@ -240,7 +239,7 @@ func newSurfaceProjectThreadCreateCmd(root, projectID *string) *cobra.Command {
 				return projectError(err)
 			}
 			if asJSON {
-				return writeJSON(command.OutOrStdout(), projectThreadReport{registry.Version, registry.Revision, *projectID, created})
+				return writeJSON(command.OutOrStdout(), projectThreadReport{Version: registry.Version, Revision: registry.Revision, ProjectID: *projectID, Thread: created})
 			}
 			_, err = fmt.Fprintf(command.OutOrStdout(), "created thread %s (%s), project %s; no agent launched\n", created.ID, safeLabel(created.Name), *projectID)
 			return err
@@ -261,9 +260,9 @@ func newSurfaceProjectThreadReadCmd(root, projectID *string, one bool) *cobra.Co
 		if *projectID == "" {
 			return projectUsage(errors.New("--project must name an exact project ID"))
 		}
-		registry, record, err := loadSurfaceProject(command, *root, *projectID)
+		registry, record, observations, err := (project.Store{Root: *root}).Inspect(command.Context(), *projectID)
 		if err != nil {
-			return err
+			return projectError(err)
 		}
 		threads := record.Threads
 		if one {
@@ -280,22 +279,45 @@ func newSurfaceProjectThreadReadCmd(root, projectID *string, one bool) *cobra.Co
 		}
 		if asJSON {
 			if one {
-				return writeJSON(command.OutOrStdout(), projectThreadReport{registry.Version, registry.Revision, record.ID, threads[0]})
+				observation, err := projectObservation(observations, threads[0].ID)
+				if err != nil {
+					return projectError(err)
+				}
+				return writeJSON(command.OutOrStdout(), projectThreadReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, Thread: threads[0], Observation: &observation})
 			}
 			return writeJSON(command.OutOrStdout(), struct {
-				Version   int              `json:"version"`
-				Revision  uint64           `json:"revision"`
-				ProjectID string           `json:"project_id"`
-				Threads   []project.Thread `json:"threads"`
-			}{registry.Version, registry.Revision, record.ID, threads})
+				Version      int                   `json:"version"`
+				Revision     uint64                `json:"revision"`
+				ProjectID    string                `json:"project_id"`
+				Threads      []project.Thread      `json:"threads"`
+				Observations []project.Observation `json:"observations"`
+			}{registry.Version, registry.Revision, record.ID, threads, observations})
 		}
 		for _, thread := range threads {
-			if _, err := fmt.Fprintf(command.OutOrStdout(), "%s %s %s\n", thread.ID, thread.Role, safeLabel(thread.Name)); err != nil {
+			observation, err := projectObservation(observations, thread.ID)
+			if err != nil {
+				return projectError(err)
+			}
+			if err := printProjectThread(command.OutOrStdout(), thread, observation); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	command.Flags().BoolVar(&asJSON, "json", false, "print version, revision, project ID, and logical thread state")
+	command.Flags().BoolVar(&asJSON, "json", false, "print logical thread state and separate enrollment observations")
 	return withProjectRoot(root, command)
+}
+
+func projectObservation(observations []project.Observation, threadID string) (project.Observation, error) {
+	for _, observation := range observations {
+		if observation.ThreadID == threadID {
+			return observation, nil
+		}
+	}
+	return project.Observation{}, fmt.Errorf("%w: thread observation is missing", project.ErrInvalidState)
+}
+
+func printProjectThread(writer io.Writer, thread project.Thread, observation project.Observation) error {
+	_, err := fmt.Fprintf(writer, "%s %s %s enrollment=%s native_session_known=%t process=%s\n", thread.ID, thread.Role, safeLabel(thread.Name), observation.Enrollment, observation.NativeSessionKnown, observation.ProcessLiveness)
+	return err
 }

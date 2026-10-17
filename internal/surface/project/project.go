@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
 
 const (
@@ -29,7 +32,10 @@ var (
 	ErrNotFound     = errors.New("project: not found")
 	ErrConflict     = errors.New("project: conflict")
 	ErrInvalidState = errors.New("project: invalid state")
+	errNoChange     = errors.New("project: no change")
 )
+
+var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 // Role is the durable role of a logical thread.
 type Role string
@@ -61,11 +67,45 @@ type Project struct {
 }
 
 type Thread struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Role      Role      `json:"role"`
-	Brief     string    `json:"brief"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Role        Role      `json:"role"`
+	Brief       string    `json:"brief"`
+	ActiveRunID string    `json:"active_run_id,omitempty"`
+	Runs        []Binding `json:"runs,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Binding struct {
+	RunID           string       `json:"run_id"`
+	Member          string       `json:"member"`
+	Harness         mail.Harness `json:"harness"`
+	NativeSessionID string       `json:"native_session_id"`
+	Worktree        string       `json:"worktree"`
+	Socket          string       `json:"socket"`
+	PaneID          string       `json:"pane_id"`
+	BoundAt         time.Time    `json:"bound_at"`
+}
+
+type Enrollment string
+
+const (
+	EnrollmentUnbound Enrollment = "unbound"
+	EnrollmentCurrent Enrollment = "current"
+	EnrollmentStale   Enrollment = "stale"
+)
+
+type ProcessLiveness string
+
+const ProcessLivenessUnknown ProcessLiveness = "unknown"
+
+type Observation struct {
+	ThreadID           string          `json:"thread_id"`
+	Enrollment         Enrollment      `json:"enrollment"`
+	NativeSessionKnown bool            `json:"native_session_known"`
+	ProcessLiveness    ProcessLiveness `json:"process_liveness"`
+	ObservedAt         time.Time       `json:"observed_at"`
+	Reason             string          `json:"reason,omitempty"`
 }
 
 // Snapshot reads the current registry without creating or modifying anything.
@@ -126,7 +166,7 @@ func (store Store) CreateProject(ctx context.Context, name, worktree, instructio
 			CreatedAt: now,
 		}},
 	}
-	registry, err := updateRegistry(ctx, root, true, func(registry *Registry) error {
+	registry, err := updateRegistry(ctx, root, true, func(registry *Registry, rootFD int) error {
 		registry.Projects = append(registry.Projects, created)
 		return nil
 	})
@@ -160,7 +200,7 @@ func (store Store) CreateThread(ctx context.Context, projectID, name, brief stri
 		return Registry{}, Thread{}, fmt.Errorf("%w: generate thread ID: %v", ErrConflict, err)
 	}
 	created := Thread{ID: threadID, Name: name, Role: RoleWorker, Brief: brief, CreatedAt: time.Now().UTC()}
-	registry, err := updateRegistry(ctx, root, false, func(registry *Registry) error {
+	registry, err := updateRegistry(ctx, root, false, func(registry *Registry, rootFD int) error {
 		for projectIndex := range registry.Projects {
 			if registry.Projects[projectIndex].ID == projectID {
 				registry.Projects[projectIndex].Threads = append(registry.Projects[projectIndex].Threads, created)
@@ -173,6 +213,123 @@ func (store Store) CreateThread(ctx context.Context, projectID, name, brief stri
 		return Registry{}, Thread{}, err
 	}
 	return registry, created, nil
+}
+
+func (store Store) Bind(ctx context.Context, projectID, threadID, member, runID, expectedPreviousRunID string) (Registry, Thread, error) {
+	if err := checkContext(ctx); err != nil {
+		return Registry{}, Thread{}, err
+	}
+	root, err := validateRoot(store.Root)
+	if err != nil {
+		return Registry{}, Thread{}, err
+	}
+	if err := validateID(projectID, "project ID"); err != nil {
+		return Registry{}, Thread{}, err
+	}
+	if err := validateID(threadID, "thread ID"); err != nil {
+		return Registry{}, Thread{}, err
+	}
+	if err := validateMember(member); err != nil {
+		return Registry{}, Thread{}, err
+	}
+	if err := validateRunID(runID, "run ID"); err != nil {
+		return Registry{}, Thread{}, err
+	}
+	if runID == "none" {
+		return Registry{}, Thread{}, fmt.Errorf("%w: run ID none is reserved", ErrInvalidInput)
+	}
+	if expectedPreviousRunID != "" {
+		if err := validateRunID(expectedPreviousRunID, "expected previous run ID"); err != nil {
+			return Registry{}, Thread{}, err
+		}
+		if expectedPreviousRunID == "none" {
+			return Registry{}, Thread{}, fmt.Errorf("%w: expected previous run ID none is reserved", ErrInvalidInput)
+		}
+	}
+	registry, err := updateRegistry(ctx, root, false, func(registry *Registry, rootFD int) error {
+		project, thread, err := registryThread(registry, projectID, threadID)
+		if err != nil {
+			return err
+		}
+		roster, err := readRoster(rootFD, projectID)
+		if err != nil {
+			return err
+		}
+		worker, found := roster.byName[member]
+		if !roster.present || !found {
+			return fmt.Errorf("%w: member is not enrolled", ErrConflict)
+		}
+		if worker.RunID == "" || worker.RunID != runID {
+			return fmt.Errorf("%w: member run does not match", ErrConflict)
+		}
+		if !roleMatches(thread.Role, worker) {
+			return fmt.Errorf("%w: member role does not match thread", ErrConflict)
+		}
+		candidate := bindingFromWorker(worker)
+		if err := validateBinding(candidate); err != nil {
+			return err
+		}
+		if thread.ActiveRunID == "" {
+			if expectedPreviousRunID != "" {
+				return fmt.Errorf("%w: expected previous run is not active", ErrConflict)
+			}
+			if projectHasRun(*project, runID) {
+				return fmt.Errorf("%w: run ID was previously bound", ErrConflict)
+			}
+			thread.Runs = append(thread.Runs, candidate)
+			thread.ActiveRunID = runID
+			return nil
+		}
+		if expectedPreviousRunID != thread.ActiveRunID {
+			return fmt.Errorf("%w: active run changed", ErrConflict)
+		}
+		activeIndex := activeBindingIndex(*thread)
+		if activeIndex < 0 {
+			return fmt.Errorf("%w: active binding is missing", ErrInvalidState)
+		}
+		active := &thread.Runs[activeIndex]
+		if runID == thread.ActiveRunID {
+			if !sameBindingIdentity(*active, candidate) {
+				return fmt.Errorf("%w: active binding identity changed", ErrConflict)
+			}
+			if active.NativeSessionID != "" && active.NativeSessionID != candidate.NativeSessionID {
+				return fmt.Errorf("%w: active native session changed", ErrConflict)
+			}
+			if active.NativeSessionID == "" && candidate.NativeSessionID != "" {
+				active.NativeSessionID = candidate.NativeSessionID
+				return nil
+			}
+			return errNoChange
+		}
+		if projectHasRun(*project, runID) {
+			return fmt.Errorf("%w: run ID was previously bound", ErrConflict)
+		}
+		thread.Runs = append(thread.Runs, candidate)
+		thread.ActiveRunID = runID
+		return nil
+	})
+	if err != nil {
+		return Registry{}, Thread{}, err
+	}
+	_, thread, err := registryThread(&registry, projectID, threadID)
+	if err != nil {
+		return Registry{}, Thread{}, err
+	}
+	return registry, *thread, nil
+}
+
+func (store Store) Inspect(ctx context.Context, projectID string) (Registry, Project, []Observation, error) {
+	if err := checkContext(ctx); err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	root, err := validateRoot(store.Root)
+	if err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	if err := validateID(projectID, "project ID"); err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	return inspectStore(ctx, root, projectID)
 }
 
 func checkContext(ctx context.Context) error {
@@ -245,6 +402,130 @@ func validateID(value, label string) error {
 	return nil
 }
 
+func validateMember(value string) error {
+	if err := mail.ValidateName(value); err != nil {
+		return fmt.Errorf("%w: member: %v", ErrInvalidInput, err)
+	}
+	return nil
+}
+
+func validateRunID(value, label string) error {
+	if !tokenPattern.MatchString(value) {
+		return fmt.Errorf("%w: %s has an invalid token", ErrInvalidInput, label)
+	}
+	return nil
+}
+
+func validateOptionalToken(value, label string) error {
+	if value != "" {
+		return validateRunID(value, label)
+	}
+	return nil
+}
+
+func validateHarness(harness mail.Harness, label string) error {
+	switch harness {
+	case mail.HarnessClaude, mail.HarnessCodex, mail.HarnessHermes, mail.HarnessPi:
+		return nil
+	default:
+		return fmt.Errorf("%w: %s has an unknown harness", ErrInvalidState, label)
+	}
+}
+
+func validateBinding(binding Binding) error {
+	if err := validateRunID(binding.RunID, "binding run ID"); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if binding.RunID == "none" {
+		return fmt.Errorf("%w: binding run ID none is reserved", ErrInvalidState)
+	}
+	if err := validateMember(binding.Member); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if err := validateHarness(binding.Harness, "binding harness"); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(binding.Worktree) {
+		return fmt.Errorf("%w: binding worktree is not absolute", ErrInvalidState)
+	}
+	if binding.Socket != "" && !filepath.IsAbs(binding.Socket) {
+		return fmt.Errorf("%w: binding socket is not absolute", ErrInvalidState)
+	}
+	if err := validateOptionalToken(binding.NativeSessionID, "binding native session ID"); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if err := validateOptionalToken(binding.PaneID, "binding pane ID"); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidState, err)
+	}
+	if binding.BoundAt.IsZero() {
+		return fmt.Errorf("%w: binding has no bound time", ErrInvalidState)
+	}
+	return nil
+}
+
+func registryThread(registry *Registry, projectID, threadID string) (*Project, *Thread, error) {
+	for projectIndex := range registry.Projects {
+		project := &registry.Projects[projectIndex]
+		if project.ID != projectID {
+			continue
+		}
+		for threadIndex := range project.Threads {
+			thread := &project.Threads[threadIndex]
+			if thread.ID == threadID {
+				return project, thread, nil
+			}
+		}
+		return nil, nil, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+	}
+	return nil, nil, fmt.Errorf("%w: project %s", ErrNotFound, projectID)
+}
+
+func projectHasRun(project Project, runID string) bool {
+	for _, thread := range project.Threads {
+		for _, binding := range thread.Runs {
+			if binding.RunID == runID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func activeBindingIndex(thread Thread) int {
+	for bindingIndex := range thread.Runs {
+		if thread.Runs[bindingIndex].RunID == thread.ActiveRunID {
+			return bindingIndex
+		}
+	}
+	return -1
+}
+
+func roleMatches(role Role, worker mail.Worker) bool {
+	return (role == RoleCoordinator && worker.Coordinator) || (role == RoleWorker && !worker.Coordinator)
+}
+
+func bindingFromWorker(worker mail.Worker) Binding {
+	return Binding{
+		RunID:           worker.RunID,
+		Member:          worker.Name,
+		Harness:         worker.Harness,
+		NativeSessionID: worker.ThreadID,
+		Worktree:        worker.Worktree,
+		Socket:          worker.Socket,
+		PaneID:          worker.PaneID,
+		BoundAt:         time.Now().UTC(),
+	}
+}
+
+func sameBindingIdentity(binding Binding, candidate Binding) bool {
+	return binding.RunID == candidate.RunID &&
+		binding.Member == candidate.Member &&
+		binding.Harness == candidate.Harness &&
+		binding.Worktree == candidate.Worktree &&
+		binding.Socket == candidate.Socket &&
+		binding.PaneID == candidate.PaneID
+}
+
 func isID(value string) bool {
 	if len(value) != 36 {
 		return false
@@ -296,6 +577,7 @@ func validateRegistry(registry Registry) error {
 		}
 		coordinators := 0
 		foundCoordinator := false
+		runs := make(map[string]struct{})
 		for _, thread := range record.Threads {
 			if err := validateStateID(thread.ID, "thread ID"); err != nil {
 				return err
@@ -318,6 +600,24 @@ func validateRegistry(registry Registry) error {
 			}
 			if err := validateStateContext(thread.Brief, "thread brief"); err != nil {
 				return err
+			}
+			if thread.ActiveRunID == "" && len(thread.Runs) != 0 {
+				return fmt.Errorf("%w: thread %s has runs but no active run", ErrInvalidState, thread.ID)
+			}
+			if thread.ActiveRunID != "" && len(thread.Runs) == 0 {
+				return fmt.Errorf("%w: thread %s has an active run but no history", ErrInvalidState, thread.ID)
+			}
+			for bindingIndex, binding := range thread.Runs {
+				if err := validateBinding(binding); err != nil {
+					return fmt.Errorf("%w: thread %s binding %d: %v", ErrInvalidState, thread.ID, bindingIndex, err)
+				}
+				if _, ok := runs[binding.RunID]; ok {
+					return fmt.Errorf("%w: duplicate run ID %s in project %s", ErrInvalidState, binding.RunID, record.ID)
+				}
+				runs[binding.RunID] = struct{}{}
+			}
+			if thread.ActiveRunID != "" && thread.Runs[len(thread.Runs)-1].RunID != thread.ActiveRunID {
+				return fmt.Errorf("%w: thread %s reactivates a retired run", ErrInvalidState, thread.ID)
 			}
 			if thread.CreatedAt.IsZero() {
 				return fmt.Errorf("%w: thread %s has no creation time", ErrInvalidState, thread.ID)

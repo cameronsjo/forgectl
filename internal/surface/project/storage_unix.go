@@ -47,7 +47,89 @@ func snapshotStore(ctx context.Context, root string) (Registry, error) {
 	return readRegistry(dir)
 }
 
-func updateRegistry(ctx context.Context, root string, createRoot bool, mutate func(*Registry) error) (Registry, error) {
+func inspectStore(ctx context.Context, root, projectID string) (Registry, Project, []Observation, error) {
+	if err := checkContext(ctx); err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	directoryFD, err := openRoot(root, false)
+	if errors.Is(err, privdir.ErrAbsent) {
+		return Registry{}, Project{}, nil, fmt.Errorf("%w: project %s", ErrNotFound, projectID)
+	}
+	if err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	defer func() { _ = unix.Close(directoryFD) }()
+	if err := checkRegistryLock(directoryFD); err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	registry, err := readRegistry(directoryFD)
+	if err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	projectIndex := -1
+	for index := range registry.Projects {
+		if registry.Projects[index].ID == projectID {
+			projectIndex = index
+			break
+		}
+	}
+	if projectIndex < 0 {
+		return Registry{}, Project{}, nil, fmt.Errorf("%w: project %s", ErrNotFound, projectID)
+	}
+	roster, err := readRoster(directoryFD, projectID)
+	if err != nil {
+		return Registry{}, Project{}, nil, err
+	}
+	observedAt := time.Now().UTC()
+	project := registry.Projects[projectIndex]
+	observations := make([]Observation, 0, len(project.Threads))
+	for _, thread := range project.Threads {
+		observation := Observation{
+			ThreadID:        thread.ID,
+			Enrollment:      EnrollmentUnbound,
+			ProcessLiveness: ProcessLivenessUnknown,
+			ObservedAt:      observedAt,
+		}
+		if thread.ActiveRunID == "" {
+			observations = append(observations, observation)
+			continue
+		}
+		activeIndex := activeBindingIndex(thread)
+		if activeIndex < 0 {
+			return Registry{}, Project{}, nil, fmt.Errorf("%w: thread %s has no active binding", ErrInvalidState, thread.ID)
+		}
+		active := thread.Runs[activeIndex]
+		observation.NativeSessionKnown = active.NativeSessionID != ""
+		observation.Enrollment = EnrollmentStale
+		if !roster.present {
+			observation.Reason = "roster-missing"
+			observations = append(observations, observation)
+			continue
+		}
+		worker, found := roster.byName[active.Member]
+		if !found {
+			observation.Reason = "member-missing"
+			observations = append(observations, observation)
+			continue
+		}
+		candidate := bindingFromWorker(worker)
+		if worker.RunID != active.RunID {
+			observation.Reason = "run-mismatch"
+		} else if !roleMatches(thread.Role, worker) {
+			observation.Reason = "role-mismatch"
+		} else if !sameBindingIdentity(active, candidate) {
+			observation.Reason = "identity-mismatch"
+		} else if active.NativeSessionID != candidate.NativeSessionID {
+			observation.Reason = "native-session-mismatch"
+		} else {
+			observation.Enrollment = EnrollmentCurrent
+		}
+		observations = append(observations, observation)
+	}
+	return registry, project, observations, nil
+}
+
+func updateRegistry(ctx context.Context, root string, createRoot bool, mutate func(*Registry, int) error) (Registry, error) {
 	if err := checkContext(ctx); err != nil {
 		return Registry{}, err
 	}
@@ -81,7 +163,10 @@ func updateRegistry(ctx context.Context, root string, createRoot bool, mutate fu
 		return Registry{}, fmt.Errorf("%w: registry revision overflow", ErrConflict)
 	}
 	next := registry
-	if err := mutate(&next); err != nil {
+	if err := mutate(&next, dir); err != nil {
+		if errors.Is(err, errNoChange) {
+			return registry, nil
+		}
 		return Registry{}, err
 	}
 	next.Version = Version
@@ -446,11 +531,35 @@ func checkSchemaKeys(data []byte) error {
 			if err := json.Unmarshal(threadRaw, &thread); err != nil {
 				return fmt.Errorf("projects[%d].threads[%d]: %w", projectIndex, threadIndex, err)
 			}
-			if err := checkKeys(thread, "id", "name", "role", "brief", "created_at"); err != nil {
+			if err := checkKeys(thread, "id", "name", "role", "brief", "active_run_id", "runs", "created_at"); err != nil {
 				return fmt.Errorf("projects[%d].threads[%d]: %w", projectIndex, threadIndex, err)
 			}
 			if err := requireFields(thread, "id", "name", "role", "brief", "created_at"); err != nil {
 				return fmt.Errorf("projects[%d].threads[%d]: %w", projectIndex, threadIndex, err)
+			}
+			if activeRun, present := thread["active_run_id"]; present && bytes.Equal(bytes.TrimSpace(activeRun), []byte("null")) {
+				return fmt.Errorf("projects[%d].threads[%d].active_run_id is null", projectIndex, threadIndex)
+			}
+			var bindings []json.RawMessage
+			if runs, present := thread["runs"]; present {
+				if bytes.Equal(bytes.TrimSpace(runs), []byte("null")) {
+					return fmt.Errorf("projects[%d].threads[%d].runs is null", projectIndex, threadIndex)
+				}
+				if err := json.Unmarshal(runs, &bindings); err != nil {
+					return fmt.Errorf("projects[%d].threads[%d].runs: %w", projectIndex, threadIndex, err)
+				}
+			}
+			for bindingIndex, bindingRaw := range bindings {
+				var binding map[string]json.RawMessage
+				if err := json.Unmarshal(bindingRaw, &binding); err != nil {
+					return fmt.Errorf("projects[%d].threads[%d].runs[%d]: %w", projectIndex, threadIndex, bindingIndex, err)
+				}
+				if err := checkKeys(binding, "run_id", "member", "harness", "native_session_id", "worktree", "socket", "pane_id", "bound_at"); err != nil {
+					return fmt.Errorf("projects[%d].threads[%d].runs[%d]: %w", projectIndex, threadIndex, bindingIndex, err)
+				}
+				if err := requireFields(binding, "run_id", "member", "harness", "native_session_id", "worktree", "socket", "pane_id", "bound_at"); err != nil {
+					return fmt.Errorf("projects[%d].threads[%d].runs[%d]: %w", projectIndex, threadIndex, bindingIndex, err)
+				}
 			}
 		}
 	}

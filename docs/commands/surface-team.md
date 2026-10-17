@@ -31,6 +31,8 @@ A Codex socket selects the dedicated app-server via `codex queue --remote unix:/
 
 For a replacement process, register the same name with `--replace` and omit `--run-id` to generate a new incarnation. Old processes then fail identity checks for sends and events. Replacement preserves the member's coordinator role and watchers. It does not resume native conversation history: resume the intended session using the harness's own facilities and verify that identity separately.
 
+Repeating the same RunID is allowed only for an exact identity no-op or filling an initially empty native-session ID. It preserves observed state and watchers; changing a known session, role, harness, worktree, socket, or pane requires a fresh RunID. Another current member cannot claim that RunID. Persistent-project bindings additionally reject historical RunID reuse within their private ledger; ordinary team registration does not keep a historical identity index.
+
 Pi refuses to bind an existing socket path, including a stale one, rather than risk unlinking another process's endpoint. On restart, register a fresh socket path and resume the saved native session. Set `FORGECTL_INBOX_RECEIPTS` to the same private receipt file across these restarts; otherwise its default is the socket path plus `.receipts`. A receipt from a different native session remains unconfirmed.
 
 ## Message outcomes
@@ -118,7 +120,7 @@ Native permission requests are cancelled, not approved on another agent's behalf
 
 Hermes delivery persists a pending receipt before prompting and immediately remains `unconfirmed`. After the turn, an exact message in native session history can confirm consumption. `flush` asks for that receipt without resending the message. A busy receiver returns `queued`; an unknown receipt stays `unconfirmed`. Neither history acceptance nor a settled native turn proves task success.
 
-To restart, stop the owned supervisor, replace the member registration with a fresh run and socket, and supply the original native session through `--thread`. Receipt files are scoped to the member and native session in the private ledger. Another supervisor cannot concurrently own that receipt store, and an existing socket is never stolen.
+To restart, stop the owned supervisor, replace the member registration with a fresh run and socket, and pass the original native session to `surface team register --thread`. The supervisor reads that registered session; its optional `--session-id` must match it. Receipt files are scoped to the member and native session in the private ledger. Another supervisor cannot concurrently own that receipt store, and an existing socket is never stolen.
 
 ### Hermes source-build verification
 

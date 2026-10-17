@@ -108,7 +108,7 @@ func newSurfaceTeamRegisterCmd(ledger *string) *cobra.Command {
 	command.Flags().StringVar(&harness, "harness", "", "native harness: claude, codex, hermes or pi")
 	command.Flags().StringVar(&member.Worktree, "worktree", "", "absolute working directory")
 	command.Flags().StringVar(&member.Socket, "socket", "", "absolute native Unix socket path")
-	command.Flags().StringVar(&member.ThreadID, "thread", "", "native Codex thread or Hermes session ID; omit only before the first session is known")
+	command.Flags().StringVar(&member.ThreadID, "thread", "", "native session ID; omit only before the first session is known")
 	command.Flags().StringVar(&member.RunID, "run-id", "", "explicit process incarnation; omit to generate a fresh one")
 	command.Flags().BoolVar(&member.Coordinator, "coordinator", false, "register the team's coordinator")
 	command.Flags().BoolVar(&replace, "replace", false, "explicitly replace this member's endpoint")
