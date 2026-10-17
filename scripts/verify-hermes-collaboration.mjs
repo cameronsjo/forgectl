@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HermesACPClient } from "./hermes-acp-client.mjs";
 import { ProjectAcceptance } from "./project-acceptance.mjs";
-import { Evidence, CodexClient, JsonLinesProcess, assertCodexSelection, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, closeProxy, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { Evidence, CodexClient, JsonLinesProcess, assertCodexSelection, assertCodexUntrusted, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, closeProxy, codexUntrustedConfig, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 export { closeProxy };
 
@@ -218,13 +218,14 @@ async function run(args) {
       const enrichedWorker = await register(evidence, forgectl, "hermes-worker", ["--ledger", ledger, "--harness", "hermes", "--worktree", workerRoot, "--socket", routeSocket, "--thread", nativeSession, "--run-id", worker.member.run_id, "--replace"], baseEnv, workerRoot);
       await projects.bind("worker", enrichedWorker);
     }
-    const coder = spawn(codex, ["app-server", "--config", `projects.${JSON.stringify(coordinatorRoot)}.trust_level="untrusted"`, "--listen", `unix://${coordinatorSocket}`], { cwd: coordinatorRoot, env: coordinatorEnv, stdio: ["ignore", "ignore", "pipe"] });
+    const coder = spawn(codex, ["app-server", "--config", codexUntrustedConfig(coordinatorRoot), "--listen", `unix://${coordinatorSocket}`], { cwd: coordinatorRoot, env: coordinatorEnv, stdio: ["ignore", "ignore", "pipe"] });
     processes.push(coder);
     coordinatorClient = new CodexClient(coder, evidence, WebSocket);
     await socketReady(coordinatorSocket);
     await coordinatorClient.connect(coordinatorSocket);
     await coordinatorClient.rpc("initialize", { clientInfo: { name: "forgectl-hermes-verifier", version: "1" }, capabilities: { experimentalApi: false } });
     coordinatorClient.notify("initialized", {});
+    assertCodexUntrusted(await coordinatorClient.rpc("config/read", { cwd: coordinatorRoot, includeLayers: true }), coordinatorRoot);
     const allowedProbe = join(coordinatorRoot, "allowed-sandbox-probe");
     const outsideProbe = `${root}-denied-sandbox-probe`;
     assert.equal(await pathExists(outsideProbe), false);

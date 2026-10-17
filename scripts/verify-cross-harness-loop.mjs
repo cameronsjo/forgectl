@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import assert from "node:assert/strict";
+
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { appendFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -88,6 +90,16 @@ function waitClosed(processHandle, timeout = STARTUP_TIMEOUT) {
 
 export function assertDuplicateRejected(result) {
   if (!Number.isInteger(result.code) || result.code <= 0 || !/duplicate/i.test(result.stderr)) fail("duplicate-ID fixture did not fail with a duplicate diagnostic");
+}
+
+export function codexUntrustedConfig(cwd) {
+  assert(typeof cwd === "string" && cwd.startsWith("/") && !/[\u0000-\u001f\u007f]/.test(cwd));
+  return `projects={${JSON.stringify(cwd)}={trust_level="untrusted"}}`;
+}
+
+export function assertCodexUntrusted(response, cwd) {
+  assert.equal(response.config?.projects?.[cwd]?.trust_level, "untrusted", "native config must retain the exact untrusted workspace");
+  assert(response.layers?.some((layer) => layer.name?.type === "sessionFlags" && layer.config?.projects?.[cwd]?.trust_level === "untrusted"), "untrusted workspace must come from transient session flags");
 }
 
 export function assertCodexSelection(response, model, cwd) {
@@ -623,7 +635,7 @@ async function main() {
   const piProxySocket = join(root, "pi-proxy.sock");
   const replacementSocket = join(root, "codex-replacement.sock");
   const piCoordinatorSocket = join(root, "pi-coordinator.sock");
-  const codexServerArgs = (socket) => ["app-server", "--config", `projects.${JSON.stringify(coordinatorRoot)}.trust_level="untrusted"`, "--listen", `unix://${socket}`];
+  const codexServerArgs = (socket) => ["app-server", "--config", codexUntrustedConfig(coordinatorRoot), "--listen", `unix://${socket}`];
   for (const socketPath of [codexSocket, piSocket, piRestartSocket, piProxySocket, replacementSocket, piCoordinatorSocket]) {
     if (socketPath.length > 103) fail(`Unix socket path exceeds macOS limit: ${socketPath}`);
   }
@@ -719,6 +731,7 @@ async function main() {
   const init = await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier", version: "1" }, capabilities: { experimentalApi: false } });
   evidence.add("codex-initialized", { protocol: init?.protocolVersion ?? init?.serverInfo?.version });
   codexRpc.notify("initialized", {});
+  assertCodexUntrusted(await codexRpc.rpc("config/read", { cwd: coordinatorRoot, includeLayers: true }), coordinatorRoot);
   const allowedProbe = join(coordinatorRoot, "sandbox-write-probe");
   const outsideProbe = `${root}-outside-write-probe`;
   if (await pathExists(outsideProbe)) fail("sandbox negative-control path already exists");
@@ -855,6 +868,7 @@ async function main() {
   await codexRpc.connect(replacementSocket);
   await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier-replacement", version: "1" }, capabilities: { experimentalApi: false } });
   codexRpc.notify("initialized", {});
+  assertCodexUntrusted(await codexRpc.rpc("config/read", { cwd: coordinatorRoot, includeLayers: true }), coordinatorRoot);
   const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
   const replacementThreadId = assertCodexSelection(replacementThread, args["codex-model"], coordinatorRoot);
   const replacementRebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--thread", replacementThreadId, "--run-id", replacement.member.run_id, "--replace"], baseEnv, coordinatorRoot);

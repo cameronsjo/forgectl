@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertCodexSelection, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, childEnv, closeProxy, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { assertCodexSelection, assertCodexUntrusted, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, childEnv, closeProxy, codexUntrustedConfig, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
 assert.throws(() => childEnv({ PATH: "/installed" }, {}, "/test/forgectl-test.bin"), /must be named forgectl/);
@@ -27,6 +27,20 @@ assert.throws(() => parseArgs([...flags, "--codex-model", "coordinator-model", "
 assert.throws(() => parseArgs(flags.slice(1)), /without explicit --live/);
 
 const selection = { thread: { id: "native-thread", cwd: "/task", ephemeral: false }, cwd: "/task", model: "chosen", modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: { type: "readOnly" } };
+assert.equal(codexUntrustedConfig('/private/tmp/task.with.dot/"quoted"'), 'projects={"/private/tmp/task.with.dot/\\"quoted\\""={trust_level="untrusted"}}');
+assert.throws(() => codexUntrustedConfig("relative/path"));
+assert.throws(() => codexUntrustedConfig("/private/tmp/line\nbreak"));
+const trustConfig = { projects: { "/task": { trust_level: "untrusted" } } };
+const trust = { config: trustConfig, layers: [{ name: { type: "sessionFlags" }, config: trustConfig }] };
+assertCodexUntrusted(trust, "/task");
+for (const changed of [
+  { config: {} },
+  { config: { projects: { "/task": { trust_level: "trusted" } } } },
+  { config: { projects: { '"/task': { trust_level: null } } } },
+  { layers: null },
+  { layers: [{ name: { type: "user" }, config: trustConfig }] },
+]) assert.throws(() => assertCodexUntrusted({ ...trust, ...changed }, "/task"));
+assert.throws(() => assertCodexUntrusted(trust, "/task/child"));
 assert.equal(assertCodexSelection(selection, "chosen", "/task"), "native-thread");
 for (const changed of [{ model: "other" }, { modelProvider: "other" }, { modelProvider: undefined }, { cwd: "/other" }, { approvalsReviewer: "auto_review" }, { sandbox: { type: "dangerFullAccess" } }]) {
   assert.throws(() => assertCodexSelection({ ...selection, ...changed }, "chosen", "/task"), /unexpected native/);
