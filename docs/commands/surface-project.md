@@ -137,6 +137,8 @@ Exit codes: `0` for completed creation, binding, or inspection; `1` for state/st
 
 ## Remaining integration
 
-These commands remain a source-build integration, not a complete accepted Projects interface. Native thread attachment and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
+These commands remain a source-build integration, not a global installation. Native Codex attachment, UI reconnect, receiver restart, and coordinator replacement have live receipts in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md). Pi RPC and Hermes ACP use read-only thread timelines rather than concurrent native interfaces.
+
+Hermes shell-based replies remain subject to its native command policy. A full accepted run does not guarantee every message payload can pass that policy: a subsequent source-code reply was denied and correctly produced no success receipt. The denial is not bypassed. A message-only native channel remains a pending design decision, not an implemented capability.
 
 The existing [team mailbox](surface-team.md) remains the communication authority. Project context and teammate messages never count as operator approval. Desk's human approval queue remains separate from read-only project monitoring.

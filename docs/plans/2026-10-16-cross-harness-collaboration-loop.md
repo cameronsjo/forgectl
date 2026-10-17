@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
-Status: Codex/Pi and Codex/Hermes collaboration accepted; native Codex-to-Pi coordinator handoff accepted; Claude deferred; Projects interface approach approved
-Next action: implement the reviewed persistent-project foundation in the [Projects plan](2026-10-17-projects-surface.md), reusing Desk and herdr navigation without a competing execution or approval system.
+Status: Codex/Pi and Codex/Hermes collaboration accepted; native Codex-to-Pi coordinator handoff accepted; Claude deferred; Projects source and native presentation implemented
+Next action: resolve the later Hermes shell-reply policy limitation recorded in the [Projects plan](2026-10-17-projects-surface.md). Native denial remains intact; a message-only channel versus limited delivery is awaiting Cameron's choice.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
