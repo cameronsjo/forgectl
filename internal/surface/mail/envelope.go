@@ -77,6 +77,8 @@ type Message struct {
 	ID          string    `json:"id"`
 	From        string    `json:"from"`
 	To          string    `json:"to"`
+	FromRunID   string    `json:"from_run_id,omitempty"`
+	ToRunID     string    `json:"to_run_id,omitempty"`
 	Body        string    `json:"body"`
 	Priority    Priority  `json:"priority"`
 	CreatedAt   time.Time `json:"created_at"`

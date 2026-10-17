@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,6 +18,15 @@ const pathExists = async (path) => {
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return false;
+    throw error;
+  }
+};
+
+const receiptContents = async (path) => {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
     throw error;
   }
 };
@@ -122,24 +131,150 @@ const spawnHarness = (directory, socketName, mode, identity = { worker: `pi-${mo
     if (child.exitCode === null) child.kill(signal);
     if (child.exitCode === null) await once(child, "exit");
   };
-  return { child, command, errors: () => errors, receiptPath, socketPath, stop };
+  const exchangeRequest = (request) => identity.runId
+    ? { ...request, v: 2, run_id: identity.runId, session_id: request.session_id ?? (mode.startsWith("wrong-") ? "session-2" : "session-1") }
+    : request;
+  const exchangeForHarness = (request, timeout) => exchange(socketPath, exchangeRequest(request), timeout);
+  return { child, command, errors: () => errors, receiptPath, socketPath, stop, exchange: exchangeForHarness };
 };
 
 const testCoordinatorIdentityActivates = async (directory) => {
   const harness = spawnHarness(directory, "coordinator.sock", "message-start", { coordinator: "pi-coordinator", ledger: directory, runId: "run-1" });
   try {
     await waitForSocket(harness.socketPath);
-    const delivery = await exchange(harness.socketPath, { v: 1, type: "deliver", id: "coordinator-1", text: "native" });
+    const delivery = await harness.exchange({ type: "deliver", id: "coordinator-1", text: "native" });
     assert.equal(delivery.ok, false);
     assert.equal(delivery.unconfirmed, true);
     await harness.command({ type: "event", name: "message_start", text: "native" });
-    const receipt = await exchange(harness.socketPath, { v: 1, type: "receipt", id: "coordinator-1" });
+    const receipt = await harness.exchange({ type: "receipt", id: "coordinator-1" });
     assert.equal(receipt.ok, true);
     assert.equal(receipt.accepted, true);
     const state = await harness.command({ type: "calls" });
     assert.equal(state.calls.length, 1);
   } finally {
     await harness.stop();
+  }
+};
+
+const testBoundIdentityRefusals = async (directory) => {
+  const harness = spawnHarness(directory, "bound-identity.sock", "message-start", { worker: "pi-bound", runId: "run-bound" });
+  const request = (type, id, overrides = {}) => ({ v: 2, type, id, run_id: "run-bound", session_id: "session-1", ...overrides });
+  try {
+    await waitForSocket(harness.socketPath);
+    const emptyReceipts = await receiptContents(harness.receiptPath);
+    for (const rejected of [
+      { v: 1, type: "deliver", id: "bound-v1", text: "legacy" },
+      request("deliver", "bound-run", { run_id: "wrong-run", text: "wrong run" }),
+      request("deliver", "bound-session", { session_id: "wrong-session", text: "wrong session" }),
+    ]) {
+      const response = await exchange(harness.socketPath, rejected);
+      assert.equal(response.ok, false);
+      assert.equal(await receiptContents(harness.receiptPath), emptyReceipts);
+    }
+    let state = await harness.command({ type: "calls" });
+    assert.equal(state.calls.length, 0);
+
+    const delivery = await harness.exchange({ type: "deliver", id: "bound-positive", text: "native" });
+    assert.equal(delivery.ok, false);
+    assert.equal(delivery.unconfirmed, true);
+    await harness.command({ type: "event", name: "message_start", text: "native" });
+    const receipt = await harness.exchange({ type: "receipt", id: "bound-positive" });
+    assert.equal(receipt.ok, true);
+    assert.equal(receipt.v, 2);
+    assert.equal(receipt.run_id, "run-bound");
+    assert.equal(receipt.session_id, "session-1");
+    const acceptedReceipts = await receiptContents(harness.receiptPath);
+
+    for (const rejected of [
+      request("receipt", "bound-positive", { run_id: "wrong-run" }),
+      request("receipt", "bound-positive", { session_id: "wrong-session" }),
+      request("state", "bound-state", { run_id: "wrong-run" }),
+      request("state", "bound-state-session", { session_id: "wrong-session" }),
+    ]) {
+      const response = await exchange(harness.socketPath, rejected);
+      assert.equal(response.ok, false);
+      assert.equal(await receiptContents(harness.receiptPath), acceptedReceipts);
+    }
+    state = await harness.command({ type: "calls" });
+    assert.equal(state.calls.length, 1);
+    const currentState = await harness.exchange({ type: "state", id: "bound-state-current" });
+    assert.equal(currentState.ok, true);
+    assert.equal(currentState.v, 2);
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testSessionSwitchDuringNativeObservationStaysUnconfirmed = async (directory) => {
+  const harness = spawnHarness(directory, "session-switch.sock", "session-switch", { worker: "pi-switch", runId: "run-switch" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const delivery = await harness.exchange({ type: "deliver", id: "session-switch-1", text: "switch while waiting" });
+    assert.equal(delivery.ok, false);
+    assert.equal(delivery.unconfirmed, true);
+    const receipt = await exchange(harness.socketPath, {
+      v: 2,
+      type: "receipt",
+      id: "session-switch-1",
+      run_id: "run-switch",
+      session_id: "session-2",
+    });
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.unconfirmed, true);
+    const state = await harness.command({ type: "calls" });
+    assert.equal(state.calls.length, 1);
+    const records = (await receiptContents(harness.receiptPath)).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(records.at(-1).state, "accepted");
+    assert.equal(records.at(-1).sessionId, "session-1");
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testRejectedReceiptIdentityRebinding = async (directory) => {
+  const first = spawnHarness(directory, "rejected-rebind.sock", "reject", { worker: "pi-rebind", runId: "run-rebind" });
+  try {
+    await waitForSocket(first.socketPath);
+    const firstDelivery = await first.exchange({ type: "deliver", id: "rejected-rebind-1", text: "retryable" });
+    assert.equal(firstDelivery.ok, false);
+    assert.equal(firstDelivery.retry, true);
+    const secondDelivery = await first.exchange({ type: "deliver", id: "rejected-rebind-1", text: "retryable" });
+    assert.equal(secondDelivery.ok, false);
+    assert.equal(secondDelivery.retry, true);
+    const sameRunReceipts = await receiptContents(first.receiptPath);
+    const sameRunState = await first.command({ type: "calls" });
+    assert.equal(sameRunState.calls.length, 2);
+    await first.stop();
+
+    await rm(first.socketPath, { force: true });
+    const changedSession = spawnHarness(directory, "rejected-rebind.sock", "wrong-reject", { worker: "pi-rebind", runId: "run-rebind" });
+    try {
+      await waitForSocket(changedSession.socketPath);
+      const response = await changedSession.exchange({ type: "deliver", id: "rejected-rebind-1", text: "retryable" });
+      assert.equal(response.ok, false);
+      assert.equal(response.unconfirmed, true);
+      assert.equal(await receiptContents(changedSession.receiptPath), sameRunReceipts);
+      const state = await changedSession.command({ type: "calls" });
+      assert.equal(state.calls.length, 0);
+    } finally {
+      await changedSession.stop();
+    }
+
+    await rm(changedSession.socketPath, { force: true });
+    const changedRun = spawnHarness(directory, "rejected-rebind.sock", "accepted", { worker: "pi-rebind", runId: "run-new" });
+    try {
+      await waitForSocket(changedRun.socketPath);
+      const response = await changedRun.exchange({ type: "deliver", id: "rejected-rebind-1", text: "retryable" });
+      assert.equal(response.ok, false);
+      assert.equal(response.unconfirmed, true);
+      assert.equal(await receiptContents(changedRun.receiptPath), sameRunReceipts);
+      const state = await changedRun.command({ type: "calls" });
+      assert.equal(state.calls.length, 0);
+    } finally {
+      await changedRun.stop();
+    }
+  } finally {
+    if (first.child.exitCode === null && first.child.signalCode === null) await first.stop("SIGKILL");
   }
 };
 
@@ -225,7 +360,7 @@ const waitForPendingReceipt = async (socketPath, id) => {
 const childMain = async (mode) => {
   const calls = [];
   const handlers = new Map();
-  const currentSession = mode === "missing-session" ? undefined : mode.startsWith("wrong-") ? "session-2" : "session-1";
+  let currentSession = mode === "missing-session" ? undefined : mode.startsWith("wrong-") ? "session-2" : "session-1";
   const sessionManager = {
     getSessionId: () => currentSession,
     getEntries: () => (mode === "history" || mode === "wrong-history") ? [{ type: "message", message: { role: "user", content: "may have arrived" } }] : [],
@@ -240,6 +375,13 @@ const childMain = async (mode) => {
       if (mode === "pending") return new Promise(() => undefined);
       if (mode === "reject") throw new Error("definite pi rejection");
       if (mode === "runtime-failure") return Promise.reject(new Error("runtime send failure"));
+      if (mode === "session-switch") {
+        setTimeout(() => {
+          handlers.get("message_start")?.({ type: "message_start", message: { role: "user", content: text } }, eventContext);
+          currentSession = "session-2";
+          handlers.get("session_start")?.({ type: "session_start", reason: "switch" }, eventContext);
+        }, 10);
+      }
       return undefined;
     },
   };
@@ -537,6 +679,9 @@ const main = async () => {
   const directory = await mkdtemp(join(tmpdir(), "forgectl-inbox-test-"));
   try {
     await testCoordinatorIdentityActivates(directory);
+    await testBoundIdentityRefusals(directory);
+    await testSessionSwitchDuringNativeObservationStaysUnconfirmed(directory);
+    await testRejectedReceiptIdentityRebinding(directory);
     await testWorkerDrainIdentityActivates(directory);
     await testInvalidCoordinatorIdentitiesStayInert(directory);
     await testVoidSendStaysPending(directory);

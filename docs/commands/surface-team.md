@@ -31,9 +31,13 @@ A Codex socket selects the dedicated app-server via `codex queue --remote unix:/
 
 For a replacement process, register the same name with `--replace` and omit `--run-id` to generate a new incarnation. Old processes then fail identity checks for sends and events. Replacement preserves the member's coordinator role and watchers. It does not resume native conversation history: resume the intended session using the harness's own facilities and verify that identity separately.
 
+New teammate messages snapshot the sender and recipient RunIDs. A queued message for a retired recipient run fails without delivery to the replacement; an unconfirmed message remains unconfirmed without asking the replacement for a receipt. Native-session discovery within the same run still permits delivery. Legacy envelopes and system notices without run IDs retain their older behavior and cannot establish exact project-thread attribution.
+
 Repeating the same RunID is allowed only for an exact identity no-op or filling an initially empty native-session ID. It preserves observed state and watchers; changing a known session, role, harness, worktree, socket, or pane requires a fresh RunID. Another current member cannot claim that RunID. Persistent-project bindings additionally reject historical RunID reuse within their private ledger; ordinary team registration does not keep a historical identity index.
 
-Pi refuses to bind an existing socket path, including a stale one, rather than risk unlinking another process's endpoint. On restart, register a fresh socket path and resume the saved native session. Set `FORGECTL_INBOX_RECEIPTS` to the same private receipt file across these restarts; otherwise its default is the socket path plus `.receipts`. A receipt from a different native session remains unconfirmed.
+Pi refuses to bind an existing socket path, including a stale one, rather than risk unlinking another process's endpoint. On restart, register a fresh socket path and resume the saved native session. `FORGECTL_INBOX_RECEIPTS` names the private receipt file; its default is the socket path plus `.receipts`. Receipts retain their original run and native session: preserving a file across a new run does not let the replacement claim old consumption or reuse old message IDs.
+
+Run/session-bound Pi requests use inbox protocol v2, carrying the expected RunID and any known native-session ID. The shipped extension refuses a legacy request on a run-bound socket and validates identity before delivery, receipt lookup, or state reporting. Old extension builds refuse v2 instead of silently delivering elsewhere. An acceptance response with a mismatched identity remains unconfirmed. A native-session switch while awaiting consumption cannot become success for the new session. Upgrade the source-built executable and its embedded extension together for these enrollments.
 
 ## Message outcomes
 

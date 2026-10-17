@@ -20,16 +20,20 @@ type PiAdapter struct {
 }
 
 type piRequest struct {
-	V        int    `json:"v"`
-	Type     string `json:"type"`
-	ID       string `json:"id,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Priority string `json:"priority,omitempty"`
+	V         int    `json:"v"`
+	Type      string `json:"type"`
+	ID        string `json:"id,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Priority  string `json:"priority,omitempty"`
 }
 
 type piResponse struct {
+	V           int    `json:"v,omitempty"`
 	OK          bool   `json:"ok"`
 	ID          string `json:"id,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
 	SessionID   string `json:"session_id,omitempty"`
 	As          string `json:"as,omitempty"`
 	Accepted    *bool  `json:"accepted,omitempty"`
@@ -43,10 +47,30 @@ type piResponse struct {
 	Retry bool `json:"retry,omitempty"`
 }
 
+const piIdentityProtocol = 2
+
+func piRequestFor(worker Worker, request piRequest) piRequest {
+	if worker.RunID == "" && worker.ThreadID == "" {
+		request.V = 1
+		return request
+	}
+	request.V = piIdentityProtocol
+	request.RunID = worker.RunID
+	request.SessionID = worker.ThreadID
+	return request
+}
+
+func piDefiniteRefusal(response piResponse) bool {
+	if response.OK || response.Unconfirmed || response.Retry || response.Evidence != "" {
+		return false
+	}
+	return response.Accepted == nil || !*response.Accepted
+}
+
 // Deliver hands text to the extension, which prompts when pi is idle, steers
 // when it is busy, and queues a follow-up for PriorityLater.
 func (a PiAdapter) Deliver(ctx context.Context, w Worker, m Message, text string) (string, error) {
-	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "deliver", ID: m.ID, Text: text, Priority: string(m.Priority)}, true)
+	resp, err := a.call(ctx, w, piRequestFor(w, piRequest{Type: "deliver", ID: m.ID, Text: text, Priority: string(m.Priority)}), true)
 	if err != nil {
 		return "", err
 	}
@@ -79,7 +103,7 @@ func (a PiAdapter) Deliver(ctx context.Context, w Worker, m Message, text string
 // accepted receipt does not prove a completed model turn, and message_start
 // precedes transcript persistence.
 func (a PiAdapter) Receipt(ctx context.Context, w Worker, m Message) (string, bool, error) {
-	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "receipt", ID: m.ID}, true)
+	resp, err := a.call(ctx, w, piRequestFor(w, piRequest{Type: "receipt", ID: m.ID}), true)
 	if err != nil {
 		return "", false, err
 	}
@@ -106,7 +130,7 @@ func (a PiAdapter) Receipt(ctx context.Context, w Worker, m Message) (string, bo
 
 // State asks the extension whether pi is idle.
 func (a PiAdapter) State(ctx context.Context, w Worker) (WorkerState, error) {
-	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "state"}, false)
+	resp, err := a.call(ctx, w, piRequestFor(w, piRequest{Type: "state"}), false)
 	if err != nil {
 		if IsRetryable(err) {
 			return StateAbsent, nil
@@ -122,8 +146,8 @@ func (a PiAdapter) State(ctx context.Context, w Worker) (WorkerState, error) {
 	return StateBusy, nil
 }
 
-func (a PiAdapter) call(ctx context.Context, socket string, req piRequest, uncertain bool) (piResponse, error) {
-	if socket == "" || !filepath.IsAbs(socket) {
+func (a PiAdapter) call(ctx context.Context, worker Worker, req piRequest, uncertain bool) (piResponse, error) {
+	if worker.Socket == "" || !filepath.IsAbs(worker.Socket) {
 		return piResponse{}, NotReady("no pi inbox socket recorded for this worker")
 	}
 	timeout := a.Timeout
@@ -136,9 +160,9 @@ func (a PiAdapter) call(ctx context.Context, socket string, req piRequest, uncer
 		return piResponse{}, err
 	}
 	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "unix", socket)
+	conn, err := d.DialContext(ctx, "unix", worker.Socket)
 	if err != nil {
-		return piResponse{}, NotReady("dial pi inbox %s: %v", socket, err)
+		return piResponse{}, NotReady("dial pi inbox %s: %v", worker.Socket, err)
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
@@ -181,6 +205,22 @@ func (a PiAdapter) call(ctx context.Context, socket string, req piRequest, uncer
 			return piResponse{}, Unconfirmed("pi inbox answered with an invalid response")
 		}
 		return piResponse{}, errors.New("pi inbox answered with an invalid response")
+	}
+	if req.V == piIdentityProtocol {
+		if resp.V != piIdentityProtocol {
+			if piDefiniteRefusal(resp) {
+				return resp, fmt.Errorf("pi inbox refused protocol v%d: %s", piIdentityProtocol, oneLine([]byte(resp.Error), 200))
+			}
+			return resp, Unconfirmed("pi inbox answered with an unsupported protocol version")
+		}
+		if resp.RunID != worker.RunID || (worker.ThreadID != "" && resp.SessionID != worker.ThreadID) {
+			if piDefiniteRefusal(resp) {
+				return resp, fmt.Errorf("pi inbox refused worker identity: %s", oneLine([]byte(resp.Error), 200))
+			}
+			return resp, Unconfirmed("pi inbox response identity does not match worker registration")
+		}
+	} else if resp.V != 0 && resp.V != 1 {
+		return resp, Unconfirmed("pi inbox answered with an unsupported protocol version")
 	}
 	return resp, nil
 }

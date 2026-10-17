@@ -8,7 +8,7 @@ import (
 // The extension and PiAdapter speak one protocol, so the shipped copy must
 // name the same environment variable and request types the adapter uses.
 func TestPiExtensionEmbedded(t *testing.T) {
-	for _, want := range []string{EnvInbox, EnvWorker, EnvCoordinator, EnvLedger, EnvRunID, EnvDrainWorker, `"deliver"`, `"receipt"`, `"state"`, "--harness", `retry: true`, "accepted", "unconfirmed", "message_start", "session_start", "getEntries", "getSessionId", "session_id"} {
+	for _, want := range []string{EnvInbox, EnvWorker, EnvCoordinator, EnvLedger, EnvRunID, EnvDrainWorker, `"deliver"`, `"receipt"`, `"state"`, "--harness", `retry: true`, "accepted", "unconfirmed", "message_start", "session_start", "getEntries", "getSessionId", "session_id", "run_id", "identity-bound pi inbox requires protocol version 2", "identityError"} {
 		if !bytes.Contains(PiExtension, []byte(want)) {
 			t.Errorf("embedded pi extension does not mention %s", want)
 		}
@@ -16,13 +16,21 @@ func TestPiExtensionEmbedded(t *testing.T) {
 }
 
 func TestPiExtensionKeepsReceiptAndSocketOwnershipState(t *testing.T) {
-	for _, want := range []string{"FORGECTL_INBOX_RECEIPTS", "receiptPath", "messageDigest", "ownedSocket", "statSync"} {
+	for _, want := range []string{"FORGECTL_INBOX_RECEIPTS", "receiptPath", "messageDigest", "ownedSocket", "statSync", "runId", "runMatches", "receipt belongs to a different pi run or session", "accepted.sessionId"} {
 		if !bytes.Contains(PiExtension, []byte(want)) {
 			t.Errorf("embedded pi extension does not mention %s", want)
 		}
 	}
 	if !bytes.Contains(PiExtension, []byte("inbox path already exists; register a fresh socket path for this process")) {
 		t.Error("extension does not fail closed on an existing socket")
+	}
+}
+
+func TestPiExtensionRejectsIdentityMismatchBeforeDelivery(t *testing.T) {
+	for _, want := range []string{"req.v !== 1 && req.v !== 2", "const identityFailure = identityError(req)", "if (identityFailure)", "pi.sendUserMessage(text"} {
+		if !bytes.Contains(PiExtension, []byte(want)) {
+			t.Errorf("embedded pi extension does not enforce %s", want)
+		}
 	}
 }
 

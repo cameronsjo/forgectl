@@ -15,6 +15,8 @@
  *   {"v":1,"type":"receipt","id":"..."}
  *     -> {"ok":true,"accepted":true,"evidence":"message_start|history"} | {"ok":false,"unconfirmed":true}
  *   {"v":1,"type":"state"} -> {"ok":true,"idle":true|false}
+ *   v2 requests add run_id and the optional expected session_id. A run-bound
+ *   receiver refuses v1 before it can mutate the Pi session.
  *
  * Turn boundaries go back to forgectl as `forgectl surface event --harness pi
  * --state busy|idle`, which records the state, sends --watch notices and flushes.
@@ -25,7 +27,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
 
@@ -37,6 +39,8 @@ type Request = {
   v?: number;
   type?: string;
   id?: string;
+  run_id?: string;
+  session_id?: string;
   text?: string;
   priority?: string;
 };
@@ -47,6 +51,7 @@ type ReceiptRecord = {
   id: string;
   digest: string;
   state: ReceiptState;
+  runId?: string;
   sessionId?: string;
   as?: string;
   evidence?: "message_start" | "history";
@@ -91,6 +96,7 @@ const isReceiptRecord = (value: unknown): value is ReceiptRecord => {
   if (typeof record.id !== "string" || !ID_PATTERN.test(record.id)) return false;
   if (typeof record.digest !== "string" || !/^[0-9a-f]{64}$/.test(record.digest)) return false;
   if (record.state !== "pending" && record.state !== "accepted" && record.state !== "rejected") return false;
+  if (record.runId !== undefined && typeof record.runId !== "string") return false;
   if (record.sessionId !== undefined && typeof record.sessionId !== "string") return false;
   if (record.as !== undefined && typeof record.as !== "string") return false;
   if (record.evidence !== undefined && record.evidence !== "message_start" && record.evidence !== "history") return false;
@@ -129,7 +135,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
         return;
       }
       const previous = receipts.get(parsed.id);
-      if (previous && (previous.digest !== parsed.digest || previous.sessionId !== parsed.sessionId || (previous.state === "accepted" && parsed.state !== "accepted"))) {
+      if (previous && (previous.digest !== parsed.digest || previous.runId !== parsed.runId || previous.sessionId !== parsed.sessionId || (previous.state === "accepted" && parsed.state !== "accepted"))) {
         diagnostic("receipt store contains conflicting records");
         return;
       }
@@ -170,7 +176,8 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     return parts.join("");
   };
 
-  const sessionMatches = (record: ReceiptRecord): boolean => Boolean(sessionId && record.sessionId && record.sessionId === sessionId);
+  const runMatches = (record: ReceiptRecord): boolean => !runID ? !record.runId : record.runId === runID;
+  const sessionMatches = (record: ReceiptRecord): boolean => Boolean(runMatches(record) && sessionId && record.sessionId && record.sessionId === sessionId);
 
   const pendingForDigest = (digest: string): ReceiptRecord | undefined => {
     for (const record of receipts.values()) {
@@ -280,7 +287,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     if (!sessionId) return { ok: false, retry: true, error: "current pi session identity is unavailable" };
     const wasIdle = idle;
     const deliverAs = !wasIdle && req.priority === "later" ? "followUp" : "steer";
-    const pendingRecord: ReceiptRecord = { id: req.id as string, digest, state: "pending", sessionId, as: wasIdle ? "prompt" : deliverAs };
+    const pendingRecord: ReceiptRecord = { id: req.id as string, digest, state: "pending", runId: runID || undefined, sessionId, as: wasIdle ? "prompt" : deliverAs };
     try {
       appendReceipt(pendingRecord);
     } catch {
@@ -305,12 +312,15 @@ export default function forgectlInbox(pi: ExtensionAPI) {
       return { ok: false, unconfirmed: true, error: "pi has not observed native consumption of the message" };
     }
     const accepted = receipts.get(req.id as string);
+    if (!accepted || accepted.state !== "accepted" || !sessionMatches(accepted)) {
+      return { ok: false, unconfirmed: true, error: "pi native consumption belongs to a different session" };
+    }
     return {
       ok: true,
-      session_id: sessionId,
+      session_id: accepted.sessionId,
       accepted: true,
-      as: accepted?.as || (wasIdle ? "prompt" : deliverAs),
-      evidence: accepted?.evidence || "message_start",
+      as: accepted.as || (wasIdle ? "prompt" : deliverAs),
+      evidence: accepted.evidence || "message_start",
     };
   };
 
@@ -321,9 +331,9 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     const digest = messageDigest(text);
     const previous = receipts.get(req.id);
     if (previous && previous.digest !== digest) return { ok: false, error: "message id was reused with different text" };
+    if (previous && !sessionMatches(previous)) return { ok: false, unconfirmed: true, error: "receipt belongs to a different pi run or session" };
     if (previous?.state === "accepted") {
-      if (!sessionMatches(previous)) return { ok: false, unconfirmed: true, error: "receipt belongs to a different pi session" };
-      return { ok: true, session_id: sessionId, accepted: true, as: previous.as, evidence: previous.evidence };
+      return { ok: true, session_id: previous.sessionId, accepted: true, as: previous.as, evidence: previous.evidence };
     }
     if (previous?.state === "pending") return { ok: false, unconfirmed: true, error: "delivery is unconfirmed" };
     const running = inFlight.get(req.id);
@@ -346,13 +356,33 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     return { ok: true, session_id: sessionId, accepted: false, known: true, error: record.error || "pi rejected the message" };
   };
 
+  const identityError = (req: Request): string | undefined => {
+    if (req.v === 1) {
+      return runID ? "identity-bound pi inbox requires protocol version 2" : undefined;
+    }
+    if (req.v !== 2) return "unsupported protocol version";
+    const requestedRunID = typeof req.run_id === "string" ? req.run_id : "";
+    if (requestedRunID !== (runID || "")) return "pi run identity does not match this process";
+    if (req.session_id !== undefined && typeof req.session_id !== "string") return "pi session identity is invalid";
+    if (req.session_id && req.session_id !== sessionId) {
+      return sessionId ? "pi session identity does not match this process" : "current pi session identity is unavailable";
+    }
+    return undefined;
+  };
+
+  const responseIdentity = (version: number): object => ({
+    v: version,
+    run_id: runID || undefined,
+    session_id: sessionId,
+  });
+
   const server = createServer((sock: Socket) => {
     let buf = "";
     let answered = false;
-    const answer = (id: string | undefined, body: object) => {
+    const answer = (id: string | undefined, body: object, version = 1) => {
       if (answered) return;
       answered = true;
-      sock.end(JSON.stringify(id ? { id, ...body } : body) + "\n");
+      sock.end(JSON.stringify(id ? { id, ...responseIdentity(version), ...body } : { ...responseIdentity(version), ...body }) + "\n");
     };
     sock.setEncoding("utf8");
     sock.setTimeout(REQUEST_TIMEOUT_MS, () => sock.destroy());
@@ -380,18 +410,23 @@ export default function forgectlInbox(pi: ExtensionAPI) {
         return;
       }
       const req = parsed as Request;
-      if (req.v !== 1) {
+      if (req.v !== 1 && req.v !== 2) {
         answer(req.id, { ok: false, error: "unsupported protocol version" });
+        return;
+      }
+      const identityFailure = identityError(req);
+      if (identityFailure) {
+        answer(req.id, { ok: false, error: identityFailure }, req.v);
         return;
       }
       try {
         if (req.type === "deliver") {
-          deliver(req).then((body) => answer(req.id, body), (err) => answer(req.id, { ok: false, unconfirmed: true, error: String(err).slice(0, 200) }));
-        } else if (req.type === "receipt") answer(req.id, receipt(req));
-        else if (req.type === "state") answer(req.id, { ok: true, idle });
-        else answer(req.id, { ok: false, error: "unknown request type" });
+          deliver(req).then((body) => answer(req.id, body, req.v), (err) => answer(req.id, { ok: false, unconfirmed: true, error: String(err).slice(0, 200) }, req.v));
+        } else if (req.type === "receipt") answer(req.id, receipt(req), req.v);
+        else if (req.type === "state") answer(req.id, { ok: true, idle }, req.v);
+        else answer(req.id, { ok: false, error: "unknown request type" }, req.v);
       } catch (err) {
-        answer(req.id, { ok: false, unconfirmed: req.type === "deliver", error: String(err).slice(0, 200) });
+        answer(req.id, { ok: false, unconfirmed: req.type === "deliver", error: String(err).slice(0, 200) }, req.v);
       }
     });
   });

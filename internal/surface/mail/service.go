@@ -64,6 +64,9 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 	if sender.Name == recip.Name {
 		return SendResult{}, errors.New("a worker cannot message itself")
 	}
+	if (sender.RunID != "" && !threadPattern.MatchString(sender.RunID)) || (recip.RunID != "" && !threadPattern.MatchString(recip.RunID)) {
+		return SendResult{}, errors.New("sender or recipient has an invalid run identity")
+	}
 	clean, err := CleanBody(body)
 	if err != nil {
 		return SendResult{}, err
@@ -72,7 +75,7 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 		pri = PriorityNext
 	}
 	now := s.now()
-	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, Body: clean, Priority: pri, CreatedAt: now, ReplyBinary: s.ReplyBinary}
+	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, FromRunID: sender.RunID, ToRunID: recip.RunID, Body: clean, Priority: pri, CreatedAt: now, ReplyBinary: s.ReplyBinary}
 
 	var res SendResult
 	err = s.Box.Locked(func(tx *Tx) error {
@@ -95,6 +98,10 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 // attempt tries one delivery and records the outcome.
 func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendResult, error) {
 	id := e.Msg.ID
+	if e.Msg.ToRunID != "" && e.Msg.ToRunID != w.RunID {
+		const detail = "recipient run changed; queued message was not delivered to the replacement"
+		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, false, s.now())
+	}
 	if err := ValidateReplyBinary(e.Msg.ReplyBinary); err != nil {
 		detail := oneLine([]byte(err.Error()), 300)
 		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, true, s.now())
@@ -131,6 +138,9 @@ func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendR
 }
 
 func (s *Service) reconcile(ctx context.Context, tx *Tx, worker Worker, entry Entry) (SendResult, error) {
+	if entry.Msg.ToRunID != "" && entry.Msg.ToRunID != worker.RunID {
+		return s.retainUnconfirmed(tx, entry, "recipient run changed; original delivery remains unconfirmed")
+	}
 	adapter, ok := s.Adapters[worker.Harness]
 	if !ok || adapter == nil {
 		detail := fmt.Sprintf("no adapter for harness %s", quoteTrunc(string(worker.Harness)))

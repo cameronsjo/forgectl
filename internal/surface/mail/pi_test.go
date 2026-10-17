@@ -50,6 +50,10 @@ func startPi(t *testing.T, dir string, respond func(piRequest) piResponse) (stri
 	return path, got
 }
 
+func versionedPiWorker(socket string) Worker {
+	return Worker{Name: "pi-1", Harness: HarnessPi, Socket: socket, RunID: "run-1", ThreadID: "session-1"}
+}
+
 // A send pi rejects while between runs stays queued instead of failing.
 func TestPiDeliverRetryIsNotReady(t *testing.T) {
 	path, _ := startPi(t, shortTempDir(t), func(piRequest) piResponse {
@@ -259,5 +263,100 @@ func TestPiResponseForAnotherMessageStaysUnconfirmed(t *testing.T) {
 	_, err := a.Deliver(context.Background(), Worker{Name: "pi-1", Harness: HarnessPi, Socket: path}, Message{ID: "m-expected"}, "x")
 	if !IsUnconfirmed(err) {
 		t.Fatalf("err = %v, want unconfirmed", err)
+	}
+}
+
+func TestPiVersionedIdentityRoundTrip(t *testing.T) {
+	accepted := true
+	idle := true
+	path, got := startPi(t, shortTempDir(t), func(req piRequest) piResponse {
+		if req.V != piIdentityProtocol || req.RunID != "run-1" || req.SessionID != "session-1" {
+			return piResponse{V: piIdentityProtocol, OK: false, Error: "unexpected identity"}
+		}
+		switch req.Type {
+		case "deliver":
+			return piResponse{V: piIdentityProtocol, OK: true, RunID: req.RunID, SessionID: req.SessionID, Accepted: &accepted, Evidence: "message_start"}
+		case "receipt":
+			return piResponse{V: piIdentityProtocol, OK: true, RunID: req.RunID, SessionID: req.SessionID, Accepted: &accepted, Evidence: "message_start", Known: true}
+		case "state":
+			return piResponse{V: piIdentityProtocol, OK: true, RunID: req.RunID, SessionID: req.SessionID, Idle: &idle}
+		default:
+			return piResponse{V: piIdentityProtocol, OK: false, RunID: req.RunID, SessionID: req.SessionID, Error: "unknown request"}
+		}
+	})
+	a := PiAdapter{Timeout: 2 * time.Second}
+	w := versionedPiWorker(path)
+	detail, err := a.Deliver(context.Background(), w, Message{ID: "m-versioned"}, "x")
+	if err != nil || detail == "" {
+		t.Fatalf("deliver = %q, %v", detail, err)
+	}
+	detail, confirmed, err := a.Receipt(context.Background(), w, Message{ID: "m-versioned"})
+	if err != nil || !confirmed || detail == "" {
+		t.Fatalf("receipt = %q, %v, confirmed=%v", detail, err, confirmed)
+	}
+	state, err := a.State(context.Background(), w)
+	if err != nil || state != StateIdle {
+		t.Fatalf("state = %q, %v", state, err)
+	}
+	for range 3 {
+		request := <-got
+		if request.V != piIdentityProtocol || request.RunID != "run-1" || request.SessionID != "session-1" {
+			t.Fatalf("request identity = %+v", request)
+		}
+	}
+}
+
+func TestPiVersionedPreDeliveryIdentityRefusalIsDefinite(t *testing.T) {
+	path, _ := startPi(t, shortTempDir(t), func(req piRequest) piResponse {
+		return piResponse{V: piIdentityProtocol, OK: false, RunID: "other-run", SessionID: "other-session", Error: "pi run identity does not match this process"}
+	})
+	_, err := (PiAdapter{Timeout: time.Second}).Deliver(context.Background(), versionedPiWorker(path), Message{ID: "m-identity"}, "hello")
+	if err == nil || IsUnconfirmed(err) {
+		t.Fatalf("identity refusal = %v, want definite refusal", err)
+	}
+}
+
+func TestPiVersionedPostDeliveryIdentityMismatchIsUnconfirmed(t *testing.T) {
+	accepted := true
+	for _, response := range []piResponse{
+		{V: piIdentityProtocol, OK: true, RunID: "other-run", SessionID: "session-1", Accepted: &accepted, Evidence: "message_start"},
+		{V: piIdentityProtocol, OK: true, RunID: "run-1", SessionID: "other-session", Accepted: &accepted, Evidence: "message_start"},
+	} {
+		path, _ := startPi(t, shortTempDir(t), func(piRequest) piResponse { return response })
+		_, err := (PiAdapter{Timeout: time.Second}).Deliver(context.Background(), versionedPiWorker(path), Message{ID: "m-identity"}, "hello")
+		if !IsUnconfirmed(err) {
+			t.Fatalf("response = %#v; err = %v, want unconfirmed", response, err)
+		}
+	}
+}
+
+func TestPiVersionedOldReceiverIsRejectedBeforeMutation(t *testing.T) {
+	path, _ := startPi(t, shortTempDir(t), func(piRequest) piResponse {
+		return piResponse{OK: false, Error: "unsupported protocol version"}
+	})
+	_, err := (PiAdapter{Timeout: time.Second}).Deliver(context.Background(), versionedPiWorker(path), Message{ID: "m-old"}, "hello")
+	if err == nil || IsUnconfirmed(err) {
+		t.Fatalf("old receiver = %v, want definite refusal", err)
+	}
+}
+
+func TestPiVersionedReceiptAndStateIdentityMismatchStayUnconfirmed(t *testing.T) {
+	accepted := true
+	path, _ := startPi(t, shortTempDir(t), func(req piRequest) piResponse {
+		if req.Type == "receipt" {
+			return piResponse{V: piIdentityProtocol, OK: true, RunID: "other-run", SessionID: "session-1", Accepted: &accepted, Evidence: "message_start", Known: true}
+		}
+		idle := true
+		return piResponse{V: piIdentityProtocol, OK: true, RunID: "run-1", SessionID: "other-session", Idle: &idle}
+	})
+	a := PiAdapter{Timeout: time.Second}
+	worker := versionedPiWorker(path)
+	_, confirmed, err := a.Receipt(context.Background(), worker, Message{ID: "m-receipt"})
+	if confirmed || !IsUnconfirmed(err) {
+		t.Fatalf("receipt confirmed=%v, err=%v; want unconfirmed", confirmed, err)
+	}
+	state, err := a.State(context.Background(), worker)
+	if state != StateUnknown || !IsUnconfirmed(err) {
+		t.Fatalf("state=%q, err=%v; want unknown/unconfirmed", state, err)
 	}
 }
