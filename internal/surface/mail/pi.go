@@ -30,18 +30,24 @@ type piRequest struct {
 }
 
 type piResponse struct {
-	V           int    `json:"v,omitempty"`
-	OK          bool   `json:"ok"`
-	ID          string `json:"id,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	As          string `json:"as,omitempty"`
-	Accepted    *bool  `json:"accepted,omitempty"`
-	Evidence    string `json:"evidence,omitempty"`
-	Idle        *bool  `json:"idle,omitempty"`
-	Known       bool   `json:"known,omitempty"`
-	Unconfirmed bool   `json:"unconfirmed,omitempty"`
-	Error       string `json:"error,omitempty"`
+	V           int                `json:"v,omitempty"`
+	OK          bool               `json:"ok"`
+	ID          string             `json:"id,omitempty"`
+	RunID       string             `json:"run_id,omitempty"`
+	SessionID   string             `json:"session_id,omitempty"`
+	As          string             `json:"as,omitempty"`
+	Accepted    *bool              `json:"accepted,omitempty"`
+	Evidence    string             `json:"evidence,omitempty"`
+	Idle        *bool              `json:"idle,omitempty"`
+	Known       bool               `json:"known,omitempty"`
+	Unknown     bool               `json:"unknown,omitempty"`
+	Provider    string             `json:"provider,omitempty"`
+	ModelID     string             `json:"model_id,omitempty"`
+	ActiveTools []string           `json:"active_tools,omitempty"`
+	SessionPath string             `json:"session_path,omitempty"`
+	Turn        *PiTurnObservation `json:"turn,omitempty"`
+	Unconfirmed bool               `json:"unconfirmed,omitempty"`
+	Error       string             `json:"error,omitempty"`
 	// Retry marks a refusal pi may not repeat, such as a send that raced
 	// the start or end of a run; the message stays queued.
 	Retry bool `json:"retry,omitempty"`

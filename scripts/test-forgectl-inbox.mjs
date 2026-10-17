@@ -171,6 +171,15 @@ const testBoundIdentityRefusals = async (directory) => {
       assert.equal(response.ok, false);
       assert.equal(await receiptContents(harness.receiptPath), emptyReceipts);
     }
+    for (const rejected of [
+      { v: 1, type: "inspect", id: "bound-inspect-v1" },
+      request("inspect", "bound-inspect-run", { run_id: "wrong-run" }),
+      request("inspect", "bound-inspect-session", { session_id: "wrong-session" }),
+    ]) {
+      const response = await exchange(harness.socketPath, rejected);
+      assert.equal(response.ok, false);
+      assert.equal(await receiptContents(harness.receiptPath), emptyReceipts);
+    }
     let state = await harness.command({ type: "calls" });
     assert.equal(state.calls.length, 0);
 
@@ -200,6 +209,105 @@ const testBoundIdentityRefusals = async (directory) => {
     const currentState = await harness.exchange({ type: "state", id: "bound-state-current" });
     assert.equal(currentState.ok, true);
     assert.equal(currentState.v, 2);
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testNativeInspectionReflectsCurrentMetadata = async (directory) => {
+  const harness = spawnHarness(directory, "inspect.sock", "inspect", { worker: "pi-inspect", runId: "run-inspect" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const initial = await harness.exchange({ type: "inspect", id: "inspect-1" });
+    assert.equal(initial.ok, true);
+    assert.equal(initial.known, true);
+    assert.equal(initial.run_id, "run-inspect");
+    assert.equal(initial.session_id, "session-1");
+    assert.equal(initial.provider, "openai-codex");
+    assert.equal(initial.model_id, "gpt-initial");
+    assert.deepEqual(initial.active_tools, ["read", "bash"]);
+    assert.equal(initial.session_path, "/tmp/pi-session-1.jsonl");
+
+    await harness.command({ type: "set-model", provider: "openai-codex", model: "gpt-changed" });
+    const changed = await harness.exchange({ type: "inspect", id: "inspect-2" });
+    assert.equal(changed.ok, true);
+    assert.equal(changed.model_id, "gpt-changed");
+    const calls = await harness.command({ type: "calls" });
+    assert.equal(calls.calls.length, 0);
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testNativeInspectionUnknownMetadata = async (directory) => {
+  for (const mode of ["missing-model", "missing-session-path", "missing-tools"]) {
+    const harness = spawnHarness(directory, `${mode}.sock`, mode, { worker: `pi-${mode}`, runId: `run-${mode}` });
+    try {
+      await waitForSocket(harness.socketPath);
+      const response = await harness.exchange({ type: "inspect", id: `${mode}-inspect` });
+      assert.equal(response.ok, false);
+      assert.equal(response.unknown, true);
+      const calls = await harness.command({ type: "calls" });
+      assert.equal(calls.calls.length, 0);
+    } finally {
+      await harness.stop();
+    }
+  }
+};
+
+const testSettledFailureIsNeverReportedCompleted = async (directory) => {
+  const harness = spawnHarness(directory, "inspect-failure.sock", "settled-failure", { worker: "pi-inspect-failure", runId: "run-inspect-failure" });
+  try {
+    await waitForSocket(harness.socketPath);
+    await harness.command({ type: "event", name: "agent_start" });
+    await harness.command({ type: "event", name: "turn_end" });
+    await harness.command({ type: "event", name: "agent_settled" });
+    const response = await harness.exchange({ type: "inspect", id: "inspect-failure" });
+    assert.equal(response.ok, true);
+    assert.equal(response.turn.status, "failed");
+    assert.equal(response.turn.error, "error");
+    assert.equal(response.turn.id, "entry-1");
+    assert.notEqual(response.turn.status, "completed");
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testNativeInspectionRequiresSettledExactEntries = async (directory) => {
+  const harness = spawnHarness(directory, "inspect-entries.sock", "inspect", { worker: "pi-entries", runId: "run-entries" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const before = await receiptContents(harness.receiptPath);
+    await harness.command({ type: "event", name: "agent_start" });
+    await harness.command({ type: "event", name: "agent_settled" });
+    assert.equal((await harness.exchange({ type: "inspect" })).turn, undefined);
+    const entryIDs = [];
+    for (const expected of ["entry-1", "entry-2"]) {
+      await harness.command({ type: "event", name: "agent_start" });
+      await harness.command({ type: "event", name: "turn_end", turnIndex: 0 });
+      assert.equal((await harness.exchange({ type: "inspect" })).turn, undefined);
+      await harness.command({ type: "event", name: "agent_settled" });
+      const observed = await harness.exchange({ type: "inspect" });
+      assert.equal(observed.turn.id, expected);
+      assert.equal(observed.turn.status, "completed");
+      assert.ok(Number.isFinite(Date.parse(observed.turn.observed_at)));
+      entryIDs.push(observed.turn.id);
+    }
+    assert.equal(new Set(entryIDs).size, 2);
+    for (const stopReason of ["length", "toolUse", "unexpected"]) {
+      await harness.command({ type: "event", name: "agent_start" });
+      await harness.command({ type: "event", name: "turn_end", stopReason });
+      await harness.command({ type: "event", name: "agent_settled" });
+      assert.equal((await harness.exchange({ type: "inspect" })).turn, undefined);
+    }
+    await harness.command({ type: "event", name: "agent_start" });
+    await harness.command({ type: "event", name: "turn_end", missingEntry: true });
+    await harness.command({ type: "event", name: "agent_settled" });
+    assert.equal((await harness.exchange({ type: "inspect" })).turn, undefined);
+    await harness.command({ type: "set-model", provider: "openai-codex", model: "gpt\u202e" });
+    assert.equal((await harness.exchange({ type: "inspect" })).known, undefined);
+    assert.equal(await receiptContents(harness.receiptPath), before);
+    assert.equal((await harness.command({ type: "calls" })).calls.length, 0);
   } finally {
     await harness.stop();
   }
@@ -361,11 +469,19 @@ const childMain = async (mode) => {
   const calls = [];
   const handlers = new Map();
   let currentSession = mode === "missing-session" ? undefined : mode.startsWith("wrong-") ? "session-2" : "session-1";
+  let currentModel = mode === "missing-model" ? undefined : { provider: "openai-codex", id: "gpt-initial" };
+  let currentTools = mode === "missing-tools" ? undefined : ["read", "bash"];
+  let currentSessionFile = mode === "missing-session-path" ? undefined : "/tmp/pi-session-1.jsonl";
+  let leafEntry;
+  let entryNumber = 0;
   const sessionManager = {
     getSessionId: () => currentSession,
+    getSessionFile: () => currentSessionFile,
+    getLeafEntry: () => leafEntry,
     getEntries: () => (mode === "history" || mode === "wrong-history") ? [{ type: "message", message: { role: "user", content: "may have arrived" } }] : [],
   };
   const eventContext = { sessionManager };
+  Object.defineProperty(eventContext, "model", { get: () => currentModel });
   const pi = {
     on(event, handler) {
       handlers.set(event, handler);
@@ -384,6 +500,10 @@ const childMain = async (mode) => {
       }
       return undefined;
     },
+    getActiveTools() {
+      if (!currentTools) throw new Error("active tools unavailable");
+      return currentTools;
+    },
   };
   const extension = await import(pathToFileURL(extensionPath).href);
   extension.default(pi);
@@ -399,9 +519,21 @@ const childMain = async (mode) => {
       input = input.slice(newline + 1);
       const request = JSON.parse(line);
       if (request.type === "calls") process.stdout.write(`${JSON.stringify({ calls, handlers: [...handlers.keys()] })}\n`);
+      else if (request.type === "set-model") {
+        currentModel = { provider: request.provider, id: request.model };
+        process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
+      }
       else if (request.type === "event") {
         const handler = handlers.get(request.name);
-        const event = request.name === "message_start" ? { type: request.name, message: { role: "user", content: request.text } } : { type: request.name };
+        const event = request.name === "message_start"
+          ? { type: request.name, message: { role: "user", content: request.text } }
+          : request.name === "turn_end"
+            ? { type: request.name, turnIndex: request.turnIndex ?? 7, message: { role: "assistant", stopReason: request.stopReason ?? (mode === "settled-failure" ? "error" : "stop"), errorMessage: mode === "settled-failure" ? "native failure" : undefined } }
+            : { type: request.name };
+        if (request.name === "turn_end") {
+          entryNumber += 1;
+          leafEntry = request.missingEntry ? undefined : { type: "message", id: `entry-${entryNumber}`, timestamp: new Date().toISOString(), message: event.message };
+        }
         await Promise.resolve(handler?.(event, eventContext));
         process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
       } else if (request.type === "exit") process.exit(0);
@@ -680,6 +812,10 @@ const main = async () => {
   try {
     await testCoordinatorIdentityActivates(directory);
     await testBoundIdentityRefusals(directory);
+    await testNativeInspectionReflectsCurrentMetadata(directory);
+    await testNativeInspectionUnknownMetadata(directory);
+    await testSettledFailureIsNeverReportedCompleted(directory);
+    await testNativeInspectionRequiresSettledExactEntries(directory);
     await testSessionSwitchDuringNativeObservationStaysUnconfirmed(directory);
     await testRejectedReceiptIdentityRebinding(directory);
     await testWorkerDrainIdentityActivates(directory);

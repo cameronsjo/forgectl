@@ -67,18 +67,19 @@ type Request struct {
 }
 
 type Response struct {
-	V           int    `json:"v"`
-	OK          bool   `json:"ok"`
-	ID          string `json:"id,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	Accepted    *bool  `json:"accepted,omitempty"`
-	Evidence    string `json:"evidence,omitempty"`
-	Idle        *bool  `json:"idle,omitempty"`
-	Known       bool   `json:"known,omitempty"`
-	Unconfirmed bool   `json:"unconfirmed,omitempty"`
-	Retry       bool   `json:"retry,omitempty"`
-	Error       string `json:"error,omitempty"`
+	V           int         `json:"v"`
+	OK          bool        `json:"ok"`
+	ID          string      `json:"id,omitempty"`
+	RunID       string      `json:"run_id,omitempty"`
+	SessionID   string      `json:"session_id,omitempty"`
+	Accepted    *bool       `json:"accepted,omitempty"`
+	Evidence    string      `json:"evidence,omitempty"`
+	Idle        *bool       `json:"idle,omitempty"`
+	Known       bool        `json:"known,omitempty"`
+	Unconfirmed bool        `json:"unconfirmed,omitempty"`
+	Retry       bool        `json:"retry,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	Inspection  *Inspection `json:"inspection,omitempty"`
 }
 
 type historyUpdate struct {
@@ -200,6 +201,7 @@ type supervisor struct {
 	forwards     sync.WaitGroup
 	connections  map[net.Conn]struct{}
 	closing      bool
+	lastTurn     *TurnObservation
 }
 
 func (receiver *supervisor) currentSession() string {
@@ -722,6 +724,19 @@ func (receiver *supervisor) handleRequest(ctx context.Context, request Request) 
 		return base
 	}
 	switch request.Type {
+	case "inspect":
+		receiver.mu.Lock()
+		provider, model, found := strings.Cut(receiver.model, ":")
+		if found && provider != "" && model != "" && receiver.mode != "" {
+			base.OK = true
+			base.Inspection = &Inspection{Provider: provider, Model: model, Mode: receiver.mode, ModelEvidence: "native-startup-handshake", Idle: !receiver.busy}
+			if receiver.lastTurn != nil {
+				turn := *receiver.lastTurn
+				base.Inspection.Turn = &turn
+			}
+		}
+		receiver.mu.Unlock()
+		return base
 	case "state":
 		receiver.mu.Lock()
 		idle := !receiver.busy
@@ -833,6 +848,15 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	receiver.nativeMu.Unlock()
 	receiver.events.write(map[string]any{"type": "hermes-turn-end", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID, "stop_reason": prompt.StopReason, "error": err != nil})
 	receiver.mu.Lock()
+	status := "unknown"
+	if err == nil {
+		if prompt.StopReason == "end_turn" {
+			status = "completed"
+		} else {
+			status = "incomplete"
+		}
+	}
+	receiver.lastTurn = &TurnObservation{MessageID: record.ID, Status: status, ObservedAt: time.Now().UTC()}
 	receiver.busy = false
 	receiver.mu.Unlock()
 }

@@ -17,6 +17,8 @@
  *   {"v":1,"type":"state"} -> {"ok":true,"idle":true|false}
  *   v2 requests add run_id and the optional expected session_id. A run-bound
  *   receiver refuses v1 before it can mutate the Pi session.
+ *   v2 `inspect` additionally requires both identities and only reports live,
+ *   read-only native metadata.
  *
  * Turn boundaries go back to forgectl as `forgectl surface event --harness pi
  * --state busy|idle`, which records the state, sends --watch notices and flushes.
@@ -45,6 +47,13 @@ type Request = {
   priority?: string;
 };
 
+type TurnObservation = {
+  id: string;
+  status: "completed" | "failed";
+  observed_at: string;
+  error?: "error" | "aborted";
+};
+
 type ReceiptState = "pending" | "accepted" | "rejected";
 
 type ReceiptRecord = {
@@ -67,6 +76,31 @@ type DeliveryOutcome = {
   error?: string;
   retry?: boolean;
   unconfirmed?: boolean;
+};
+
+type InspectionOutcome = {
+  ok: boolean;
+  known?: boolean;
+  unknown?: boolean;
+  session_id?: string;
+  session_path?: string;
+  provider?: string;
+  model_id?: string;
+  active_tools?: string[];
+  turn?: TurnObservation;
+  error?: string;
+};
+
+type SessionManagerContext = {
+  getEntries?: () => unknown[];
+  getSessionId?: () => string;
+  getSessionFile?: () => string | undefined;
+  getLeafEntry?: () => unknown;
+};
+
+type ObservationContext = {
+  sessionManager?: SessionManagerContext;
+  readonly model?: { provider?: unknown; id?: unknown };
 };
 
 type SocketIdentity = {
@@ -150,6 +184,9 @@ export default function forgectlInbox(pi: ExtensionAPI) {
 
   let idle = true;
   let sessionId: string | undefined;
+  let observationContext: ObservationContext | undefined;
+  let turnCandidate: TurnObservation | undefined;
+  let settledTurn: TurnObservation | undefined;
   const inFlight = new Map<string, Promise<DeliveryOutcome>>();
   const observationWaiters = new Map<string, Set<(accepted: boolean) => void>>();
 
@@ -211,7 +248,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     return true;
   };
 
-  const reconcileHistory = (ctx: { sessionManager?: { getEntries?: () => unknown[]; getSessionId?: () => string } }): void => {
+  const reconcileHistory = (ctx: ObservationContext): void => {
     try {
       sessionId = ctx.sessionManager?.getSessionId?.();
       const entries = ctx.sessionManager?.getEntries?.() || [];
@@ -242,6 +279,8 @@ export default function forgectlInbox(pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     idle = false;
+    turnCandidate = undefined;
+    settledTurn = undefined;
     report("busy");
   });
   // pi stays in its run after agent_end (retries and auto-compaction live in
@@ -250,7 +289,25 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   // 1.0.4 (spike S3), so idle starts at agent_settled.
   pi.on("agent_settled", () => {
     idle = true;
+    settledTurn = turnCandidate;
     report("idle");
+  });
+
+  pi.on("turn_end", (event: { message?: { role?: unknown; stopReason?: unknown } }, ctx: ObservationContext) => {
+    turnCandidate = undefined;
+    if (event.message?.role !== "assistant") return;
+    try {
+      const leaf = ctx.sessionManager?.getLeafEntry?.() as { type?: unknown; id?: unknown; timestamp?: unknown; message?: unknown } | undefined;
+      if (!leaf || leaf.type !== "message" || leaf.message !== event.message || typeof leaf.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(leaf.id) || typeof leaf.timestamp !== "string" || !Number.isFinite(Date.parse(leaf.timestamp))) return;
+      const observedAt = new Date(leaf.timestamp).toISOString();
+      if (event.message.stopReason === "stop") {
+        turnCandidate = { id: leaf.id, status: "completed", observed_at: observedAt };
+      } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
+        turnCandidate = { id: leaf.id, status: "failed", observed_at: observedAt, error: event.message.stopReason };
+      }
+    } catch {
+      turnCandidate = undefined;
+    }
   });
 
   pi.on("message_start", (event: { message?: { role?: unknown; content?: unknown } }) => {
@@ -261,9 +318,46 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     if (record) markAccepted(record, "message_start");
   });
 
-  pi.on("session_start", (_event: unknown, ctx: { sessionManager?: { getEntries?: () => unknown[]; getSessionId?: () => string } }) => {
+  pi.on("session_start", (_event: unknown, ctx: ObservationContext) => {
+    observationContext = ctx;
+    turnCandidate = undefined;
+    settledTurn = undefined;
     reconcileHistory(ctx);
   });
+
+  const safeMetadataString = (value: unknown, max = 256): string | undefined => {
+    if (typeof value !== "string" || value.length === 0 || value.length > max || /[\p{Cc}\p{Cf}]/u.test(value)) return undefined;
+    return value;
+  };
+
+  const inspect = (): InspectionOutcome => {
+    const ctx = observationContext;
+    if (!ctx?.sessionManager?.getSessionId || !ctx.sessionManager.getSessionFile || !ctx.model) {
+      return { ok: false, unknown: true, error: "current pi native metadata is unavailable" };
+    }
+    try {
+      const currentSessionID = safeMetadataString(ctx.sessionManager.getSessionId(), 256);
+      const sessionPath = safeMetadataString(ctx.sessionManager.getSessionFile(), 4096);
+      const provider = safeMetadataString(ctx.model.provider);
+      const modelID = safeMetadataString(ctx.model.id);
+      const activeTools = pi.getActiveTools();
+      if (!currentSessionID || currentSessionID !== sessionId || !sessionPath || !isAbsolute(sessionPath) || !provider || !modelID || !Array.isArray(activeTools) || activeTools.length > 64 || !activeTools.every((tool) => safeMetadataString(tool, 128))) {
+        return { ok: false, unknown: true, session_id: currentSessionID, error: "current pi native metadata is unavailable" };
+      }
+      return {
+        ok: true,
+        known: true,
+        session_id: currentSessionID,
+        session_path: sessionPath,
+        provider,
+        model_id: modelID,
+        active_tools: [...activeTools],
+        ...(settledTurn ? { turn: { ...settledTurn } } : {}),
+      };
+    } catch {
+      return { ok: false, unknown: true, error: "current pi native metadata is unavailable" };
+    }
+  };
 
   const waitForNativeObservation = (id: string): Promise<boolean> => new Promise((resolve) => {
     const current = receipts.get(id);
@@ -358,12 +452,17 @@ export default function forgectlInbox(pi: ExtensionAPI) {
 
   const identityError = (req: Request): string | undefined => {
     if (req.v === 1) {
-      return runID ? "identity-bound pi inbox requires protocol version 2" : undefined;
+      return runID || req.type === "inspect" ? "identity-bound pi inbox requires protocol version 2" : undefined;
     }
     if (req.v !== 2) return "unsupported protocol version";
     const requestedRunID = typeof req.run_id === "string" ? req.run_id : "";
     if (requestedRunID !== (runID || "")) return "pi run identity does not match this process";
     if (req.session_id !== undefined && typeof req.session_id !== "string") return "pi session identity is invalid";
+    if (req.type === "inspect") {
+      if (!runID) return "pi inspect requires a bound run identity";
+      if (!req.session_id) return "pi inspect requires a native session identity";
+      if (!sessionId) return "current pi session identity is unavailable";
+    }
     if (req.session_id && req.session_id !== sessionId) {
       return sessionId ? "pi session identity does not match this process" : "current pi session identity is unavailable";
     }
@@ -424,6 +523,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
           deliver(req).then((body) => answer(req.id, body, req.v), (err) => answer(req.id, { ok: false, unconfirmed: true, error: String(err).slice(0, 200) }, req.v));
         } else if (req.type === "receipt") answer(req.id, receipt(req), req.v);
         else if (req.type === "state") answer(req.id, { ok: true, idle }, req.v);
+        else if (req.type === "inspect") answer(req.id, inspect(), req.v);
         else answer(req.id, { ok: false, error: "unknown request type" }, req.v);
       } catch (err) {
         answer(req.id, { ok: false, unconfirmed: req.type === "deliver", error: String(err).slice(0, 200) }, req.v);

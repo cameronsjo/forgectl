@@ -8,6 +8,8 @@ import (
 	"net"
 	"path/filepath"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/surface/hermes"
 )
 
 type HermesAdapter struct {
@@ -24,18 +26,19 @@ type hermesRequest struct {
 }
 
 type hermesResponse struct {
-	V           int    `json:"v"`
-	OK          bool   `json:"ok"`
-	ID          string `json:"id,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	Accepted    *bool  `json:"accepted,omitempty"`
-	Evidence    string `json:"evidence,omitempty"`
-	Idle        *bool  `json:"idle,omitempty"`
-	Known       bool   `json:"known,omitempty"`
-	Unconfirmed bool   `json:"unconfirmed,omitempty"`
-	Retry       bool   `json:"retry,omitempty"`
-	Error       string `json:"error,omitempty"`
+	V           int                `json:"v"`
+	OK          bool               `json:"ok"`
+	ID          string             `json:"id,omitempty"`
+	RunID       string             `json:"run_id,omitempty"`
+	SessionID   string             `json:"session_id,omitempty"`
+	Accepted    *bool              `json:"accepted,omitempty"`
+	Evidence    string             `json:"evidence,omitempty"`
+	Idle        *bool              `json:"idle,omitempty"`
+	Known       bool               `json:"known,omitempty"`
+	Unconfirmed bool               `json:"unconfirmed,omitempty"`
+	Retry       bool               `json:"retry,omitempty"`
+	Error       string             `json:"error,omitempty"`
+	Inspection  *hermes.Inspection `json:"inspection,omitempty"`
 }
 
 func (adapter HermesAdapter) Deliver(ctx context.Context, worker Worker, message Message, text string) (string, error) {
