@@ -8,6 +8,7 @@ import { createConnection, createServer } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
+import { ProjectAcceptance } from "./project-acceptance.mjs";
 
 const MAX_LOG = 24_000;
 const DEFAULT_TIMEOUT = 180_000;
@@ -16,7 +17,7 @@ const sensitive = /(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|COOKIE|AUTH)/i;
 let activeEvidence;
 let activeCleanup = async () => {};
 
-const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS --codex-model ID [--codex ABS] [--pi ABS] [--pi-provider NAME --pi-model ID] [--pi-extension ABS ...]
+const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root ABS --websocket-module ABS --codex-model ID --pi-provider openai-codex --pi-model ID [--codex ABS] [--pi ABS] [--pi-extension ABS ...] [--projects --herdr ABS]
 
 Runs the opt-in disposable Codex/Pi collaboration acceptance loop. The root
 must be an existing empty 0700 directory. The script never copies auth files
@@ -32,12 +33,13 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--live") out.live = true;
+    else if (arg === "--projects") out.projects = true;
     else if (arg === "--help" || arg === "-h") return { help: true };
     else if (arg === "--pi-extension") {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out.piExtensions.push(value);
-    } else if (["--forgectl", "--root", "--codex", "--codex-model", "--pi", "--websocket-module", "--pi-provider", "--pi-model"].includes(arg)) {
+    } else if (["--forgectl", "--root", "--codex", "--codex-model", "--pi", "--websocket-module", "--pi-provider", "--pi-model", "--herdr"].includes(arg)) {
       const value = argv[++index];
       if (!value) fail(`${arg} needs a value`);
       out[arg === "--websocket-module" ? "websocketModule" : arg.slice(2)] = value;
@@ -49,7 +51,10 @@ export function parseArgs(argv) {
   }
   if (out.piExtensions.some((path) => !path.startsWith("/"))) fail("--pi-extension must be an absolute path");
   if (!out["codex-model"]) fail("--codex-model is required to avoid mutable global model defaults");
-  if (Boolean(out["pi-provider"]) !== Boolean(out["pi-model"])) fail("--pi-provider and --pi-model must be supplied together");
+  if (!out["pi-provider"] || !out["pi-model"]) fail("--pi-provider and --pi-model must be supplied together explicitly");
+  if (!["openai", "openai-codex"].includes(out["pi-provider"])) fail("Pi model traffic must use an OpenAI provider");
+  if (out.projects && !out.herdr?.startsWith("/")) fail("--projects requires an absolute --herdr for rendered presentation acceptance");
+  if (out.herdr && !out.projects) fail("--herdr requires --projects");
   return out;
 }
 
@@ -82,6 +87,19 @@ function waitClosed(processHandle, timeout = STARTUP_TIMEOUT) {
 
 export function assertDuplicateRejected(result) {
   if (!Number.isInteger(result.code) || result.code <= 0 || !/duplicate/i.test(result.stderr)) fail("duplicate-ID fixture did not fail with a duplicate diagnostic");
+}
+
+export function assertCodexSelection(response, model, cwd) {
+  if (!response.thread?.id || response.thread.ephemeral !== false || response.thread.cwd !== cwd || response.cwd !== cwd || response.model !== model || response.modelProvider !== "openai" || response.approvalPolicy !== "never" || response.approvalsReviewer !== "user" || response.sandbox?.type !== "readOnly") {
+    fail("Codex returned an unexpected native identity, model, provider, or initial posture");
+  }
+  return response.thread.id;
+}
+
+export function assertOpenAIModel(model) {
+  const endpoint = new URL(model.baseUrl);
+  const expectedHost = model.provider === "openai-codex" ? "chatgpt.com" : model.provider === "openai" ? "api.openai.com" : "";
+  if (!expectedHost || endpoint.protocol !== "https:" || endpoint.hostname !== expectedHost || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) fail("Pi native model route must be direct OpenAI HTTPS");
 }
 
 async function ensureFreshRoot(root) {
@@ -560,11 +578,12 @@ async function main() {
   if (typeof WebSocket !== "function") fail("--websocket-module did not export a WebSocket constructor");
   const piExtensions = [];
   for (const path of args.piExtensions) piExtensions.push(await extensionFile(path));
-  const ledger = join(root, "ledger");
+  let ledger = join(root, "ledger");
   const coordinatorRoot = join(root, "coordinator");
   const piCoordinatorRoot = join(root, "pi-coordinator");
   const piRoot = join(root, "pi");
   const piSessions = join(root, "pi-sessions");
+  const piSessionId = randomUUID();
   const codexSocket = join(root, "codex.sock");
   const piSocket = join(root, "pi.sock");
   const piRestartSocket = join(root, "pi-restart.sock");
@@ -576,10 +595,12 @@ async function main() {
   for (const socketPath of [codexSocket, piSocket, piRestartSocket, piProxySocket, replacementSocket, piCoordinatorSocket]) {
     if (socketPath.length > 103) fail(`Unix socket path exceeds macOS limit: ${socketPath}`);
   }
-  await Promise.all([mkdir(ledger, { mode: 0o700 }), mkdir(coordinatorRoot, { mode: 0o700 }), mkdir(piCoordinatorRoot, { mode: 0o700 }), mkdir(piRoot, { mode: 0o700 }), mkdir(piSessions, { mode: 0o700 })]);
+  await Promise.all([...(args.projects ? [] : [mkdir(ledger, { mode: 0o700 })]), mkdir(coordinatorRoot, { mode: 0o700 }), mkdir(piCoordinatorRoot, { mode: 0o700 }), mkdir(piRoot, { mode: 0o700 }), mkdir(piSessions, { mode: 0o700 })]);
   const inheritedEnv = { ...process.env };
   for (const key of ["FORGECTL_LEDGER", "FORGECTL_WORKER", "FORGECTL_COORDINATOR", "FORGECTL_RUN_ID", "FORGECTL_INBOX", "FORGECTL_INBOX_RECEIPTS", "FORGECTL_DRAIN_WORKER"]) delete inheritedEnv[key];
   const baseEnv = childEnv(inheritedEnv, {}, forgectl);
+  const projects = args.projects ? await new ProjectAcceptance({ evidence, runCommand, forgectl, root, worktree: coordinatorRoot, env: baseEnv, herdr: await executable(args.herdr, "--herdr") }).create("Codex + Pi", "Pi worker") : null;
+  if (projects) ledger = projects.ledger;
   await assertNoScratchTrust(evidence, root);
   await recordBinary(evidence, "forgectl", forgectl, baseEnv, coordinatorRoot);
   await recordBinary(evidence, "codex", codex, baseEnv, coordinatorRoot);
@@ -588,7 +609,7 @@ async function main() {
   await verifyPiFlags(evidence, pi, baseEnv, piRoot);
   const coordinator = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", codexSocket], baseEnv, coordinatorRoot);
   let coordinatorEnv = childEnv(baseEnv, coordinator.environment, forgectl);
-  let worker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piProxySocket], baseEnv, piRoot);
+  let worker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piProxySocket, "--thread", piSessionId], baseEnv, piRoot);
   const extensionResult = await runCommand(evidence, forgectl, ["surface", "team", "extension", "--ledger", ledger, "--json"], { cwd: piRoot, env: baseEnv });
   if (extensionResult.code !== 0) fail(`extension export failed: ${bounded(extensionResult.stderr)}`);
   const extensionPath = lastJson(extensionResult.stdout)?.path;
@@ -609,6 +630,8 @@ async function main() {
   activeCleanup = async () => {
     if (cleaned) return;
     cleaned = true;
+    let presentationError;
+    try { await projects?.cleanup(); } catch (error) { presentationError = error; }
     if (proxy) proxy.close();
     if (piRpc) piRpc.stop(); else if (piChild && !piChild.killed) piChild.kill("SIGTERM");
     if (codexRpc) codexRpc.stop(); else if (codexChild && !codexChild.killed) codexChild.kill("SIGTERM");
@@ -620,9 +643,9 @@ async function main() {
     if (restartedPiChild) await waitClosed(restartedPiChild);
     if (replacementChild) await waitClosed(replacementChild);
     if (piCoordinatorChild) await waitClosed(piCoordinatorChild);
+    if (presentationError) throw presentationError;
   };
   proxy = await startAckDroppingProxy(evidence, piProxySocket, piSocket);
-  const piSessionId = randomUUID();
   const piModelArgs = args["pi-provider"] ? ["--provider", args["pi-provider"], "--model", args["pi-model"]] : [];
   const piArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piSessionId, "--tools", "read,bash,find,grep"];
   let piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX: piSocket, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
@@ -633,6 +656,7 @@ async function main() {
   const piSessionFile = initialPiState?.data?.sessionFile;
   if (!initialPiState?.data || !initialPiModel || typeof initialPiModel.provider !== "string" || typeof initialPiModel.id !== "string" || !Array.isArray(initialPiModel.input) || !Number.isInteger(initialPiModel.contextWindow) || !Number.isInteger(initialPiModel.maxTokens) || initialPiState.data.sessionId !== piSessionId || typeof piSessionFile !== "string" || !piSessionFile.startsWith(piSessions)) fail("Pi native get_state did not prove the requested session, session file, and model capabilities");
   if (piModelArgs.length && (initialPiModel.provider !== args["pi-provider"] || initialPiModel.id !== args["pi-model"])) fail("Pi silently selected a different provider or model");
+  assertOpenAIModel(initialPiModel);
   evidence.add("pi-native-state", { provider: initialPiModel.provider, modelId: initialPiModel.id, reasoning: Boolean(initialPiModel.reasoning), input: initialPiModel.input, contextWindow: initialPiModel.contextWindow, maxTokens: initialPiModel.maxTokens, sessionId: initialPiState.data.sessionId, sessionFile: piSessionFile, explicitExtensions: piExtensions });
   await piRpc.request({ type: "prompt", id: "pi-role", message: `You are the Pi worker in an explicitly enrolled forgectl team. Do not create files or run tools from this setup prompt. Wait for a [forgectl-msg] from the coordinator; when one arrives, follow its task instructions and ask for clarification before doing any artifact work. Reply only through ${forgectlCommand} surface send; use that exact absolute executable, not a shell alias or an installed copy.` }, DEFAULT_TIMEOUT);
   await piRpc.waitFor((event) => event.type === "agent_settled", DEFAULT_TIMEOUT);
@@ -662,15 +686,16 @@ async function main() {
   });
   if (await readFile(allowedProbe, "utf8") !== "allowed" || sandboxProbe.exitCode === 0 || !/Operation not permitted|Permission denied/.test(sandboxProbe.stderr) || await pathExists(outsideProbe)) fail("native sandbox did not permit scratch writes while denying adjacent temporary-directory writes");
   evidence.add("sandbox-write-boundary", { allowedProbe, outsideProbe, outsideWriteExit: sandboxProbe.exitCode, outsideWriteDenied: true, sandboxPolicy: workspaceSandbox(root) });
-  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
-  const threadId = thread?.thread?.id ?? thread?.id;
-  if (!threadId) fail("Codex thread/start returned no thread id");
-  if (thread.thread?.ephemeral !== false) fail("Codex queue delivery requires a persistent native thread");
-  if (thread.model !== args["codex-model"]) fail("Codex silently selected a different model");
+  const thread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
+  const threadId = assertCodexSelection(thread, args["codex-model"], coordinatorRoot);
   await assertNoScratchTrust(evidence, root);
   evidence.add("codex-thread", { threadId, model: thread.model, ephemeral: thread.thread.ephemeral, cwd: coordinatorRoot, writableRoot: root, approvalPolicy: "never", initialSandbox: "read-only", turnSandbox: "workspace-write" });
   const rebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", codexSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (rebound.member.run_id !== coordinator.member.run_id || rebound.member.thread_id !== threadId) fail("coordinator replacement changed the process incarnation or thread unexpectedly");
+  if (projects) {
+    await projects.bind("coordinator", rebound);
+    await projects.bind("worker", worker);
+  }
   const fixture = await createFixture(root);
   const utility = join(piRoot, "summarize-mailbox.mjs");
   const taskId = `cross-harness-${randomUUID()}`;
@@ -722,6 +747,20 @@ async function main() {
   evidence.add("negative-control", { code: negative.code, rejected: true, stderr: negative.stderr });
   const verifiedUtilityHash = createHash("sha256").update(await readFile(utility)).digest("hex");
   const verifiedExecutionLog = await readFile(executionLog, "utf8");
+  if (projects) {
+    const idleDeadline = Date.now() + STARTUP_TIMEOUT;
+    while ((await piRpc.request({ type: "get_state" }, STARTUP_TIMEOUT))?.data?.isStreaming !== false) {
+      if (Date.now() >= idleDeadline) fail("Pi did not settle before project evidence observation");
+      await sleep(100);
+    }
+    await codexRpc.waitForThreadIdle(threadId);
+    await projects.observe("worker", { provider: initialPiModel.provider, model: initialPiModel.id, completed: true });
+    await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+    await projects.verifyArtifact("worker", utility, verifiedUtilityHash);
+    const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
+    await codexRpc.turn(threadId, `For a native UI visibility check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);
+    await projects.presentNative({ codex, model: args["codex-model"], rpc: codexRpc, marker });
+  }
   const busyStartIndex = piRpc.lines.length;
   const busyToken = `busy-${randomUUID()}`;
   await piRpc.request({ type: "prompt", id: "busy-probe", message: `Use the bash tool to run sleep 5 for the busy-delivery probe. Do not read the mailbox, modify files, or send messages until the sleep finishes.` }, 30_000);
@@ -735,7 +774,7 @@ async function main() {
   piRpc.stop();
   await waitClosed(piChild);
   proxy.close();
-  const directWorker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piRestartSocket, "--replace"], baseEnv, piRoot);
+  const directWorker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piRestartSocket, "--thread", piSessionId, "--replace"], baseEnv, piRoot);
   worker = directWorker;
   piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
   const stoppedProbe = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `recovery probe ${taskId}. Consume this probe without running tools or sending a reply.`, "--priority", "next", "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
@@ -748,10 +787,13 @@ async function main() {
   await socketReady(piRestartSocket);
   const restartedPiState = await piRpc.request({ type: "get_state" }, STARTUP_TIMEOUT);
   if (restartedPiState?.data?.sessionId !== piSessionId || restartedPiState?.data?.sessionFile !== piSessionFile) fail("Pi restart did not reopen the saved native session file");
+  if (restartedPiState.data.model?.id !== initialPiModel.id || restartedPiState.data.model?.provider !== initialPiModel.provider) fail("Pi restart changed the selected model or provider");
+  assertOpenAIModel(restartedPiState.data.model);
   const restartedMessages = (await piRpc.request({ type: "get_messages", id: "messages-after-restart" }, 30_000))?.data?.messages;
   const restartedDelegationCount = Array.isArray(restartedMessages) ? restartedMessages.filter((message) => message?.role === "user" && contentText(message.content).includes(`id=${delegated.id}`)).length : 0;
   if (restartedDelegationCount !== 1) fail(`Pi restart history did not preserve exactly one delegated header for ${delegated.id}`);
   evidence.add("pi-native-restart-state", { sessionId: restartedPiState.data.sessionId, sessionFile: restartedPiState.data.sessionFile, modelId: restartedPiState.data.model?.id, provider: restartedPiState.data.model?.provider, delegatedHeaderCount: restartedDelegationCount });
+  if (projects) await projects.bind("worker", directWorker);
   const restartedFlush = await flushUntilSent(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, stoppedReport.id);
   const recoveredProbe = restartedFlush.message;
   evidence.add("receiver-restart", { id: recoveredProbe.id, flush: restartedFlush });
@@ -770,13 +812,11 @@ async function main() {
   await codexRpc.connect(replacementSocket);
   await codexRpc.rpc("initialize", { clientInfo: { name: "forgectl-cross-harness-verifier-replacement", version: "1" }, capabilities: { experimentalApi: false } });
   codexRpc.notify("initialized", {});
-  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
-  const replacementThreadId = replacementThread?.thread?.id ?? replacementThread?.id;
-  if (!replacementThreadId) fail("replacement Codex thread/start returned no thread id");
-  if (replacementThread.thread?.ephemeral !== false) fail("replacement Codex queue delivery requires a persistent native thread");
-  if (replacementThread.model !== args["codex-model"]) fail("replacement Codex silently selected a different model");
+  const replacementThread = await codexRpc.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
+  const replacementThreadId = assertCodexSelection(replacementThread, args["codex-model"], coordinatorRoot);
   const replacementRebound = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", replacementSocket, "--thread", replacementThreadId, "--run-id", replacement.member.run_id, "--replace"], baseEnv, coordinatorRoot);
   if (replacementRebound.member.run_id !== replacement.member.run_id || replacementRebound.member.thread_id !== replacementThreadId) fail("replacement coordinator did not bind its new thread and run");
+  if (projects) await projects.bind("coordinator", replacementRebound);
   evidence.add("coordinator-replacement", { oldRunId: coordinator.member.run_id, runId: replacement.member.run_id, oldThreadId: threadId, threadId: replacementThreadId, socket: replacementSocket });
   const replacementToken = `replacement-${randomUUID()}`;
   await codexRpc.turn(replacementThreadId, `You are the replacement coordinator. Read the current ledger and delegate the independent recovery check ${replacementToken} to pi-worker with ${forgectlCommand} surface send. Use that exact absolute executable, not a shell alias or an installed copy. Tell Pi to reply with exactly that token and do not modify files. This turn proves the newly registered coordinator thread, not the retired one, can deliver work. Your network-disabled sandbox may return queued with exit 75; the task supervisor automatically flushes this private mailbox after your turn, so do not resend or expand permissions.`, coordinatorRoot, root);
@@ -790,22 +830,30 @@ async function main() {
   if (replacementCompleted.params.turn.status !== "completed") fail("replacement coordinator did not finish the native reply turn");
   evidence.add("replacement-roundtrip", { token: replacementToken, replyId: replacementReply.id, threadId: replacementThreadId, runId: replacement.member.run_id, nativeReplyTurnId: replacementTurnId, nativeReplyCompleted: true });
   await codexRpc.waitForThreadIdle(replacementThreadId);
+  if (projects) {
+    await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+    const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
+    await codexRpc.turn(replacementThreadId, `For a native UI recovery check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);
+    await projects.presentNative({ codex, model: args["codex-model"], rpc: codexRpc, marker });
+  }
   codexRpc.stop();
   await waitClosed(replacementChild);
-  const piCoordinator = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "pi", "--worktree", piCoordinatorRoot, "--coordinator", "--socket", piCoordinatorSocket, "--replace"], baseEnv, piCoordinatorRoot);
+  const piCoordinatorSessionId = randomUUID();
+  const piCoordinator = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "pi", "--worktree", piCoordinatorRoot, "--coordinator", "--socket", piCoordinatorSocket, "--thread", piCoordinatorSessionId, "--replace"], baseEnv, piCoordinatorRoot);
   if (piCoordinator.member.run_id === replacement.member.run_id || piCoordinator.member.harness !== "pi" || !piCoordinator.member.coordinator) fail("cross-harness replacement did not preserve the role with a new Pi run");
   const retiredCodexEvent = await runCommand(evidence, forgectl, ["surface", "event", "--harness", "codex", JSON.stringify({ type: "agent-turn-complete", "thread-id": replacementThreadId, "input-messages": ["not a title"] })], { cwd: coordinatorRoot, env: replacementEnv });
   const retiredCodexSend = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `retired cross-harness coordinator probe ${taskId}`, "--json"], { cwd: coordinatorRoot, env: replacementEnv });
   if (retiredCodexEvent.code === 0 || retiredCodexSend.code === 0 || !retiredCodexEvent.stderr.includes("FORGECTL_RUN_ID") || !retiredCodexSend.stderr.includes("FORGECTL_RUN_ID")) fail("retired Codex identity was not specifically rejected after the Pi handoff");
   evidence.add("cross-harness-retired-run-rejected", { eventCode: retiredCodexEvent.code, sendCode: retiredCodexSend.code });
-  const piCoordinatorSessionId = randomUUID();
   const piCoordinatorEnv = childEnv(baseEnv, { ...piCoordinator.environment, FORGECTL_INBOX_RECEIPTS: join(root, "pi-coordinator-receipts.jsonl") }, forgectl);
   const piCoordinatorArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piCoordinatorSessionId, "--tools", "read,bash,find,grep"];
   piCoordinatorChild = spawn(pi, piCoordinatorArgs, { cwd: piCoordinatorRoot, env: piCoordinatorEnv, stdio: ["pipe", "pipe", "pipe"] });
   piCoordinatorRpc = new JsonLinesProcess(piCoordinatorChild, evidence, "pi-rpc-coordinator");
   const piCoordinatorState = await piCoordinatorRpc.request({ type: "get_state" }, STARTUP_TIMEOUT);
   if (piCoordinatorState?.data?.sessionId !== piCoordinatorSessionId || piCoordinatorState.data.model?.id !== initialPiModel.id || piCoordinatorState.data.model?.provider !== initialPiModel.provider || typeof piCoordinatorState.data.sessionFile !== "string" || !piCoordinatorState.data.sessionFile.startsWith(`${piSessions}/`)) fail("Pi coordinator did not prove its separate native session and selected model");
+  assertOpenAIModel(piCoordinatorState.data.model);
   await socketReady(piCoordinatorSocket);
+  if (projects) await projects.bind("coordinator", piCoordinator);
   evidence.add("cross-harness-coordinator-start", { from: "codex", to: "pi", oldThreadId: replacementThreadId, oldRunId: replacement.member.run_id, runId: piCoordinator.member.run_id, sessionId: piCoordinatorSessionId, sessionFile: piCoordinatorState.data.sessionFile });
   const handoffToken = `handoff-${randomUUID()}`;
   const handoffStartIndex = piCoordinatorRpc.lines.length;
@@ -824,6 +872,10 @@ async function main() {
   if (handoffReplyCount !== 1) fail("Pi coordinator native history did not contain exactly one handoff reply");
   if (createHash("sha256").update(await readFile(utility)).digest("hex") !== verifiedUtilityHash || await readFile(executionLog, "utf8") !== verifiedExecutionLog) fail("coordinator replacement changed the verified artifact or original execution journal");
   evidence.add("cross-harness-coordinator-roundtrip", { taskId, token: handoffToken, delegationId: handoffDelegation.id, replyId: handoffReply.id, from: "codex", to: "pi", runId: piCoordinator.member.run_id, sessionId: piCoordinatorSessionId, nativeReplyCount: handoffReplyCount, nativeReplyCompleted: true, artifactPreserved: true });
+  if (projects) {
+    await projects.observe("coordinator", { provider: initialPiModel.provider, model: initialPiModel.id, completed: true });
+    await projects.audit();
+  }
   const report = await mailbox(evidence, forgectl, ledger, piCoordinatorEnv, piCoordinatorRoot);
   const taskMessages = (report.messages ?? []).filter((message) => message.body.includes(taskId));
   const ids = taskMessages.map((message) => message.id);
@@ -833,7 +885,7 @@ async function main() {
   await activeCleanup();
   await assertNoScratchTrust(evidence, root);
   await evidence.save();
-  await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, replacementThreadId, piCoordinatorSessionId, utility: utilityResult.code, negativeControl: negative.code }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, replacementThreadId, piCoordinatorSessionId, projectId: projects?.project.id, utility: utilityResult.code, negativeControl: negative.code }, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, piCoordinatorSessionId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);
 }
 

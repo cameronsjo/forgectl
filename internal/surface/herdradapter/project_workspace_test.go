@@ -184,6 +184,55 @@ func TestStartProjectWorkspaceRefusesWrongRootTerminal(t *testing.T) {
 	}
 }
 
+func TestStartProjectWorkspaceAcceptsCompositeNavigationLabel(test *testing.T) {
+	run := newRunner()
+	run.sessions = func() (exec.SensitiveResult, error) {
+		return stdout(sessionsJSON(map[string]any{"name": "project", "running": true, "socket_path": testSocket})), nil
+	}
+	adapter := newTestAdapter(test, run, map[string]string{sessionEnv: "project"})
+	spec, _ := newSpec(test)
+	label, err := projectLabelFor("Codex + Hermes", spec.OwnershipName())
+	if err != nil {
+		test.Fatal(err)
+	}
+	configureProjectWorkspaceRunner(run, spec.OwnershipName(), "term_1")
+	base := run.fake.RunFunc
+	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if cmd.Kind == exec.KindHerdrProjectTabProbe && hasSubcommand(cmd, "workspace", "list") {
+			return stdout(projectWorkspaceJSON(wsA, label)), nil
+		}
+		return base(cmd)
+	}
+	result := adapter.StartProjectWorkspace(context.Background(), spec, func(backend.ServerID, backend.EndpointID) error { return nil })
+	if result.Outcome() != backend.RefKnown || result.Failed() {
+		test.Fatalf("StartProjectWorkspace = %v, want RefKnown", result)
+	}
+}
+
+func TestStartProjectWorkspaceRejectsMalformedCompositeLabel(test *testing.T) {
+	run := newRunner()
+	run.sessions = func() (exec.SensitiveResult, error) {
+		return stdout(sessionsJSON(map[string]any{"name": "project", "running": true, "socket_path": testSocket})), nil
+	}
+	adapter := newTestAdapter(test, run, map[string]string{sessionEnv: "project"})
+	spec, _ := newSpec(test)
+	configureProjectWorkspaceRunner(run, spec.OwnershipName(), "term_1")
+	base := run.fake.RunFunc
+	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if cmd.Kind == exec.KindHerdrProjectTabProbe && hasSubcommand(cmd, "workspace", "list") {
+			return stdout(projectWorkspaceJSON(wsA, "Codex + Hermes · "+spec.OwnershipName()+"-forged")), nil
+		}
+		return base(cmd)
+	}
+	result := adapter.StartProjectWorkspace(context.Background(), spec, func(backend.ServerID, backend.EndpointID) error { return nil })
+	if result.Outcome() != backend.RefKnown || !result.Failed() {
+		test.Fatalf("StartProjectWorkspace = %v, want RefKnown-with-cause", result)
+	}
+	if _, found := commandOfKind(run.calls(), exec.KindHerdrBootstrap); found {
+		test.Fatal("bootstrap ran for malformed composite label")
+	}
+}
+
 func TestFocusProjectWorkspaceRefusesWrongTerminalWithoutMutation(t *testing.T) {
 	run := newRunner()
 	run.sessions = func() (exec.SensitiveResult, error) {
@@ -306,13 +355,21 @@ func TestStartProjectWorkspaceRejectsDuplicateOwnershipMarker(t *testing.T) {
 	}
 	a := newTestAdapter(t, run, map[string]string{sessionEnv: "project"})
 	spec, _ := newSpec(t)
+	firstLabel, err := projectLabelFor("Codex", spec.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLabel, err := projectLabelFor("Hermes", spec.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
 	configureProjectWorkspaceRunner(run, spec.OwnershipName(), "term_1")
 	base := run.fake.RunFunc
 	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		if cmd.Kind == exec.KindHerdrProjectTabProbe && hasSubcommand(cmd, "workspace", "list") {
 			return stdout(projectWorkspaceRowsJSON(
-				map[string]any{"workspace_id": wsA, "label": spec.OwnershipName()},
-				map[string]any{"workspace_id": wsB, "label": spec.OwnershipName()},
+				map[string]any{"workspace_id": wsA, "label": firstLabel},
+				map[string]any{"workspace_id": wsB, "label": secondLabel},
 			)), nil
 		}
 		return base(cmd)
@@ -333,14 +390,22 @@ func TestFocusProjectWorkspaceRejectsDuplicateOwnershipMarker(t *testing.T) {
 	}
 	a := newTestAdapter(t, run, map[string]string{sessionEnv: "project"})
 	spec, _ := newSpec(t)
+	firstLabel, err := projectLabelFor("Codex", spec.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLabel, err := projectLabelFor("Hermes", spec.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
 	configureProjectWorkspaceRunner(run, spec.OwnershipName(), "term_1")
 	duplicate := false
 	base := run.fake.RunFunc
 	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		if duplicate && cmd.Kind == exec.KindHerdrProjectTabProbe && hasSubcommand(cmd, "workspace", "list") {
 			return stdout(projectWorkspaceRowsJSON(
-				map[string]any{"workspace_id": wsA, "label": spec.OwnershipName()},
-				map[string]any{"workspace_id": wsB, "label": spec.OwnershipName()},
+				map[string]any{"workspace_id": wsA, "label": firstLabel},
+				map[string]any{"workspace_id": wsB, "label": secondLabel},
 			)), nil
 		}
 		return base(cmd)

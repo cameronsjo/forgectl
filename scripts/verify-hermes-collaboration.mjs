@@ -9,7 +9,8 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HermesACPClient } from "./hermes-acp-client.mjs";
-import { Evidence, CodexClient, JsonLinesProcess, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { ProjectAcceptance } from "./project-acceptance.mjs";
+import { Evidence, CodexClient, JsonLinesProcess, assertCodexSelection, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const startupTimeout = 120_000;
@@ -21,8 +22,9 @@ export function parseHermesArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--live") result.live = true;
+    else if (flag === "--projects") result.projects = true;
     else if (flag === "--help") return { help: true };
-    else if ([...paths, "codex-model", "hermes-model"].some((name) => flag === `--${name}`)) {
+    else if ([...paths, "codex-model", "hermes-model", "herdr"].some((name) => flag === `--${name}`)) {
       const value = argv[++index];
       if (!value || value.startsWith("--")) throw new Error(`${flag} needs a value`);
       result[flag.slice(2)] = value;
@@ -32,6 +34,8 @@ export function parseHermesArgs(argv) {
   for (const name of paths) if (!result[name]?.startsWith("/")) throw new Error(`--${name} must be absolute`);
   if (!result["codex-model"] || !result["hermes-model"]) throw new Error("both native model IDs must be explicit");
   if (result["hermes-model"].includes(":")) throw new Error("--hermes-model is the unqualified OpenAI model ID");
+  if (result.projects && !result.herdr?.startsWith("/")) throw new Error("--projects requires an absolute --herdr");
+  if (result.herdr && !result.projects) throw new Error("--herdr requires --projects");
   return result;
 }
 
@@ -137,6 +141,7 @@ async function run(args) {
   const nativeAuditors = [];
   let proxy;
   let coordinatorClient;
+  let projects;
   let accepted = false;
   const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
   const protectedAuth = join(codexHome, "auth.json");
@@ -150,14 +155,16 @@ async function run(args) {
     const nativeModel = `openai-codex:${args["hermes-model"]}`;
     const webSocketModule = await import(pathToFileURL(args["websocket-module"]).href);
     const WebSocket = webSocketModule.default?.WebSocket ?? webSocketModule.default ?? webSocketModule.WebSocket;
-    const ledger = join(root, "ledger");
+    let ledger = join(root, "ledger");
     const coordinatorRoot = join(root, "coordinator");
     const workerRoot = join(root, "hermes");
     const runtimeHome = join(root, "native-home");
-    for (const directory of [ledger, coordinatorRoot, workerRoot, runtimeHome]) await mkdir(directory, { mode: 0o700 });
+    for (const directory of [...(args.projects ? [] : [ledger]), coordinatorRoot, workerRoot, runtimeHome]) await mkdir(directory, { mode: 0o700 });
     const inherited = { ...process.env };
     for (const key of Object.keys(inherited)) if (key.startsWith("FORGECTL_")) delete inherited[key];
     const baseEnv = childEnv(inherited, {}, forgectl);
+    projects = args.projects ? await new ProjectAcceptance({ evidence, runCommand, forgectl, root, worktree: coordinatorRoot, env: baseEnv, herdr: await executable(args.herdr, "--herdr") }).create("Codex + Hermes", "Hermes worker") : null;
+    if (projects) ledger = projects.ledger;
     const hermesEnv = { PATH: `${dirname(args["hermes-python"])}:${dirname(forgectl)}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: runtimeHome, HERMES_HOME: args["hermes-home"], LANG: "en_US.UTF-8", PYTHONDONTWRITEBYTECODE: "1" };
     const nativeEvidence = privateNativeEvidence(evidence);
     const checkConfig = async () => {
@@ -218,6 +225,10 @@ async function run(args) {
     });
     let receiver = await startWorker(worker, listenSocket, "hermes-supervisor");
     const nativeSession = receiver.ready.session_id;
+    if (projects) {
+      const enrichedWorker = await register(evidence, forgectl, "hermes-worker", ["--ledger", ledger, "--harness", "hermes", "--worktree", workerRoot, "--socket", routeSocket, "--thread", nativeSession, "--run-id", worker.member.run_id, "--replace"], baseEnv, workerRoot);
+      await projects.bind("worker", enrichedWorker);
+    }
     const coder = spawn(codex, ["app-server", "--config", `projects.${JSON.stringify(coordinatorRoot)}.trust_level="untrusted"`, "--listen", `unix://${coordinatorSocket}`], { cwd: coordinatorRoot, env: coordinatorEnv, stdio: ["ignore", "ignore", "pipe"] });
     processes.push(coder);
     coordinatorClient = new CodexClient(coder, evidence, WebSocket);
@@ -234,12 +245,10 @@ async function run(args) {
     assert.match(sandbox.stderr, /Operation not permitted|Permission denied/);
     assert.equal(await pathExists(outsideProbe), false);
     evidence.add("sandbox-write-boundary", { outsideWriteDenied: true, outsideWriteExit: sandbox.exitCode });
-    const thread = await coordinatorClient.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], approvalPolicy: "never", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
-    const threadId = thread.thread?.id ?? thread.id;
-    assert(threadId);
-    assert.equal(thread.model, args["codex-model"]);
-    assert.equal(thread.thread?.ephemeral, false);
-    await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", coordinatorSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
+    const thread = await coordinatorClient.rpc("thread/start", { cwd: coordinatorRoot, model: args["codex-model"], modelProvider: "openai", approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only", ephemeral: false, threadSource: "startup" });
+    const threadId = assertCodexSelection(thread, args["codex-model"], coordinatorRoot);
+    const enrichedCoordinator = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "codex", "--worktree", coordinatorRoot, "--coordinator", "--socket", coordinatorSocket, "--thread", threadId, "--run-id", coordinator.member.run_id, "--replace"], baseEnv, coordinatorRoot);
+    if (projects) await projects.bind("coordinator", enrichedCoordinator);
     const fixture = await createFixture(root);
     const artifact = join(coordinatorRoot, "summarize-mailbox.mjs");
     const taskId = `hermes-collaboration-${randomUUID()}`;
@@ -286,6 +295,16 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     assert.deepEqual(lastJson(clarificationCheck.stdout), { counts: { sent: 0, queued: 1, failed: 0, unconfirmed: 0 }, ids: ["fixture-1"] });
     const artifactHash = digest(sourcePayload.source);
     evidence.add("worker-artifact-verified", { taskId, sha256: artifactHash, executionId: sourcePayload.execution_id, worker_file_created: false, worker_authored_source: true, coordinator_materialized: true, positive: positive.code, duplicate: negative.code, missing: missing.code, clarification: clarificationCheck.code });
+    if (projects) {
+      await receiver.stream.waitFor((event) => event.type === "hermes-turn-end" && event.message_id === answer.id && event.stop_reason === "end_turn" && !event.error, taskTimeout);
+      await coordinatorClient.waitForThreadIdle(threadId);
+      await projects.observe("worker", { provider: "openai-codex", model: nativeModel, completed: true });
+      await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+      await projects.verifyArtifact("coordinator", artifact, artifactHash);
+      const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
+      await coordinatorClient.turn(threadId, `For a native UI visibility check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);
+      await projects.presentNative({ codex, model: args["codex-model"], rpc: coordinatorClient, marker });
+    }
     const sendProbe = async (body) => {
       const result = await runCommand(evidence, forgectl, ["surface", "send", "hermes-worker", body, "--json"], { cwd: coordinatorRoot, env: coordinatorEnv });
       const sent = lastJson(result.stdout);
@@ -323,6 +342,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     evidence.add("stopped-receiver", { id: recovery.sent.id, status: "queued", code: 75, retiredRunRejected: true });
     receiver = await startWorker(restarted, restartSocket, "hermes-supervisor-restarted");
     assert.equal(receiver.ready.session_id, nativeSession);
+    if (projects) await projects.bind("worker", restarted);
     const wrongIdentity = { v: 1, type: "deliver", id: `wrong-${randomUUID()}`, run_id: restarted.member.run_id, session_id: randomUUID(), text: "WRONG_SESSION_NEGATIVE_CONTROL" };
     const refused = await inboxRequest(restartSocket, wrongIdentity);
     assert.equal(refused.ok, false);
@@ -333,6 +353,11 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     assert.equal(repeated.accepted, true);
     assert.equal(repeated.evidence, "history");
     evidence.add("hermes-restart-reconciled", { sessionId: nativeSession, oldRunId: worker.member.run_id, runId: restarted.member.run_id, recoveredId: recovery.sent.id, originalReceiptPreserved: true });
+    if (projects) {
+      await receiver.stream.waitFor((event) => event.type === "hermes-turn-end" && event.message_id === recovery.sent.id && event.stop_reason === "end_turn" && !event.error, taskTimeout);
+      await projects.observe("worker", { provider: "openai-codex", model: nativeModel, completed: true });
+      await projects.audit();
+    }
     await stopWorker(receiver);
     const audit = new HermesACPClient(hermes, workerRoot, hermesEnv, evidence);
     nativeAuditors.push(audit);
@@ -348,6 +373,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     evidence.add("native-history-audited", { sessionId: nativeSession, uniqueInputIds: workerInputs, exactSourceProvenance: true, wrongSessionAbsent: true, artifactPreserved: true });
     await checkConfig();
     await coordinatorClient.waitForThreadIdle(threadId);
+    await projects?.cleanup();
     coordinatorClient.stop();
     await waitClosed(coder);
     await assertNoScratchTrust(evidence, root);
@@ -356,13 +382,14 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     for (const child of processes) assert(child.exitCode !== null || child.signalCode !== null);
     evidence.add("acceptance-summary", { taskId, threadId, nativeSession, artifact, artifactHash, globalAuthUnchanged: true, globalConfigUnchanged: true, workerAuthoredSource: true, coordinatorMaterialized: true });
     await evidence.save();
-    await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, nativeSession, artifact, artifactHash, worker_file_created: false, worker_authored_source: true, coordinator_materialized: true }, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, nativeSession, projectId: projects?.project.id, artifact, artifactHash, worker_file_created: false, worker_authored_source: true, coordinator_materialized: true }, null, 2)}\n`, { mode: 0o600 });
     accepted = true;
     process.stdout.write(`${JSON.stringify({ root, taskId, nativeSession, artifact: "verified", source: "Hermes", materializedBy: "Codex", recovery: "verified" })}\n`);
   } catch (error) {
     evidence.add("acceptance-failed", { error: String(error) });
     throw error;
   } finally {
+    try { await projects?.cleanup(); } catch (error) { evidence.add("cleanup-failed", { error: String(error), component: "project-presentation" }); }
     coordinatorClient?.stop();
     try { await closeProxy(proxy); } catch (error) { evidence.add("cleanup-failed", { error: String(error), component: "proxy" }); }
     for (const audit of nativeAuditors) if (!audit.closed) audit.child.kill("SIGTERM");
@@ -378,7 +405,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const args = parseHermesArgs(process.argv.slice(2));
-    if (args.help) process.stdout.write("verify-hermes-collaboration.mjs --live --forgectl ABS --root ABS --codex ABS --codex-model ID --hermes ABS --hermes-python ABS --hermes-home ABS --hermes-model ID --websocket-module ABS\n");
+    if (args.help) process.stdout.write("verify-hermes-collaboration.mjs --live --forgectl ABS --root ABS --codex ABS --codex-model ID --hermes ABS --hermes-python ABS --hermes-home ABS --hermes-model ID --websocket-module ABS [--projects --herdr ABS]\n");
     else await run(args);
   } catch (error) {
     process.stderr.write(`${String(error)}\n`);

@@ -68,7 +68,7 @@ func (p *ProjectTabAdapter) Start(ctx context.Context, spec backend.StartSpec) b
 		return backend.NewNotMutated(*cause)
 	}
 	for _, row := range before {
-		if row.label == spec.OwnershipName() {
+		if projectLabelMatches(row.label, spec.OwnershipName()) {
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureIdentityMismatch,
 				fmt.Errorf("%w: child marker already exists", ErrProjectTabIdentity)))
 		}
@@ -248,13 +248,13 @@ func (p *ProjectTabAdapter) locate(ctx context.Context, ref backend.Ref) (projec
 	}
 	var matched *projectTabRow
 	for i := range rows {
-		if rows[i].label == ref.OwnershipName() {
+		if projectLabelMatches(rows[i].label, ref.OwnershipName()) {
 			if matched != nil || rows[i].tabID != identity.Tab() {
 				return projectTabSnapshot{}, projectTabMismatch, backend.NewStartCause(backend.FailureIdentityMismatch, ErrProjectTabIdentity)
 			}
 			matched = &rows[i]
 		}
-		if rows[i].tabID == identity.Tab() && rows[i].label != ref.OwnershipName() {
+		if rows[i].tabID == identity.Tab() && !projectLabelMatches(rows[i].label, ref.OwnershipName()) {
 			return projectTabSnapshot{}, projectTabMismatch, backend.NewStartCause(backend.FailureIdentityMismatch, ErrProjectTabIdentity)
 		}
 	}
@@ -318,13 +318,13 @@ func (p *ProjectTabAdapter) parentTabsAt(ctx context.Context, kind exec.CommandK
 		c := backend.NewStartCause(backend.FailureIdentityMismatch, fmt.Errorf("%w: parent workspace is absent", ErrProjectTabParent))
 		return nil, &c
 	}
-	if parent.marker != p.parent.OwnershipName() {
+	if !projectLabelMatches(parent.marker, p.parent.OwnershipName()) {
 		c := backend.NewStartCause(backend.FailureIdentityMismatch, fmt.Errorf("%w: parent workspace marker changed", ErrProjectTabParent))
 		return nil, &c
 	}
 	parentMatches := 0
 	for id, row := range rows {
-		if row.marker != p.parent.OwnershipName() {
+		if !projectLabelMatches(row.marker, p.parent.OwnershipName()) {
 			continue
 		}
 		parentMatches++
@@ -489,7 +489,7 @@ func (p *ProjectTabAdapter) verifyCreated(ctx context.Context, spec backend.Star
 	}
 	found := 0
 	for _, row := range rows {
-		if row.label == spec.OwnershipName() {
+		if projectLabelMatches(row.label, spec.OwnershipName()) {
 			found++
 			if row.tabID != created.TabID || row.workspaceID != created.WorkspaceID || row.paneCount != 1 {
 				c := backend.NewStartCause(backend.FailureIdentityMismatch, ErrProjectTabIdentity)
@@ -535,7 +535,7 @@ func (p *ProjectTabAdapter) reconcile(ctx context.Context, spec backend.StartSpe
 	}
 	candidates := make([]projectTabRow, 0, 1)
 	for _, row := range rows {
-		if row.label == spec.OwnershipName() {
+		if projectLabelMatches(row.label, spec.OwnershipName()) {
 			if _, existed := seen[row.tabID]; !existed {
 				candidates = append(candidates, row)
 			}

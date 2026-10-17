@@ -10,11 +10,6 @@ import (
 
 const projectToken = "forgectl_project"
 
-// ShowProjectWorkspace applies the cosmetic project name to the verified
-// project workspace and its root pane. The ownership label is deliberately
-// untouched: it remains the durable marker used by every project operation.
-// Metadata is best effort for callers, but this method still refuses to issue
-// a write when any part of the project identity cannot be re-proven.
 func (adapter *Adapter) ShowProjectWorkspace(ctx context.Context, ref backend.Ref, projectName string) error {
 	if err := CheckTokenValue(projectToken, projectName); err != nil {
 		return err
@@ -24,7 +19,37 @@ func (adapter *Adapter) ShowProjectWorkspace(ctx context.Context, ref backend.Re
 	if err != nil {
 		return err
 	}
+	label, err := projectLabelFor(projectName, ref.OwnershipName())
+	if err != nil {
+		return err
+	}
 	res, runErr := adapter.run.RunSensitive(ctx, adapter.command(exec.KindHerdrMetadata,
+		exec.MustFixed("workspace"),
+		exec.MustFixed("rename"),
+		exec.Opaque(identity.Workspace()),
+		exec.Opaque(label),
+	))
+	if runErr != nil {
+		return fmt.Errorf("%w: workspace rename: %v", ErrMetadataFailed, adapter.classifyRunError(runErr, res))
+	}
+	identity, _, err = adapter.verifyProjectMetadataTarget(ctx, ref)
+	if err != nil {
+		return err
+	}
+	res, runErr = adapter.run.RunSensitive(ctx, adapter.command(exec.KindHerdrMetadata,
+		exec.MustFixed("tab"),
+		exec.MustFixed("rename"),
+		exec.Opaque(identity.Tab()),
+		exec.Opaque(label),
+	))
+	if runErr != nil {
+		return fmt.Errorf("%w: root tab rename: %v", ErrMetadataFailed, adapter.classifyRunError(runErr, res))
+	}
+	identity, _, err = adapter.verifyProjectMetadataTarget(ctx, ref)
+	if err != nil {
+		return err
+	}
+	res, runErr = adapter.run.RunSensitive(ctx, adapter.command(exec.KindHerdrMetadata,
 		exec.MustFixed("workspace"),
 		exec.MustFixed("report-metadata"),
 		exec.Opaque(identity.Workspace()),
@@ -56,9 +81,6 @@ func (adapter *Adapter) ShowProjectWorkspace(ctx context.Context, ref backend.Re
 	return nil
 }
 
-// ShowProjectThread applies only the thread's display name to the child tab's
-// root pane. It never changes the child tab label, which is the exact marker
-// used to prove that the requested tab belongs to this project.
 func (projectTab *ProjectTabAdapter) ShowProjectThread(ctx context.Context, childRef backend.Ref, threadName string) error {
 	if err := CheckTokenValue("display_agent", threadName); err != nil {
 		return err
@@ -68,7 +90,24 @@ func (projectTab *ProjectTabAdapter) ShowProjectThread(ctx context.Context, chil
 	if err != nil {
 		return err
 	}
+	label, err := projectLabelFor(threadName, childRef.OwnershipName())
+	if err != nil {
+		return err
+	}
 	res, runErr := projectTab.adapter.run.RunSensitive(ctx, projectTab.adapter.command(exec.KindHerdrMetadata,
+		exec.MustFixed("tab"),
+		exec.MustFixed("rename"),
+		exec.Opaque(child.tab.tabID),
+		exec.Opaque(label),
+	))
+	if runErr != nil {
+		return fmt.Errorf("%w: tab rename: %v", ErrMetadataFailed, projectTab.adapter.classifyRunError(runErr, res))
+	}
+	child, err = projectTab.verifyProjectTabMetadataTarget(ctx, childRef)
+	if err != nil {
+		return err
+	}
+	res, runErr = projectTab.adapter.run.RunSensitive(ctx, projectTab.adapter.command(exec.KindHerdrMetadata,
 		exec.MustFixed("pane"),
 		exec.MustFixed("report-metadata"),
 		exec.Opaque(child.pane.PaneID),

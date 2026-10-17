@@ -36,7 +36,10 @@ func prepareProjectNativeView(test *testing.T) (project.Store, projectReport, []
 	registerProjectCLIMember(test, created.Ledger, member, true)
 	bindProjectCLIThread(test, store.Root, created.Project.ID, created.Project.CoordinatorThreadID, member.Name, member.RunID, previousRun)
 	binary := filepath.Join(test.TempDir(), "codex")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0o600); err != nil {
+		test.Fatal(err)
+	}
+	if err := chmodExec(binary); err != nil {
 		test.Fatal(err)
 	}
 	previousPrepare, previousLaunch, previousInspect := projectPrepareCodexView, projectLaunchNative, projectInspectCodexView

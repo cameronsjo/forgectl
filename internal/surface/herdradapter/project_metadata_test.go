@@ -29,21 +29,39 @@ func TestShowProjectWorkspaceUsesCosmeticMetadataWithoutChangingOwnership(test *
 		test.Fatalf("ShowProjectWorkspace: %v", err)
 	}
 
-	var workspace, pane *exec.SensitiveCommand
+	var workspace, pane, workspaceRename, tabRename *exec.SensitiveCommand
+	metadataCount := 0
 	for index := range run.calls() {
 		call := run.calls()[index]
 		if call.Kind != exec.KindHerdrMetadata {
 			continue
 		}
-		if containsArg(call.Args, exec.MustFixed("workspace")) {
+		metadataCount++
+		if hasSubcommand(call, "workspace", "rename") {
+			workspaceRename = &call
+		} else if hasSubcommand(call, "tab", "rename") {
+			tabRename = &call
+		} else if containsArg(call.Args, exec.MustFixed("workspace")) {
 			workspace = &call
 		} else if containsArg(call.Args, exec.MustFixed("pane")) {
 			pane = &call
 		}
 	}
-	if workspace == nil || pane == nil {
-		test.Fatalf("metadata calls = %#v, want workspace and pane reports", run.calls())
+	if metadataCount != 4 || workspace == nil || pane == nil || workspaceRename == nil || tabRename == nil {
+		test.Fatalf("metadata calls = %#v, want workspace/tab renames and workspace/pane reports", run.calls())
 	}
+	label, err := projectLabelFor("Project Alpha", ref.OwnershipName())
+	if err != nil {
+		test.Fatal(err)
+	}
+	assertArgv(test, *workspaceRename, []exec.Arg{
+		exec.MustFixed("--session"), exec.Opaque(adapter.Session()),
+		exec.MustFixed("workspace"), exec.MustFixed("rename"), exec.Opaque(wsA), exec.Opaque(label),
+	})
+	assertArgv(test, *tabRename, []exec.Arg{
+		exec.MustFixed("--session"), exec.Opaque(adapter.Session()),
+		exec.MustFixed("tab"), exec.MustFixed("rename"), exec.Opaque(tabA), exec.Opaque(label),
+	})
 	assertArgv(test, *workspace, []exec.Arg{
 		exec.MustFixed("--session"), exec.Opaque(adapter.Session()),
 		exec.MustFixed("workspace"), exec.MustFixed("report-metadata"), exec.Opaque(wsA),
@@ -94,17 +112,19 @@ func TestShowProjectWorkspaceRefusesChangedRootBeforeMetadata(test *testing.T) {
 }
 
 type projectThreadMetadataFixture struct {
-	adapter          *Adapter
-	runner           *scriptedRunner
-	project          *ProjectTabAdapter
-	child            backend.Ref
-	childMarker      string
-	childCreated     bool
-	childWorkspace   string
-	childTab         string
-	childPane        string
-	childTerminal    string
-	serverTurnedOver bool
+	adapter             *Adapter
+	runner              *scriptedRunner
+	project             *ProjectTabAdapter
+	child               backend.Ref
+	childMarker         string
+	childCreated        bool
+	childWorkspace      string
+	childTab            string
+	childPane           string
+	childTerminal       string
+	serverTurnedOver    bool
+	afterRenameTerminal string
+	afterRenameServer   bool
 }
 
 func newProjectThreadMetadataFixture(test *testing.T) *projectThreadMetadataFixture {
@@ -137,6 +157,14 @@ func newProjectThreadMetadataFixture(test *testing.T) *projectThreadMetadataFixt
 	fixture.childMarker = childTag.OwnershipName()
 	base := runner.fake.RunFunc
 	runner.fake.RunFunc = func(command exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if command.Kind == exec.KindHerdrMetadata && hasSubcommand(command, "tab", "rename") {
+			if fixture.afterRenameTerminal != "" {
+				fixture.childTerminal = fixture.afterRenameTerminal
+			}
+			if fixture.afterRenameServer {
+				fixture.serverTurnedOver = true
+			}
+		}
 		if command.Kind == exec.KindHerdrProjectTabCreate {
 			fixture.childCreated = true
 			return stdout(projectCreateJSON(fixture.childWorkspace, fixture.childTab, fixture.childPane, fixture.childTerminal)), nil
@@ -191,14 +219,35 @@ func TestShowProjectThreadUsesChildPaneOnly(test *testing.T) {
 	if err := fixture.project.ShowProjectThread(context.Background(), fixture.child, "Thread Beta"); err != nil {
 		test.Fatalf("ShowProjectThread: %v", err)
 	}
-	metadata := fixture.metadataCalls()
-	if len(metadata) != 1 {
-		test.Fatalf("metadata calls = %d, want one child pane report", len(metadata))
+	var rename *exec.SensitiveCommand
+	for index := range fixture.runner.calls() {
+		call := fixture.runner.calls()[index]
+		if call.Kind == exec.KindHerdrMetadata && hasSubcommand(call, "tab", "rename") {
+			rename = &call
+		}
 	}
-	if containsArg(metadata[0].Args, exec.Opaque(paneA)) {
+	if rename == nil {
+		test.Fatal("ShowProjectThread did not rename the child tab")
+	}
+	label, err := projectLabelFor("Thread Beta", fixture.childMarker)
+	if err != nil {
+		test.Fatal(err)
+	}
+	assertArgv(test, *rename, []exec.Arg{
+		exec.MustFixed("--session"), exec.Opaque(fixture.adapter.Session()),
+		exec.MustFixed("tab"), exec.MustFixed("rename"), exec.Opaque(fixture.childTab), exec.Opaque(label),
+	})
+	metadata := fixture.metadataCalls()
+	if len(metadata) != 2 {
+		test.Fatalf("metadata calls = %d, want one tab rename and one child pane report", len(metadata))
+	}
+	if !hasSubcommand(metadata[0], "tab", "rename") {
+		test.Fatalf("first metadata call = %#v, want tab rename", metadata[0])
+	}
+	if containsArg(metadata[1].Args, exec.Opaque(paneA)) || !containsArg(metadata[1].Args, exec.MustFixed("pane")) {
 		test.Fatal("parent pane received child metadata")
 	}
-	assertArgv(test, metadata[0], []exec.Arg{
+	assertArgv(test, metadata[1], []exec.Arg{
 		exec.MustFixed("--session"), exec.Opaque(fixture.adapter.Session()),
 		exec.MustFixed("pane"), exec.MustFixed("report-metadata"), exec.Opaque(fixture.childPane),
 		exec.MustFixed("--source"), exec.MustFixed(MetadataSource),
@@ -214,6 +263,29 @@ func TestShowProjectThreadRefusesChildIdentityMismatchBeforeMetadata(test *testi
 	}
 	if len(fixture.metadataCalls()) != 0 {
 		test.Fatal("metadata was written after child identity mismatch")
+	}
+}
+
+func TestShowProjectThreadRefusesIdentityDriftAfterTabRename(test *testing.T) {
+	for name, configure := range map[string]func(*projectThreadMetadataFixture){
+		"terminal": func(fixture *projectThreadMetadataFixture) {
+			fixture.afterRenameTerminal = "term_changed"
+		},
+		"server": func(fixture *projectThreadMetadataFixture) {
+			fixture.afterRenameServer = true
+		},
+	} {
+		test.Run(name, func(test *testing.T) {
+			fixture := newProjectThreadMetadataFixture(test)
+			configure(fixture)
+			if err := fixture.project.ShowProjectThread(context.Background(), fixture.child, "Thread Beta"); err == nil {
+				test.Fatal("ShowProjectThread accepted identity drift after tab rename")
+			}
+			metadata := fixture.metadataCalls()
+			if len(metadata) != 1 || !hasSubcommand(metadata[0], "tab", "rename") {
+				test.Fatalf("metadata calls = %#v, want only the tab rename", metadata)
+			}
+		})
 	}
 }
 

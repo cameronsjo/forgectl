@@ -81,7 +81,7 @@ func (a *Adapter) verifyProjectWorkspace(
 	row, ok := rows[created.WorkspaceID]
 	markerMatches := 0
 	for id, candidate := range rows {
-		if candidate.marker != spec.OwnershipName() {
+		if !projectLabelMatches(candidate.marker, spec.OwnershipName()) {
 			continue
 		}
 		markerMatches++
@@ -90,7 +90,7 @@ func (a *Adapter) verifyProjectWorkspace(
 			return &c
 		}
 	}
-	if !ok || row.marker != spec.OwnershipName() || markerMatches != 1 {
+	if !ok || !projectLabelMatches(row.marker, spec.OwnershipName()) || markerMatches != 1 {
 		c := backend.NewStartCause(backend.FailureIdentityMismatch, ErrProjectWorkspace)
 		return &c
 	}
@@ -146,7 +146,7 @@ func (a *Adapter) reconcileProjectWorkspace(
 	}
 	var matches []string
 	for id, row := range rows {
-		if row.marker == spec.OwnershipName() {
+		if projectLabelMatches(row.marker, spec.OwnershipName()) {
 			if _, existed := before[id]; !existed {
 				matches = append(matches, id)
 			}
@@ -320,7 +320,7 @@ func (a *Adapter) verifyProjectWorkspaceRef(ctx context.Context, ref backend.Ref
 	row, ok := rows[identity.Workspace()]
 	markerMatches := 0
 	for id, candidate := range rows {
-		if candidate.marker != ref.OwnershipName() {
+		if !projectLabelMatches(candidate.marker, ref.OwnershipName()) {
 			continue
 		}
 		markerMatches++
@@ -329,7 +329,7 @@ func (a *Adapter) verifyProjectWorkspaceRef(ctx context.Context, ref backend.Ref
 			return &c
 		}
 	}
-	if !ok || row.marker != ref.OwnershipName() || markerMatches != 1 {
+	if !ok || !projectLabelMatches(row.marker, ref.OwnershipName()) || markerMatches != 1 {
 		c := backend.NewStartCause(backend.FailureIdentityMismatch, ErrProjectWorkspace)
 		return &c
 	}

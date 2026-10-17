@@ -67,6 +67,10 @@ func TestProjectTabStartUsesParentAndTerminalIdentity(t *testing.T) {
 	childTab := "w2R:t2"
 	childPane := "w2R:p2"
 	childTerminal := "term_2"
+	childLabel, err := projectLabelFor("Codex + Pi", childTag.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
 	created := false
 	base := run.fake.RunFunc
 	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
@@ -81,7 +85,7 @@ func TestProjectTabStartUsesParentAndTerminalIdentity(t *testing.T) {
 			if hasSubcommand(cmd, "tab", "list") {
 				rows := []map[string]any{{"tab_id": tabA, "workspace_id": wsA, "label": "parent", "pane_count": 1}}
 				if created {
-					rows = append(rows, map[string]any{"tab_id": childTab, "workspace_id": wsA, "label": childTag.OwnershipName(), "pane_count": 1})
+					rows = append(rows, map[string]any{"tab_id": childTab, "workspace_id": wsA, "label": childLabel, "pane_count": 1})
 				}
 				return stdout(projectTabsJSON(rows...)), nil
 			}
@@ -146,12 +150,20 @@ func TestProjectTabRefusesDuplicateParentWorkspaceMarkerBeforeCreate(t *testing.
 	a, _, parent := startOn(t, run, map[string]string{sessionEnv: "project"})
 	parent = parentWithTerminal(t, parent, "term_1")
 	spec, _ := newSpec(t)
+	firstLabel, err := projectLabelFor("Codex", parent.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLabel, err := projectLabelFor("Pi", parent.OwnershipName())
+	if err != nil {
+		t.Fatal(err)
+	}
 	base := run.fake.RunFunc
 	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		if cmd.Kind == exec.KindHerdrProjectTabProbe && hasSubcommand(cmd, "workspace", "list") {
 			return stdout(projectWorkspaceRowsJSON(
-				map[string]any{"workspace_id": wsA, "label": parent.OwnershipName()},
-				map[string]any{"workspace_id": wsB, "label": parent.OwnershipName()},
+				map[string]any{"workspace_id": wsA, "label": firstLabel},
+				map[string]any{"workspace_id": wsB, "label": secondLabel},
 			)), nil
 		}
 		return base(cmd)
@@ -166,6 +178,58 @@ func TestProjectTabRefusesDuplicateParentWorkspaceMarkerBeforeCreate(t *testing.
 	}
 	if _, found := commandOfKind(run.calls(), exec.KindHerdrProjectTabCreate); found {
 		t.Fatal("project tab create ran with a duplicate parent workspace marker")
+	}
+}
+
+func TestProjectTabRefusesDuplicateCompositeChildMarkerBeforeCreate(test *testing.T) {
+	run := newRunner()
+	run.sessions = func() (exec.SensitiveResult, error) {
+		return stdout(sessionsJSON(map[string]any{"name": "project", "running": true, "socket_path": testSocket})), nil
+	}
+	adapter, _, parent := startOn(test, run, map[string]string{sessionEnv: "project"})
+	parent = parentWithTerminal(test, parent, "term_1")
+	spec, tag := newSpec(test)
+	firstLabel, err := projectLabelFor("Codex", tag.OwnershipName())
+	if err != nil {
+		test.Fatal(err)
+	}
+	secondLabel, err := projectLabelFor("Pi", tag.OwnershipName())
+	if err != nil {
+		test.Fatal(err)
+	}
+	base := run.fake.RunFunc
+	run.fake.RunFunc = func(command exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if command.Kind == exec.KindHerdrProjectTabProbe {
+			if hasSubcommand(command, "workspace", "list") {
+				return stdout(projectWorkspaceJSON(wsA, parent.OwnershipName())), nil
+			}
+			if hasSubcommand(command, "tab", "list") {
+				return stdout(projectTabsJSON(
+					map[string]any{"tab_id": tabA, "workspace_id": wsA, "label": "parent", "pane_count": 1},
+					map[string]any{"tab_id": "w2R:t2", "workspace_id": wsA, "label": firstLabel, "pane_count": 1},
+					map[string]any{"tab_id": "w2R:t3", "workspace_id": wsA, "label": secondLabel, "pane_count": 1},
+				)), nil
+			}
+		}
+		if command.Kind == exec.KindHerdrPaneStatus && containsArg(command.Args, exec.Opaque(paneA)) {
+			return stdout(projectPaneJSON(wsA, tabA, paneA, "term_1")), nil
+		}
+		return base(command)
+	}
+	project, err := adapter.ForProjectTab(parent)
+	if err != nil {
+		test.Fatalf("ForProjectTab: %v", err)
+	}
+	before := len(run.calls())
+	result := project.Start(context.Background(), spec)
+	if result.Outcome() != backend.NotMutated {
+		test.Fatalf("ProjectTab.Start = %v, want NotMutated", result)
+	}
+	if _, found := commandOfKind(run.calls()[before:], exec.KindHerdrProjectTabCreate); found {
+		test.Fatal("project tab create ran with duplicate composite child markers")
+	}
+	if _, found := commandOfKind(run.calls()[before:], exec.KindHerdrBootstrap); found {
+		test.Fatal("bootstrap ran with duplicate composite child markers")
 	}
 }
 
@@ -420,6 +484,8 @@ func fixedArg(value string) exec.Arg {
 		return exec.MustFixed("list")
 	case "create":
 		return exec.MustFixed("create")
+	case "rename":
+		return exec.MustFixed("rename")
 	default:
 		panic("unexpected fixed test argument")
 	}

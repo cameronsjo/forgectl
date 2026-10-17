@@ -10,6 +10,9 @@ import { HermesACPClient } from "./hermes-acp-client.mjs";
 
 const flags = ["--live", "--root", "/private/test", "--forgectl", "/bin/forgectl", "--codex", "/bin/codex", "--codex-model", "coordinator-model", "--hermes", "/bin/hermes-acp", "--hermes-python", "/bin/python", "--hermes-home", "/private/hermes", "--hermes-model", "worker-model", "--websocket-module", "/private/ws.mjs"];
 assert.equal(parseHermesArgs(flags)["hermes-model"], "worker-model");
+assert.equal(parseHermesArgs([...flags, "--projects", "--herdr", "/test/herdr"]).projects, true);
+assert.throws(() => parseHermesArgs([...flags, "--projects"]), /requires an absolute --herdr/);
+assert.throws(() => parseHermesArgs([...flags, "--herdr", "/test/herdr"]), /requires --projects/);
 assert.throws(() => parseHermesArgs(flags.slice(1)), /requires --live/);
 assert.throws(() => parseHermesArgs([...flags, "--hermes-model", "other-provider:model"]), /unqualified/);
 assert.throws(() => parseHermesArgs([...flags, "--hermes-python", "python"]), /must be absolute/);
