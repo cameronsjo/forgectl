@@ -4,12 +4,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -167,11 +170,11 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, cacheCause, snap)
 			if asJSON {
 				rows := snapshotToLsJSON(snap, false)
 				if rows == nil {
@@ -215,11 +218,11 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if err != nil {
 				return withJSONUsageCode(WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), classExit(classFailed)))
 			}
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, cacheCause, snap)
 
 			task, ok := findTask(snap.Tasks, id)
 			if !ok {
@@ -228,7 +231,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if asJSON {
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
-				return enc.Encode(task)
+				return enc.Encode(tasksShowJSON{Task: task, Stale: staleFor(cacheCause, snap)})
 			}
 			return printTaskDetail(deps.Theme.Writer(cmd.OutOrStdout(), nil), task)
 		},
@@ -338,11 +341,11 @@ dependency store.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, cacheCause, snap)
 
 			readySnap := tasks.Snapshot{Tasks: tasks.Ready(snap.Tasks)}
 			if asJSON {
@@ -453,29 +456,29 @@ func loadTasksSnapshot(
 	runner exec.Runner,
 	host, keychainService string,
 	allowedHosts []string,
-) (tasks.Snapshot, bool, error) {
+) (snap tasks.Snapshot, cacheCause error, err error) {
 	ctx := cmd.Context()
 	token, err := readTasksKeychainToken(cmd, runner, tasksKeychainFlag, keychainService, host, allowedHosts)
 	if err != nil {
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
 	client, err := newTasksClient(ctx, runner, host, token)
 	if err != nil {
 		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
-	snap, err := client.FetchAll(ctx)
+	snap, err = client.FetchAll(ctx)
 	if err != nil {
 		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
 	snap.FetchedAt = time.Now().UTC()
 	cacheSnapshot(ctx, cmd.ErrOrStderr(), snap)
-	return snap, false, nil
+	return snap, nil, nil
 }
 
 // cacheSnapshot writes the fetched snapshot to the local cache. A cache
@@ -529,29 +532,57 @@ func mayServeCache(err error) bool {
 // cachedTasksSnapshot loads the local cache after a network failure. If no
 // cache exists either, the original network error is returned so the
 // caller's exit code still reflects "unreachable", not a generic failure.
-func cachedTasksSnapshot(cause error) (tasks.Snapshot, bool, error) {
+func cachedTasksSnapshot(cause error) (snap tasks.Snapshot, cacheCause error, err error) {
 	path, err := config.TasksCachePath()
 	if err != nil {
-		return tasks.Snapshot{}, false, cause
+		return tasks.Snapshot{}, nil, cause
 	}
-	snap, err := tasks.LoadCache(path)
+	snap, err = tasks.LoadCache(path)
 	if err != nil {
-		return tasks.Snapshot{}, false, cause
+		return tasks.Snapshot{}, nil, cause
 	}
-	return snap, true, nil
+	return snap, cause, nil
 }
 
 // reportCacheFallback names the host that actually failed, not the default
 // one: under --host the operator is otherwise told a different instance is
 // down than the one they asked for, during exactly the incident this notice
 // exists to explain.
-func reportCacheFallback(stderr io.Writer, host string, fromCache bool, snap tasks.Snapshot) {
-	if !fromCache {
+func reportCacheFallback(stderr io.Writer, host string, cause error, snap tasks.Snapshot) {
+	if cause == nil {
 		return
 	}
 	age := time.Since(snap.FetchedAt).Round(time.Second)
-	fmt.Fprintf(stderr, "forgectl: %s unreachable — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
-		safeTitle(host), age)
+	fmt.Fprintf(stderr, "forgectl: STALE DATA: %s unreachable (%s) — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
+		safeTitle(host), safeText(cause.Error()), age)
+	// "no route to host" from a dial that curl does not share is typically
+	// macOS Local Network privacy denying this process or its parent app (a
+	// sandboxed parent process can cause the same refusal) (#1289). The
+	// client folds dial errors into text, so match the text as well as the
+	// errno.
+	if runtime.GOOS == "darwin" && (errors.Is(cause, syscall.EHOSTUNREACH) || strings.Contains(cause.Error(), "no route to host")) {
+		fmt.Fprintln(stderr, "forgectl: hint: if curl reaches the host, this is typically macOS Local Network privacy or a sandboxed parent process; allow your terminal app under System Settings > Privacy & Security > Local Network") //nolint:errcheck // best-effort stderr notice
+	}
+}
+
+// tasksStale is the additive "stale" object `tasks show --json` carries on a
+// cache fallback only; a live read omits it. ls and ready emit bare arrays,
+// whose shape stays unchanged.
+type tasksStale struct {
+	Cause      string `json:"cause"`
+	AgeSeconds int64  `json:"age_seconds"`
+}
+
+type tasksShowJSON struct {
+	tasks.Task
+	Stale *tasksStale `json:"stale,omitempty"`
+}
+
+func staleFor(cause error, snap tasks.Snapshot) *tasksStale {
+	if cause == nil {
+		return nil
+	}
+	return &tasksStale{Cause: safeText(cause.Error()), AgeSeconds: int64(time.Since(snap.FetchedAt).Seconds())}
 }
 
 // tasksExitError maps a tasks package sentinel to its distinct exit code
