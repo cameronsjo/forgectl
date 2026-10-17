@@ -6,9 +6,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertCodexSelection, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, closeProxy, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { assertCodexSelection, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, childEnv, closeProxy, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
+assert.throws(() => childEnv({ PATH: "/installed" }, {}, "/test/forgectl-test.bin"), /must be named forgectl/);
+assert.equal(childEnv({ PATH: "/installed" }, {}, "/test/forgectl").PATH.split(":")[0], "/test");
 assert.throws(() => parseArgs(flags), /--codex-model is required/);
 const modelFlags = ["--codex-model", "coordinator-model", "--pi-provider", "openai-codex", "--pi-model", "worker-model"];
 const selected = parseArgs([...flags, ...modelFlags]);

@@ -2,7 +2,7 @@
 
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { appendFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
@@ -21,7 +21,8 @@ const usage = `usage: verify-cross-harness-loop.mjs --live --forgectl ABS --root
 
 Runs the opt-in disposable Codex/Pi collaboration acceptance loop. The root
 must be an existing empty 0700 directory. The script never copies auth files
-or prints inherited secret values.
+or prints inherited secret values. The resolved --forgectl executable must be
+named forgectl so native extension callbacks use the same source-built binary.
 `;
 
 function fail(message) {
@@ -169,6 +170,7 @@ function runCommand(evidence, command, args, options = {}) {
 }
 
 function childEnv(base, additions, forgectl) {
+  if (basename(forgectl) !== "forgectl") fail("acceptance binary must be named forgectl so native extension callbacks resolve the exact build");
   const path = `${dirname(forgectl)}:${base.PATH ?? ""}`;
   return { ...base, ...additions, PATH: path };
 }
