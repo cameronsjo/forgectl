@@ -49,11 +49,13 @@ Remaining acceptance gates are a different-harness coordinator swap, Claude and 
 
 The next unit uses the already approved selectable-coordinator contract without adding a new transport or provider. Registration already supports a Pi coordinator, but the embedded inbox currently requires `FORGECTL_WORKER` and therefore remains inert for the emitted coordinator environment. Codex will correct that role mismatch and prove a native cross-harness handoff before adding Hermes.
 
-- [ ] Activate the Pi inbox for exactly one explicit worker or coordinator identity; reject mixed coordinator/worker identities, and require the explicit ledger/run fields for a coordinator. Preserve the existing worker path and all receipt, socket, and permission controls.
-- [ ] Add behavioral role controls against the embedded extension, including missing and conflicting identities.
-- [ ] Extend the live verifier after its existing Codex replacement: retire that coordinator, register the same role with a fresh run and Pi session, and have Pi read the existing task ledger, delegate a bounded recovery check, receive its worker's native reply, and settle successfully. No native private-history conversion is implied.
+- [x] Activate the Pi inbox for exactly one explicit worker or coordinator identity; reject mixed coordinator/worker identities, and require the explicit ledger/run fields for a coordinator. Preserve the existing worker path and all receipt, socket, and permission controls.
+- [x] Add behavioral role controls against the embedded extension, including missing and conflicting identities.
+- [x] Extend the live verifier after its existing Codex replacement: retire that coordinator, register the same role with a fresh run and Pi session, and have Pi read the existing task ledger, delegate a bounded recovery check, receive its worker's native reply, and settle successfully. No native private-history conversion is implied.
 - [ ] Verify that the retired Codex run can no longer send or report events, that the Pi coordinator's reply is consumed in its own native session, and that cleanup includes every newly owned process.
 - [ ] Commit and push the verified unit; keep installed tools and services unchanged. Keep all model traffic on OpenAI.
+
+The implementation's independent mail-package tests and embedded-extension behavioral checks pass. The role-denial tests synchronize with completed child initialization and assert no registered callbacks before checking absent endpoints, so slow startup cannot impersonate a denial. The parent's first behavioral run timed out on an existing ownership-socket readiness check under heavy host load; an unchanged rerun passed. Registration-envelope negative controls and verifier syntax also pass. The new cross-harness live gate remains pending until its own run writes `ACCEPTED`.
 
 ## Accepted live receipt
 

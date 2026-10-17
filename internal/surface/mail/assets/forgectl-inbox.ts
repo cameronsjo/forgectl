@@ -1,11 +1,12 @@
 /**
- * forgectl-inbox: lets `forgectl surface send` reach a pi worker.
+ * forgectl-inbox: lets `forgectl surface send` reach an enrolled Pi member.
  *
  * forgectl ships this file inside its binary (mail.PiExtension) and loads it
- * only for pi workers it launches, passing
+ * when explicitly loaded with its registration environment, passing
  *   FORGECTL_INBOX   absolute path of the unix socket to bind (in the 0700 ledger dir)
- *   FORGECTL_WORKER  this worker's roster name
- * Without both it does nothing, so it is inert in a normal pi session.
+ *   exactly one of FORGECTL_WORKER or FORGECTL_COORDINATOR
+ *   FORGECTL_LEDGER and FORGECTL_RUN_ID when the coordinator is selected
+ * Without a valid role it does nothing, so it is inert in a normal pi session.
  *
  * Protocol: one request per connection, a JSON line in and a JSON line back.
  *   {"v":1,"type":"deliver","id":"...","text":"...","priority":"now|next|later"}
@@ -101,7 +102,14 @@ const messageDigest = (text: string): string => createHash("sha256").update(text
 export default function forgectlInbox(pi: ExtensionAPI) {
   const socketPath = process.env.FORGECTL_INBOX;
   const worker = process.env.FORGECTL_WORKER;
-  if (!socketPath || !worker || !isAbsolute(socketPath)) return;
+  const coordinator = process.env.FORGECTL_COORDINATOR;
+  const ledger = process.env.FORGECTL_LEDGER;
+  const runID = process.env.FORGECTL_RUN_ID;
+  const drainWorker = process.env.FORGECTL_DRAIN_WORKER;
+  const hasWorker = Boolean(worker);
+  const hasCoordinator = Boolean(coordinator);
+  if (!socketPath || !isAbsolute(socketPath) || hasWorker === hasCoordinator) return;
+  if (hasCoordinator && (Boolean(drainWorker) || !ledger || !isAbsolute(ledger) || !runID?.trim())) return;
   const receiptPath = process.env.FORGECTL_INBOX_RECEIPTS || `${socketPath}.receipts`;
 
   const receipts = new Map<string, ReceiptRecord>();

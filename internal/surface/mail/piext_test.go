@@ -8,7 +8,7 @@ import (
 // The extension and PiAdapter speak one protocol, so the shipped copy must
 // name the same environment variable and request types the adapter uses.
 func TestPiExtensionEmbedded(t *testing.T) {
-	for _, want := range []string{EnvInbox, EnvWorker, `"deliver"`, `"receipt"`, `"state"`, "--harness", `retry: true`, "accepted", "unconfirmed", "message_start", "session_start", "getEntries", "getSessionId", "session_id"} {
+	for _, want := range []string{EnvInbox, EnvWorker, EnvCoordinator, EnvLedger, EnvRunID, EnvDrainWorker, `"deliver"`, `"receipt"`, `"state"`, "--harness", `retry: true`, "accepted", "unconfirmed", "message_start", "session_start", "getEntries", "getSessionId", "session_id"} {
 		if !bytes.Contains(PiExtension, []byte(want)) {
 			t.Errorf("embedded pi extension does not mention %s", want)
 		}

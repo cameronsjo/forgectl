@@ -370,8 +370,15 @@ async function pathExists(path) {
 async function register(evidence, forgectl, name, flags, env, cwd) {
   const result = await runCommand(evidence, forgectl, ["surface", "team", "register", name, "--json", ...flags], { cwd, env });
   if (result.code !== 0) fail(`team registration failed for ${name}`);
-  const json = lastJson(result.stdout);
-  if (!json || typeof json.ledger !== "string" || !json.member || json.member.name !== name || typeof json.member.harness !== "string" || typeof json.member.worktree !== "string" || json.environment?.FORGECTL_LEDGER !== json.ledger || typeof json.environment.FORGECTL_RUN_ID !== "string") fail(`unexpected registration for ${name}`);
+  return assertRegistration(lastJson(result.stdout), name);
+}
+
+export function assertRegistration(json, name) {
+  if (!json || typeof json.ledger !== "string" || !json.member || json.member.name !== name || typeof json.member.harness !== "string" || typeof json.member.worktree !== "string" || json.environment?.FORGECTL_LEDGER !== json.ledger || typeof json.environment.FORGECTL_RUN_ID !== "string" || !json.environment.FORGECTL_RUN_ID || json.environment.FORGECTL_RUN_ID !== json.member.run_id) fail(`unexpected registration for ${name}`);
+  const identity = json.member.coordinator === true ? "FORGECTL_COORDINATOR" : "FORGECTL_WORKER";
+  const otherIdentity = json.member.coordinator === true ? "FORGECTL_WORKER" : "FORGECTL_COORDINATOR";
+  if (json.environment[identity] !== name || Object.hasOwn(json.environment, otherIdentity) || Object.hasOwn(json.environment, "FORGECTL_DRAIN_WORKER")) fail(`unexpected registration identity for ${name}`);
+  if (json.member.harness === "pi" && (!json.member.socket || json.environment.FORGECTL_INBOX !== json.member.socket)) fail(`unexpected Pi registration inbox for ${name}`);
   return json;
 }
 
@@ -547,6 +554,7 @@ async function main() {
   for (const path of args.piExtensions) piExtensions.push(await extensionFile(path));
   const ledger = join(root, "ledger");
   const coordinatorRoot = join(root, "coordinator");
+  const piCoordinatorRoot = join(root, "pi-coordinator");
   const piRoot = join(root, "pi");
   const piSessions = join(root, "pi-sessions");
   const codexSocket = join(root, "codex.sock");
@@ -555,11 +563,12 @@ async function main() {
   const piReceiptPath = join(root, "pi-receipts.jsonl");
   const piProxySocket = join(root, "pi-proxy.sock");
   const replacementSocket = join(root, "codex-replacement.sock");
+  const piCoordinatorSocket = join(root, "pi-coordinator.sock");
   const codexServerArgs = (socket) => ["app-server", "--config", `projects.${JSON.stringify(coordinatorRoot)}.trust_level="untrusted"`, "--listen", `unix://${socket}`];
-  for (const socketPath of [codexSocket, piSocket, piRestartSocket, piProxySocket, replacementSocket]) {
+  for (const socketPath of [codexSocket, piSocket, piRestartSocket, piProxySocket, replacementSocket, piCoordinatorSocket]) {
     if (socketPath.length > 103) fail(`Unix socket path exceeds macOS limit: ${socketPath}`);
   }
-  await Promise.all([mkdir(ledger, { mode: 0o700 }), mkdir(coordinatorRoot, { mode: 0o700 }), mkdir(piRoot, { mode: 0o700 }), mkdir(piSessions, { mode: 0o700 })]);
+  await Promise.all([mkdir(ledger, { mode: 0o700 }), mkdir(coordinatorRoot, { mode: 0o700 }), mkdir(piCoordinatorRoot, { mode: 0o700 }), mkdir(piRoot, { mode: 0o700 }), mkdir(piSessions, { mode: 0o700 })]);
   const inheritedEnv = { ...process.env };
   for (const key of ["FORGECTL_LEDGER", "FORGECTL_WORKER", "FORGECTL_COORDINATOR", "FORGECTL_RUN_ID", "FORGECTL_INBOX", "FORGECTL_INBOX_RECEIPTS", "FORGECTL_DRAIN_WORKER"]) delete inheritedEnv[key];
   const baseEnv = childEnv(inheritedEnv, {}, forgectl);
@@ -586,6 +595,8 @@ async function main() {
   let codexRpc;
   let restartedPiChild;
   let replacementChild;
+  let piCoordinatorChild;
+  let piCoordinatorRpc;
   let cleaned = false;
   activeCleanup = async () => {
     if (cleaned) return;
@@ -595,10 +606,12 @@ async function main() {
     if (codexRpc) codexRpc.stop(); else if (codexChild && !codexChild.killed) codexChild.kill("SIGTERM");
     if (restartedPiChild && !restartedPiChild.killed && restartedPiChild.exitCode === null) restartedPiChild.kill("SIGTERM");
     if (replacementChild && !replacementChild.killed && replacementChild.exitCode === null) replacementChild.kill("SIGTERM");
+    if (piCoordinatorRpc) piCoordinatorRpc.stop(); else if (piCoordinatorChild && !piCoordinatorChild.killed) piCoordinatorChild.kill("SIGTERM");
     if (piChild) await waitClosed(piChild);
     if (codexChild) await waitClosed(codexChild);
     if (restartedPiChild) await waitClosed(restartedPiChild);
     if (replacementChild) await waitClosed(replacementChild);
+    if (piCoordinatorChild) await waitClosed(piCoordinatorChild);
   };
   proxy = startAckDroppingProxy(evidence, piProxySocket, piSocket);
   const piSessionId = randomUUID();
@@ -698,6 +711,8 @@ async function main() {
   const negative = await runCommand(evidence, process.execPath, [utility, corrupt], { cwd: piRoot, env: baseEnv, timeout: 30_000 });
   evidence.add("negative-control", { code: negative.code, rejected: negative.code !== 0, stderr: negative.stderr });
   if (negative.code === 0) fail("corrupted duplicate-ID fixture was accepted");
+  const verifiedUtilityHash = createHash("sha256").update(await readFile(utility)).digest("hex");
+  const verifiedExecutionLog = await readFile(executionLog, "utf8");
   const busyStartIndex = piRpc.lines.length;
   const busyToken = `busy-${randomUUID()}`;
   await piRpc.request({ type: "prompt", id: "busy-probe", message: `Use the bash tool to run sleep 5 for the busy-delivery probe. Do not read the mailbox, modify files, or send messages until the sleep finishes.` }, 30_000);
@@ -765,17 +780,52 @@ async function main() {
   const replacementCompleted = await codexRpc.waitFor((event) => event.method === "turn/completed" && event.params?.threadId === replacementThreadId && event.params?.turn?.id === replacementTurnId);
   if (replacementCompleted.params.turn.status !== "completed") fail("replacement coordinator did not finish the native reply turn");
   evidence.add("replacement-roundtrip", { token: replacementToken, replyId: replacementReply.id, threadId: replacementThreadId, runId: replacement.member.run_id, nativeReplyTurnId: replacementTurnId, nativeReplyCompleted: true });
-  const report = await mailbox(evidence, forgectl, ledger, replacementEnv, coordinatorRoot);
+  await codexRpc.waitForThreadIdle(replacementThreadId);
+  codexRpc.stop();
+  await waitClosed(replacementChild);
+  const piCoordinator = await register(evidence, forgectl, "coordinator", ["--ledger", ledger, "--harness", "pi", "--worktree", piCoordinatorRoot, "--coordinator", "--socket", piCoordinatorSocket, "--replace"], baseEnv, piCoordinatorRoot);
+  if (piCoordinator.member.run_id === replacement.member.run_id || piCoordinator.member.harness !== "pi" || !piCoordinator.member.coordinator) fail("cross-harness replacement did not preserve the role with a new Pi run");
+  const retiredCodexEvent = await runCommand(evidence, forgectl, ["surface", "event", "--harness", "codex", JSON.stringify({ type: "agent-turn-complete", "thread-id": replacementThreadId, "input-messages": ["not a title"] })], { cwd: coordinatorRoot, env: replacementEnv });
+  const retiredCodexSend = await runCommand(evidence, forgectl, ["surface", "send", "pi-worker", `retired cross-harness coordinator probe ${taskId}`, "--json"], { cwd: coordinatorRoot, env: replacementEnv });
+  if (retiredCodexEvent.code === 0 || retiredCodexSend.code === 0 || !retiredCodexEvent.stderr.includes("FORGECTL_RUN_ID") || !retiredCodexSend.stderr.includes("FORGECTL_RUN_ID")) fail("retired Codex identity was not specifically rejected after the Pi handoff");
+  evidence.add("cross-harness-retired-run-rejected", { eventCode: retiredCodexEvent.code, sendCode: retiredCodexSend.code });
+  const piCoordinatorSessionId = randomUUID();
+  const piCoordinatorEnv = childEnv(baseEnv, { ...piCoordinator.environment, FORGECTL_INBOX_RECEIPTS: join(root, "pi-coordinator-receipts.jsonl") }, forgectl);
+  const piCoordinatorArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piCoordinatorSessionId, "--tools", "read,bash,find,grep"];
+  piCoordinatorChild = spawn(pi, piCoordinatorArgs, { cwd: piCoordinatorRoot, env: piCoordinatorEnv, stdio: ["pipe", "pipe", "pipe"] });
+  piCoordinatorRpc = new JsonLinesProcess(piCoordinatorChild, evidence, "pi-rpc-coordinator");
+  const piCoordinatorState = await piCoordinatorRpc.request({ type: "get_state" }, STARTUP_TIMEOUT);
+  if (piCoordinatorState?.data?.sessionId !== piCoordinatorSessionId || piCoordinatorState.data.model?.id !== initialPiModel.id || piCoordinatorState.data.model?.provider !== initialPiModel.provider || typeof piCoordinatorState.data.sessionFile !== "string" || !piCoordinatorState.data.sessionFile.startsWith(`${piSessions}/`)) fail("Pi coordinator did not prove its separate native session and selected model");
+  await socketReady(piCoordinatorSocket);
+  evidence.add("cross-harness-coordinator-start", { from: "codex", to: "pi", oldThreadId: replacementThreadId, oldRunId: replacement.member.run_id, runId: piCoordinator.member.run_id, sessionId: piCoordinatorSessionId, sessionFile: piCoordinatorState.data.sessionFile });
+  const handoffToken = `handoff-${randomUUID()}`;
+  const handoffStartIndex = piCoordinatorRpc.lines.length;
+  await piCoordinatorRpc.request({ type: "prompt", message: `You are the new coordinator of an explicitly enrolled forgectl team, replacing the retired Codex coordinator. Your fresh native session does not inherit its private history. Read the existing durable inbox using ${forgectlCommand} surface inbox --json and identify the earlier completed cross-harness task. Delegate a bounded recovery check to pi-worker using ${forgectlCommand} surface send pi-worker with a body containing the exact marker ${handoffToken} and the earlier completed task ID you discovered. Ask Pi to reply with that marker and not modify any files. Use those exact absolute executables, not shell aliases. You may read task files and send enrolled-team messages, but do not change the existing artifact, create task files, alter permissions, or send a further message after receiving the worker's reply. A transport acknowledgement is not completed work. After the reply arrives in this native session, acknowledge it with the exact marker ${handoffToken} in your final response and stop.` }, DEFAULT_TIMEOUT);
+  const handoffDelegation = await waitMailbox(evidence, forgectl, ledger, piCoordinatorEnv, piCoordinatorRoot, (message) => message.from === "coordinator" && message.to === "pi-worker" && message.status === "sent" && message.body.includes(handoffToken), DEFAULT_TIMEOUT);
+  if (!handoffDelegation.body.includes(taskId)) fail("Pi coordinator did not recover the earlier completed task identity from the durable ledger");
+  const handoffReply = await waitMailbox(evidence, forgectl, ledger, piCoordinatorEnv, piCoordinatorRoot, (message) => message.from === "pi-worker" && message.to === "coordinator" && message.status === "sent" && message.body.includes(handoffToken), DEFAULT_TIMEOUT);
+  const handoffInput = await piCoordinatorRpc.waitForAfter((event) => event.type === "message_start" && event.message?.role === "user" && contentText(event.message.content).includes(`id=${handoffReply.id}`), handoffStartIndex);
+  const handoffInputIndex = piCoordinatorRpc.lines.indexOf(handoffInput);
+  if (handoffInputIndex < handoffStartIndex) fail("Pi coordinator reply was not a new native user message");
+  const handoffAcknowledgement = await piCoordinatorRpc.waitForAfter((event) => event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "stop" && contentText(event.message.content).includes(handoffToken), handoffInputIndex + 1);
+  if (!handoffAcknowledgement) fail("Pi coordinator did not complete an acknowledgement after consuming the reply");
+  await piCoordinatorRpc.waitForAfter((event) => event.type === "agent_settled", handoffInputIndex + 1);
+  const handoffMessages = (await piCoordinatorRpc.request({ type: "get_messages" }))?.data?.messages;
+  const handoffReplyCount = Array.isArray(handoffMessages) ? handoffMessages.filter((message) => message.role === "user" && contentText(message.content).includes(`id=${handoffReply.id}`)).length : 0;
+  if (handoffReplyCount !== 1) fail("Pi coordinator native history did not contain exactly one handoff reply");
+  if (createHash("sha256").update(await readFile(utility)).digest("hex") !== verifiedUtilityHash || await readFile(executionLog, "utf8") !== verifiedExecutionLog) fail("coordinator replacement changed the verified artifact or original execution journal");
+  evidence.add("cross-harness-coordinator-roundtrip", { taskId, token: handoffToken, delegationId: handoffDelegation.id, replyId: handoffReply.id, from: "codex", to: "pi", runId: piCoordinator.member.run_id, sessionId: piCoordinatorSessionId, nativeReplyCount: handoffReplyCount, nativeReplyCompleted: true, artifactPreserved: true });
+  const report = await mailbox(evidence, forgectl, ledger, piCoordinatorEnv, piCoordinatorRoot);
   const taskMessages = (report.messages ?? []).filter((message) => message.body.includes(taskId));
   const ids = taskMessages.map((message) => message.id);
   if (new Set(ids).size !== ids.length) fail("task mailbox contains duplicate message IDs");
   const acceptedOrVisible = taskMessages.filter((message) => ["sent", "unconfirmed"].includes(message.status));
-  evidence.add("acceptance-summary", { taskId, threadId, replacementThreadId, taskMessageIds: ids, visibleDeliveryStatuses: acceptedOrVisible.map((message) => ({ id: message.id, status: message.status })) });
+  evidence.add("acceptance-summary", { taskId, threadId, replacementThreadId, piCoordinatorSessionId, taskMessageIds: ids, visibleDeliveryStatuses: acceptedOrVisible.map((message) => ({ id: message.id, status: message.status })) });
   await activeCleanup();
   await assertNoScratchTrust(evidence, root);
   await evidence.save();
-  await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, replacementThreadId, utility: utilityResult.code, negativeControl: negative.code }, null, 2)}\n`, { mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);
+  await writeFile(join(root, "ACCEPTED"), `${JSON.stringify({ taskId, threadId, replacementThreadId, piCoordinatorSessionId, utility: utilityResult.code, negativeControl: negative.code }, null, 2)}\n`, { mode: 0o600 });
+  process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, piCoordinatorSessionId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

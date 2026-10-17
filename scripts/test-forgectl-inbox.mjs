@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -11,6 +11,16 @@ const scriptPath = fileURLToPath(import.meta.url);
 const extensionPath = join(dirname(scriptPath), "..", "internal", "surface", "mail", "assets", "forgectl-inbox.ts");
 
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const pathExists = async (path) => {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+};
 
 const exchange = (socketPath, request, timeout = 1500) => new Promise((resolve, reject) => {
   const socket = createConnection(socketPath);
@@ -58,16 +68,24 @@ const sendAndForget = (socketPath, request) => new Promise((resolve, reject) => 
   socket.on("error", reject);
 });
 
-const spawnHarness = (directory, socketName, mode) => {
+const spawnHarness = (directory, socketName, mode, identity = { worker: `pi-${mode}` }) => {
   const socketPath = join(directory, socketName);
   const receiptPath = `${socketPath}.receipts`;
+  const identityEnv = {};
+  if (identity.worker !== undefined) identityEnv.FORGECTL_WORKER = identity.worker;
+  if (identity.coordinator !== undefined) identityEnv.FORGECTL_COORDINATOR = identity.coordinator;
+  if (identity.ledger !== undefined) identityEnv.FORGECTL_LEDGER = identity.ledger;
+  if (identity.runId !== undefined) identityEnv.FORGECTL_RUN_ID = identity.runId;
+  if (identity.drainWorker !== undefined) identityEnv.FORGECTL_DRAIN_WORKER = identity.drainWorker;
+  const childEnvironment = { ...process.env };
+  for (const key of ["FORGECTL_WORKER", "FORGECTL_COORDINATOR", "FORGECTL_LEDGER", "FORGECTL_RUN_ID", "FORGECTL_DRAIN_WORKER"]) delete childEnvironment[key];
   const child = spawn(process.execPath, ["--experimental-strip-types", scriptPath, "--child", mode], {
     env: {
-      ...process.env,
+      ...childEnvironment,
       NODE_NO_WARNINGS: "1",
       FORGECTL_INBOX: socketPath,
       FORGECTL_INBOX_RECEIPTS: receiptPath,
-      FORGECTL_WORKER: `pi-${mode}`,
+      ...identityEnv,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -105,6 +123,66 @@ const spawnHarness = (directory, socketName, mode) => {
     if (child.exitCode === null) await once(child, "exit");
   };
   return { child, command, errors: () => errors, receiptPath, socketPath, stop };
+};
+
+const testCoordinatorIdentityActivates = async (directory) => {
+  const harness = spawnHarness(directory, "coordinator.sock", "message-start", { coordinator: "pi-coordinator", ledger: directory, runId: "run-1" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const delivery = await exchange(harness.socketPath, { v: 1, type: "deliver", id: "coordinator-1", text: "native" });
+    assert.equal(delivery.ok, false);
+    assert.equal(delivery.unconfirmed, true);
+    await harness.command({ type: "event", name: "message_start", text: "native" });
+    const receipt = await exchange(harness.socketPath, { v: 1, type: "receipt", id: "coordinator-1" });
+    assert.equal(receipt.ok, true);
+    assert.equal(receipt.accepted, true);
+    const state = await harness.command({ type: "calls" });
+    assert.equal(state.calls.length, 1);
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testWorkerDrainIdentityActivates = async (directory) => {
+  const harness = spawnHarness(directory, "worker-drain.sock", "message-start", { worker: "pi-worker", drainWorker: "1" });
+  try {
+    const initialized = await harness.command({ type: "calls" });
+    assert.ok(initialized.handlers.includes("session_start"));
+    await waitForSocket(harness.socketPath);
+    const delivery = await exchange(harness.socketPath, { v: 1, type: "deliver", id: "worker-drain-1", text: "native" });
+    assert.equal(delivery.ok, false);
+    assert.equal(delivery.unconfirmed, true);
+    await harness.command({ type: "event", name: "message_start", text: "native" });
+    const receipt = await exchange(harness.socketPath, { v: 1, type: "receipt", id: "worker-drain-1" });
+    assert.equal(receipt.ok, true);
+    assert.equal(receipt.accepted, true);
+  } finally {
+    await harness.stop();
+  }
+};
+
+const testInvalidCoordinatorIdentitiesStayInert = async (directory) => {
+  const cases = [
+    ["missing-identity", { ledger: directory, runId: "run-1" }],
+    ["missing-ledger", { coordinator: "pi-coordinator", runId: "run-1" }],
+    ["missing-run", { coordinator: "pi-coordinator", ledger: directory }],
+    ["blank-run", { coordinator: "pi-coordinator", ledger: directory, runId: "   " }],
+    ["relative-ledger", { coordinator: "pi-coordinator", ledger: "relative-ledger", runId: "run-1" }],
+    ["coordinator-worker", { coordinator: "pi-coordinator", worker: "pi-worker", ledger: directory, runId: "run-1" }],
+    ["coordinator-drain-worker", { coordinator: "pi-coordinator", ledger: directory, runId: "run-1", drainWorker: "1" }],
+  ];
+  for (const [mode, identity] of cases) {
+    const harness = spawnHarness(directory, `${mode}.sock`, mode, identity);
+    try {
+      const state = await harness.command({ type: "calls" });
+      assert.deepEqual(state.calls, []);
+      assert.deepEqual(state.handlers, []);
+      await assertSocketUnavailable(harness.socketPath);
+      assert.equal(await pathExists(harness.receiptPath), false);
+    } finally {
+      await harness.stop();
+    }
+  }
 };
 
 const waitForSocket = async (socketPath) => {
@@ -178,7 +256,7 @@ const childMain = async (mode) => {
       const line = input.slice(0, newline);
       input = input.slice(newline + 1);
       const request = JSON.parse(line);
-      if (request.type === "calls") process.stdout.write(`${JSON.stringify({ calls })}\n`);
+      if (request.type === "calls") process.stdout.write(`${JSON.stringify({ calls, handlers: [...handlers.keys()] })}\n`);
       else if (request.type === "event") {
         const handler = handlers.get(request.name);
         const event = request.name === "message_start" ? { type: request.name, message: { role: "user", content: request.text } } : { type: request.name };
@@ -458,6 +536,9 @@ const testRejectedReceiptRestartsAndRetries = async (directory) => {
 const main = async () => {
   const directory = await mkdtemp(join(tmpdir(), "forgectl-inbox-test-"));
   try {
+    await testCoordinatorIdentityActivates(directory);
+    await testWorkerDrainIdentityActivates(directory);
+    await testInvalidCoordinatorIdentitiesStayInert(directory);
     await testVoidSendStaysPending(directory);
     await testAsyncRuntimeFailureStaysPending(directory);
     await testNativeMessageStartAcceptance(directory);
