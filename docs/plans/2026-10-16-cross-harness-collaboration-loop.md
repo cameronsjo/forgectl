@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
 Status: Codex/Pi collaboration and native Codex-to-Pi coordinator handoff accepted; Claude, Hermes, and Projects remain staged
-Next action: create the authorized isolated Hermes environment, import credentials through its native flow, and prove the same collaboration contract while preserving OpenAI-only traffic.
+Next action: connect the verified native Hermes ACP process to the existing mailbox and prove real collaboration and recovery while preserving OpenAI-only traffic and native permission checks.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
@@ -71,13 +71,27 @@ On the 2026-10-17 continuation, read-only checks found no `hermes` executable, n
 
 ### Next bounded unit: native Hermes participation
 
-- [ ] Install the pinned, locally inspected Hermes source into a private temporary environment, without modifying the third-party source checkout or installing a global command.
-- [ ] Use Hermes's native Codex-credential import into a separate private `HERMES_HOME`; verify the native selected provider and model without printing tokens or placing them in the task ledger. Preserve the existing Codex auth file.
+- [x] Install the pinned, locally inspected Hermes source into a private temporary environment, without modifying the third-party source checkout or installing a global command.
+- [x] Import only the expiring Codex access token through Hermes's native API-key credential-pool command into a separate private `HERMES_HOME`; verify the native selected provider and model without printing tokens or placing them in the task ledger. Do not import the shared refresh token. Preserve the existing Codex auth file.
 - [ ] Reuse the smallest verified native session protocol and existing forgectl delivery contract; retain native permission checks and distinguish receipt, native consumption, turn completion, and independently checked output.
 - [ ] Prove real Hermes participation, interruption/restart behavior, and selected-session delivery with disposable task-owned processes. Keep uncertain delivery visible rather than resending blindly.
 - [ ] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
 
 Projects remains behind the agreed harness acceptance sequence. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items are deferred here, not silently dropped or marked complete.
+
+### Hermes native preflight evidence
+
+Codex archived the clean, locally inspected Hermes source at `02d1da49de5086946256cc157ff928dcffbe8ca1` into `/private/tmp/fctl-hermes.TwuIsK/source` and installed its frozen lock with the ACP extra into that root's private virtual environment. Native Hermes `0.15.1` reports `Hermes ACP check OK`; the original third-party checkout remains unchanged. Nothing was installed globally.
+
+Inspection found that the ordinary OAuth import copies Codex's single-use refresh token, despite its independence wording. Refreshing that copy could invalidate Codex's existing login. Codex did not execute that import. Instead, the existing native `auth_add_command` API-key path accepts an access-only credential for `openai-codex`. The native importer reads the original credentials in process; only `access_token` is handed to that command, never the refresh or ID token. This expiring credential deliberately cannot refresh itself; expiration requires another explicitly scoped import or a separately authorized independent login. It is not a permanent authentication setup.
+
+The offline `/private/tmp/fctl-hermes.TwuIsK/verify-access-pool.py` check exercised native pool selection, forced runtime resolution, and reactive refresh with network access forbidden. The access-only entry never called OAuth refresh; a fake OAuth entry did engage the refresh negative control. A separate native import/preflight verified one manual API-key entry, no singleton tokens, no refresh token, an owner-only store, unchanged Codex authentication bytes, and direct `openai-codex`/`codex_responses` routing. An independent source review confirmed that pool loading does not import Codex's global credentials.
+
+The native ACP probe `node /private/tmp/fctl-hermes.TwuIsK/probe-native-acp.mjs` exited `0` with receipt `/private/tmp/fctl-hermes.TwuIsK/probe-983e8cc3-f2e7-4798-b392-1a7b0f1547a6/ACCEPTED.json`. Hermes completed a real `openai-codex:gpt-5.6-sol` turn, stopped, restarted, and loaded native session `0d34054e-361b-4470-8ad2-2bd9b56eb65d` with exactly one matching user and assistant message. Both owned processes exited `0`. Both sessions retained native `default` approval mode; no tool permission request occurred. The private runtime uses its own `HOME` and `HERMES_HOME`, pins every auxiliary task (including background titles) to the same OpenAI provider/model, and has no configured fallback providers. Codex's original auth file was byte-identical after the probe, and Hermes still had no refresh token. This proves native authentication, turn execution, and session persistence, not cross-harness collaboration.
+
+The first native probe stopped before any prompt because its assertion expected an unqualified model ID. Native ACP actually returns `openai-codex:gpt-5.6-sol`; source inspection confirmed the provider-qualified contract and the corrected probe passed. That earlier run did not receive an acceptance receipt.
+
+The next implementation extends forgectl rather than adding a global broker. An explicitly enrolled Hermes process uses ACP stdio behind its private per-process inbox socket. Durable mailbox state remains authoritative; the supervisor records a pending receipt before forwarding, refuses busy delivery before forwarding, and reconciles consumption only from matching native history. A missing or ambiguous history result remains unconfirmed and is not resent. Native permission requests are denied rather than silently approved, and native default mode is preserved. Transport consumption, native turn termination, and independently verified task output remain separate evidence.
 
 ## Accepted cross-harness handoff receipt
 
