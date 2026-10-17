@@ -84,27 +84,59 @@ type codexTurn struct {
 // or otherwise mutating the thread. RunID is required as the enrollment gate;
 // Codex's app-server protocol has no run-id field to echo back.
 func (adapter CodexAdapter) Inspect(ctx context.Context, worker Worker) (CodexObservation, error) {
+	var observation CodexObservation
+	err := adapter.withCodexRPC(ctx, worker, func(ctx context.Context, client *codexRPCClient) error {
+		if err := codexInitialize(ctx, client); err != nil {
+			return err
+		}
+		thread, err := codexReadThread(ctx, client, worker)
+		if err != nil {
+			return err
+		}
+		turnsResult, err := client.call(ctx, "thread/turns/list", map[string]any{
+			"threadId":      worker.ThreadID,
+			"limit":         1,
+			"sortDirection": "desc",
+			"itemsView":     "notLoaded",
+		})
+		if err != nil {
+			return err
+		}
+		var turns codexTurnsList
+		if err := json.Unmarshal(turnsResult, &turns); err != nil || turns.Data == nil {
+			return errors.New("codex thread/turns/list returned malformed metadata")
+		}
+		var nativeTurns []codexTurn
+		if string(turns.Data) == "null" {
+			return errors.New("codex thread/turns/list returned malformed metadata")
+		}
+		if err := json.Unmarshal(turns.Data, &nativeTurns); err != nil || len(nativeTurns) > 1 {
+			return errors.New("codex thread/turns/list returned malformed metadata")
+		}
+		observation = CodexObservation{NativeSessionID: thread.ID, Provider: thread.ModelProvider, Model: thread.Model, CWD: thread.CWD}
+		if len(nativeTurns) == 0 {
+			return nil
+		}
+		turn, err := codexSettledTurn(nativeTurns[0])
+		if err != nil {
+			return err
+		}
+		observation.Turn = turn
+		return nil
+	})
+	return observation, err
+}
+
+func (adapter CodexAdapter) withCodexRPC(ctx context.Context, worker Worker, fn func(context.Context, *codexRPCClient) error) error {
 	if contextError := ctx.Err(); contextError != nil {
-		return CodexObservation{}, contextError
+		return contextError
 	}
-	if worker.RunID == "" || worker.ThreadID == "" {
-		return CodexObservation{}, NotReady("codex observation requires a run and native thread identity")
-	}
-	if worker.Harness != "" && worker.Harness != HarnessCodex {
-		return CodexObservation{}, fmt.Errorf("codex observation requires a codex worker")
-	}
-	if !threadPattern.MatchString(worker.ThreadID) {
-		return CodexObservation{}, fmt.Errorf("codex thread id %s has unexpected characters", quoteTrunc(worker.ThreadID))
-	}
-	if worker.Worktree == "" || !filepath.IsAbs(worker.Worktree) || filepath.Clean(worker.Worktree) != worker.Worktree {
-		return CodexObservation{}, fmt.Errorf("codex observation requires an absolute clean worktree")
-	}
-	if worker.Socket == "" {
-		return CodexObservation{}, NotReady("no codex app-server socket recorded for this worker")
+	if err := validateCodexObservationWorker(worker); err != nil {
+		return err
 	}
 	snapshot, err := inspectCodexSocket(worker.Socket)
 	if err != nil {
-		return CodexObservation{}, err
+		return err
 	}
 	timeout := adapter.Timeout
 	if timeout <= 0 {
@@ -117,23 +149,23 @@ func (adapter CodexAdapter) Inspect(ctx context.Context, worker Worker) (CodexOb
 	conn, err := dialer.DialContext(ctx, "unix", worker.Socket)
 	if err != nil {
 		if contextError := ctx.Err(); contextError != nil {
-			return CodexObservation{}, contextError
+			return contextError
 		}
-		return CodexObservation{}, NotReady("dial codex app-server: endpoint unavailable")
+		return NotReady("dial codex app-server: endpoint unavailable")
 	}
 	ws, err := codexWebSocket(ctx, conn, deadline)
 	if err != nil {
 		_ = conn.Close()
 		if contextError := ctx.Err(); contextError != nil {
-			return CodexObservation{}, contextError
+			return contextError
 		}
-		return CodexObservation{}, Unconfirmed("codex app-server handshake failed")
+		return Unconfirmed("codex app-server handshake failed")
 	}
 	var closeSocket sync.Once
 	closeWebSocket := func() { closeSocket.Do(func() { _ = ws.Close() }) }
 	defer closeWebSocket()
 	if !sameCodexSocket(snapshot, worker.Socket) {
-		return CodexObservation{}, Unconfirmed("codex app-server socket changed during observation")
+		return Unconfirmed("codex app-server socket changed during observation")
 	}
 	stopCancel := make(chan struct{})
 	go func() {
@@ -145,59 +177,54 @@ func (adapter CodexAdapter) Inspect(ctx context.Context, worker Worker) (CodexOb
 	}()
 	defer close(stopCancel)
 	client := codexRPCClient{ws: ws, nextID: 1, deadline: deadline}
+	return fn(ctx, &client)
+}
+
+func validateCodexObservationWorker(worker Worker) error {
+	if worker.RunID == "" || worker.ThreadID == "" {
+		return NotReady("codex observation requires a run and native thread identity")
+	}
+	if worker.Harness != "" && worker.Harness != HarnessCodex {
+		return fmt.Errorf("codex observation requires a codex worker")
+	}
+	if !threadPattern.MatchString(worker.ThreadID) {
+		return fmt.Errorf("codex thread id %s has unexpected characters", quoteTrunc(worker.ThreadID))
+	}
+	if worker.Worktree == "" || !filepath.IsAbs(worker.Worktree) || filepath.Clean(worker.Worktree) != worker.Worktree {
+		return fmt.Errorf("codex observation requires an absolute clean worktree")
+	}
+	if worker.Socket == "" {
+		return NotReady("no codex app-server socket recorded for this worker")
+	}
+	return nil
+}
+
+func codexInitialize(ctx context.Context, client *codexRPCClient) error {
 	if _, err := client.call(ctx, "initialize", map[string]any{
 		"clientInfo": map[string]string{"name": "forgectl", "version": "dev"},
 	}); err != nil {
-		return CodexObservation{}, err
+		return err
 	}
-	if err := client.notify(ctx, "initialized", map[string]any{}); err != nil {
-		return CodexObservation{}, err
-	}
+	return client.notify(ctx, "initialized", map[string]any{})
+}
+
+func codexReadThread(ctx context.Context, client *codexRPCClient, worker Worker) (codexThread, error) {
 	readResult, err := client.call(ctx, "thread/read", map[string]any{
 		"threadId":     worker.ThreadID,
 		"includeTurns": false,
 	})
 	if err != nil {
-		return CodexObservation{}, err
+		return codexThread{}, err
 	}
 	var read codexThreadRead
 	if err := json.Unmarshal(readResult, &read); err != nil {
-		return CodexObservation{}, errors.New("codex thread/read returned malformed metadata")
+		return codexThread{}, errors.New("codex thread/read returned malformed metadata")
 	}
 	thread := read.Thread
 	if thread.ID != worker.ThreadID || thread.CWD != worker.Worktree || !safeCodexToken(thread.ModelProvider) || !safeCodexToken(thread.Model) {
-		return CodexObservation{}, errors.New("codex thread metadata does not match the enrolled worker")
+		return codexThread{}, errors.New("codex thread metadata does not match the enrolled worker")
 	}
-	turnsResult, err := client.call(ctx, "thread/turns/list", map[string]any{
-		"threadId":      worker.ThreadID,
-		"limit":         1,
-		"sortDirection": "desc",
-		"itemsView":     "notLoaded",
-	})
-	if err != nil {
-		return CodexObservation{}, err
-	}
-	var turns codexTurnsList
-	if err := json.Unmarshal(turnsResult, &turns); err != nil || turns.Data == nil {
-		return CodexObservation{}, errors.New("codex thread/turns/list returned malformed metadata")
-	}
-	var nativeTurns []codexTurn
-	if string(turns.Data) == "null" {
-		return CodexObservation{}, errors.New("codex thread/turns/list returned malformed metadata")
-	}
-	if err := json.Unmarshal(turns.Data, &nativeTurns); err != nil || len(nativeTurns) > 1 {
-		return CodexObservation{}, errors.New("codex thread/turns/list returned malformed metadata")
-	}
-	observation := CodexObservation{NativeSessionID: thread.ID, Provider: thread.ModelProvider, Model: thread.Model, CWD: thread.CWD}
-	if len(nativeTurns) == 0 {
-		return observation, nil
-	}
-	turn, err := codexSettledTurn(nativeTurns[0])
-	if err != nil {
-		return CodexObservation{}, err
-	}
-	observation.Turn = turn
-	return observation, nil
+	return thread, nil
 }
 
 type codexRPCClient struct {

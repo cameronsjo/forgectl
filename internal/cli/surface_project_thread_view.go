@@ -16,6 +16,7 @@ import (
 
 func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *cobra.Command {
 	var options projectPresentationOptions
+	var nativeOptions projectNativeViewOptions
 	var view string
 	command := &cobra.Command{
 		Use:   "open <thread-id>",
@@ -28,8 +29,11 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 			if err := options.validate(); err != nil {
 				return err
 			}
-			if view != "timeline" {
-				return projectUsage(errors.New("this view requires explicit --view timeline; native attachment is not inferred"))
+			if view != "timeline" && view != "native" {
+				return projectUsage(errors.New("--view must be timeline or native; fallback is never inferred"))
+			}
+			if err := nativeOptions.validate(view); err != nil {
+				return err
 			}
 			store := project.Store{Root: *root}
 			registry, record, observations, err := store.Inspect(command.Context(), *projectID)
@@ -43,6 +47,13 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 			if record.Workspace == nil || record.Workspace.Session != options.Session {
 				return projectError(fmt.Errorf("%w: open the project workspace in the exact named session first", project.ErrConflict))
 			}
+			selectedPresentation := project.SurfacePresentationTimeline
+			if view == "native" {
+				if err := nativeOptions.validateBinding(binding); err != nil {
+					return projectError(err)
+				}
+				selectedPresentation = project.SurfacePresentationCodexRemote
+			}
 			presentation, err := projectPresentationFor(deps, options.Binary, options.Session, command.ErrOrStderr())
 			if err != nil {
 				return projectError(err)
@@ -51,7 +62,7 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 				if operation.Kind != project.SurfaceKindThread || operation.ThreadID != thread.ID || operation.RunID != binding.RunID || operation.Phase != project.SurfacePhaseVerified || operation.Retirement != nil {
 					continue
 				}
-				if operation.Presentation != project.SurfacePresentationTimeline {
+				if operation.Presentation != selectedPresentation {
 					return projectError(fmt.Errorf("%w: existing tab uses a different presentation; close its view explicitly", project.ErrConflict))
 				}
 				if err := presentation.FocusThread(command.Context(), record.Workspace.Ref, *operation.Ref); err != nil {
@@ -63,11 +74,15 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 				}
 				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "focused", Focused: true, Operation: &operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 			}
+			if view == "native" {
+				return createProjectThreadNative(command, store, record, thread, binding, presentation, options, nativeOptions)
+			}
 			return createProjectThreadTimeline(command, store, record, thread, binding, presentation, options)
 		},
 	}
 	options.flags(command)
-	command.Flags().StringVar(&view, "view", "", "explicit presentation: timeline; never an automatic native fallback")
+	command.Flags().StringVar(&view, "view", "", "explicit presentation: timeline or supported native; never an automatic fallback")
+	nativeOptions.flags(command)
 	return withProjectRoot(root, command)
 }
 

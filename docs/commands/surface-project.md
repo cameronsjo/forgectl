@@ -95,6 +95,12 @@ forgectl surface project --root /absolute/private/projects \
   --session projects-test --herdr-binary /absolute/herdr --json
 
 forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID open THREAD_ID --view native \
+  --session projects-test --herdr-binary /absolute/herdr \
+  --codex-binary /absolute/codex --expect-provider openai \
+  --expect-model EXACT_EXISTING_MODEL --json
+
+forgectl surface project --root /absolute/private/projects \
   thread --project PROJECT_ID focus THREAD_ID \
   --session projects-test --herdr-binary /absolute/herdr --json
 
@@ -111,9 +117,13 @@ After successful creation or focus, the bridge reapplies bounded human-readable 
 
 `thread open --view timeline` explicitly creates a read-only thread timeline tab inside the saved project workspace. It requires current enrollment, journals intent before the tab mutation, and keeps the logical thread and native run separate from the view's operation ID. Repeating the command focuses its existing verified view. Unsupported views fail rather than silently choosing a different native interface or starting another history writer.
 
+`thread open --view native` starts a Codex remote client for an already enrolled persistent session on its private app-server socket. Codex first checks the expected provider/model without mutation, then prepares the exact session with a native resume request containing no overrides. This preparation is not read-only. Only the supported OpenAI provider, user-reviewed `never`/`on-request` approvals, and network-disabled read-only/workspace-write policies are accepted; custom permission profiles and unknown policies are refused. The client receives the observed policy, working directory, and exact workspace/write roots through a typed launch request, not arbitrary harness arguments. It uses the existing private surface handshake and binary-provenance checks with a fresh credential-free client home, never a copied auth file. This connects a UI to an existing session; it does not create a coding worker or change generic worker-policy checks. Provider metadata identifies the selected provider; it does not independently attest the server's network route.
+
+Successful native creation proves authenticated client execution started in the recorded tab, not that attachment finished or that the native policy remains unchanged. The report states that limitation explicitly. Reopening only focuses the existing client; it does not resume again. Pi RPC and Hermes ACP enrollments currently require explicit timeline views because a safe concurrent native client has not been established. Closing a remote-client tab does not stop the enrolled app server or remove its native history. The isolated client state remains in its private temporary directory.
+
 `thread close-view` closes only the exact saved presentation operation, never the project workspace or enrolled native server. It may retire an old run's view after enrollment replacement, but cannot focus that stale run. Closure has its own `pending`/`closed`/`already_gone`/`unknown` evidence and preserves the original creation reference. Proven closure permits reopening a view of the same current RunID; closing a UI is not native process replacement. An unresolved close blocks another view. Legacy operations without a recorded presentation kind cannot be closed automatically. These are surface-identity checks, not native-process termination evidence.
 
-Presentation reports include the registry revision, exact IDs, `focused`, and any operation/workspace identity. `verified` describes the saved surface, not proof that its viewer or a native harness is still running. If creation is recorded but focus fails, the command reports `focused: false` and exits `1`; a later `open` attempts only focus. Thread focus requires a current enrollment and a verified, non-retired tab for that exact active run. It never silently creates a tab, resumes native history, or launches another writer. Native thread attachment remains under integration.
+Presentation reports include the registry revision, exact IDs, `focused`, and any operation/workspace identity. `verified` describes the saved surface, not proof that its viewer or a native harness is still running. If creation is recorded but focus fails, the command reports `focused: false` and exits `1`; a later `open` attempts only focus. Thread focus requires a current enrollment and a verified, non-retired tab for that exact active run. It never silently creates a tab, resumes native history, or launches another writer.
 
 ## Persistence and refusals
 

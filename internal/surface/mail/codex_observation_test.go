@@ -27,6 +27,8 @@ type codexObservationFake struct {
 	threadCWD  string
 	model      string
 	provider   string
+	resume     map[string]any
+	resumeErr  map[string]any
 	jsonRPC    *string
 	delay      time.Duration
 	large      bool
@@ -117,10 +119,15 @@ func (fake *codexObservationFake) handle(ws *websocket.Conn) {
 			} else {
 				result = map[string]any{"data": []any{fake.turn}}
 			}
+		case "thread/resume":
+			result = fake.resume
 		default:
 			return
 		}
 		response := map[string]any{"id": requestID, "result": result}
+		if method == "thread/resume" && fake.resumeErr != nil {
+			response = map[string]any{"id": requestID, "error": fake.resumeErr}
+		}
 		if fake.jsonRPC != nil {
 			response["jsonrpc"] = *fake.jsonRPC
 		}
