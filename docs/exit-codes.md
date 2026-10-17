@@ -16,6 +16,7 @@ One table for every forgectl verb ([ADR-0015](adr/0015-exit-code-table.md), [#10
 
 ## Outside the table
 
+- **7** (`tasks ls`, `show` and `ready` refused a cache older than 72h; pass `--allow-stale` to serve it, with the STALE DATA notice. 5 and 6 stay reserved)
 - **75** (`desk watch` reached `--deadline`, and the last line holds the resume command; `surface send` queued a message it could not deliver yet, and a later `send`, `flush` or hook event retries it), **130** (interrupted) and **141** (stdout closed). `resume` also uses 130 for a cancelled pick.
 - **Pass-through verbs** return a child's code: `launch`, `surface _exec`, `docs read` (the reader's status), `k8s` (kubectl's, including a remote command's), and `desk watch` for its run's rc. Their help says so. 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141.
 
