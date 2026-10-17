@@ -107,6 +107,11 @@ const (
 	KindHerdrReconcile
 	KindHerdrProbe
 	KindHerdrCleanup
+	KindHerdrProjectTabCreate
+	KindHerdrProjectTabReconcile
+	KindHerdrProjectTabProbe
+	KindHerdrProjectTabCleanup
+	KindHerdrProjectTabFocus
 	// KindHerdrPaneInspect reads a pane's foreground process before anything is
 	// typed into it. KindHerdrBootstrap is the `pane run` that types the
 	// trampoline line into a pane the inspection found idle.
@@ -182,25 +187,30 @@ var kindNames = [kindCount]string{
 	KindCmuxProbe:     "cmux.probe",
 	KindCmuxCleanup:   "cmux.cleanup",
 
-	KindHerdrReadiness:   "herdr.readiness",
-	KindHerdrSnapshot:    "herdr.snapshot",
-	KindHerdrCreate:      "herdr.create",
-	KindHerdrReconcile:   "herdr.reconcile",
-	KindHerdrProbe:       "herdr.probe",
-	KindHerdrCleanup:     "herdr.cleanup",
-	KindHerdrPaneInspect: "herdr.pane-inspect",
-	KindHerdrBootstrap:   "herdr.bootstrap",
-	KindHerdrNotify:      "herdr.notification-show",
-	KindHerdrPaneSplit:   "herdr.pane-split",
-	KindHerdrPaneRename:  "herdr.pane-rename",
-	KindHerdrPaneRun:     "herdr.pane-run",
-	KindHerdrPaneMove:    "herdr.pane-move",
-	KindHerdrScreenRead:  "herdr.screen-read",
-	KindHerdrPaneStatus:  "herdr.pane-status",
-	KindHerdrSendText:    "herdr.send-text",
-	KindHerdrPaneAgent:   "herdr.pane-agent",
-	KindHerdrSendKeys:    "herdr.send-keys",
-	KindHerdrMetadata:    "herdr.report-metadata",
+	KindHerdrReadiness:           "herdr.readiness",
+	KindHerdrSnapshot:            "herdr.snapshot",
+	KindHerdrCreate:              "herdr.create",
+	KindHerdrReconcile:           "herdr.reconcile",
+	KindHerdrProbe:               "herdr.probe",
+	KindHerdrCleanup:             "herdr.cleanup",
+	KindHerdrProjectTabCreate:    "herdr.project-tab-create",
+	KindHerdrProjectTabReconcile: "herdr.project-tab-reconcile",
+	KindHerdrProjectTabProbe:     "herdr.project-tab-probe",
+	KindHerdrProjectTabCleanup:   "herdr.project-tab-cleanup",
+	KindHerdrProjectTabFocus:     "herdr.project-tab-focus",
+	KindHerdrPaneInspect:         "herdr.pane-inspect",
+	KindHerdrBootstrap:           "herdr.bootstrap",
+	KindHerdrNotify:              "herdr.notification-show",
+	KindHerdrPaneSplit:           "herdr.pane-split",
+	KindHerdrPaneRename:          "herdr.pane-rename",
+	KindHerdrPaneRun:             "herdr.pane-run",
+	KindHerdrPaneMove:            "herdr.pane-move",
+	KindHerdrScreenRead:          "herdr.screen-read",
+	KindHerdrPaneStatus:          "herdr.pane-status",
+	KindHerdrSendText:            "herdr.send-text",
+	KindHerdrPaneAgent:           "herdr.pane-agent",
+	KindHerdrSendKeys:            "herdr.send-keys",
+	KindHerdrMetadata:            "herdr.report-metadata",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
 
@@ -57,13 +58,73 @@ type Registry struct {
 }
 
 type Project struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	Worktree            string    `json:"worktree"`
-	Instructions        string    `json:"instructions"`
-	CoordinatorThreadID string    `json:"coordinator_thread_id"`
-	CreatedAt           time.Time `json:"created_at"`
-	Threads             []Thread  `json:"threads"`
+	ID                  string             `json:"id"`
+	Name                string             `json:"name"`
+	Worktree            string             `json:"worktree"`
+	Instructions        string             `json:"instructions"`
+	CoordinatorThreadID string             `json:"coordinator_thread_id"`
+	CreatedAt           time.Time          `json:"created_at"`
+	Threads             []Thread           `json:"threads"`
+	Workspace           *Workspace         `json:"workspace,omitempty"`
+	SurfaceOperations   []SurfaceOperation `json:"surface_operations,omitempty"`
+}
+
+// Workspace is the durable identity of a project's native parent surface.
+// Session is the named backend session used to select the server; Ref is the
+// exact closeable object returned by that backend.
+type Workspace struct {
+	Session string      `json:"session"`
+	Ref     backend.Ref `json:"ref"`
+}
+
+type SurfaceKind string
+
+const (
+	SurfaceKindWorkspace SurfaceKind = "workspace"
+	SurfaceKindThread    SurfaceKind = "thread"
+)
+
+type SurfacePhase string
+
+const (
+	SurfacePhasePending  SurfacePhase = "pending"
+	SurfacePhaseVerified SurfacePhase = "verified"
+	SurfacePhaseFailed   SurfacePhase = "failed"
+	SurfacePhaseUnknown  SurfacePhase = "unknown"
+)
+
+// SurfaceErrorCategory is deliberately closed. It records a bounded operator
+// classification rather than an adapter's arbitrary error text.
+type SurfaceErrorCategory string
+
+const (
+	SurfaceErrorCanceled SurfaceErrorCategory = "canceled"
+	SurfaceErrorConflict SurfaceErrorCategory = "conflict"
+	SurfaceErrorEndpoint SurfaceErrorCategory = "endpoint"
+	SurfaceErrorIdentity SurfaceErrorCategory = "identity"
+	SurfaceErrorInternal SurfaceErrorCategory = "internal"
+	SurfaceErrorLaunch   SurfaceErrorCategory = "launch"
+	SurfaceErrorParent   SurfaceErrorCategory = "parent"
+	SurfaceErrorServer   SurfaceErrorCategory = "server"
+	SurfaceErrorCleanup  SurfaceErrorCategory = "cleanup"
+	SurfaceErrorUnknown  SurfaceErrorCategory = "unknown"
+)
+
+type SurfaceOperation struct {
+	ID               string               `json:"id"`
+	Kind             SurfaceKind          `json:"kind"`
+	ThreadID         string               `json:"thread_id,omitempty"`
+	RunID            string               `json:"run_id,omitempty"`
+	Session          string               `json:"session"`
+	Tag              string               `json:"tag"`
+	ExpectedServer   string               `json:"expected_server"`
+	ExpectedEndpoint string               `json:"expected_endpoint"`
+	Parent           *backend.Ref         `json:"parent,omitempty"`
+	Phase            SurfacePhase         `json:"phase"`
+	Ref              *backend.Ref         `json:"ref,omitempty"`
+	StartedAt        time.Time            `json:"started_at"`
+	FinishedAt       *time.Time           `json:"finished_at,omitempty"`
+	ErrorCategory    SurfaceErrorCategory `json:"error_category,omitempty"`
 }
 
 type Thread struct {
@@ -569,6 +630,11 @@ func validateRegistry(registry Registry) error {
 		if err := validateStateContext(record.Instructions, "project instructions"); err != nil {
 			return err
 		}
+		if record.Workspace != nil {
+			if err := validateWorkspace(*record.Workspace); err != nil {
+				return fmt.Errorf("%w: project %s workspace: %v", ErrInvalidState, record.ID, err)
+			}
+		}
 		if record.CreatedAt.IsZero() {
 			return fmt.Errorf("%w: project %s has no creation time", ErrInvalidState, record.ID)
 		}
@@ -578,6 +644,7 @@ func validateRegistry(registry Registry) error {
 		coordinators := 0
 		foundCoordinator := false
 		runs := make(map[string]struct{})
+		threadIDs := make(map[string]struct{}, len(record.Threads))
 		for _, thread := range record.Threads {
 			if err := validateStateID(thread.ID, "thread ID"); err != nil {
 				return err
@@ -586,6 +653,7 @@ func validateRegistry(registry Registry) error {
 				return fmt.Errorf("%w: duplicate thread ID %s", ErrInvalidState, thread.ID)
 			}
 			seen[thread.ID] = struct{}{}
+			threadIDs[thread.ID] = struct{}{}
 			if err := validateStateName(thread.Name, "thread name"); err != nil {
 				return err
 			}
@@ -626,8 +694,195 @@ func validateRegistry(registry Registry) error {
 		if coordinators != 1 || !foundCoordinator {
 			return fmt.Errorf("%w: project %s must have exactly one coordinator", ErrInvalidState, record.ID)
 		}
+		if err := validateSurfaceOperations(record); err != nil {
+			return fmt.Errorf("%w: project %s surface operations: %v", ErrInvalidState, record.ID, err)
+		}
+		for _, operation := range record.SurfaceOperations {
+			if operation.Kind == SurfaceKindThread {
+				if _, exists := threadIDs[operation.ThreadID]; !exists {
+					return fmt.Errorf("%w: operation %s names an unknown thread", ErrInvalidState, operation.ID)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+func validateWorkspace(workspace Workspace) error {
+	if err := validateRunID(workspace.Session, "workspace session"); err != nil {
+		return err
+	}
+	if err := validateCompleteWorkspaceReference(workspace.Ref); err != nil {
+		return fmt.Errorf("workspace reference: %w", err)
+	}
+	return nil
+}
+
+func validateSurfaceOperations(project Project) error {
+	seen := make(map[string]struct{}, len(project.SurfaceOperations))
+	active := make(map[string]struct{})
+	threads := make(map[string]Thread, len(project.Threads))
+	for _, thread := range project.Threads {
+		threads[thread.ID] = thread
+	}
+	verifiedWorkspace := 0
+	for index, operation := range project.SurfaceOperations {
+		if err := validateStateID(operation.ID, "surface operation ID"); err != nil {
+			return fmt.Errorf("operation %d: %v", index, err)
+		}
+		if _, exists := seen[operation.ID]; exists {
+			return fmt.Errorf("duplicate operation ID %s", operation.ID)
+		}
+		seen[operation.ID] = struct{}{}
+		if operation.Kind != SurfaceKindWorkspace && operation.Kind != SurfaceKindThread {
+			return fmt.Errorf("operation %s has unknown kind", operation.ID)
+		}
+		if operation.Kind == SurfaceKindWorkspace && (operation.ThreadID != "" || operation.RunID != "" || operation.Parent != nil) {
+			return fmt.Errorf("workspace operation %s carries thread fields", operation.ID)
+		}
+		if operation.Kind == SurfaceKindThread && (operation.ThreadID == "" || operation.RunID == "" || operation.Parent == nil) {
+			return fmt.Errorf("thread operation %s is missing thread identity or parent", operation.ID)
+		}
+		if operation.Phase == SurfacePhasePending || operation.Phase == SurfacePhaseUnknown || operation.Phase == SurfacePhaseVerified {
+			logicalID := string(operation.Kind)
+			if operation.Kind == SurfaceKindThread {
+				logicalID += ":" + operation.ThreadID
+			}
+			if _, exists := active[logicalID]; exists {
+				return fmt.Errorf("duplicate active operation for %s", logicalID)
+			}
+			active[logicalID] = struct{}{}
+		}
+		if operation.Kind == SurfaceKindThread {
+			thread, exists := threads[operation.ThreadID]
+			if !exists {
+				return fmt.Errorf("operation %s names an unknown thread", operation.ID)
+			}
+			if err := validateStateID(operation.ThreadID, "surface operation thread ID"); err != nil {
+				return fmt.Errorf("operation %s: %v", operation.ID, err)
+			}
+			if err := validateRunID(operation.RunID, "surface operation run ID"); err != nil {
+				return fmt.Errorf("operation %s: %v", operation.ID, err)
+			}
+			if err := operation.Parent.Validate(); err != nil {
+				return fmt.Errorf("operation %s parent: %w", operation.ID, err)
+			}
+			if project.Workspace == nil {
+				return fmt.Errorf("operation %s has no saved project workspace", operation.ID)
+			}
+			if operation.Session != project.Workspace.Session || !refsEqual(*operation.Parent, project.Workspace.Ref) {
+				return fmt.Errorf("operation %s parent or session differs from project workspace", operation.ID)
+			}
+			if operation.ExpectedServer != project.Workspace.Ref.Server().String() {
+				return fmt.Errorf("operation %s has a different expected server than project workspace", operation.ID)
+			}
+			workspaceEndpoint, _ := project.Workspace.Ref.Endpoint()
+			if operation.ExpectedEndpoint != workspaceEndpoint.String() {
+				return fmt.Errorf("operation %s has a different expected endpoint than project workspace", operation.ID)
+			}
+			runFound := false
+			for _, binding := range thread.Runs {
+				if binding.RunID == operation.RunID {
+					runFound = true
+					break
+				}
+			}
+			if !runFound {
+				return fmt.Errorf("operation %s names a run outside its thread history", operation.ID)
+			}
+		}
+		if err := validateRunID(operation.Session, "surface operation session"); err != nil {
+			return fmt.Errorf("operation %s: %v", operation.ID, err)
+		}
+		if _, err := backend.ParseRecoveryTag(operation.Tag); err != nil {
+			return fmt.Errorf("operation %s tag: %w", operation.ID, err)
+		}
+		if !validDigest(operation.ExpectedServer) {
+			return fmt.Errorf("operation %s has invalid expected server", operation.ID)
+		}
+		if !validDigest(operation.ExpectedEndpoint) {
+			return fmt.Errorf("operation %s has invalid expected endpoint", operation.ID)
+		}
+		if operation.Kind == SurfaceKindWorkspace && operation.Phase == SurfacePhaseVerified {
+			verifiedWorkspace++
+			if project.Workspace == nil || operation.Session != project.Workspace.Session || operation.Ref == nil || !refsEqual(*operation.Ref, project.Workspace.Ref) {
+				return fmt.Errorf("verified workspace operation %s does not match saved project workspace", operation.ID)
+			}
+		}
+		switch operation.Phase {
+		case SurfacePhasePending:
+			if operation.FinishedAt != nil || operation.Ref != nil || operation.ErrorCategory != "" {
+				return fmt.Errorf("pending operation %s carries a terminal outcome", operation.ID)
+			}
+		case SurfacePhaseVerified:
+			if operation.FinishedAt == nil || operation.Ref == nil || operation.ErrorCategory != "" {
+				return fmt.Errorf("verified operation %s has an incomplete outcome", operation.ID)
+			}
+		case SurfacePhaseFailed, SurfacePhaseUnknown:
+			if operation.FinishedAt == nil || !validErrorCategory(operation.ErrorCategory) {
+				return fmt.Errorf("%s operation %s has an incomplete failure", operation.Phase, operation.ID)
+			}
+		default:
+			return fmt.Errorf("operation %s has unknown phase", operation.ID)
+		}
+		if operation.Ref != nil {
+			if err := operation.Ref.Validate(); err != nil {
+				return fmt.Errorf("operation %s reference: %w", operation.ID, err)
+			}
+			if operation.Ref.Tag().String() != operation.Tag || operation.Ref.Server().String() != operation.ExpectedServer {
+				return fmt.Errorf("operation %s reference does not match its ownership or server", operation.ID)
+			}
+			endpoint, ok := operation.Ref.Endpoint()
+			if !ok || endpoint.String() != operation.ExpectedEndpoint {
+				return fmt.Errorf("operation %s reference does not match its endpoint", operation.ID)
+			}
+			if operation.Kind == SurfaceKindWorkspace {
+				if err := validateCompleteWorkspaceReference(*operation.Ref); err != nil {
+					return fmt.Errorf("operation %s workspace reference: %v", operation.ID, err)
+				}
+			} else {
+				if err := validateChildReference(operation, *operation.Ref); err != nil {
+					return fmt.Errorf("operation %s: %v", operation.ID, err)
+				}
+			}
+		}
+		if operation.StartedAt.IsZero() {
+			return fmt.Errorf("operation %s has no start time", operation.ID)
+		}
+		if operation.FinishedAt != nil && operation.FinishedAt.Before(operation.StartedAt) {
+			return fmt.Errorf("operation %s finished before it started", operation.ID)
+		}
+	}
+	if project.Workspace != nil && verifiedWorkspace != 1 {
+		return fmt.Errorf("saved project workspace has %d verified workspace operations", verifiedWorkspace)
+	}
+	if project.Workspace == nil && verifiedWorkspace != 0 {
+		return fmt.Errorf("verified workspace operation has no saved project workspace")
+	}
+	return nil
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, runeValue := range value {
+		if (runeValue < '0' || runeValue > '9') && (runeValue < 'a' || runeValue > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validErrorCategory(category SurfaceErrorCategory) bool {
+	switch category {
+	case SurfaceErrorCanceled, SurfaceErrorConflict, SurfaceErrorEndpoint, SurfaceErrorIdentity,
+		SurfaceErrorInternal, SurfaceErrorLaunch, SurfaceErrorParent, SurfaceErrorServer,
+		SurfaceErrorCleanup, SurfaceErrorUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateStateID(value, label string) error {

@@ -53,6 +53,36 @@ const minProtocol = 20
 // workspace carries no ownership marker at all — exactly the window
 // reconciliation exists to close.
 func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.StartResult {
+	return a.start(ctx, spec, nil, false)
+}
+
+// StartProjectWorkspace creates the named-session workspace that owns a
+// project's tabs. The callback records the pending operation against the exact
+// server incarnation and endpoint readiness observed immediately before the
+// workspace snapshot and create. A callback failure, or a turnover while it
+// runs, is NotMutated: no workspace command is issued.
+func (a *Adapter) StartProjectWorkspace(
+	ctx context.Context,
+	spec backend.StartSpec,
+	beforeCreate func(backend.ServerID, backend.EndpointID) error,
+) backend.StartResult {
+	if a.source != backend.HerdrNamedSessionServer() {
+		return backend.NewNotMutated(backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("project workspaces require an explicitly named herdr session")))
+	}
+	if beforeCreate == nil {
+		return backend.NewNotMutated(backend.NewStartCause(backend.FailureInternal,
+			errors.New("project workspace create requires a pending-operation callback")))
+	}
+	return a.start(ctx, spec, beforeCreate, true)
+}
+
+func (a *Adapter) start(
+	ctx context.Context,
+	spec backend.StartSpec,
+	beforeCreate func(backend.ServerID, backend.EndpointID) error,
+	projectWorkspace bool,
+) backend.StartResult {
 	if err := spec.Validate(); err != nil {
 		return backend.NewNotMutated(backend.NewStartCause(backend.FailureInternal, err))
 	}
@@ -64,6 +94,21 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	server, cause := a.readiness(ctx)
 	if cause != nil {
 		return backend.NewNotMutated(*cause)
+	}
+	if beforeCreate != nil {
+		if err := beforeCreate(server.incarnation, backend.EndpointOf(server.socket)); err != nil {
+			return backend.NewNotMutated(backend.NewStartCause(backend.FailureUnavailable, err))
+		}
+		fresh, freshCause := a.freshReadiness(ctx, server)
+		if freshCause != nil {
+			return backend.NewNotMutated(*freshCause)
+		}
+		if !server.incarnation.Matches(fresh.incarnation) ||
+			!backend.EndpointOf(server.socket).Matches(backend.EndpointOf(fresh.socket)) {
+			return backend.NewNotMutated(backend.NewStartCause(backend.FailureIdentityMismatch,
+				errors.New("the herdr server changed while the project create was pending")))
+		}
+		server = fresh
 	}
 
 	before, cause := a.snapshot(ctx, exec.KindHerdrSnapshot)
@@ -81,19 +126,41 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		spec.CWD(),
 	))
 	if runErr != nil {
+		if projectWorkspace {
+			return a.reconcileProjectWorkspace(ctx, spec, before, server, a.classifyRunError(runErr, res))
+		}
 		return a.reconcile(ctx, spec.Tag(), marker, before, server, a.classifyRunError(runErr, res))
 	}
 
-	created, err := parseCreated(res.Stdout)
+	var created createdWorkspace
+	var err error
+	if projectWorkspace {
+		created, err = parseProjectWorkspaceCreated(res.Stdout)
+	} else {
+		created, err = parseCreated(res.Stdout)
+	}
 	if err != nil {
 		// A create that exited zero without a readable identity is the same
 		// ambiguity as one that failed.
+		if projectWorkspace {
+			return a.reconcileProjectWorkspace(ctx, spec, before, server,
+				backend.NewStartCause(backend.FailureMalformedResponse, err))
+		}
 		return a.reconcile(ctx, spec.Tag(), marker, before, server,
 			backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
 
-	ref, err := a.reference(created, spec.Tag(), server)
+	var ref backend.Ref
+	if projectWorkspace {
+		ref, err = a.referenceWithTerminal(created, spec.Tag(), server, true)
+	} else {
+		ref, err = a.reference(created, spec.Tag(), server)
+	}
 	if err != nil {
+		if projectWorkspace {
+			return a.reconcileProjectWorkspace(ctx, spec, before, server,
+				backend.NewStartCause(backend.FailureMalformedResponse, err))
+		}
 		return a.reconcile(ctx, spec.Tag(), marker, before, server,
 			backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
@@ -117,8 +184,22 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// typed input waits in the terminal queue for whatever reads it next, and a
 	// shell still loading its rc files passes. A prompt-ready signal is
 	// forgectl#1051; binding the handshake to the pane is forgectl#1041.
+	if projectWorkspace {
+		if cause := a.verifyProjectWorkspace(ctx, spec, created, server, before); cause != nil {
+			return backend.NewRefKnownWithCause(ref, *cause)
+		}
+		if a.turnover(server) != turnoverNone {
+			return backend.NewRefKnownWithCause(ref, backend.NewStartCause(backend.FailureIdentityMismatch,
+				errors.New("the herdr server changed immediately before project bootstrap")))
+		}
+	}
 	if cause := a.rootPaneIdle(ctx, created.PaneID); cause != nil {
 		return backend.NewRefKnownWithCause(ref, *cause)
+	}
+	if projectWorkspace {
+		if cause := a.verifyProjectWorkspace(ctx, spec, created, server, before); cause != nil {
+			return backend.NewRefKnownWithCause(ref, *cause)
+		}
 	}
 	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrBootstrap,
 		exec.MustFixed("pane"),
@@ -690,6 +771,10 @@ func (a *Adapter) protocol(ctx context.Context) (string, *backend.StartCause) {
 // and novelty; one exact match earns fresh readiness against the same named
 // session and socket, while ambiguity still remains OutcomeUnknown.
 func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, server serverInfo) (backend.Ref, error) {
+	return a.referenceWithTerminal(created, tag, server, false)
+}
+
+func (a *Adapter) referenceWithTerminal(created createdWorkspace, tag backend.RecoveryTag, server serverInfo, requireTerminal bool) (backend.Ref, error) {
 	info, err := a.lstat(server.socket)
 	if err != nil {
 		return backend.Ref{}, fmt.Errorf("stat herdr socket: %w", err)
@@ -704,6 +789,15 @@ func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, s
 	id, err := backend.NewHerdrIdentity(created.WorkspaceID, created.TabID, created.PaneID)
 	if err != nil {
 		return backend.Ref{}, err
+	}
+	if requireTerminal {
+		if created.TerminalID == "" {
+			return backend.Ref{}, errors.New("the herdr create reply named no terminal")
+		}
+		id, err = id.WithTerminal(created.TerminalID)
+		if err != nil {
+			return backend.Ref{}, err
+		}
 	}
 	ref, err := backend.NewHerdrRef(a.source, now, tag, id)
 	if err != nil {
@@ -791,6 +885,7 @@ type createdWorkspace struct {
 	WorkspaceID string
 	TabID       string
 	PaneID      string
+	TerminalID  string
 }
 
 // createResult and listResult are the "result" members of herdr's

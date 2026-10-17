@@ -38,6 +38,11 @@ const KindHerdrPaneRun CommandKind
 const KindHerdrPaneSplit CommandKind
 const KindHerdrPaneStatus CommandKind
 const KindHerdrProbe CommandKind
+const KindHerdrProjectTabCleanup CommandKind
+const KindHerdrProjectTabCreate CommandKind
+const KindHerdrProjectTabFocus CommandKind
+const KindHerdrProjectTabProbe CommandKind
+const KindHerdrProjectTabReconcile CommandKind
 const KindHerdrReadiness CommandKind
 const KindHerdrReconcile CommandKind
 const KindHerdrScreenRead CommandKind

@@ -516,11 +516,54 @@ func checkSchemaKeys(data []byte) error {
 		if err := json.Unmarshal(projectRaw, &object); err != nil {
 			return fmt.Errorf("projects[%d]: %w", projectIndex, err)
 		}
-		if err := checkKeys(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads"); err != nil {
+		if err := checkKeys(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads", "workspace", "surface_operations"); err != nil {
 			return fmt.Errorf("projects[%d]: %w", projectIndex, err)
 		}
 		if err := requireFields(object, "id", "name", "worktree", "instructions", "coordinator_thread_id", "created_at", "threads"); err != nil {
 			return fmt.Errorf("projects[%d]: %w", projectIndex, err)
+		}
+		if workspace, present := object["workspace"]; present {
+			if bytes.Equal(bytes.TrimSpace(workspace), []byte("null")) {
+				return fmt.Errorf("projects[%d].workspace is null", projectIndex)
+			}
+			var workspaceObject map[string]json.RawMessage
+			if err := json.Unmarshal(workspace, &workspaceObject); err != nil {
+				return fmt.Errorf("projects[%d].workspace: %w", projectIndex, err)
+			}
+			if err := checkKeys(workspaceObject, "session", "ref"); err != nil {
+				return fmt.Errorf("projects[%d].workspace: %w", projectIndex, err)
+			}
+			if err := requireFields(workspaceObject, "session", "ref"); err != nil {
+				return fmt.Errorf("projects[%d].workspace: %w", projectIndex, err)
+			}
+		}
+		if operations, present := object["surface_operations"]; present {
+			if bytes.Equal(bytes.TrimSpace(operations), []byte("null")) {
+				return fmt.Errorf("projects[%d].surface_operations is null", projectIndex)
+			}
+			var operationRows []json.RawMessage
+			if err := json.Unmarshal(operations, &operationRows); err != nil {
+				return fmt.Errorf("projects[%d].surface_operations: %w", projectIndex, err)
+			}
+			for operationIndex, operationRaw := range operationRows {
+				var operation map[string]json.RawMessage
+				if err := json.Unmarshal(operationRaw, &operation); err != nil {
+					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
+				}
+				if err := checkKeys(operation, "id", "kind", "thread_id", "run_id", "session", "tag", "expected_server", "expected_endpoint", "parent", "phase", "ref", "started_at", "finished_at", "error_category"); err != nil {
+					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
+				}
+				if err := requireFields(operation, "id", "kind", "session", "tag", "expected_server", "expected_endpoint", "phase", "started_at"); err != nil {
+					return fmt.Errorf("projects[%d].surface_operations[%d]: %w", projectIndex, operationIndex, err)
+				}
+				for key, value := range operation {
+					if key == "thread_id" || key == "run_id" || key == "expected_endpoint" || key == "parent" || key == "ref" || key == "finished_at" || key == "error_category" {
+						if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+							return fmt.Errorf("projects[%d].surface_operations[%d].%s is null", projectIndex, operationIndex, key)
+						}
+					}
+				}
+			}
 		}
 		var threads []json.RawMessage
 		if err := json.Unmarshal(object["threads"], &threads); err != nil {

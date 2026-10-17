@@ -395,9 +395,9 @@ func (i CMuxIdentity) Workspace() string { return i.workspace }
 // into a reference that later reaches a command line.
 const maxHerdrIDLen = 128
 
-// HerdrIdentity is a herdr workspace, and optionally the tab and pane inside
-// it that a create response reported.
-type HerdrIdentity struct{ workspace, tab, pane string }
+// HerdrIdentity is a herdr workspace, and optionally the tab, pane, and
+// terminal inside it that a create response reported.
+type HerdrIdentity struct{ workspace, tab, pane, terminal string }
 
 // NewHerdrIdentity validates a herdr workspace and its optional children.
 //
@@ -449,6 +449,20 @@ func (i HerdrIdentity) Tab() string { return i.tab }
 // Pane returns the root pane ID a create response reported, or the empty
 // string.
 func (i HerdrIdentity) Pane() string { return i.pane }
+
+// WithTerminal returns a copy that is bound to the pane's stable terminal.
+// A terminal without a pane would not identify a usable delivery address.
+func (i HerdrIdentity) WithTerminal(terminal string) (HerdrIdentity, error) {
+	if i.pane == "" || !validHerdrID(terminal) {
+		return HerdrIdentity{}, fmt.Errorf("%w: herdr terminal id", ErrInvalidIdentity)
+	}
+	i.terminal = terminal
+	return i, nil
+}
+
+// Terminal returns the stable terminal ID, or the empty string for legacy
+// workspace references that predate terminal binding.
+func (i HerdrIdentity) Terminal() string { return i.terminal }
 
 // Ref is a closeable handle on exactly one manager object.
 //
@@ -615,6 +629,9 @@ func (r Ref) Validate() error {
 		if r.herdr == (HerdrIdentity{}) {
 			return fmt.Errorf("%w: herdr reference has no workspace", ErrInvalidRef)
 		}
+		if r.herdr.terminal != "" && r.herdr.pane == "" {
+			return fmt.Errorf("%w: herdr terminal has no pane", ErrInvalidRef)
+		}
 	case KindUnspecified:
 		return fmt.Errorf("%w: unknown backend", ErrInvalidRef)
 	}
@@ -707,6 +724,7 @@ type refWire struct {
 	Workspace string `json:"workspace,omitempty"`
 	Tab       string `json:"tab,omitempty"`
 	Pane      string `json:"pane,omitempty"`
+	Terminal  string `json:"terminal,omitempty"`
 	// Endpoint is new without a version change: a build from before it
 	// refuses a reference carrying it (unknown fields are refused), which is
 	// the fail-closed direction.
@@ -736,6 +754,7 @@ func (r Ref) MarshalJSON() ([]byte, error) {
 		w.Workspace = r.herdr.workspace
 		w.Tab = r.herdr.tab
 		w.Pane = r.herdr.pane
+		w.Terminal = r.herdr.terminal
 		w.Endpoint = r.endpoint.digest
 	case KindUnspecified:
 		return nil, ErrInvalidRef
@@ -798,7 +817,7 @@ func DecodeRef(data []byte) (Ref, error) {
 	// it did not expect is the same defect as one that ignores an unknown key.
 	switch kind {
 	case KindTmux:
-		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
+		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Terminal != "" || w.Endpoint != "" {
 			return Ref{}, fmt.Errorf("%w: tmux reference carries workspace fields", ErrInvalidRef)
 		}
 		id, err := NewTmuxIdentity(w.Session)
@@ -807,7 +826,7 @@ func DecodeRef(data []byte) (Ref, error) {
 		}
 		return NewTmuxRef(source, server, tag, id)
 	case KindCmux:
-		if w.Session != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
+		if w.Session != "" || w.Tab != "" || w.Pane != "" || w.Terminal != "" || w.Endpoint != "" {
 			return Ref{}, fmt.Errorf("%w: cmux reference carries foreign fields", ErrInvalidRef)
 		}
 		id, err := NewCMuxIdentity(w.Workspace)
@@ -819,9 +838,18 @@ func DecodeRef(data []byte) (Ref, error) {
 		if w.Session != "" {
 			return Ref{}, fmt.Errorf("%w: herdr reference carries a session field", ErrInvalidRef)
 		}
+		if w.Terminal != "" && w.Pane == "" {
+			return Ref{}, fmt.Errorf("%w: herdr terminal without pane", ErrInvalidRef)
+		}
 		id, err := NewHerdrIdentity(w.Workspace, w.Tab, w.Pane)
 		if err != nil {
 			return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
+		}
+		if w.Terminal != "" {
+			id, err = id.WithTerminal(w.Terminal)
+			if err != nil {
+				return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
+			}
 		}
 		ref, err := NewHerdrRef(source, server, tag, id)
 		if err != nil || w.Endpoint == "" {
