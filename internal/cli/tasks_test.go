@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -318,11 +319,12 @@ func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
 	}
 }
 
-// TestTasksLs_CacheFallbackNamesCauseAndAge pins #1289: a fallback to cache
-// names the underlying error and the cache age, and is marked STALE so it can
-// never read as fresh data. A later live read after that failure serves fresh
-// data with no notice (the failure leaves nothing sticky).
-func TestTasksLs_CacheFallbackNamesCauseAndAge(t *testing.T) {
+// TestTasksReads_CacheFallbackNamesCauseAndAge pins #1289 for ls, ready and
+// show: a fallback to cache names the underlying error and the cache age on
+// stderr, marked STALE, and leaves stdout clean JSON. `show --json` also
+// carries an additive "stale" object on fallback only. A later live read after
+// the failure serves fresh data with no notice and no "stale" field.
+func TestTasksReads_CacheFallbackNamesCauseAndAge(t *testing.T) {
 	isolateTasksConfigDir(t)
 	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
 	deps := module.Deps{Runner: runner, Theme: theme.Default()}
@@ -330,7 +332,6 @@ func TestTasksLs_CacheFallbackNamesCauseAndAge(t *testing.T) {
 	if _, stderr, err := runTasksCmd(t, deps, "ls"); err != nil || stderr != "" {
 		t.Fatalf("seeding live read: err=%v stderr=%q", err, stderr)
 	}
-
 	cachePath, err := config.TasksCachePath()
 	if err != nil {
 		t.Fatal(err)
@@ -339,30 +340,86 @@ func TestTasksLs_CacheFallbackNamesCauseAndAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap.FetchedAt = time.Now().Add(-286 * time.Hour)
-	if err := tasks.SaveCache(cachePath, snap); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := newTasksClient
-	t.Cleanup(func() { newTasksClient = orig })
-	newTasksClient = func(context.Context, exec.Runner, string, tasks.Token) (*tasks.Client, error) {
-		return nil, fmt.Errorf("%w: dial tcp 192.168.1.102:443: connect: no route to host", tasks.ErrUnreachable)
-	}
-	_, stderr, err := runTasksCmd(t, deps, "ls")
-	if err != nil {
-		t.Fatalf("fallback ls: %v", err)
-	}
-	for _, want := range []string{"STALE", "no route to host", "286h", "Local Network"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("fallback notice %q lacks %q", stderr, want)
+	ageCache := func() {
+		snap.FetchedAt = time.Now().Add(-286 * time.Hour)
+		if err := tasks.SaveCache(cachePath, snap); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	newTasksClient = orig
-	_, runner2 := withFakeTasksBackend(t, fakeVikunjaHandler(t))
-	deps.Runner = runner2
-	if _, stderr, err := runTasksCmd(t, deps, "ls"); err != nil || stderr != "" {
-		t.Fatalf("live read after a prior failure: err=%v stderr=%q, want fresh data and no notice", err, stderr)
+	liveClient := newTasksClient
+	t.Cleanup(func() { newTasksClient = liveClient })
+	failing := func(context.Context, exec.Runner, string, tasks.Token) (*tasks.Client, error) {
+		return nil, fmt.Errorf("%w: dial tcp 192.0.2.1:443: connect: no route to host", tasks.ErrUnreachable)
+	}
+
+	cmds := [][]string{{"ls", "--json"}, {"ready", "--json"}, {"show", "1", "--json"}}
+	for _, args := range cmds {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			ageCache() // an earlier subtest's live read refreshed the cache
+			newTasksClient = failing
+			stdout, stderr, err := runTasksCmd(t, deps, args...)
+			if err != nil {
+				t.Fatalf("fallback: %v", err)
+			}
+			if !strings.HasPrefix(stderr, "forgectl: STALE DATA: ") {
+				t.Errorf("stderr %q lacks the STALE DATA prefix", stderr)
+			}
+			for _, want := range []string{"no route to host", "286h"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr %q lacks %q", stderr, want)
+				}
+			}
+			if strings.Contains(stdout, "STALE") {
+				t.Errorf("stdout carries the notice: %q", stdout)
+			}
+			var parsed any
+			if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+			}
+			if args[0] == "show" {
+				obj, ok := parsed.(map[string]any)
+				if !ok {
+					t.Fatalf("show --json top level is %T, want object", parsed)
+				}
+				stale, ok := obj["stale"].(map[string]any)
+				if !ok {
+					t.Fatalf("show --json lacks the stale object: %s", stdout)
+				}
+				if !strings.Contains(stale["cause"].(string), "no route to host") || stale["age_seconds"].(float64) < 286*3600 {
+					t.Errorf("stale = %v, want the cause and an age of at least 286h", stale)
+				}
+			} else if _, ok := parsed.([]any); !ok {
+				t.Errorf("%s top level is %T, want the unchanged bare array", args[0], parsed)
+			}
+
+			// A live read after that failure is fresh: nothing sticks.
+			newTasksClient = liveClient
+			_, liveRunner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
+			liveDeps := module.Deps{Runner: liveRunner, Theme: theme.Default()}
+			out, stderr, err := runTasksCmd(t, liveDeps, args...)
+			if err != nil || stderr != "" {
+				t.Fatalf("live read after a failure: err=%v stderr=%q", err, stderr)
+			}
+			if strings.Contains(out, `"stale"`) {
+				t.Errorf("live read carries a stale field: %s", out)
+			}
+		})
+	}
+}
+
+// TestReportCacheFallback_Hint gates the Local Network hint on macOS and on a
+// no-route error.
+func TestReportCacheFallback_Hint(t *testing.T) {
+	var buf bytes.Buffer
+	snap := tasks.Snapshot{FetchedAt: time.Now()}
+	reportCacheFallback(&buf, "h.example", fmt.Errorf("%w: timeout", tasks.ErrUnreachable), snap)
+	if strings.Contains(buf.String(), "hint:") {
+		t.Errorf("a timeout must not print the Local Network hint: %q", buf.String())
+	}
+	buf.Reset()
+	reportCacheFallback(&buf, "h.example", fmt.Errorf("%w: connect: no route to host", tasks.ErrUnreachable), snap)
+	if got := strings.Contains(buf.String(), "hint:"); got != (runtime.GOOS == "darwin") {
+		t.Errorf("hint printed = %v on %s: %q", got, runtime.GOOS, buf.String())
 	}
 }
