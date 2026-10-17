@@ -10,7 +10,9 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HermesACPClient } from "./hermes-acp-client.mjs";
 import { ProjectAcceptance } from "./project-acceptance.mjs";
-import { Evidence, CodexClient, JsonLinesProcess, assertCodexSelection, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { Evidence, CodexClient, JsonLinesProcess, assertCodexSelection, assertDuplicateRejected, assertNoScratchTrust, assertRoundtripOrder, childEnv, closeProxy, contentText, createFixture, ensureFreshRoot, executable, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, startAckDroppingProxy, waitClosed, waitMailbox, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+
+export { closeProxy };
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const startupTimeout = 120_000;
@@ -91,14 +93,6 @@ function privateNativeEvidence(evidence) {
       evidence.add(kind, data);
     },
   };
-}
-
-export async function closeProxy(server) {
-  if (!server) return;
-  const sockets = server.ownedSockets ?? new Set();
-  for (const socket of sockets) socket.destroy();
-  if (!server.listening) return;
-  await new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
 }
 
 async function socketReady(path) {
@@ -218,11 +212,6 @@ async function run(args) {
       assert.equal(receiver.child.exitCode, 0, "supervisor shutdown must finish successfully");
     };
     proxy = await startAckDroppingProxy(evidence, routeSocket, listenSocket);
-    proxy.ownedSockets = new Set();
-    proxy.on("connection", (socket) => {
-      proxy.ownedSockets.add(socket);
-      socket.once("close", () => proxy.ownedSockets.delete(socket));
-    });
     let receiver = await startWorker(worker, listenSocket, "hermes-supervisor");
     const nativeSession = receiver.ready.session_id;
     if (projects) {
@@ -299,7 +288,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
       await receiver.stream.waitFor((event) => event.type === "hermes-turn-end" && event.message_id === answer.id && event.stop_reason === "end_turn" && !event.error, taskTimeout);
       await coordinatorClient.waitForThreadIdle(threadId);
       await projects.observe("worker", { provider: "openai-codex", model: nativeModel, completed: true });
-      await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+      await projects.observe("coordinator", { provider: "openai", model: args["codex-model"], completed: true });
       await projects.verifyArtifact("coordinator", artifact, artifactHash);
       const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
       await coordinatorClient.turn(threadId, `For a native UI visibility check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);

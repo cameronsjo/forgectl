@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertCodexSelection, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { assertCodexSelection, assertDuplicateRejected, assertOpenAIModel, assertRegistration, assertRoundtripOrder, closeProxy, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
 assert.throws(() => parseArgs(flags), /--codex-model is required/);
@@ -81,6 +83,82 @@ try {
   assert.deepEqual(proxyEvents, []);
 } finally {
   await rm(proxyRoot, { recursive: true });
+}
+
+const delayedSocket = new EventEmitter();
+delayedSocket.destroyed = true;
+delayedSocket.closed = false;
+delayedSocket.destroy = () => {};
+const delayedServer = { listening: false, ownedUpstreams: new Set([delayedSocket]) };
+let delayedCleanupFinished = false;
+const delayedCleanup = closeProxy(delayedServer).then(() => { delayedCleanupFinished = true; });
+await new Promise((resolvePromise) => setImmediate(resolvePromise));
+assert.equal(delayedCleanupFinished, false, "destroyed does not prove a socket closed");
+delayedSocket.closed = true;
+delayedSocket.emit("close");
+await delayedCleanup;
+await closeProxy(delayedServer);
+
+const heldRoot = await mkdtemp(join(tmpdir(), "fctl-proxy-held-"));
+const heldProxyPath = join(heldRoot, "proxy.sock");
+const heldTargetPath = join(heldRoot, "target.sock");
+const targetSockets = new Set();
+let target;
+let proxy;
+let client;
+let reopened;
+let targetConnectionTimer;
+let targetConnectedResolve;
+const listen = (server, path) => new Promise((resolvePromise, reject) => {
+  server.once("error", reject);
+  server.listen(path, resolvePromise);
+});
+const connect = (path) => new Promise((resolvePromise, reject) => {
+  const socket = createConnection(path);
+  socket.once("connect", () => resolvePromise(socket));
+  socket.once("error", reject);
+});
+try {
+  const targetConnected = new Promise((resolvePromise, reject) => {
+    targetConnectedResolve = resolvePromise;
+    targetConnectionTimer = setTimeout(() => reject(new Error("held proxy upstream did not connect")), 5_000);
+  });
+  target = createServer((socket) => {
+    targetSockets.add(socket);
+    socket.once("close", () => targetSockets.delete(socket));
+    clearTimeout(targetConnectionTimer);
+    targetConnectedResolve(socket);
+  });
+  await listen(target, heldTargetPath);
+  proxy = await startAckDroppingProxy({ add: () => {} }, heldProxyPath, heldTargetPath);
+  client = await connect(heldProxyPath);
+  client.write(`${JSON.stringify({ type: "deliver", id: "held-open" })}\n`);
+  await targetConnected;
+  const accepted = [...proxy.ownedSockets];
+  const upstreams = [...proxy.ownedUpstreams];
+  const proxySocketClosed = new Set();
+  for (const socket of [...accepted, ...upstreams]) socket.once("close", () => proxySocketClosed.add(socket));
+  const clientClosed = new Promise((resolvePromise) => client.once("close", resolvePromise));
+  assert.equal(accepted.length, 1);
+  assert.equal(upstreams.length, 1);
+  await closeProxy(proxy);
+  assert.equal(proxy.listening, false);
+  assert.deepEqual(proxySocketClosed, new Set([...accepted, ...upstreams]));
+  await clientClosed;
+  assert.equal(client.destroyed, true);
+  assert(accepted.every((socket) => socket.destroyed));
+  assert(upstreams.every((socket) => socket.destroyed));
+  await closeProxy(proxy);
+  reopened = await startAckDroppingProxy({ add: () => {} }, heldProxyPath, heldTargetPath);
+  await closeProxy(reopened);
+} finally {
+  clearTimeout(targetConnectionTimer);
+  await closeProxy(reopened).catch(() => {});
+  await closeProxy(proxy).catch(() => {});
+  if (client && !client.destroyed) client.destroy();
+  for (const socket of targetSockets) socket.destroy();
+  if (target?.listening) await new Promise((resolvePromise) => target.close(() => resolvePromise()));
+  await rm(heldRoot, { recursive: true });
 }
 
 process.stdout.write("cross-harness verifier contract tests passed\n");

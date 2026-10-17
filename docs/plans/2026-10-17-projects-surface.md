@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
 Status: P1/P2/P4 implemented and locally verified; P3 native presentation and P5 live acceptance remain in progress
-Next action: lint the settled navigation and native-client changes, then build committed source and verify dedicated-session native attachment and live collaboration acceptance.
+Next action: run dedicated-session native Codex attachment and live Codex/Pi/Hermes Projects acceptance using the verified clean-source binary.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -128,3 +128,7 @@ Final source checks at `42815e47ee484097068bfe7fd425c3e17bd0c520`: golangci-lint
 The first navigation rerun at `/private/tmp/fcp.w7E8A5` failed before painting: the child started before the parent sized its PTY and herdr correctly rejected a zero-sized grid. This was a render-verifier race, not evidence against the new labels. The probe now sizes its own child terminal before `exec`; the regression delays the parent, fails against the committed old probe, and passes against the correction. The disposable server shut down; no model request was made.
 
 The next no-model run at `/private/tmp/fcp.kBUNmC` refused success because client reaping was unconfirmed. A separate actual-client signal/wait trace showed the PTY master remained open while waiting, delaying exit; closing the completed capture's master first reduced observed cleanup from 3.57 seconds to 0.052 seconds. The probe now closes that descriptor before its bounded group-signal/reap loop, without widening either wait budget or accepting an unreaped child. The old ordering fails the new deterministic regression; the complete probe contracts pass. The diagnostic and acceptance servers were stopped; rendering acceptance remains pending.
+
+Navigation live acceptance passed with `node scripts/verify-project-presentation.mjs --live --forgectl /private/tmp/forgectl-projects-evidence-42815e47.bin --herdr /opt/homebrew/Cellar/herdr/0.9.3-palette.1/bin/herdr --root /private/tmp/fcp.GrOEKJ`, exit 0, using committed verifier `242563fd` and the unchanged clean-source binary. Reconstructed terminal cells show `Presentation Target` in the sidebar and `Worker timeline` in the tab bar, not merely in content or metadata. The absent-label control exited 1 after actually rendering and reaping its client. Separate receipt assertions confirmed create/focus/close/reopen identities, no duplicate markers, unchanged unrelated project/workspace state, both client exits 0, named-server cleanup, and no acceptance/cleanup failure. This proves native herdr navigation; Codex remote-session attachment and cross-harness Projects acceptance remain pending.
+
+Independent acceptance review identified two verifier gaps before the paid runs: Codex observations accepted any nonempty provider, and the Pi acknowledgement proxy was not awaited on shutdown. The verifiers now assert OpenAI on every Codex observation and await actual close events for both accepted and upstream proxy sockets. Failure cleanup attempts every owned component before reporting aggregated errors. Codex independently ran the cross-harness, Hermes, project, and presentation contract scripts after review corrections, all exit 0. Controls include held-open upstream/client sockets, released socket-path rebinding, destroyed-but-not-yet-closed sockets, and repeated cleanup.

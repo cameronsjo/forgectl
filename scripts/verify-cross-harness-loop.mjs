@@ -440,7 +440,11 @@ export async function startAckDroppingProxy(evidence, listenPath, targetPath) {
   let dropped = false;
   let droppedId;
   const deliveryIds = [];
+  const ownedSockets = new Set();
+  const ownedUpstreams = new Set();
   const server = createServer((client) => {
+    ownedSockets.add(client);
+    client.once("close", () => ownedSockets.delete(client));
     let request = "";
     let requestRecord;
     client.on("error", (error) => evidence.add("proxy-client-error", { error: String(error) }));
@@ -453,6 +457,8 @@ export async function startAckDroppingProxy(evidence, listenPath, targetPath) {
         if (requestRecord.type === "deliver" && requestRecord.id) deliveryIds.push(requestRecord.id);
       } catch { }
       const upstream = createConnection(targetPath);
+      ownedUpstreams.add(upstream);
+      upstream.once("close", () => ownedUpstreams.delete(upstream));
       upstream.setEncoding("utf8");
       upstream.on("error", (error) => client.destroy(error));
       upstream.on("connect", () => upstream.write(request));
@@ -482,7 +488,31 @@ export async function startAckDroppingProxy(evidence, listenPath, targetPath) {
   evidence.add("proxy-start", { listenPath, targetPath, policy: "drop-first-positive-ack-forward-receipts" });
   server.droppedId = () => droppedId;
   server.deliveryIds = () => [...deliveryIds];
+  server.ownedSockets = ownedSockets;
+  server.ownedUpstreams = ownedUpstreams;
   return server;
+}
+
+export async function closeProxy(server) {
+  if (!server) return;
+  const sockets = [...(server.ownedSockets ?? []), ...(server.ownedUpstreams ?? [])];
+  const closeEvents = sockets.filter((socket) => !socket.closed).map((socket) => new Promise((resolvePromise) => socket.once("close", resolvePromise)));
+  for (const socket of sockets) socket.destroy();
+  if (!server.closePromise) {
+    server.closePromise = new Promise((resolvePromise, reject) => {
+      if (!server.listening) {
+        resolvePromise();
+        return;
+      }
+      server.close((error) => {
+        if (error && error.code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+        else resolvePromise();
+      });
+    });
+  }
+  const results = await Promise.allSettled([server.closePromise, ...closeEvents]);
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) throw failure.reason;
 }
 
 async function flushUntilSent(evidence, forgectl, ledger, env, cwd, id, timeout = 60_000) {
@@ -630,20 +660,31 @@ async function main() {
   activeCleanup = async () => {
     if (cleaned) return;
     cleaned = true;
-    let presentationError;
-    try { await projects?.cleanup(); } catch (error) { presentationError = error; }
-    if (proxy) proxy.close();
-    if (piRpc) piRpc.stop(); else if (piChild && !piChild.killed) piChild.kill("SIGTERM");
-    if (codexRpc) codexRpc.stop(); else if (codexChild && !codexChild.killed) codexChild.kill("SIGTERM");
-    if (restartedPiChild && !restartedPiChild.killed && restartedPiChild.exitCode === null) restartedPiChild.kill("SIGTERM");
-    if (replacementChild && !replacementChild.killed && replacementChild.exitCode === null) replacementChild.kill("SIGTERM");
-    if (piCoordinatorRpc) piCoordinatorRpc.stop(); else if (piCoordinatorChild && !piCoordinatorChild.killed) piCoordinatorChild.kill("SIGTERM");
-    if (piChild) await waitClosed(piChild);
-    if (codexChild) await waitClosed(codexChild);
-    if (restartedPiChild) await waitClosed(restartedPiChild);
-    if (replacementChild) await waitClosed(replacementChild);
-    if (piCoordinatorChild) await waitClosed(piCoordinatorChild);
-    if (presentationError) throw presentationError;
+    const errors = [];
+    const attempt = async (action) => {
+      try { await action(); } catch (error) { errors.push(error); }
+    };
+    await attempt(() => projects?.cleanup());
+    await attempt(() => closeProxy(proxy));
+    await attempt(() => {
+      if (piRpc) piRpc.stop(); else if (piChild && !piChild.killed) piChild.kill("SIGTERM");
+    });
+    await attempt(() => {
+      if (codexRpc) codexRpc.stop(); else if (codexChild && !codexChild.killed) codexChild.kill("SIGTERM");
+    });
+    await attempt(() => {
+      if (restartedPiChild && !restartedPiChild.killed && restartedPiChild.exitCode === null) restartedPiChild.kill("SIGTERM");
+    });
+    await attempt(() => {
+      if (replacementChild && !replacementChild.killed && replacementChild.exitCode === null) replacementChild.kill("SIGTERM");
+    });
+    await attempt(() => {
+      if (piCoordinatorRpc) piCoordinatorRpc.stop(); else if (piCoordinatorChild && !piCoordinatorChild.killed) piCoordinatorChild.kill("SIGTERM");
+    });
+    for (const child of [piChild, codexChild, restartedPiChild, replacementChild, piCoordinatorChild]) {
+      if (child) await attempt(() => waitClosed(child));
+    }
+    if (errors.length) throw new AggregateError(errors, "cross-harness cleanup failed");
   };
   proxy = await startAckDroppingProxy(evidence, piProxySocket, piSocket);
   const piModelArgs = args["pi-provider"] ? ["--provider", args["pi-provider"], "--model", args["pi-model"]] : [];
@@ -755,7 +796,7 @@ async function main() {
     }
     await codexRpc.waitForThreadIdle(threadId);
     await projects.observe("worker", { provider: initialPiModel.provider, model: initialPiModel.id, completed: true });
-    await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+    await projects.observe("coordinator", { provider: "openai", model: args["codex-model"], completed: true });
     await projects.verifyArtifact("worker", utility, verifiedUtilityHash);
     const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
     await codexRpc.turn(threadId, `For a native UI visibility check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);
@@ -773,7 +814,7 @@ async function main() {
   evidence.add("busy-receiver", { id: busyReport.id, status: busyReport.status, reconciled: busyReconciled.message.status, token: busyToken });
   piRpc.stop();
   await waitClosed(piChild);
-  proxy.close();
+  await closeProxy(proxy);
   const directWorker = await register(evidence, forgectl, "pi-worker", ["--ledger", ledger, "--harness", "pi", "--worktree", piRoot, "--socket", piRestartSocket, "--thread", piSessionId, "--replace"], baseEnv, piRoot);
   worker = directWorker;
   piEnv = childEnv(baseEnv, { ...worker.environment, FORGECTL_INBOX_RECEIPTS: piReceiptPath }, forgectl);
@@ -831,7 +872,7 @@ async function main() {
   evidence.add("replacement-roundtrip", { token: replacementToken, replyId: replacementReply.id, threadId: replacementThreadId, runId: replacement.member.run_id, nativeReplyTurnId: replacementTurnId, nativeReplyCompleted: true });
   await codexRpc.waitForThreadIdle(replacementThreadId);
   if (projects) {
-    await projects.observe("coordinator", { model: args["codex-model"], completed: true });
+    await projects.observe("coordinator", { provider: "openai", model: args["codex-model"], completed: true });
     const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
     await codexRpc.turn(replacementThreadId, `For a native UI recovery check, reply exactly ${marker}. Do not use tools, alter files, or send messages.`, coordinatorRoot, root);
     await projects.presentNative({ codex, model: args["codex-model"], rpc: codexRpc, marker });
