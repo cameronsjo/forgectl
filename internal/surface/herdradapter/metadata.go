@@ -20,7 +20,7 @@ import (
 // reporter set, and a token forgectl clears is cleared for every reporter.
 const MetadataSource = "forgectl-surface"
 
-// WorkerNameToken is the workspace token that carries a worker's name. A
+// WorkerNameKey is the workspace token that carries a worker's name. A
 // herdr sidebar shows it where the operator's [ui.sidebar.spaces] rows name
 // "$forgectl_worker" (forgectl#1047). The workspace label stays the ownership
 // marker. The name carries forgectl's prefix because the token map is shared:
@@ -28,7 +28,7 @@ const MetadataSource = "forgectl-surface"
 // token (forgectl#1287). It was "worker" before forgectl#1287; nothing in
 // forgectl reads it back, so only a sidebar row needs the new name. A key
 // the caller picks for TagPane is the caller's own and stays unprefixed.
-const WorkerNameToken = "forgectl_worker"
+const WorkerNameKey = "forgectl_worker"
 
 // herdr's own limits on a metadata report (src/app/api_helpers.rs). A key
 // outside them is refused by herdr; checking here gives the refusal before
@@ -95,7 +95,7 @@ func CheckTokenValue(key, value string) error {
 // the ownership check every write makes. It is cosmetic: the caller treats a
 // failure as a note, never as a failed launch.
 func (a *Adapter) ShowWorkerName(ctx context.Context, ref backend.Ref, name string) error {
-	if err := CheckTokenValue(WorkerNameToken, name); err != nil {
+	if err := CheckTokenValue(WorkerNameKey, name); err != nil {
 		return err
 	}
 	_, ws, err := a.ownedPane(ctx, ref)
@@ -109,7 +109,7 @@ func (a *Adapter) ShowWorkerName(ctx context.Context, ref backend.Ref, name stri
 		exec.MustFixed("--source"),
 		exec.MustFixed(MetadataSource),
 		exec.MustFixed("--token"),
-		exec.Opaque(WorkerNameToken+"="+name),
+		exec.Opaque(WorkerNameKey+"="+name),
 	))
 	if runErr != nil {
 		return fmt.Errorf("%w: workspace report-metadata: %v", ErrMetadataFailed, a.classifyRunError(runErr, res))

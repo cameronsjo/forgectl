@@ -218,9 +218,10 @@ exits 1: check the exit code before trusting the empty fields.
 
 A worker launch also shows the worker's name in herdr's sidebar: it sets the
 workspace token "forgectl_worker" (herdr workspace report-metadata), which a
-[ui.sidebar.spaces] row shows as $forgectl_worker (it was $worker before forgectl#1287), after the workspace ownership
-check. The workspace label stays the ownership marker. A failure to set it is a note on stderr, not a failed
-launch.
+[ui.sidebar.spaces] row shows as $forgectl_worker (it was $worker before
+forgectl#1287), after the workspace ownership check. The workspace label
+stays the ownership marker. A failure to set it is a note on stderr, not a
+failed launch.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
