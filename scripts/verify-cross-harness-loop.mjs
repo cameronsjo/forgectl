@@ -418,13 +418,14 @@ async function waitMailbox(evidence, forgectl, ledger, env, cwd, predicate, time
   fail("mailbox condition timed out");
 }
 
-function startAckDroppingProxy(evidence, listenPath, targetPath) {
+export async function startAckDroppingProxy(evidence, listenPath, targetPath) {
   let dropped = false;
   let droppedId;
   const deliveryIds = [];
   const server = createServer((client) => {
     let request = "";
     let requestRecord;
+    client.on("error", (error) => evidence.add("proxy-client-error", { error: String(error) }));
     client.setEncoding("utf8");
     client.on("data", (chunk) => {
       request += chunk;
@@ -456,7 +457,10 @@ function startAckDroppingProxy(evidence, listenPath, targetPath) {
       });
     });
   });
-  server.listen(listenPath);
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(listenPath, resolvePromise);
+  });
   evidence.add("proxy-start", { listenPath, targetPath, policy: "drop-first-positive-ack-forward-receipts" });
   server.droppedId = () => droppedId;
   server.deliveryIds = () => [...deliveryIds];
@@ -617,7 +621,7 @@ async function main() {
     if (replacementChild) await waitClosed(replacementChild);
     if (piCoordinatorChild) await waitClosed(piCoordinatorChild);
   };
-  proxy = startAckDroppingProxy(evidence, piProxySocket, piSocket);
+  proxy = await startAckDroppingProxy(evidence, piProxySocket, piSocket);
   const piSessionId = randomUUID();
   const piModelArgs = args["pi-provider"] ? ["--provider", args["pi-provider"], "--model", args["pi-model"]] : [];
   const piArgs = ["--mode", "rpc", ...piModelArgs, "--no-extensions", "-e", extensionPath, ...piExtensions.flatMap((path) => ["-e", path]), "--session-dir", piSessions, "--session-id", piSessionId, "--tools", "read,bash,find,grep"];

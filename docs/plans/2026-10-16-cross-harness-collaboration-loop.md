@@ -59,6 +59,8 @@ The implementation's independent mail-package tests and embedded-extension behav
 
 The first extended live run correctly failed before the handoff: the worker hardcoded the positive fixture path, so the independent duplicate-input check exited zero. The delegation had not explicitly specified the input-path argument. Codex made the CLI contract explicit rather than changing the generated worker artifact or weakening the check; the negative check now also requires a duplicate-specific diagnostic, not an arbitrary failure or signal. Cleanup requested termination of both owned processes; Pi exited immediately and Codex exited zero after 46 seconds, beyond the old 30-second wait. The bounded exit wait now matches the two-minute startup allowance. This failed run never wrote `ACCEPTED`.
 
+A retry launched inside the terminal tool sandbox failed to bind its private Unix socket with `EPERM`, before collaboration began. The verifier now awaits actual proxy listening before reporting startup or spawning native children, and a negative test requires a bind error to reject normally without a startup receipt. The live loop needs an approved host-level process; the nested Codex task sandbox remains restricted as described above.
+
 ## Accepted live receipt
 
 On 2026-10-16 at 19:17 America/Chicago (2026-10-17 00:17 UTC), `node scripts/verify-cross-harness-loop.mjs --live ...` exited `0` and wrote `ACCEPTED` in the private run root `/private/tmp/fctl-live.hx3eAL`. The [command reference](../commands/surface-team.md#source-build-verification) describes reproduction. Raw native events remain private because they can contain locally loaded guidance.

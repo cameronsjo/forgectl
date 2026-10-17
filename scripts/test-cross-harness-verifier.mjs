@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { assertDuplicateRejected, assertRegistration, assertRoundtripOrder, parseArgs, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertDuplicateRejected, assertRegistration, assertRoundtripOrder, parseArgs, startAckDroppingProxy, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
 assert.throws(() => parseArgs(flags), /--codex-model is required/);
@@ -53,5 +56,14 @@ for (const result of [
   { code: 1, stderr: "Cannot read input file" },
   { code: 1, stderr: "" },
 ]) assert.throws(() => assertDuplicateRejected(result), /duplicate-ID fixture/);
+
+const proxyRoot = await mkdtemp(join(tmpdir(), "fctl-proxy-test-"));
+const proxyEvents = [];
+try {
+  await assert.rejects(startAckDroppingProxy({ add: (...event) => proxyEvents.push(event) }, join(proxyRoot, "missing", "proxy.sock"), join(proxyRoot, "worker.sock")), (error) => error.syscall === "listen" && ["ENOENT", "EPERM", "EACCES"].includes(error.code));
+  assert.deepEqual(proxyEvents, []);
+} finally {
+  await rm(proxyRoot, { recursive: true });
+}
 
 process.stdout.write("cross-harness verifier contract tests passed\n");
