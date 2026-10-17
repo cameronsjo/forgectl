@@ -837,6 +837,8 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ root, ledger, taskId, threadId, replacementThreadId, piCoordinatorSessionId, utility: "verified", negativeControl: "rejected", note: "native turn completion, mailbox delivery, worker claim, and independent verification are recorded separately" })}\n`);
 }
 
+export { Evidence, CodexClient, JsonLinesProcess, assertNoScratchTrust, childEnv, contentText, createFixture, ensureFreshRoot, executable, flushMailbox, flushUntilSent, lastJson, mailbox, pathExists, readReceiptRecords, recordBinary, recordFile, register, runCommand, waitClosed, waitMailbox };
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(async (error) => {
     if (activeEvidence) activeEvidence.add("failure", { error: bounded(error.stack ?? error) });

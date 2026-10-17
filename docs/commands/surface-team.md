@@ -92,3 +92,46 @@ The Codex sandbox explicitly excludes the otherwise writable `/tmp` and `TMPDIR`
 The verifier then retires that Codex coordinator and enrolls Pi under the same coordinator name with a new run, socket, receipt file, and native session. Pi must discover the earlier completed task ID from the durable inbox, delegate a recovery check, consume the worker's reply, and complete a native acknowledgement. The original verified artifact and execution journal must remain unchanged. This is an explicit task-context handoff, not conversion of Codex's private conversation history into Pi history.
 
 The verifier starts only task-owned processes, records native session/model identities, and leaves private evidence on failure. Its acceptance gate requires a real delegation, clarification and answer without human relay, a worker-created executable artifact, an independent positive check and corrupt-input negative control, and interruption/replacement probes. Merely running its syntax or help check does not satisfy that gate.
+
+## Native Hermes sessions
+
+`surface hermes` owns one native Hermes ACP process and exposes its enrolled session through a private Unix socket. It is a per-process adapter, not a new global broker. Install and authenticate Hermes separately; forgectl does not import credentials or change native configuration.
+
+```sh
+forgectl surface team register hermes-worker --ledger /absolute/private/team \
+  --harness hermes --worktree /absolute/worker \
+  --socket /absolute/private/hermes.sock --json
+```
+
+Supply the returned environment to the supervisor, preserving the intended private `HERMES_HOME`. Start from the registered worktree:
+
+```sh
+forgectl surface hermes --command /absolute/venv/bin/hermes-acp \
+  --model openai-codex:MODEL_ID --json
+```
+
+The supervisor creates a native session when the registration has no thread ID; otherwise it loads that exact session. Startup checks the configured provider-qualified model and native `default` permission mode, then binds the session to the roster. It refuses mismatched role, run, worktree, socket, or session identities. `--listen-socket` may select a different owned listener when a task-scoped transparent proxy occupies the registered route socket.
+
+Native permission requests are cancelled, not approved on another agent's behalf. Unsupported client operations are rejected. This headless adapter does not provide interactive approvals or a filesystem sandbox; Hermes's existing native terminal policy still applies. Team enrollment grants neither file-write permission nor authority to bypass a denial.
+
+Hermes delivery persists a pending receipt before prompting and immediately remains `unconfirmed`. After the turn, an exact message in native session history can confirm consumption. `flush` asks for that receipt without resending the message. A busy receiver returns `queued`; an unknown receipt stays `unconfirmed`. Neither history acceptance nor a settled native turn proves task success.
+
+To restart, stop the owned supervisor, replace the member registration with a fresh run and socket, and supply the original native session through `--thread`. Receipt files are scoped to the member and native session in the private ledger. Another supervisor cannot concurrently own that receipt store, and an existing socket is never stolen.
+
+### Hermes source-build verification
+
+```sh
+go test ./internal/surface/hermes ./internal/surface/mail
+node scripts/test-hermes-verifier.mjs
+scratch=$(mktemp -d /private/tmp/fh.XXXXXX)
+node scripts/verify-hermes-collaboration.mjs --live \
+  --forgectl "$FORGECTL_BUILD" --root "$scratch" \
+  --websocket-module "$WEBSOCKET_MODULE" \
+  --codex "$CODEX_NATIVE" --codex-model "$CODEX_MODEL" \
+  --hermes "$HERMES_ACP" --hermes-python "$HERMES_PYTHON" \
+  --hermes-home "$HERMES_HOME" --hermes-model "$HERMES_MODEL"
+```
+
+Use absolute executable paths, retaining the virtual-environment Python path rather than resolving its interpreter symlink. `HERMES_MODEL` is the unqualified OpenAI model ID. This verifier requires a preconfigured private access-only OpenAI credential, no copied refresh token, all auxiliary models pinned to OpenAI, and no provider fallbacks. It validates that configuration through native Hermes helpers and checks that Codex's global authentication and configuration remain unchanged. An expired credential is a failed prerequisite, not permission to refresh or replace another harness's login.
+
+Hermes authors source as a bounded base64 mailbox payload; Codex materializes those exact bytes in its existing sandbox. The verifier requires executable positive, duplicate-input, missing-path, and clarified-default checks, plus native source provenance. This is worker-authored source with coordinator materialization, not a claim that Hermes wrote or executed a file. A separate real native write request must be denied. Lost acknowledgement, busy/stopped delivery, same-session restart, stale-run rejection, selected-session refusal, unique native consumption, and owned-process cleanup are independent gates. A live `ACCEPTED` receipt, not unit tests or help output, is required to claim this collaboration works.
