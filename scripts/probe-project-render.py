@@ -529,6 +529,7 @@ def capture(herdr: pathlib.Path, session: str, project: str, thread: str | None,
         os.environ.clear()
         os.environ.update(environment)
         try:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
             os.execvpe(command[0], command, environment)
         except OSError as error:
             os.write(2, f"probe child exec failed: {error}\n".encode())

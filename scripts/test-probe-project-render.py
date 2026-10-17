@@ -7,6 +7,7 @@ import importlib.util
 import os
 import pathlib
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("probe_project_render", ROOT / "probe-project-render.py")
@@ -103,6 +104,38 @@ def test_unconfirmed_cleanup_fails_capture() -> None:
             PROBE._kill_and_reap = original
 
 
+def test_child_has_grid_before_parent_runs() -> None:
+    with tempfile.TemporaryDirectory(prefix="probe-render-grid-") as temporary:
+        fake = pathlib.Path(temporary) / "fake-herdr"
+        fake.write_text(
+            "#!/usr/bin/python3\n"
+            "import fcntl, struct, termios, time\n"
+            "rows, cols, _, _ = struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))\n"
+            "assert (rows, cols) == (45, 160), (rows, cols)\n"
+            "print('Expected Thread\\r\\nExpected Project         │\\r\\n                         │\\r\\n                         │', flush=True)\n"
+            "time.sleep(5)\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        original_forkpty = PROBE.os.forkpty
+        original_settle = PROBE.SETTLE_TIME
+
+        def delayed_parent():
+            pid, descriptor = original_forkpty()
+            if pid != 0:
+                time.sleep(0.4)
+            return pid, descriptor
+
+        PROBE.os.forkpty = delayed_parent
+        PROBE.SETTLE_TIME = 0.01
+        try:
+            _, _, checks, _, _, _, _ = PROBE.capture(fake, "render-test", "Expected Project", "Expected Thread", None)
+            assert checks == {"project": True, "thread": True}
+        finally:
+            PROBE.os.forkpty = original_forkpty
+            PROBE.SETTLE_TIME = original_settle
+
+
 def main() -> int:
     for test in (
         test_title_is_not_screen_content,
@@ -110,6 +143,7 @@ def main() -> int:
         test_labels_must_appear_in_navigation,
         test_split_queries_and_utf8_box_drawing,
         test_unconfirmed_cleanup_fails_capture,
+        test_child_has_grid_before_parent_runs,
     ):
         test()
     print("probe-project-render contract tests passed")
