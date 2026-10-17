@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
 Status: Codex/Pi and Codex/Hermes collaboration accepted; native Codex-to-Pi coordinator handoff accepted; Claude deferred; Projects interface approach approved
-Next action: finish delivery of the accepted Hermes unit, then reuse forgectl desk and herdr's existing sidebar/tabs for persistent projects and threads, without adding a competing execution or approval system.
+Next action: implement the reviewed persistent-project foundation in the [Projects plan](2026-10-17-projects-surface.md), reusing Desk and herdr navigation without a competing execution or approval system.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
@@ -75,7 +75,7 @@ On the 2026-10-17 continuation, read-only checks found no `hermes` executable, n
 - [x] Import only the expiring Codex access token through Hermes's native API-key credential-pool command into a separate private `HERMES_HOME`; verify the native selected provider and model without printing tokens or placing them in the task ledger. Do not import the shared refresh token. Preserve the existing Codex auth file.
 - [x] Reuse the smallest verified native session protocol and existing forgectl delivery contract; retain native permission checks and distinguish receipt, native consumption, turn completion, and independently checked output.
 - [x] Prove real Hermes participation, interruption/restart behavior, and selected-session delivery with disposable task-owned processes. Keep uncertain delivery visible rather than resending blindly.
-- [ ] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
+- [x] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
 
 Projects now depends on accepted Codex/Pi/Hermes collaboration, not Claude live acceptance. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items remain required continuation work, not silently dropped or marked complete.
 
@@ -114,6 +114,10 @@ On 2026-10-17 at 11:48 America/Chicago (16:48 UTC), `node scripts/verify-hermes-
 - Evidence hashes: `ACCEPTED` → `dda71fb7e9daea6cbb2acd5bb26f3339cb57c608f871f2f9c512ceca6117a963`; `events.jsonl` → `0b524231b4622085d7fecd2c04923644c509f437444753f09ae3f4837f41fff7`.
 
 This accepts Hermes collaboration and recovery through the headless adapter. It does not claim Hermes wrote or executed the generated utility, supply permanent authentication, complete herdr's launch integration, or deliver the Projects interface. No production installation, service, provider policy, PR, or merge changed.
+
+Codex pushed the accepted Hermes implementation, receipts, reviewed Projects plan, and private-directory CLI test correction to `codex/cross-harness-loop`; `git ls-remote --exit-code origin refs/heads/codex/cross-harness-loop` matched `80ccc3c34b2a263094a620f3795fd8c40068f204`. At that push, product source matched the accepted `656352ee` build. The final Hermes CLI tests passed after the fixture correction; Linux and Windows vet passed before subsequent Projects implementation. A later pinned-linter run observed the concurrently evolving Projects CLI and failed typechecking; it is not recorded as a green final combined lint run and will be rerun against settled code.
+
+The subsequent repository-wide JSON-encoder guard found six earlier Hermes emitters without the required sink classification. Codex changed the operator-facing event writer to the existing value-preserving terminal-safe JSON encoder, and marked the five private protocol/receipt encoders at their exact sinks. A regression proves C1/bidi controls are escaped while decoded native text remains byte-identical. Fresh Hermes/mail package tests, the event-writer race test, and the repository JSON-emitter guard passed. This source correction does not imply another native acceptance run; the Projects live gate will exercise the resulting build.
 
 ## Accepted cross-harness handoff receipt
 

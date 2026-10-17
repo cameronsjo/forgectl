@@ -21,6 +21,27 @@ type hermesTestWriter struct {
 	buf bytes.Buffer
 }
 
+func TestEventWriterEscapesTerminalControlsWithoutChangingValues(test *testing.T) {
+	var output bytes.Buffer
+	writer := eventWriter{writer: &output, mu: &sync.Mutex{}}
+	original := "native response \u009b31m\u202e café\n"
+	writer.write(map[string]any{"type": "native-update", "update": map[string]string{"text": original}})
+	if strings.ContainsRune(output.String(), '\u009b') || strings.ContainsRune(output.String(), '\u202e') {
+		test.Fatalf("terminal controls reached event output: %q", output.String())
+	}
+	var decoded struct {
+		Update struct {
+			Text string `json:"text"`
+		} `json:"update"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		test.Fatal(err)
+	}
+	if decoded.Update.Text != original {
+		test.Fatalf("event changed native text: %q", decoded.Update.Text)
+	}
+}
+
 func (outputWriter *hermesTestWriter) Write(data []byte) (int, error) {
 	outputWriter.mu.Lock()
 	defer outputWriter.mu.Unlock()

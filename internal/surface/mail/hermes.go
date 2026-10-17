@@ -115,6 +115,7 @@ func (adapter HermesAdapter) call(ctx context.Context, worker Worker, request he
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
+	// termsafe:allow-raw-json native request sent only to the Hermes supervisor Unix socket
 	line, err := json.Marshal(request)
 	if err != nil {
 		return hermesResponse{}, err

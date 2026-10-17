@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 const (
@@ -246,7 +248,7 @@ type eventWriter struct {
 func (outputWriter eventWriter) write(value any) {
 	outputWriter.mu.Lock()
 	defer outputWriter.mu.Unlock()
-	_ = json.NewEncoder(outputWriter.writer).Encode(value)
+	_ = termsafe.JSONEncoder(outputWriter.writer).Encode(value)
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -519,6 +521,7 @@ func (client *nativeClient) call(ctx context.Context, method string, params any,
 	}
 	client.nextID++
 	id := client.nextID
+	// termsafe:allow-raw-json native ACP request sent only to the child stdin
 	request, err := json.Marshal(struct {
 		JSONRPC string `json:"jsonrpc"`
 		ID      int    `json:"id"`
@@ -576,6 +579,7 @@ func (client *nativeClient) answer(id json.RawMessage, method string) error {
 	} else {
 		response.Error = map[string]any{"code": -32601, "message": "unsupported client operation"}
 	}
+	// termsafe:allow-raw-json native ACP response sent only to the child stdin
 	line, err := json.Marshal(response)
 	if err != nil {
 		return err
@@ -870,6 +874,7 @@ func (receiver *supervisor) appendReceiptLocked(record receipt) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
+	// termsafe:allow-raw-json durable receipt written only to the private ledger
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -962,6 +967,7 @@ func loadReceipts(path string) (map[string]receipt, error) {
 }
 
 func writeResponse(connection net.Conn, response Response) {
+	// termsafe:allow-raw-json supervisor protocol response sent only over its Unix socket
 	data, err := json.Marshal(response)
 	if err != nil {
 		return
