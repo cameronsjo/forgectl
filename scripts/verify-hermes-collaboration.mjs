@@ -288,7 +288,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     if (projects) {
       await receiver.stream.waitFor((event) => event.type === "hermes-turn-end" && event.message_id === answer.id && event.stop_reason === "end_turn" && !event.error, taskTimeout);
       await coordinatorClient.waitForThreadIdle(threadId);
-      await projects.observe("worker", { provider: "openai-codex", model: nativeModel, completed: true });
+      await projects.observe("worker", { provider: "openai-codex", model: args["hermes-model"], completed: true });
       await projects.observe("coordinator", { provider: "openai", model: args["codex-model"], completed: true });
       await projects.verifyArtifact("coordinator", artifact, artifactHash);
       const marker = `PROJECT_UI_${randomUUID().replaceAll("-", "")}`;
@@ -345,7 +345,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     evidence.add("hermes-restart-reconciled", { sessionId: nativeSession, oldRunId: worker.member.run_id, runId: restarted.member.run_id, recoveredId: recovery.sent.id, originalReceiptPreserved: true });
     if (projects) {
       await receiver.stream.waitFor((event) => event.type === "hermes-turn-end" && event.message_id === recovery.sent.id && event.stop_reason === "end_turn" && !event.error, taskTimeout);
-      await projects.observe("worker", { provider: "openai-codex", model: nativeModel, completed: true });
+      await projects.observe("worker", { provider: "openai-codex", model: args["hermes-model"], completed: true });
       await projects.audit();
     }
     await stopWorker(receiver);
