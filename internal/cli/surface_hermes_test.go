@@ -22,8 +22,8 @@ type hermesCLIFixture struct {
 
 func newHermesCLIFixture(test *testing.T) hermesCLIFixture {
 	test.Helper()
-	ledger := test.TempDir()
-	if err := os.Chmod(ledger, 0o700); err != nil {
+	ledger := filepath.Join(test.TempDir(), "ledger")
+	if err := os.Mkdir(ledger, 0o700); err != nil {
 		test.Fatal(err)
 	}
 	worktree := test.TempDir()
