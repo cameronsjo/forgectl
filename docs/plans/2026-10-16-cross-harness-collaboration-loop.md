@@ -1,6 +1,6 @@
 # Cross-harness collaboration loop
 
-Status: Codex/Pi collaboration and native Codex-to-Pi coordinator handoff accepted; Claude, Hermes, and Projects remain staged
+Status: Codex/Pi collaboration and native Codex-to-Pi coordinator handoff accepted; Hermes collaboration under verification, Claude deferred, Projects staged
 Next action: connect the verified native Hermes ACP process to the existing mailbox and prove real collaboration and recovery while preserving OpenAI-only traffic and native permission checks.
 Branch: `codex/cross-harness-loop`
 
@@ -73,7 +73,7 @@ On the 2026-10-17 continuation, read-only checks found no `hermes` executable, n
 
 - [x] Install the pinned, locally inspected Hermes source into a private temporary environment, without modifying the third-party source checkout or installing a global command.
 - [x] Import only the expiring Codex access token through Hermes's native API-key credential-pool command into a separate private `HERMES_HOME`; verify the native selected provider and model without printing tokens or placing them in the task ledger. Do not import the shared refresh token. Preserve the existing Codex auth file.
-- [ ] Reuse the smallest verified native session protocol and existing forgectl delivery contract; retain native permission checks and distinguish receipt, native consumption, turn completion, and independently checked output.
+- [x] Reuse the smallest verified native session protocol and existing forgectl delivery contract; retain native permission checks and distinguish receipt, native consumption, turn completion, and independently checked output.
 - [ ] Prove real Hermes participation, interruption/restart behavior, and selected-session delivery with disposable task-owned processes. Keep uncertain delivery visible rather than resending blindly.
 - [ ] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
 
@@ -92,6 +92,8 @@ The native ACP probe `node /private/tmp/fctl-hermes.TwuIsK/probe-native-acp.mjs`
 The first native probe stopped before any prompt because its assertion expected an unqualified model ID. Native ACP actually returns `openai-codex:gpt-5.6-sol`; source inspection confirmed the provider-qualified contract and the corrected probe passed. That earlier run did not receive an acceptance receipt.
 
 The next implementation extends forgectl rather than adding a global broker. An explicitly enrolled Hermes process uses ACP stdio behind its private per-process inbox socket. Durable mailbox state remains authoritative; the supervisor records a pending receipt before forwarding, refuses busy delivery before forwarding, and reconciles consumption only from matching native history. A missing or ambiguous history result remains unconfirmed and is not resent. Native permission requests are denied rather than silently approved, and native default mode is preserved. Transport consumption, native turn termination, and independently verified task output remain separate evidence.
+
+The source adapter is implemented as `surface hermes` and registered in the existing mailbox. Focused Hermes/mail tests, race checks, and CLI identity controls pass against this implementation. These checks cover missing/conflicting native evidence, one-to-one receipt ownership, pending-write failure, busy/stopping refusal, permission cancellation, session-lock exclusion, native-process exit, and replacement-socket preservation. CLI controls reject wrong member/run/worktree/session identities, mixed roles, public ledgers, and symlinked ledgers. Live collaboration is still a separate unchecked gate below; unit tests do not claim model task completion.
 
 The Hermes task artifact will be worker-authored source transported in a bounded base64 JSON mailbox reply, then materialized byte-for-byte by Codex inside its existing sandbox. This preserves Hermes's native default edit-approval policy without granting an approval or suggesting an alternative file-writing path. Acceptance must explicitly record `worker_file_created=false`, `worker_authored_source=true`, and `coordinator_materialized=true`; native assistant/tool history must prove the exact source payload. Positive, duplicate-ID, missing-input, and clarification-policy checks run against those exact bytes. A separate native `write_file` negative control must be denied and leave its target absent. This is real delegated artifact authoring, not evidence that Hermes wrote or executed a file.
 

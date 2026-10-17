@@ -46,6 +46,28 @@ func TestSurfaceTeamRegistration(t *testing.T) {
 	}
 }
 
+func TestSurfaceTeamHermesRegistrationExportsSession(test *testing.T) {
+	test.Setenv(mail.EnvWorker, "")
+	test.Setenv(mail.EnvDrainWorker, "")
+	ledger := filepath.Join(test.TempDir(), "team")
+	worktree := test.TempDir()
+	socket := filepath.Join(ledger, "hermes.sock")
+	output, stderr, code := runSurface(test, "", "team", "register", "hermes-1", "--ledger", ledger, "--harness", "hermes", "--socket", socket, "--thread", "session-1", "--run-id", "run-1", "--worktree", worktree, "--json")
+	if code != 0 {
+		test.Fatalf("register exit=%d stdout=%s stderr=%s", code, output, stderr)
+	}
+	var report struct {
+		Member      mail.Worker       `json:"member"`
+		Environment map[string]string `json:"environment"`
+	}
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		test.Fatal(err)
+	}
+	if report.Member.Harness != mail.HarnessHermes || report.Environment["FORGECTL_HERMES_SOCKET"] != socket || report.Environment["FORGECTL_HERMES_SESSION_ID"] != "session-1" || report.Environment[mail.EnvRunID] != "run-1" {
+		test.Fatalf("Hermes registration = %#v", report)
+	}
+}
+
 func TestSurfaceTeamExtensionExactBuild(t *testing.T) {
 	ledger := filepath.Join(t.TempDir(), "team")
 	arguments := []string{"team", "extension", "--ledger", ledger, "--json"}

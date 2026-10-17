@@ -88,6 +88,12 @@ func newSurfaceTeamRegisterCmd(ledger *string) *cobra.Command {
 			if registered.Harness == mail.HarnessPi {
 				environment[mail.EnvInbox] = registered.Socket
 			}
+			if registered.Harness == mail.HarnessHermes {
+				environment["FORGECTL_HERMES_SOCKET"] = registered.Socket
+				if registered.ThreadID != "" {
+					environment["FORGECTL_HERMES_SESSION_ID"] = registered.ThreadID
+				}
+			}
 			if asJSON {
 				return writeJSON(command.OutOrStdout(), struct {
 					Ledger      string            `json:"ledger"`
@@ -99,10 +105,10 @@ func newSurfaceTeamRegisterCmd(ledger *string) *cobra.Command {
 			return err
 		},
 	}
-	command.Flags().StringVar(&harness, "harness", "", "native harness: claude, codex or pi")
+	command.Flags().StringVar(&harness, "harness", "", "native harness: claude, codex, hermes or pi")
 	command.Flags().StringVar(&member.Worktree, "worktree", "", "absolute working directory")
 	command.Flags().StringVar(&member.Socket, "socket", "", "absolute native Unix socket path")
-	command.Flags().StringVar(&member.ThreadID, "thread", "", "Codex thread ID; omit only before the first thread is known")
+	command.Flags().StringVar(&member.ThreadID, "thread", "", "native Codex thread or Hermes session ID; omit only before the first session is known")
 	command.Flags().StringVar(&member.RunID, "run-id", "", "explicit process incarnation; omit to generate a fresh one")
 	command.Flags().BoolVar(&member.Coordinator, "coordinator", false, "register the team's coordinator")
 	command.Flags().BoolVar(&replace, "replace", false, "explicitly replace this member's endpoint")

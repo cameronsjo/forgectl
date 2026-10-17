@@ -31,8 +31,15 @@ func (roster FileRoster) Register(member Worker, replace bool) (Worker, error) {
 		if member.ThreadID != "" && !threadPattern.MatchString(member.ThreadID) {
 			return Worker{}, errors.New("codex thread id has unexpected characters")
 		}
+	case HarnessHermes:
+		if member.Socket == "" {
+			return Worker{}, errors.New("hermes registration requires a supervisor socket")
+		}
+		if member.ThreadID != "" && !threadPattern.MatchString(member.ThreadID) {
+			return Worker{}, errors.New("hermes session id has unexpected characters")
+		}
 	default:
-		return Worker{}, errors.New("member harness must be claude, codex or pi")
+		return Worker{}, errors.New("member harness must be claude, codex, hermes or pi")
 	}
 	if member.RunID == "" {
 		member.RunID = newID()

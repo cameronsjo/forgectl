@@ -73,6 +73,7 @@ func defaultMailSession(deps module.Deps, getenv func(string) string) (*mailSess
 	adapters := map[mail.Harness]mail.Adapter{
 		mail.HarnessClaude: mail.ClaudeAdapter{ConfigDir: claudeDir},
 		mail.HarnessCodex:  mail.CodexAdapter{Runner: deps.Runner},
+		mail.HarnessHermes: mail.HermesAdapter{},
 		mail.HarnessPi:     mail.PiAdapter{},
 	}
 	return &mailSession{

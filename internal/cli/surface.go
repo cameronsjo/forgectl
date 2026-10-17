@@ -127,6 +127,7 @@ its workers across harnesses. See forgectl surface send --help.`,
 	cmd.AddCommand(newSurfaceFlushCmd(deps))
 	cmd.AddCommand(newSurfaceEventCmd(deps))
 	cmd.AddCommand(newSurfaceTeamCmd())
+	cmd.AddCommand(newSurfaceHermesCmd())
 	return cmd
 }
 
