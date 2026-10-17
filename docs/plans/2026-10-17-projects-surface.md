@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: P1/P2/P3/P4 implemented and verified; Codex/Pi and one Hermes Projects run passed; a later Hermes reply was refused by native shell policy
-Next action: resolve Cameron's pending choice between a message-only Hermes reply channel and delivery with the recorded native-policy limitation. Do not retry the denied command or broaden permissions.
+Status: P1/P2/P3/P4 implemented and verified; message-only Hermes replies authorized by Cameron's continuation; final acceptance remains open
+Next action: review and implement the explicit native-reply channel below, retaining native permissions and using fresh task sessions. Do not retry or reroute the denied command.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -153,13 +153,26 @@ This does not invalidate the earlier complete Hermes run or establish that Herme
 
 Codex's fresh independent audit of the successful Hermes run rehashed the owner-private artifact (`b5ed83a6fb10ab473a197a63114d0204c7c06e5793fb44f92abbdd5e142d9e5a`) and reran its positive and duplicate controls (exit 0/1). Project `4179b7df-bd2b-4b63-b63e-4dff700df172` retains coordinator thread `fc84890f-c37d-481f-9d41-1e5effb16a13` and Hermes thread `a5b5973b-7d74-474e-afb3-14d22f3e247b`; the Hermes native session survives a fresh run ID. Four reconstructed clients include two matching Codex history markers and two thread-selection views; native UI policy snapshots are unchanged. The receipt records four successful native exits, named presentation-server cleanup, exact assistant-source provenance, and unchanged unrelated state. Both native harnesses selected OpenAI `gpt-5.6-sol`. These facts are retained as scoped evidence, not an unconditional reliability claim.
 
-### Pending reply-channel research
+### Reply-channel research
 
 Read-only inspection of pinned Hermes source `02d1da49` establishes a narrower candidate than an additional tool server. ACP already supplies assistant output through `agent_message_chunk`: `acp_adapter/events.py:268` streams it, and `acp_adapter/server.py:1537` sends the final response when it was not streamed or was transformed. Forgectl already decodes these updates in `internal/surface/hermes/supervisor.go:133`, but its current reconciliation at `:864` uses only exact native user-message history to acknowledge delivery. It does not publish assistant replies to the mailbox.
 
 The recommendation, if Cameron chooses the message-only channel, is to consume explicit native assistant reply data rather than embed that data in a shell command. A design still needs exact turn/run/session attribution, bounded framing, explicit routing within the enrolled team, durable deduplication, and refusal of incomplete, ambiguous, or denied turns. It must use fresh task sessions, never resume or reroute the denied command, and preserve all existing tool/edit permissions. Streaming chunks alone are not proof of one complete final response.
 
 Codex also independently checked why a generic MCP tool is not the preferred shortcut: Hermes's MCP handler directly invokes its remote tool (`tools/mcp_tool.py:2460`), while the common dispatcher applies plugin checks and the separate file-edit guard (`model_tools.py:920`). ACP terminal permission wiring is separate (`acp_adapter/server.py:1368`, `:1430`). Merely calling something a message tool does not give it an approval boundary; any future handler must constrain its actual authority. The existing forgectl MCP commands concern tasks, not the surface mailbox. This is research and a recommendation only; no new reply path is implemented or authorized by this document.
+
+### Approved continuation: message-only native replies
+
+Cameron replied “Continue” after Codex recommended the message-only channel and paused for that choice. Codex is proceeding with that recommended approach, not the alternative of declaring the shell-reply limitation accepted. The previous denied session and command remain untouched. No additional model provider, native permission grant, global configuration, generic MCP capability, or third-party edit is included.
+
+- [ ] R1: Add an opt-in `surface hermes --native-replies` contract. Resolve every incoming message against the exact private mailbox record and current enrolled tuple. Preserve its identity and untrusted-agent warning, but replace the shell reply hint with an explicit versioned JSON reply frame containing only the incoming message ID and reply body. The model cannot choose a sender, recipient, run, or native session. Legacy mode remains unchanged.
+- [ ] R2: Accept a frame only from one completed native prompt with no permission request, cancellation, refusal, or protocol error. Require an unambiguous new input after a pre-turn history snapshot and a matching final assistant frame in durable history and the bounded live response segment. Ignore thoughts; refuse malformed/duplicate fields, incomplete/oversized frames, earlier-turn or tool narration, extra user turns, changed history, and live/history disagreement. A transformed response must not cause publication of different untransformed text. Native `end_turn` alone is not proof of a reply.
+- [ ] R3: Persist reply intent before invoking the model and ready-to-publish bytes before enqueueing. Bind publication to the original input, native session, sender run, and original destination run. A deterministic mailbox reply key makes retry after append idempotent; contradictory body/identity is refused. Reuse the existing mailbox policy and delivery/receipt machinery, including automatic initial delivery rather than relying on a human flush. Unknown delivery is never blindly retried. Interrupted/denied/unconfirmed reply state remains visible; old-run replies never migrate to a replacement. Typed CLI callbacks keep the Hermes supervisor independent of the mail package.
+- [ ] R4: Verify parser, history/live matching, permission-denied suppression, exact routing, malformed/private-store guards, policy preservation, crash windows, duplicate publication, and replacement refusal with adversarial fixtures and race tests. Then use a clean committed build in fresh OpenAI-only native sessions for a complete clarification/source-artifact/recovery/Projects run. Prove native assistant authorship, exact materialized bytes, no shell-based reply execution, denied-edit preservation, actual UI rendering, and cleanup. Reconcile P5/P6 only after independent evidence audit and exact feature-branch delivery.
+
+The reply frame is task data, not a request to execute code or approve tools. It may carry source text for a separately authorized coordinator to materialize under its existing sandbox. Acceptance may use an explicit UTF-8 source field instead of asking Hermes to compute base64 through a terminal; byte identity and native authorship checks remain mandatory. No reply is synthesized from arbitrary prose, tool output, thoughts, or a turn that encountered a native permission denial. The explicit frame avoids forwarding every assistant acknowledgement and creating reply loops.
+
+Read-only native and mailbox reviews informed these requirements. Hermes can replay multiple assistant/tool rows and normalize surrounding whitespace; streaming may also include tool narration or a second transformed response. The current mailbox send API generates random IDs, so it cannot itself supply crash-safe reply deduplication. Review of the complete continuation requirements and implementation is still required before activation.
 
 ## Local acceptance commands
 
