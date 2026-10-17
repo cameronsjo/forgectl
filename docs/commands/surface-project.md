@@ -1,6 +1,6 @@
 # Persistent collaboration projects
 
-`forgectl surface project` keeps logical projects, threads, and enrolled-run bindings in an explicit private registry. It is separate from `forgectl projects`, which inventories repositories. These commands do not launch a harness, enroll a team, create a Git worktree or branch, open a herdr workspace, or grant tools.
+`forgectl surface project` keeps logical projects, threads, and enrolled-run bindings in an explicit private registry. It is separate from `forgectl projects`, which inventories repositories. Creation, binding, context, and inspection do not launch a harness, enroll a team, create a Git worktree or branch, or grant tools. Explicit `open` and `thread focus` commands control verified herdr presentation.
 
 A project has a stable ID, a working directory, optional instructions, and exactly one coordinator thread. Additional threads are worker workstreams. Labels are for people; commands address exact IDs. Two projects may share the same label and working directory without sharing identity or their future team ledger.
 
@@ -26,7 +26,7 @@ forgectl surface project --root /absolute/private/projects \
 
 Use this source build's absolute executable path when an older installed `forgectl` is also present. `--root` has no environment or global default. Its parent directory must already exist; the registry root is created owner-private when creating the first project. The working directory must already exist and be absolute. `--instructions` and `--brief` are optional UTF-8 regular files of at most 16 KiB; their contents are snapshots, not live file links. Names are bounded to 128 Unicode characters and cannot contain control characters.
 
-Every JSON response includes `version` and `revision`. Project creation and `show` include a `project` object and its deterministic `ledger` path; that ledger is not created by these commands. Thread creation and `show` include `project_id` and `thread`. `list` responses contain `projects` or `threads` arrays. Project `list` is a logical registry snapshot; project `show` and thread `list`/`show` also read one checked roster snapshot and return separate `observations` or `observation`. No record or successful command implies that a native agent is running or that work has completed.
+Registry JSON responses include `version` and `revision`. Project creation and `show` include a `project` object and its deterministic `ledger` path; that ledger is not created by these commands. Thread creation and `show` include `project_id` and `thread`. `list` responses contain `projects` or `threads` arrays. Project `list` is a logical registry snapshot; project `show` and thread `list`/`show` also read one checked roster snapshot and return separate `observations` or `observation`. The timeline has a separate evidence-snapshot shape described below. No record or successful command implies that a native agent is running or that work has completed.
 
 ## Bind an enrolled run
 
@@ -51,6 +51,37 @@ Enrollment observations are `unbound`, `current`, or `stale`. `current` means on
 
 `thread context` returns a bounded context capsule: project instructions, the thread brief, stable IDs, the current saved run when bound, and exact mailbox references. It contains no native conversation history and performs no delivery, launch, registration, or approval. A stale binding is refused until explicitly resolved. Without `--json`, instructions and brief are sanitized previews; `--json` preserves the complete bounded values while escaping terminal controls. Project context and teammate messages remain task data, never operator approval.
 
+## Read-only timeline
+
+```sh
+forgectl surface project --root /absolute/private/projects timeline PROJECT_ID --json
+forgectl surface project --root /absolute/private/projects \
+  timeline PROJECT_ID --thread THREAD_ID --live
+```
+
+The timeline reuses Desk's renderer without opening its approval queue. With no `--thread`, it shows all logical thread states and the project's bounded mailbox transport evidence. A thread view includes only messages whose saved sender or recipient run ID matches that thread's binding history. Legacy messages without run IDs remain project-level evidence; names and timestamps never invent a thread attribution.
+
+`waiting`, `transport_accepted`, `delivery_failed`, and `delivery_unknown` describe delivery, not completed model turns or verified artifacts. Enrollment and native-session identity remain separate from process liveness, which is explicitly `unknown`. Message bodies, delivery diagnostics, native histories, and project instructions do not enter the projection. The current projection does not yet collect model-turn or artifact-verification evidence.
+
+JSON includes `version`, `project_id`, optional `thread_id`, and Desk's `view` with sanitized events, unknown liveness, `partial`, `held`, and dropped-record counts. It is not an atomic revision of both registry and mailbox. Malformed, over-cap, or unterminated input remains visible; the command prints the partial report and exits `1`. Reads are bounded to 8 MiB of mailbox data, 1 MiB per record, and 50,000 messages. `--live` requires a terminal and cannot be combined with `--json`. Neither snapshot nor live mode registers, launches, focuses, repairs state, or approves work.
+
+## Explicit herdr presentation
+
+```sh
+forgectl surface project --root /absolute/private/projects \
+  open PROJECT_ID --session projects-test --herdr-binary /absolute/herdr --json
+
+forgectl surface project --root /absolute/private/projects \
+  thread --project PROJECT_ID focus THREAD_ID \
+  --session projects-test --herdr-binary /absolute/herdr --json
+```
+
+`open` creates a project-owned workspace whose initial tab runs this executable's read-only live timeline, then focuses it. It records a `pending` operation before creation and the complete verified reference afterward. Reopening focuses that saved workspace; it does not infer ownership from a name or working directory, restart a server, or duplicate a missing/stale workspace. Both the session and absolute herdr binary are explicit; ambient session defaults are not used.
+
+References bind generated ownership markers to the server incarnation, endpoint, workspace, tab, pane, and stable terminal. Display labels are not ownership. Changed or duplicate markers, moved/replaced terminals, or server turnover are refused. An ambiguous creation remains `unknown` rather than allowing an automatic retry. Inspect `show --json` for `surface_operations`; do not delete the registry or manually alter phases to force a retry. Automatic recovery/retirement of unresolved operations is not provided by this slice.
+
+Presentation reports include the registry revision, exact IDs, `focused`, and any operation/workspace identity. `verified` describes the saved surface, not proof that its viewer or a native harness is still running. If creation is recorded but focus fails, the command reports `focused: false` and exits `1`; a later `open` attempts only focus. Thread focus requires a current enrollment and a verified tab for that exact active run. It never silently creates a tab, resumes native history, or launches another writer. Native thread launch/attachment remains under integration.
+
 ## Persistence and refusals
 
 The registry uses a versioned `registry.json`, a private lock, and atomic replacement under the named root. Creation includes the coordinator thread in the same transaction. Fresh CLI processes read the same project/thread IDs; they do not reconstruct identity from labels, directories, or terminal IDs.
@@ -61,6 +92,6 @@ Exit codes: `0` for completed creation, binding, or inspection; `1` for state/st
 
 ## Remaining integration
 
-These records are the foundation, not a complete Projects interface. Native launch/attachment, herdr sidebar/tab presentation, Desk monitoring, and the live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
+These commands remain a source-build integration, not a complete accepted Projects interface. Native thread launch/attachment, model-turn and artifact-verification evidence, explicit surface retirement, and live reconnect/replacement checks remain tracked in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md).
 
 The existing [team mailbox](surface-team.md) remains the communication authority. Project context and teammate messages never count as operator approval. Desk's human approval queue remains separate from read-only project monitoring.

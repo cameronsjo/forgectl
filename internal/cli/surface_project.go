@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -29,7 +30,7 @@ type projectThreadReport struct {
 	Observation *project.Observation `json:"observation,omitempty"`
 }
 
-func newSurfaceProjectCmd() *cobra.Command {
+func newSurfaceProjectCmd(deps module.Deps) *cobra.Command {
 	var root string
 	command := &cobra.Command{
 		Use:          "project",
@@ -42,7 +43,9 @@ func newSurfaceProjectCmd() *cobra.Command {
 	command.AddCommand(newSurfaceProjectCreateCmd(&root))
 	command.AddCommand(newSurfaceProjectListCmd(&root))
 	command.AddCommand(newSurfaceProjectShowCmd(&root))
-	command.AddCommand(newSurfaceProjectThreadCmd(&root))
+	command.AddCommand(newSurfaceProjectThreadCmd(deps, &root))
+	command.AddCommand(newSurfaceProjectTimelineCmd(deps, &root))
+	command.AddCommand(newSurfaceProjectOpenCmd(deps, &root))
 	return command
 }
 
@@ -202,7 +205,7 @@ func newSurfaceProjectShowCmd(root *string) *cobra.Command {
 	return withProjectRoot(root, command)
 }
 
-func newSurfaceProjectThreadCmd(root *string) *cobra.Command {
+func newSurfaceProjectThreadCmd(deps module.Deps, root *string) *cobra.Command {
 	var projectID string
 	command := &cobra.Command{
 		Use:   "thread",
@@ -216,6 +219,7 @@ func newSurfaceProjectThreadCmd(root *string) *cobra.Command {
 	command.AddCommand(newSurfaceProjectThreadReadCmd(root, &projectID, true))
 	command.AddCommand(newSurfaceProjectThreadBindCmd(root, &projectID))
 	command.AddCommand(newSurfaceProjectThreadContextCmd(root, &projectID))
+	command.AddCommand(newSurfaceProjectThreadFocusCmd(deps, root, &projectID))
 	return command
 }
 
