@@ -1,14 +1,14 @@
 # Cross-harness collaboration loop
 
-Status: in progress
-Next action: rerun live Codex/Pi acceptance with explicit executable and model selection after correcting the first runtime failures.
+Status: first milestone accepted; later harnesses and Projects remain staged
+Next action: apply the proven delivery contract to the next harness without treating a same-harness coordinator replacement as harness-neutral acceptance.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
 
 Cameron approved the proposed collaboration-first sequence with “You do it ..” on 2026-10-16. Codex will first make two explicitly enrolled harnesses delegate work, ask and answer a clarification, return an artifact, and independently verify it without Cameron relaying messages. Codex will interrupt the loop and prove recovery before adding more harnesses or a Projects interface.
 
-The permission is to communicate within this task's team, not to impersonate Cameron, expand tool permissions, approve actions for another agent, merge, deploy, or alter installed production tools. This implementation uses an isolated source build and dedicated sessions. Existing Agent Board, Codex daemon, Pi settings, Claude settings, and fleet services remain untouched. Feature-branch commits and pushes are authorized; PR creation, merge, installation, and deployment are not included.
+The permission is to communicate within this task's team, not to impersonate Cameron, expand tool permissions, approve actions for another agent, merge, deploy, or alter installed production tools. This implementation uses an isolated source build and dedicated sessions. No existing Agent Board, Codex-daemon, Pi, Claude, or fleet installation/service configuration is changed. Feature-branch commits and pushes are authorized; PR creation, merge, installation, and deployment are not included.
 
 ## Approach
 
@@ -26,10 +26,10 @@ Agent Board stays out of this first hot path. It can remain a directory, bulleti
 
 - [x] Register an explicit Codex coordinator and Pi teammate, including an isolated Codex endpoint; preserve legacy Claude identity and default-deny peer policy.
 - [x] Add write-ahead uncertain-delivery state, receiver receipt reconciliation, and negative tests for lost acknowledgements and restart ambiguity.
-- [ ] Harden the Pi extension's message-ID handling and socket ownership; verify against the installed runtime rather than only source declarations.
-- [ ] Run a real Codex-to-Pi task, clarification, answer, artifact, and independent executable check. Record the exact build, harness versions, session identities, and mailbox outcomes.
-- [ ] Exercise busy delivery, stopped receiver, lost acknowledgement, receiver restart, and coordinator replacement without a human message relay. State any unresolved uncertainty honestly.
-- [ ] Commit and push the tested feature branch with a reproducible acceptance procedure and evidence; do not install it globally.
+- [x] Harden the Pi extension's message-ID handling and socket ownership; verify against the installed runtime rather than only source declarations.
+- [x] Run a real Codex-to-Pi task, clarification, answer, artifact, and independent executable check. Record the exact build, harness versions, session identities, and mailbox outcomes.
+- [x] Exercise busy delivery, stopped receiver, lost acknowledgement, receiver restart, and coordinator replacement without a human message relay. State any unresolved uncertainty honestly.
+- [x] Commit and push the tested feature branch with a reproducible acceptance procedure and evidence; do not install it globally.
 
 ## Review and verification
 
@@ -41,13 +41,32 @@ Targeted Go tests precede wider tests and build/lint checks. Live acceptance use
 
 After the two-harness loop passes, evaluate Agent Board's incremental value, then apply the same contract to Claude and Hermes and finally the Projects interface. These are dependent stages, not claims of completion. Existing herdr worker-launch integration remains a separate delivery surface until its own real acceptance passes; this first headless proof does not complete that older plan's T5 gate.
 
-## Completion evidence
+The accepted loop does not need Agent Board in its delivery path: forgectl supplies the durable mailbox and each native harness supplies conversation delivery. Keep Agent Board available for discovery, cross-session announcements, or human-facing audit; do not rewrite or remove it on the strength of this experiment. This proves that the configured Board integrations are not a prerequisite for automatic task replies, not that every Board capability is redundant.
+
+Remaining acceptance gates are a different-harness coordinator swap, Claude and Hermes participation under Cameron's provider and native-permission constraints, herdr launch wiring, and a persistent Projects/thread interface. The first run replaces Codex with a new Codex process and thread; it does not prove any of those later gates.
+
+## Accepted live receipt
+
+On 2026-10-16 at 19:17 America/Chicago (2026-10-17 00:17 UTC), `node scripts/verify-cross-harness-loop.mjs --live ...` exited `0` and wrote `ACCEPTED` in the private run root `/private/tmp/fctl-live.hx3eAL`. The [command reference](../commands/surface-team.md#source-build-verification) describes reproduction. Raw native events remain private because they can contain locally loaded guidance.
+
+- Product build: clean commit `311b5e1fcc17ee3c3dee9821600ff9d64ad64e19`, executable SHA-256 `b226a2772790095439d6fb2cbc73a12ecf22de5c58f6f473d5f1faafbd2d3b79`. Product source was unchanged at verifier commit `5a4e5b9890fc9745a0e6c32574cfc22781be3903`; the verifier SHA-256 is `ae5e69170509e6863c2d357785d06e99b112e304941c6f374575ccddd6ac8683`.
+- Native runtimes: Codex `0.153.4` with `gpt-6-astra`; Pi `0.84.4` with direct `openai-codex/gpt-5.6-sol`. Pi loaded the existing estate-auth, cadence-guards, rules, and plan-mode extensions. No OpenRouter traffic was used.
+- Task `cross-harness-8e6a2618-35aa-4537-b12d-93c51be21b0e` produced durable delegation, clarification, answer, and completion records in positions `0,1,2,3`. The worker-created JSONL summarizer returned the required final-status counts, and the duplicate-message negative control exited `1` with the expected duplicate-ID error. Codex independently reran both checks after cleanup.
+- The intentionally lost acknowledgement reconciled with one proxy delivery, one accepted receipt, and one matching native user message. The worker execution journal contained one execution record. These are observations of this run, not a distributed exactly-once guarantee.
+- A message delivered during an active Pi turn reconciled to `sent`. A stopped Pi receiver returned `queued`/exit `75`; restarting at a fresh socket reopened native session `404e6ee8-8a1f-436c-ba4d-7fa7284509f5`, preserved one original delegation, and consumed the queued recovery message.
+- The retired coordinator's send and event were rejected. Replacement thread `01a14736-df07-76a2-9553-d3012b48ec37` received the worker reply and completed native turn `01a14738-1dfa-7821-8d6a-32f561e38f13`; it did not reuse original thread `01a14733-de88-75b0-9fe6-4fdf9eaa83ff`.
+- The actual Codex sandbox permitted a scratch write and denied an adjacent temporary-directory write. Its global configuration hash stayed unchanged throughout this accepted run. Both owned Codex servers exited `0`; both owned Pi processes exited `143` after requested termination. No cleanup or configuration-check failures were recorded.
+- Receipt hashes: `events.jsonl` SHA-256 `430c4dc57b7ca5a7bb4dcef07e1c0d9392c901bbd31dbb75fe7bb53b4582cae8`; `ACCEPTED` SHA-256 `b7eddb06963f0eb9a7e344733796ab4942a91a81ea354de47d1160363c731119`; worker utility SHA-256 `0edfdfac3be728f2412bc39ab24d72aeac614e255e4bbd5e81b4e569eefe5b58`.
+
+The source-build feature branch was pushed and its remote SHA matched `5a4e5b9890fc9745a0e6c32574cfc22781be3903` before this receipt-only documentation update. No PR, merge, production installation, or deployment was performed.
+
+## Development evidence and corrected failures
 
 - Baseline: `go test ./internal/surface/mail` passed on the unmodified base. The first sandbox attempt could not write Go's cache; the permitted retry using the normal cache passed.
 - Implementation checks: the focused mail/team/send/inbox/flush/event tests pass, the actual embedded-extension behavioral script passes, and `go build` produces the isolated executable. The repository-pinned golangci-lint 2.13.1 reports `0 issues` with Go 1.26.8; the machine's default Go 1.27 export format is newer than that linter supports.
 - A wider CLI run completed with one `TestDeskWatch_ClosedPipeExits141` timeout; its isolated fresh rerun passed. This is not recorded as a fully green wider suite.
 - Native Codex probe: installed 0.153.4 completed WebSocket-over-Unix initialization and created an idle ephemeral thread with no model turns; the owned server stopped with exit 0.
-- Live acceptance remains pending. The first live verifier attempt stopped before registration or model turns because plain Pi `--help` exceeded its 30-second preflight timeout. The next preflight loads built-in CLI metadata without unrelated extensions; actual model processes still load the explicit authentication and safety extensions.
+- The first live verifier attempt stopped before registration or model turns because plain Pi `--help` exceeded its 30-second preflight timeout. The next preflight loads built-in CLI metadata without unrelated extensions; actual model processes still load the explicit authentication and safety extensions.
 - The second live attempt reached both runtimes but did not delegate work. Pi selected an unsupported `openai-codex/gpt-5.5` model; the verifier now checks explicit model selection and treats native model errors as failures. Codex's login shell selected an older installed forgectl despite the inherited `PATH`; delegation prompts and persisted reply hints now use the isolated executable's absolute path.
 - Starting a workspace-write Codex thread persisted scratch trust entries in global configuration. Codex removed only its own two entries, preserving concurrent unrelated changes. The verifier now starts read-only threads with process-scoped untrusted-project overrides and checks for scratch-path persistence. Task turns retain a scratch-only workspace-write sandbox with network access disabled; this is not a global trust or sandbox change.
 - A fresh no-model probe of the corrected initialization returned an idle read-only thread, left global configuration byte-identical, and stopped its owned server with exit 0. After the reply-path correction, all mail tests, the focused CLI tests, and the embedded-extension behavioral tests passed again; the shell-quoting test executes the rendered argument through a real shell.

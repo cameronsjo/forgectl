@@ -66,6 +66,23 @@ The behavioral extension test uses the actual embedded TypeScript source with a 
 
 The opt-in live verifier requires a fresh private scratch directory, explicit isolated binary paths, a locally installed `ws` module entrypoint through `--websocket-module`, and the installed Pi authentication and safety extensions through repeatable `--pi-extension` arguments. The WebSocket library handles Codex's native Unix transport without a TCP bridge or a new global installation. Prefer the native Codex executable rather than a wrapper so the verifier owns the server process it stops.
 
+With these paths and existing authenticated model IDs set for the local machine:
+
+```sh
+scratch=$(mktemp -d /private/tmp/fctl-live.XXXXXX)
+node scripts/verify-cross-harness-loop.mjs --live \
+  --forgectl "$FORGECTL_BUILD" --root "$scratch" \
+  --websocket-module "$WEBSOCKET_MODULE" \
+  --codex "$CODEX_NATIVE" --codex-model "$CODEX_MODEL" \
+  --pi "$PI_BINARY" --pi-provider "$PI_PROVIDER" --pi-model "$PI_MODEL" \
+  --pi-extension "$PI_AUTH_EXTENSION" \
+  --pi-extension "$PI_GUARDS_EXTENSION" \
+  --pi-extension "$PI_RULES_EXTENSION" \
+  --pi-extension "$PI_PLAN_EXTENSION"
+```
+
+All path variables must be absolute. Include every authentication and safety extension required by the local Pi setup; these arguments are not permission to disable existing protections. Successful completion writes `ACCEPTED` only after owned-process cleanup and the final configuration check. The [first accepted run](../plans/2026-10-16-cross-harness-collaboration-loop.md#accepted-live-receipt) records the exact tested build and its limitations.
+
 Supply the required `--codex-model ID` and the paired `--pi-provider NAME --pi-model ID` to select existing authenticated models explicitly. The verifier checks the native selected models and fails on a model error rather than treating a settled failed turn as readiness. It initializes persistent Codex threads read-only with a process-scoped untrusted-project override, then grants each task turn workspace writes only within the scratch root. Their native session records remain in Codex's normal history. It checks that Codex did not persist the scratch path in global configuration.
 
 The Codex sandbox explicitly excludes the otherwise writable `/tmp` and `TMPDIR` defaults. A native no-model command must successfully write inside the scratch root and fail to write an adjacent temporary path before model work begins. Startup has a bounded two-minute allowance for the required Pi extensions. Replacement waits for the old coordinator's current work to settle, and success requires the new coordinator to consume the worker's reply in its own native thread and finish that turn—not merely accept it into a queue.
