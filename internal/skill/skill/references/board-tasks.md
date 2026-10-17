@@ -94,7 +94,7 @@ Read the `--json` result (stdout on success, the `code` of the stderr object on 
 |---|---|
 | Exit 0, `"done": true`, `"already_done": false` | Done. Report the id and the closed task's title and project. If `evidence_recorded` is `false`, say so. |
 | Exit 0, `"already_done": true` | Fine. Nothing was written. Report the id as already done. |
-| `not_confirmed` | The update may have landed. Read the task with `get_task`, or with `forgectl tasks show <id>` with its stderr kept, before any retry. If stderr says `serving cached data`, the read failed. Retry at most once per id in this session, and only if the read succeeds and shows the task open. A second `not_confirmed`, or a failed read, is reported to the operator as not confirmed and never retried. |
+| `not_confirmed` | The update may have landed. Read the task with `get_task`, or with `forgectl tasks show <id>` with its stderr kept, before any retry. If stderr says `serving cached data`, the read failed. A cache older than 72h is not served: `tasks ls`, `show` and `ready` print `refusing data older than 72h` to stderr, write nothing to stdout and exit 7. Treat exit 7 as a failed read. Pass `--allow-stale` only when the operator accepts old data, and never to confirm a write. Retry at most once per id in this session, and only if the read succeeds and shows the task open. A second `not_confirmed`, or a failed read, is reported to the operator as not confirmed and never retried. |
 | `unauthorized`, `write_refused`, `credential_missing` | Report the id as still open. Do not retry. Credential setup is the operator's. |
 | Exit 4 (host refused) | Report it. Never change `--host` or the config to get around it. |
 | `not_found` | Report the id as not found. Do not search for the task another way. |
@@ -112,3 +112,11 @@ If you marked the wrong task done, or marked a task done whose work had not land
 ## Creating a task
 
 When you create a board task, record what will finish it: a repo plus an issue, PR, or plan. Put that in the task's description, and put the new id in that plan's `card:` or that PR body's `Board-Task:` line. A task that only the operator can finish needs the operator's go before you create it.
+
+## Reading the board
+
+`forgectl tasks ls`, `show` and `ready` read the live board and fall back to a local cache when the host is unreachable. Keep stderr: a fallback prints `forgectl: STALE DATA: <host> unreachable (<cause>) — serving cached data, <age> old` there, and `show --json` adds a `stale` object. Data marked stale is not the current board.
+
+- A cache older than 72h is refused: stdout stays empty, stderr says `refusing data older than 72h; pass --allow-stale to use it`, and the exit code is 7. Report the board as unreadable. Do not pick work from it.
+- `--allow-stale` serves that cache anyway, with the notice. Pass it only when the operator has said old data is acceptable.
+- Exit 2 is an unreachable host with no cache to serve. Exit 3 is a rejected credential. Exit 4 is a refused host.

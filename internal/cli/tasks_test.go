@@ -215,7 +215,7 @@ func TestTasksLs_Unreachable_FallsBackToCacheWithAgeStated(t *testing.T) {
 	if mkErr := os.MkdirAll(filepath.Dir(cachePath), 0o700); mkErr != nil {
 		t.Fatal(mkErr)
 	}
-	stale := tasks.Snapshot{Tasks: []tasks.Task{{ID: 7, Title: "cached task", Position: 1}}}
+	stale := tasks.Snapshot{Tasks: []tasks.Task{{ID: 7, Title: "cached task", Position: 1}}, FetchedAt: time.Now().Add(-time.Hour)}
 	if saveErr := tasks.SaveCache(cachePath, stale); saveErr != nil {
 		t.Fatal(saveErr)
 	}
@@ -353,7 +353,8 @@ func TestTasksReads_CacheFallbackNamesCauseAndAge(t *testing.T) {
 		return nil, fmt.Errorf("%w: dial tcp 192.0.2.1:443: connect: no route to host", tasks.ErrUnreachable)
 	}
 
-	cmds := [][]string{{"ls", "--json"}, {"ready", "--json"}, {"show", "1", "--json"}}
+	// 286h is past the ceiling, so these reads opt in with --allow-stale.
+	cmds := [][]string{{"ls", "--json", "--allow-stale"}, {"ready", "--json", "--allow-stale"}, {"show", "1", "--json", "--allow-stale"}}
 	for _, args := range cmds {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			ageCache() // an earlier subtest's live read refreshed the cache
