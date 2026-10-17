@@ -45,6 +45,16 @@ The accepted loop does not need Agent Board in its delivery path: forgectl suppl
 
 Remaining acceptance gates are a different-harness coordinator swap, Claude and Hermes participation under Cameron's provider and native-permission constraints, herdr launch wiring, and a persistent Projects/thread interface. The first run replaces Codex with a new Codex process and thread; it does not prove any of those later gates.
 
+### Next bounded unit: replace Codex with Pi
+
+The next unit uses the already approved selectable-coordinator contract without adding a new transport or provider. Registration already supports a Pi coordinator, but the embedded inbox currently requires `FORGECTL_WORKER` and therefore remains inert for the emitted coordinator environment. Codex will correct that role mismatch and prove a native cross-harness handoff before adding Hermes.
+
+- [ ] Activate the Pi inbox for exactly one explicit worker or coordinator identity; reject mixed coordinator/worker identities, and require the explicit ledger/run fields for a coordinator. Preserve the existing worker path and all receipt, socket, and permission controls.
+- [ ] Add behavioral role controls against the embedded extension, including missing and conflicting identities.
+- [ ] Extend the live verifier after its existing Codex replacement: retire that coordinator, register the same role with a fresh run and Pi session, and have Pi read the existing task ledger, delegate a bounded recovery check, receive its worker's native reply, and settle successfully. No native private-history conversion is implied.
+- [ ] Verify that the retired Codex run can no longer send or report events, that the Pi coordinator's reply is consumed in its own native session, and that cleanup includes every newly owned process.
+- [ ] Commit and push the verified unit; keep installed tools and services unchanged. Keep all model traffic on OpenAI.
+
 ## Accepted live receipt
 
 On 2026-10-16 at 19:17 America/Chicago (2026-10-17 00:17 UTC), `node scripts/verify-cross-harness-loop.mjs --live ...` exited `0` and wrote `ACCEPTED` in the private run root `/private/tmp/fctl-live.hx3eAL`. The [command reference](../commands/surface-team.md#source-build-verification) describes reproduction. Raw native events remain private because they can contain locally loaded guidance.
