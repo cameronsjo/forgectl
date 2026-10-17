@@ -71,12 +71,13 @@ var (
 )
 
 // attentionAgent reduces a herdr agent row to the queue's view. The session
-// is the Claude Code session id (attentionSession); the names are the
-// worktree and the basenames of the agent's directories, for the
-// worker-prefix match.
+// is the Claude Code session id (attentionSession); the names are herdr's
+// agent name first, then the worktree and the basenames of the agent's
+// directories, for the worker-prefix match. A worktree path is free-form, so
+// the agent name is the stable label (forgectl#1286).
 func attentionAgent(a herdr.Agent) attention.Agent {
 	out := attention.Agent{Pane: a.PaneID, Status: a.AgentStatus, Session: attentionSession(a)}
-	var names []string
+	names := []string{a.Name}
 	if a.Tokens != nil {
 		names = append(names, a.Tokens.Worktree, baseName(a.Tokens.CWD))
 	}

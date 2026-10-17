@@ -217,8 +217,8 @@ object is still printed, with the ids and the worktree, and the launch then
 exits 1: check the exit code before trusting the empty fields.
 
 A worker launch also shows the worker's name in herdr's sidebar: it sets the
-workspace token "worker" (herdr workspace report-metadata), which a
-[ui.sidebar.spaces] row shows as $worker, after the workspace ownership
+workspace token "forgectl_worker" (herdr workspace report-metadata), which a
+[ui.sidebar.spaces] row shows as $forgectl_worker (it was $worker before forgectl#1287), after the workspace ownership
 check. The workspace label stays the ownership marker. A failure to set it is a note on stderr, not a failed
 launch.
 

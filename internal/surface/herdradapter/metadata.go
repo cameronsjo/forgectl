@@ -22,8 +22,13 @@ const MetadataSource = "forgectl-surface"
 
 // WorkerNameToken is the workspace token that carries a worker's name. A
 // herdr sidebar shows it where the operator's [ui.sidebar.spaces] rows name
-// "$worker" (forgectl#1047). The workspace label stays the ownership marker.
-const WorkerNameToken = "worker"
+// "$forgectl_worker" (forgectl#1047). The workspace label stays the ownership
+// marker. The name carries forgectl's prefix because the token map is shared:
+// a bare "worker" could overwrite, or be overwritten by, another reporter's
+// token (forgectl#1287). It was "worker" before forgectl#1287; nothing in
+// forgectl reads it back, so only a sidebar row needs the new name. A key
+// the caller picks for TagPane is the caller's own and stays unprefixed.
+const WorkerNameToken = "forgectl_worker"
 
 // herdr's own limits on a metadata report (src/app/api_helpers.rs). A key
 // outside them is refused by herdr; checking here gives the refusal before
