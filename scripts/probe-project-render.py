@@ -458,6 +458,8 @@ class VTScreen:
 def _kill_and_reap(pid: int, fd: int) -> tuple[int | None, int | None, bool]:
     status = None
     reaped = False
+    with contextlib.suppress(OSError):
+        os.close(fd)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(os.getpgid(pid), sig)
@@ -477,8 +479,6 @@ def _kill_and_reap(pid: int, fd: int) -> tuple[int | None, int | None, bool]:
             time.sleep(0.05)
         if reaped:
             break
-    with contextlib.suppress(OSError):
-        os.close(fd)
     if not reaped:
         with contextlib.suppress(ChildProcessError):
             waited, status = os.waitpid(pid, os.WNOHANG)

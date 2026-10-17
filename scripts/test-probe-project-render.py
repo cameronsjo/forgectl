@@ -8,6 +8,7 @@ import os
 import pathlib
 import tempfile
 import time
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("probe_project_render", ROOT / "probe-project-render.py")
@@ -136,6 +137,18 @@ def test_child_has_grid_before_parent_runs() -> None:
             PROBE.SETTLE_TIME = original_settle
 
 
+def test_completed_capture_closes_master_before_reaping() -> None:
+    operations = []
+    with (
+        patch.object(PROBE.os, "close", side_effect=lambda descriptor: operations.append(("close", descriptor))),
+        patch.object(PROBE.os, "getpgid", return_value=123),
+        patch.object(PROBE.os, "killpg", side_effect=lambda group, sig: operations.append(("signal", group))),
+        patch.object(PROBE.os, "waitpid", side_effect=lambda pid, options: (operations.append(("wait", pid)) or (pid, 0))),
+    ):
+        assert PROBE._kill_and_reap(123, 456) == (0, None, True)
+    assert operations.index(("close", 456)) < operations.index(("wait", 123))
+
+
 def main() -> int:
     for test in (
         test_title_is_not_screen_content,
@@ -144,6 +157,7 @@ def main() -> int:
         test_split_queries_and_utf8_box_drawing,
         test_unconfirmed_cleanup_fails_capture,
         test_child_has_grid_before_parent_runs,
+        test_completed_capture_closes_master_before_reaping,
     ):
         test()
     print("probe-project-render contract tests passed")
