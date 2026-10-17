@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: approved direction; P1 foundation reviewed and ready; Hermes presentation choice pending
-Next action: implement and verify P1 while resolving the capability-specific P3 presentation boundary.
+Status: P1 foundation implemented and verified; P2 run binding next; Hermes presentation choice pending
+Next action: bind logical threads to explicit mailbox runs while resolving the capability-specific P3 presentation boundary.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -54,7 +54,7 @@ P2 binding snapshots never update automatically. An explicit repeat bind of the 
 
 ## Work
 
-- [ ] P1: Add the private versioned project/thread store and the exact creation/inspection CLI above. Record stable IDs and the coordinator role; test restart, concurrent writers, corrupt/public/symlinked/hardlinked state, wrong-project IDs, and no-write reads. Reuse `privdir.OpenChecked` for read-only directory validation; do not use helpers that silently repair modes on read.
+- [x] P1: Add the private versioned project/thread store and the exact creation/inspection CLI above. Record stable IDs and the coordinator role; test restart, concurrent writers, corrupt/public/symlinked/hardlinked state, wrong-project IDs, and no-write reads. Reuse `privdir.OpenChecked` for read-only directory validation; do not use helpers that silently repair modes on read.
 - [ ] P2: Bind logical threads to explicitly enrolled mailbox runs using existing `RunID` and native identity. Preserve history, detect stale bindings, reject reused replacement RunIDs, and provide a concise context capsule from project instructions, thread brief, and durable mailbox references without converting native histories. Test stale compare-and-update, same run claimed by two threads, roster change before/after snapshot persistence, interrupted binding, and coordinator harness replacement.
 - [ ] P3: Integrate task-owned herdr presentation and native launch/attach capabilities. Reuse the existing surface handshake, posture, ownership, and recovery mechanisms instead of typing prompts into arbitrary panes. Verify exact current source/API contracts before extending their seam; add restart, wrong-pane, ambiguous-ack, and unrelated-workspace negative controls.
 - [ ] P4: Reuse Desk's read-only renderer for project/thread run status and timeline, with a sanitized source/projection and explicit unknown/stale states. Preserve the human approval queue unchanged. Verify parsing and rendered waiting, failure, completed-turn, and independently verified-result states; malformed inputs must not become success.
@@ -83,6 +83,8 @@ Native source/help evidence establishes different UI capabilities: Codex `resume
 
 ## Completion evidence
 
-None yet for the Projects interface. The accepted Hermes and Codex/Pi receipts are prerequisites, not substitutes for this plan's acceptance.
+P1's logical foundation is verified; the Projects interface and live P5 acceptance remain incomplete. The accepted Hermes and Codex/Pi receipts are prerequisites, not substitutes for this plan's acceptance.
+
+P1 verification: Codex ran `go test ./internal/privdir ./internal/surface/project -count=1` and the same packages with `-race`, then `go test ./internal/cli -run 'TestSurfaceProject|TestJSONStderr_NoUnwrappedErrorSites|TestJSONEmittersUseTermsafeEncoder' -count=1`. These passed, including an actual source-built executable creating and reopening the same project in separate processes, production JSON error framing, and unsafe-state negative controls. The first pinned lint run found two unchecked test-root cleanup errors; after correcting them, Codex reran the project package tests and golangci-lint v2.13.1 over `internal/privdir`, `internal/surface/project`, `internal/surface/hermes`, `internal/surface/mail`, and `internal/cli`: exit 0, zero new issues against `origin/main`. `git diff --check` passed. This is source/fixture evidence, not a native launch or a complete Projects UI claim.
 
 P2 enrollment prerequisite: team registration now permits a same-RunID replacement only as an exact identity no-op or one-way native-session discovery. It preserves observed state and watchers, rejects identity/session changes and another current member's RunID, and still mints a fresh ID when omitted. Codex independently ran `go test ./internal/surface/mail -count=1`, the `TestRegister` race tests, and both verifier contract scripts successfully on the changed source. These checks use fixtures and local sockets; they do not replace P5 live acceptance. Project binding and historical-run validation remain pending.

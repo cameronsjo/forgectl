@@ -4,6 +4,8 @@
 
 This is an opt-in source-build workflow. Use the same isolated `forgectl` build on every participant's `PATH`; an older installed binary may not have these commands. Invoke its absolute path when starting a task because login profiles and aliases may replace `PATH`. New messages retain that executable path in their reply hint, including across queued retries. Keep native sandbox, approval, authentication, and guard extensions enabled.
 
+The separate [persistent-project commands](surface-project.md) record logical projects and threads. Creating those records does not enroll or launch a member; the mailbox remains the communication authority.
+
 ## Register members
 
 ```sh

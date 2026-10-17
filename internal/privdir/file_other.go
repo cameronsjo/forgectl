@@ -9,3 +9,6 @@ import (
 
 // OpenFile is unavailable off Unix, for the reason Pin is; see the unix file.
 func OpenFile(int, string, int, fs.FileMode) (*os.File, error) { return nil, ErrUnsupported }
+
+// OpenFileChecked is unavailable off Unix; see the unix implementation.
+func OpenFileChecked(int, string, int, fs.FileMode) (*os.File, error) { return nil, ErrUnsupported }

@@ -50,7 +50,7 @@ deep-dive get a link here.
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
-| `surface` | Start a harness inside a terminal manager; explicitly enroll native conversations for task messaging | Usage below; [teams](docs/commands/surface-team.md) |
+| `surface` | Start a harness inside a terminal manager; keep persistent collaboration projects and explicitly enroll native conversations for task messaging | Usage below; [teams](docs/commands/surface-team.md), [collaboration projects](docs/commands/surface-project.md) |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
@@ -203,6 +203,11 @@ forgectl surface list --orphans    # this repo's workers: present, gone, or unre
 forgectl surface tag x --token task=PAP-12   # display tokens on x's herdr pane ($task in the sidebar)
 forgectl surface usage x --json    # price x's transcript, no GitHub call
 forgectl surface close x           # close x's workspace; remove its worktree only if no work is lost; never deletes the branch
+
+# logical collaboration projects — private state only, no agent or worktree launched
+forgectl surface project --root /absolute/private/registry create "Feature work" --worktree /absolute/repo --json
+forgectl surface project --root /absolute/private/registry list --json
+forgectl surface project --root /absolute/private/registry thread --project PROJECT_ID create "Review" --brief review.md --json
 
 # recipe — run small built-in workbench recipes (alias: r)
 forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it

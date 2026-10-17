@@ -36,6 +36,19 @@ import (
 // A name that does not exist (and is not created) is fs.ErrNotExist. Every
 // refusal is ErrUnsafeFile, with a terminal-safe reason that names the file.
 func OpenFile(dirFD int, name string, flags int, mode fs.FileMode) (*os.File, error) {
+	return openFile(dirFD, name, flags, mode, true)
+}
+
+// OpenFileChecked opens name with the same descriptor-relative ownership,
+// type, link-count, and identity checks as OpenFile, but never changes the
+// file's mode. An existing file must already have mode exactly equal to mode.
+// This is for read-only state inspection and atomic stores that must refuse a
+// public file rather than silently repairing it.
+func OpenFileChecked(dirFD int, name string, flags int, mode fs.FileMode) (*os.File, error) {
+	return openFile(dirFD, name, flags, mode, false)
+}
+
+func openFile(dirFD int, name string, flags int, mode fs.FileMode, repairMode bool) (*os.File, error) {
 	if err := validName(name); err != nil {
 		return nil, err
 	}
@@ -55,7 +68,7 @@ func OpenFile(dirFD int, name string, flags int, mode fs.FileMode) (*os.File, er
 		return nil, unsafeFile("open %s: %s", name, err)
 	}
 	f := os.NewFile(uintptr(fd), name)
-	if err := verifyFile(dirFD, name, fd, want); err != nil {
+	if err := verifyFile(dirFD, name, fd, want, repairMode); err != nil {
 		f.Close() //nolint:errcheck,gosec // refusing; nothing was written
 		return nil, err
 	}
@@ -64,7 +77,7 @@ func OpenFile(dirFD int, name string, flags int, mode fs.FileMode) (*os.File, er
 
 // verifyFile is OpenFile's check of the open descriptor fd against name in
 // dirFD.
-func verifyFile(dirFD int, name string, fd int, want uint32) error {
+func verifyFile(dirFD int, name string, fd int, want uint32, repairMode bool) error {
 	var pinned unix.Stat_t
 	if err := unix.Fstat(fd, &pinned); err != nil {
 		return unsafeFile("stat %s: %s", name, err)
@@ -92,6 +105,9 @@ func verifyFile(dirFD int, name string, fd int, want uint32) error {
 	// Stat_t.Mode is uint16 on Darwin and uint32 on Linux; widen explicitly.
 	if uint32(pinned.Mode)&0o7777 == want {
 		return nil
+	}
+	if !repairMode {
+		return unsafeFile("%s has mode %04o, want %04o", name, uint32(pinned.Mode)&0o7777, want)
 	}
 	if err := unix.Fchmod(fd, want); err != nil {
 		return unsafeFile("restrict %s mode: %s", name, err)
