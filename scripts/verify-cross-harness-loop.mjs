@@ -72,12 +72,16 @@ function lastJson(text) {
 
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
-function waitClosed(processHandle, timeout = 30_000) {
+function waitClosed(processHandle, timeout = STARTUP_TIMEOUT) {
   if (processHandle.exitCode !== null || processHandle.signalCode !== null) return Promise.resolve();
   return new Promise((resolvePromise, reject) => {
     const timer = setTimeout(() => reject(new Error(`owned process ${processHandle.pid ?? "unknown"} did not exit within ${timeout}ms`)), timeout);
     processHandle.once("close", () => { clearTimeout(timer); resolvePromise(); });
   });
+}
+
+export function assertDuplicateRejected(result) {
+  if (!Number.isInteger(result.code) || result.code <= 0 || !/duplicate/i.test(result.stderr)) fail("duplicate-ID fixture did not fail with a duplicate diagnostic");
 }
 
 async function ensureFreshRoot(root) {
@@ -667,7 +671,8 @@ async function main() {
   const utility = join(piRoot, "summarize-mailbox.mjs");
   const taskId = `cross-harness-${randomUUID()}`;
   const delegation = `You are the coordinator of an explicitly enrolled forgectl team. Delegate task ${taskId} to pi-worker by running exactly the available native command forgectl surface send pi-worker '<task text>'; your shell inherits FORGECTL_LEDGER=${ledger}, FORGECTL_COORDINATOR=coordinator, and FORGECTL_RUN_ID for this registered process. Do not create the worker artifact yourself. Tell Pi to ask one meaningful clarification before any artifact work, and require the clarification body to contain exactly CLARIFICATION ${taskId}. Then stop this turn and wait. The next coordinator turn will be started by the worker's queued reply; answer that clarification directly through forgectl surface send pi-worker with a body containing exactly ANSWER ${taskId}, preserving task ID ${taskId}. The worker must create ${utility} with Node builtins only, read fixture ${fixture} in forgectl mailbox JSONL shape, fold final statuses including unconfirmed, reject duplicate message-record IDs (duplicate op:msg IDs, not status records), append exactly one task execution record to ${join(piRoot, "worker-executions.jsonl")} shaped {"taskId":"${taskId}","executionId":"<unique>"}, and reply with a body containing exactly COMPLETED ${taskId}, its artifact path, and execution ID. The standalone utility stdout must be exactly one JSON object shaped {"counts":{"sent":1,"queued":1,"failed":1,"unconfirmed":1},"ids":["fixture-1","fixture-2","fixture-3","fixture-4"]} with no extra output. A successful delegation is transport acceptance, not proof of a completed turn; do not claim completion until the worker reply is visible in the inbox.`;
-  const exactBinaryDelegation = delegation.replaceAll("forgectl surface", `${forgectlCommand} surface`);
+  const artifactContract = `The utility CLI contract is node ${utility} INPUT_PATH. It must read the path from process.argv[2], not hardcode the fixture path, and reject a missing input path with a nonzero exit. The independent check will pass both the named valid fixture and a different duplicate-ID fixture through that argument. Duplicate message IDs must produce a nonzero exit and a diagnostic containing the word duplicate on stderr. Include this CLI contract in the worker delegation.`;
+  const exactBinaryDelegation = `${delegation} ${artifactContract}`.replaceAll("forgectl surface", `${forgectlCommand} surface`);
   await codexRpc.turn(threadId, `${exactBinaryDelegation} Use that exact absolute executable; a shell alias or login profile may select an older installed copy. Your network-disabled sandbox may enqueue the message with exit 75 because it cannot connect to the local receiver socket. The task supervisor automatically flushes this private team mailbox after your turn. If queued, do not resend or expand permissions; end the turn and wait for the native reply.`, coordinatorRoot, root);
   await assertNoScratchTrust(evidence, root);
   const delegated = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "coordinator" && message.to === "pi-worker" && message.body.includes(taskId) && ["sent", "unconfirmed"].includes(message.status), 60_000);
@@ -709,8 +714,8 @@ async function main() {
   const fixtureText = await readFile(fixture, "utf8");
   await writeFile(corrupt, `${fixtureText}${fixtureText.split("\n")[0]}\n`, { mode: 0o600 });
   const negative = await runCommand(evidence, process.execPath, [utility, corrupt], { cwd: piRoot, env: baseEnv, timeout: 30_000 });
-  evidence.add("negative-control", { code: negative.code, rejected: negative.code !== 0, stderr: negative.stderr });
-  if (negative.code === 0) fail("corrupted duplicate-ID fixture was accepted");
+  assertDuplicateRejected(negative);
+  evidence.add("negative-control", { code: negative.code, rejected: true, stderr: negative.stderr });
   const verifiedUtilityHash = createHash("sha256").update(await readFile(utility)).digest("hex");
   const verifiedExecutionLog = await readFile(executionLog, "utf8");
   const busyStartIndex = piRpc.lines.length;

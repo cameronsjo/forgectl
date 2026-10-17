@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { assertRegistration, assertRoundtripOrder, parseArgs, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
+import { assertDuplicateRejected, assertRegistration, assertRoundtripOrder, parseArgs, workspaceSandbox } from "./verify-cross-harness-loop.mjs";
 
 const flags = ["--live", "--forgectl", "/test/forgectl", "--root", "/test/root", "--websocket-module", "/test/ws.mjs"];
 assert.throws(() => parseArgs(flags), /--codex-model is required/);
@@ -45,5 +45,13 @@ const workerRegistration = {
   environment: { FORGECTL_LEDGER: "/test/ledger", FORGECTL_RUN_ID: "run-2", FORGECTL_WORKER: "worker", FORGECTL_INBOX: "/test/worker.sock" },
 };
 assert.equal(assertRegistration(workerRegistration, "worker"), workerRegistration);
+
+assert.doesNotThrow(() => assertDuplicateRejected({ code: 1, stderr: "Duplicate message-record ID: fixture-1" }));
+for (const result of [
+  { code: 0, stderr: "Duplicate message-record ID: fixture-1" },
+  { code: null, stderr: "Duplicate message-record ID: fixture-1" },
+  { code: 1, stderr: "Cannot read input file" },
+  { code: 1, stderr: "" },
+]) assert.throws(() => assertDuplicateRejected(result), /duplicate-ID fixture/);
 
 process.stdout.write("cross-harness verifier contract tests passed\n");
