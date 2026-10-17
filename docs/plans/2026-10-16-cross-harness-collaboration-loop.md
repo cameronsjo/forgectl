@@ -65,7 +65,7 @@ The next approved host-level attempt received an OpenAI usage-limit error during
 
 ### Remaining provider and authentication gates
 
-Cameron requested that model traffic stay on OpenAI. Codex has not enabled Anthropic or OpenRouter traffic, installed a translation gateway, or changed global authentication. No verified OpenAI-only native Claude route is available from this investigation; Claude live acceptance remains deferred under that constraint, not declared impossible.
+Cameron requested that model traffic stay on OpenAI. Codex has not enabled Anthropic or OpenRouter traffic, installed a translation gateway, or changed global authentication. No verified OpenAI-only native Claude route is available from this investigation; Claude live acceptance remains deferred under that constraint, not declared impossible. Cameron subsequently selected “Proceed with Codex/Pi/Hermes; defer Claude,” authorizing progress toward Projects after Hermes passes without waiting for Claude live acceptance. The OpenAI-only provider constraint remains unchanged.
 
 On the 2026-10-17 continuation, read-only checks found no `hermes` executable, no `~/.hermes/auth.json`, and no `OPENAI_API_KEY` in the process environment. Codex asked whether Cameron permits an isolated Hermes setup and its native import of Codex credentials into a private authentication store. Cameron answered “Make it happen,” authorizing that setup. This does not authorize another model provider, changes to existing global authentication, mutation of the third-party Hermes checkout, or use of a production relay.
 
@@ -77,7 +77,7 @@ On the 2026-10-17 continuation, read-only checks found no `hermes` executable, n
 - [ ] Prove real Hermes participation, interruption/restart behavior, and selected-session delivery with disposable task-owned processes. Keep uncertain delivery visible rather than resending blindly.
 - [ ] Record exact source/build/runtime evidence, commit and push the verified feature changes, and leave existing installations untouched.
 
-Projects remains behind the agreed harness acceptance sequence. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items are deferred here, not silently dropped or marked complete.
+Projects now depends on accepted Codex/Pi/Hermes collaboration, not Claude live acceptance. Existing herdr launch wiring remains a separate gate; this headless proof does not complete it. Agent Board remains optional for discovery, announcements, and audit, rather than a mandatory delivery broker. These items remain required continuation work, not silently dropped or marked complete.
 
 ### Hermes native preflight evidence
 
