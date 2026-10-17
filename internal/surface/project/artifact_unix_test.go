@@ -17,7 +17,7 @@ func TestVerifyArtifact(test *testing.T) {
 	worktree := test.TempDir()
 	path := filepath.Join(worktree, "result.txt")
 	contents := []byte("verified result\n")
-	if err := os.WriteFile(path, contents, 0o640); err != nil {
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		test.Fatal(err)
 	}
 	digest := sha256.Sum256(contents)
@@ -45,7 +45,7 @@ func TestVerifyArtifact(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o640 {
+	if info.Mode().Perm() != 0o600 {
 		test.Fatalf("source mode = %o", info.Mode().Perm())
 	}
 }
@@ -105,7 +105,7 @@ func TestVerifyArtifactRejectsSymlinkAndHardlink(test *testing.T) {
 	if err := os.Link(target, filepath.Join(worktree, "hard.txt")); err != nil {
 		test.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(worktree, "directory"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(worktree, "directory"), 0o700); err != nil {
 		test.Fatal(err)
 	}
 	for _, path := range []string{"link.txt", "link-dir/target.txt", "hard.txt", "directory"} {
@@ -164,7 +164,7 @@ func TestVerifyArtifactRejectsCanceledAndChangedSource(test *testing.T) {
 func TestVerifyArtifactRejectsRenamedAndReplacedDirectory(test *testing.T) {
 	worktree := test.TempDir()
 	directory := filepath.Join(worktree, "nested")
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	if err := os.Mkdir(directory, 0o700); err != nil {
 		test.Fatal(err)
 	}
 	path := filepath.Join(directory, "result.txt")
@@ -181,7 +181,7 @@ func TestVerifyArtifactRejectsRenamedAndReplacedDirectory(test *testing.T) {
 		if err := os.Rename(directory, oldDirectory); err != nil {
 			test.Fatalf("rename directory: %v", err)
 		}
-		if err := os.Mkdir(directory, 0o755); err != nil {
+		if err := os.Mkdir(directory, 0o700); err != nil {
 			test.Fatalf("replace directory: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(directory, "result.txt"), contents, 0o600); err != nil {
@@ -196,7 +196,7 @@ func TestVerifyArtifactRejectsRenamedAndReplacedDirectory(test *testing.T) {
 func TestVerifyArtifactRejectsRenamedAndReplacedWorktree(test *testing.T) {
 	parent := test.TempDir()
 	worktree := filepath.Join(parent, "worktree")
-	if err := os.Mkdir(worktree, 0o755); err != nil {
+	if err := os.Mkdir(worktree, 0o700); err != nil {
 		test.Fatal(err)
 	}
 	path := filepath.Join(worktree, "result.txt")
@@ -213,7 +213,7 @@ func TestVerifyArtifactRejectsRenamedAndReplacedWorktree(test *testing.T) {
 		if err := os.Rename(worktree, oldWorktree); err != nil {
 			test.Fatalf("rename worktree: %v", err)
 		}
-		if err := os.Mkdir(worktree, 0o755); err != nil {
+		if err := os.Mkdir(worktree, 0o700); err != nil {
 			test.Fatalf("replace worktree: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(worktree, "result.txt"), contents, 0o600); err != nil {
