@@ -51,6 +51,26 @@ Enrollment observations are `unbound`, `current`, or `stale`. `current` means on
 
 `thread context` returns a bounded context capsule: project instructions, the thread brief, stable IDs, the current saved run when bound, and exact mailbox references. It contains no native conversation history and performs no delivery, launch, registration, or approval. A stale binding is refused until explicitly resolved. Without `--json`, instructions and brief are sanitized previews; `--json` preserves the complete bounded values while escaping terminal controls. Project context and teammate messages remain task data, never operator approval.
 
+## Agents activity overview
+
+```sh
+forgectl surface project --root /absolute/private/projects agents PROJECT_ID --json
+forgectl surface project --root /absolute/private/projects agents PROJECT_ID --live
+forgectl surface project --root /absolute/private/projects \
+  agents PROJECT_ID --live --herdr-session projects-test \
+  --herdr-binary /absolute/herdr
+```
+
+The Agents overview has one row per logical thread, harness/current-model subtitles, and native activity intervals on a shared rolling time axis. It runs inside a terminal tab, preserving herdr's existing sidebar and tabs. Use Up/Down or `j`/`k` to select a thread, `+`/`-` to change the visible window from 5 to 60 minutes, and `q` to exit. Narrow terminals retain the identity/status list. `--no-icons` selects ASCII markers.
+
+When both explicit herdr options are provided, Enter focuses the selected thread's existing verified view and `e` opens or focuses its detailed evidence timeline. Actions recheck the selected run and surface identity; they never silently select a replacement run or guess a native resume command. Without those options the live view remains read-only and its focus/open actions are unavailable. `--live` requires a terminal and cannot be combined with `--json`. Printed and JSON output read one snapshot and perform no surface actions.
+
+Bars represent observed native activity, not task correctness or mailbox delivery. Codex supplies bounded native turn history; Pi and Hermes supply intervals observed by the current extension/supervisor process. Their `current-process` coverage and `since` time make unavailable earlier history explicit. Provider/model subtitles are the current selection, not the producer of every old interval. Historical model metadata is shown only when captured with that interval. Unsupported or unreachable sources remain unknown. Failed polls freeze open intervals at their last observation rather than extending them as if still active; finished observations remain visible. Old persisted turn evidence without start/end times is a point, never an invented duration. No prompt, generated task summary, or reasoning text is used as a label.
+
+Collection is read-only and rechecks exact enrollment after native inspection. Snapshots are bounded to 64 rows, 512 total intervals/points, and 2 MiB of encoded output, with four concurrent native reads, two seconds per read, and a five-second native-refresh deadline. JSON includes total/dropped counts, source coverage, and explicit partial/reason fields. An incomplete one-shot snapshot is still printed but exits nonzero; inspect its partial fields rather than treating it as complete project coverage.
+
+The existing explicit `thread observe` mutation can persist a settled interval only when its native turn ID and outcome match. Both actual endpoints are required; currently selected model metadata is never substituted for interval-captured metadata. Repeated observations preserve known values and the original observation time; missing metadata can be enriched once, but conflicting times/outcomes/known metadata are refused. The Agents view itself never writes these observations or reconstructs lost process history from mailbox receipts.
+
 ## Read-only timeline
 
 ```sh
@@ -109,7 +129,7 @@ forgectl surface project --root /absolute/private/projects \
   --session projects-test --herdr-binary /absolute/herdr --json
 ```
 
-`open` creates a project-owned workspace whose initial tab runs this executable's read-only live timeline, then focuses it. It records a `pending` operation before creation and the complete verified reference afterward. Reopening focuses that saved workspace; it does not infer ownership from a name or working directory, restart a server, or duplicate a missing/stale workspace. Both the session and absolute herdr binary are explicit; ambient session defaults are not used.
+`open` creates a project-owned workspace whose initial tab runs this executable's Agents overview, then focuses it. It records a `pending` operation before creation and the complete verified reference afterward. Reopening focuses that saved workspace; it does not replace an existing viewer, infer ownership from a name or working directory, restart a server, or duplicate a missing/stale workspace. Both the session and absolute herdr binary are explicit; ambient session defaults are not used. Existing project workspaces keep their original viewer; run `agents --live` directly in an operator-selected terminal to use the new overview without changing them.
 
 References bind generated ownership markers to the server incarnation, endpoint, workspace, tab, pane, and stable terminal. Human-readable label prefixes are not ownership. Changed or duplicate markers, moved/replaced terminals, or server turnover are refused. An ambiguous creation remains `unknown` rather than allowing an automatic retry. Inspect `show --json` for `surface_operations`; do not delete the registry or manually alter phases to force a retry. Automatic recovery/retirement of unresolved operations is not provided by this slice.
 

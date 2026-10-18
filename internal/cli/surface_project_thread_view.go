@@ -36,7 +36,7 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 				return err
 			}
 			store := project.Store{Root: *root}
-			registry, record, observations, err := store.Inspect(command.Context(), *projectID)
+			_, record, observations, err := store.Inspect(command.Context(), *projectID)
 			if err != nil {
 				return projectError(err)
 			}
@@ -58,26 +58,31 @@ func newSurfaceProjectThreadOpenCmd(deps module.Deps, root, projectID *string) *
 			if err != nil {
 				return projectError(err)
 			}
-			for _, operation := range record.SurfaceOperations {
-				if operation.Kind != project.SurfaceKindThread || operation.ThreadID != thread.ID || operation.RunID != binding.RunID || operation.Phase != project.SurfacePhaseVerified || operation.Retirement != nil {
-					continue
+			freshRegistry, freshRecord, freshThread, freshBinding, operation, inspectError := inspectCurrentProjectThreadView(command.Context(), store, record.ID, thread.ID, binding.RunID, options.Session, selectedPresentation, "")
+			if inspectError != nil {
+				return projectError(inspectError)
+			}
+			if operation.ID != "" {
+				if operation.Parent == nil || operation.Ref == nil {
+					return projectError(fmt.Errorf("%w: existing thread view reference is invalid", project.ErrConflict))
 				}
-				if operation.Presentation != selectedPresentation {
-					return projectError(fmt.Errorf("%w: existing tab uses a different presentation; close its view explicitly", project.ErrConflict))
-				}
-				if err := presentation.FocusThread(command.Context(), record.Workspace.Ref, *operation.Ref); err != nil {
+				if err := presentation.FocusThread(command.Context(), *operation.Parent, *operation.Ref); err != nil {
 					return projectError(err)
 				}
 				warnings := []string{}
-				if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *operation.Ref, thread.Name); warning != "" {
+				if warning := projectThreadMetadataWarning(presentation, command.Context(), *operation.Parent, *operation.Ref, freshThread.Name); warning != "" {
 					warnings = append(warnings, warning)
 				}
-				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "focused", Focused: true, Operation: &operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
+				workspace := freshRecord.Workspace
+				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: freshRegistry.Version, Revision: freshRegistry.Revision, ProjectID: freshRecord.ID, ThreadID: freshThread.ID, RunID: freshBinding.RunID, Action: "focused", Focused: true, Operation: &operation, Workspace: workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
+			}
+			if freshThread.ID == "" || freshBinding.RunID == "" {
+				return projectError(fmt.Errorf("%w: selected thread binding changed before view creation", project.ErrConflict))
 			}
 			if view == "native" {
-				return createProjectThreadNative(command, store, record, thread, binding, presentation, options, nativeOptions)
+				return createProjectThreadNative(command, store, freshRecord, freshThread, freshBinding, presentation, options, nativeOptions)
 			}
-			return createProjectThreadTimeline(command, store, record, thread, binding, presentation, options)
+			return createProjectThreadTimeline(command, store, freshRecord, freshThread, freshBinding, presentation, options)
 		},
 	}
 	options.flags(command)
@@ -142,21 +147,22 @@ func createProjectThreadTimeline(command *cobra.Command, store project.Store, re
 	var focusError error
 	warnings := []string{}
 	if completed.Phase == project.SurfacePhaseVerified {
-		_, freshProject, observations, inspectError := store.Inspect(command.Context(), record.ID)
+		freshRegistry, freshProject, _, _, freshOperation, inspectError := inspectCurrentProjectThreadView(command.Context(), store, record.ID, thread.ID, binding.RunID, options.Session, project.SurfacePresentationTimeline, completed.ID)
 		focusError = inspectError
-		if focusError == nil {
-			_, freshBinding, currentError := projectCurrentThread(freshProject, observations, thread.ID)
-			focusError = currentError
-			if focusError == nil && freshBinding.RunID != binding.RunID {
-				focusError = fmt.Errorf("%w: thread run changed after view creation", project.ErrConflict)
-			}
+		if focusError == nil && freshOperation.ID == "" {
+			focusError = fmt.Errorf("%w: thread view operation changed after creation", project.ErrConflict)
+		}
+		if focusError == nil && (freshOperation.Parent == nil || freshOperation.Ref == nil) {
+			focusError = fmt.Errorf("%w: thread view reference is unavailable after creation", project.ErrConflict)
 		}
 		if focusError == nil {
-			focusError = presentation.FocusThread(command.Context(), record.Workspace.Ref, *completed.Ref)
+			report.Version, report.Revision = freshRegistry.Version, freshRegistry.Revision
+			report.Workspace = freshProject.Workspace
+			focusError = presentation.FocusThread(command.Context(), *freshOperation.Parent, *freshOperation.Ref)
 		}
 		report.Focused = focusError == nil
 		if focusError == nil {
-			if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *completed.Ref, thread.Name); warning != "" {
+			if warning := projectThreadMetadataWarning(presentation, command.Context(), *freshOperation.Parent, *freshOperation.Ref, thread.Name); warning != "" {
 				warnings = append(warnings, warning)
 			}
 		}

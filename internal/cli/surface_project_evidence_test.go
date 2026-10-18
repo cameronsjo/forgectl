@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
 )
@@ -123,6 +124,49 @@ func TestSurfaceProjectEvidenceRefusesReplacementDuringObservation(test *testing
 			after, err := store.Snapshot(test.Context())
 			if err != nil || after.Revision != before.Revision || len(after.Projects[0].Evidence) != 0 {
 				test.Fatalf("stale observation changed state: %v %#v", err, after)
+			}
+		})
+	}
+}
+
+func TestSurfaceProjectEvidenceCapturesOnlyMatchingNativeInterval(test *testing.T) {
+	for _, scenario := range []string{"matched", "unrelated", "open", "duplicate", "outcome", "source"} {
+		test.Run(scenario, func(test *testing.T) {
+			store, created, member := prepareProjectEvidence(test)
+			now := time.Now().UTC()
+			started, ended := now.Add(-time.Minute), now.Add(-time.Second)
+			span := activity.Span{ID: "activity-1", TurnID: "native-turn", StartedAt: started, EndedAt: &ended, State: activity.Finished, Provider: "openai", Model: "captured-model"}
+			native := projectNativeObservation{Source: project.EvidenceSourceCodexThreadRead, NativeSessionID: member.ThreadID, Provider: "different-provider", Model: "currently-selected-model", Turn: &projectNativeTurn{ID: "native-turn", Status: project.EvidenceCompleted, ObservedAt: ended}, Activity: &activity.Snapshot{Version: activity.Version, Source: activity.SourceCodex, Coverage: activity.CoverageNativeHistory, ObservedAt: now, Spans: []activity.Span{span}}}
+			switch scenario {
+			case "unrelated":
+				native.Activity.Spans[0].TurnID = "another-turn"
+			case "open":
+				native.Activity.Spans[0].State, native.Activity.Spans[0].EndedAt = activity.Running, nil
+			case "duplicate":
+				span.ID = "activity-2"
+				native.Activity.Spans = append(native.Activity.Spans, span)
+			case "outcome":
+				native.Activity.Spans[0].State = activity.Failed
+			case "source":
+				native.Source = project.EvidenceSourcePiInbox
+			}
+			installProjectObserver(test, func(context.Context, mail.Worker) (projectNativeObservation, error) { return native, nil })
+			report, stderr, code := projectEvidenceCommand(test, store, created, member.RunID, "observe")
+			if scenario == "duplicate" || scenario == "outcome" || scenario == "source" {
+				if code == 0 || report.Evidence != nil {
+					test.Fatalf("contradictory interval accepted: exit=%d stderr=%s report=%+v", code, stderr, report)
+				}
+				return
+			}
+			if code != 0 || report.Evidence == nil {
+				test.Fatalf("observation rejected: exit=%d stderr=%s", code, stderr)
+			}
+			if scenario == "matched" {
+				if report.Evidence.StartedAt == nil || !report.Evidence.StartedAt.Equal(started) || report.Evidence.EndedAt == nil || !report.Evidence.EndedAt.Equal(ended) || report.Evidence.Provider != "openai" || report.Evidence.Model != "captured-model" || !report.Evidence.ObservedAt.Equal(now) {
+					test.Fatalf("captured interval was altered: %+v", report.Evidence)
+				}
+			} else if report.Evidence.StartedAt != nil || report.Evidence.EndedAt != nil || report.Evidence.Provider != "" || report.Evidence.Model != "" {
+				test.Fatalf("unmatched interval became evidence: %+v", report.Evidence)
 			}
 		})
 	}

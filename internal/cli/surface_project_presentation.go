@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -163,14 +164,14 @@ func newSurfaceProjectOpenCmd(deps module.Deps, root *string) *cobra.Command {
 	var options projectPresentationOptions
 	command := &cobra.Command{
 		Use:   "open <project-id>",
-		Short: "Create or focus the project's exact herdr workspace and read-only timeline",
+		Short: "Create or focus the project's exact herdr workspace and Agents overview",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, arguments []string) error {
 			if err := options.validate(); err != nil {
 				return err
 			}
 			store := project.Store{Root: *root}
-			registry, record, _, err := store.Inspect(command.Context(), arguments[0])
+			_, record, _, err := store.Inspect(command.Context(), arguments[0])
 			if err != nil {
 				return projectError(err)
 			}
@@ -182,14 +183,19 @@ func newSurfaceProjectOpenCmd(deps module.Deps, root *string) *cobra.Command {
 				return projectError(err)
 			}
 			if record.Workspace != nil {
-				if err := presentation.FocusProjectWorkspace(command.Context(), record.Workspace.Ref); err != nil {
+				freshRegistry, freshRecord, workspaceOperation, err := inspectCurrentProjectWorkspace(command.Context(), store, record.ID, options.Session)
+				if err != nil {
+					return projectError(err)
+				}
+				if err := presentation.FocusProjectWorkspace(command.Context(), freshRecord.Workspace.Ref); err != nil {
 					return projectError(err)
 				}
 				warnings := []string{}
-				if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), record.Workspace.Ref, record.Name); warning != "" {
+				if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), freshRecord.Workspace.Ref, freshRecord.Name); warning != "" {
 					warnings = append(warnings, warning)
 				}
-				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, Action: "focused", Focused: true, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
+				workspace := *freshRecord.Workspace
+				return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: freshRegistry.Version, Revision: freshRegistry.Revision, ProjectID: freshRecord.ID, Action: "focused", Focused: true, Operation: &workspaceOperation, Workspace: &workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 			}
 			return createProjectWorkspace(command, store, record, presentation, options)
 		},
@@ -207,7 +213,7 @@ func createProjectWorkspace(command *cobra.Command, store project.Store, record 
 	if err != nil {
 		return projectError(err)
 	}
-	bootstrap, err := projectTimelineBootstrap(self, store.Root, record.ID)
+	bootstrap, err := projectAgentsBootstrap(self, store.Root, record.ID, options.Session, options.Binary)
 	if err != nil {
 		return projectError(err)
 	}
@@ -245,11 +251,20 @@ func createProjectWorkspace(command *cobra.Command, store project.Store, record 
 	var focusError error
 	warnings := []string{}
 	if completed.Phase == project.SurfacePhaseVerified {
-		report.Workspace = &project.Workspace{Session: options.Session, Ref: *completed.Ref}
-		focusError = presentation.FocusProjectWorkspace(command.Context(), *completed.Ref)
+		freshRegistry, freshRecord, freshOperation, inspectError := inspectCurrentProjectWorkspace(command.Context(), store, record.ID, options.Session)
+		focusError = inspectError
+		if focusError == nil && freshOperation.ID != completed.ID {
+			focusError = fmt.Errorf("%w: workspace operation changed after creation", project.ErrConflict)
+		}
+		if focusError == nil {
+			workspace := *freshRecord.Workspace
+			report.Version, report.Revision = freshRegistry.Version, freshRegistry.Revision
+			report.Workspace = &workspace
+			focusError = presentation.FocusProjectWorkspace(command.Context(), workspace.Ref)
+		}
 		report.Focused = focusError == nil
 		if focusError == nil {
-			if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), *completed.Ref, record.Name); warning != "" {
+			if warning := projectWorkspaceMetadataWarning(presentation, command.Context(), report.Workspace.Ref, record.Name); warning != "" {
 				warnings = append(warnings, warning)
 			}
 		}
@@ -265,6 +280,93 @@ func createProjectWorkspace(command *cobra.Command, store project.Store, record 
 		return projectError(fmt.Errorf("workspace was recorded but focus failed: %w", focusError))
 	}
 	return nil
+}
+
+func inspectCurrentProjectWorkspace(ctx context.Context, store project.Store, projectID, session string) (project.Registry, project.Project, project.SurfaceOperation, error) {
+	registry, record, _, err := store.Inspect(ctx, projectID)
+	if err != nil {
+		return project.Registry{}, project.Project{}, project.SurfaceOperation{}, err
+	}
+	if record.Workspace == nil || record.Workspace.Session != session {
+		return project.Registry{}, project.Project{}, project.SurfaceOperation{}, fmt.Errorf("%w: project has no verified workspace in that named session", project.ErrConflict)
+	}
+	var found project.SurfaceOperation
+	for _, operation := range record.SurfaceOperations {
+		if operation.Kind != project.SurfaceKindWorkspace || operation.Session != session || operation.Phase != project.SurfacePhaseVerified || operation.Ref == nil {
+			continue
+		}
+		if operation.Ref.Validate() != nil {
+			return project.Registry{}, project.Project{}, project.SurfaceOperation{}, fmt.Errorf("%w: saved workspace reference is invalid", project.ErrConflict)
+		}
+		equal, compareErr := sameProjectReference(*operation.Ref, record.Workspace.Ref)
+		if compareErr != nil || !equal {
+			return project.Registry{}, project.Project{}, project.SurfaceOperation{}, fmt.Errorf("%w: saved workspace operation does not match the project workspace", project.ErrConflict)
+		}
+		if found.ID != "" {
+			return project.Registry{}, project.Project{}, project.SurfaceOperation{}, fmt.Errorf("%w: project has multiple verified workspace operations", project.ErrConflict)
+		}
+		found = operation
+	}
+	if found.ID == "" {
+		return project.Registry{}, project.Project{}, project.SurfaceOperation{}, fmt.Errorf("%w: verified workspace operation is unavailable", project.ErrConflict)
+	}
+	return registry, record, found, nil
+}
+
+func inspectCurrentProjectThreadView(ctx context.Context, store project.Store, projectID, threadID, runID, session string, expectedPresentation project.SurfacePresentation, expectedOperationID string) (project.Registry, project.Project, project.Thread, project.Binding, project.SurfaceOperation, error) {
+	registry, record, observations, err := store.Inspect(ctx, projectID)
+	if err != nil {
+		return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, err
+	}
+	thread, binding, err := projectCurrentThread(record, observations, threadID)
+	if err != nil {
+		return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, err
+	}
+	if binding.RunID != runID {
+		return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: selected thread run changed before focus", project.ErrConflict)
+	}
+	if record.Workspace == nil || record.Workspace.Session != session {
+		return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: project workspace changed before focus", project.ErrConflict)
+	}
+	var found project.SurfaceOperation
+	for _, operation := range record.SurfaceOperations {
+		if operation.Kind != project.SurfaceKindThread || operation.ThreadID != threadID || operation.RunID != runID || operation.Session != session || operation.Phase != project.SurfacePhaseVerified || operation.Retirement != nil {
+			continue
+		}
+		if expectedPresentation != "" && expectedOperationID == "" && operation.Presentation != expectedPresentation {
+			return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: existing tab uses a different presentation; close its view explicitly", project.ErrConflict)
+		}
+		if expectedOperationID != "" && operation.ID != expectedOperationID {
+			continue
+		}
+		if expectedPresentation != "" && operation.Presentation != expectedPresentation {
+			continue
+		}
+		if operation.Parent == nil || operation.Ref == nil || operation.Ref.Validate() != nil {
+			return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: saved thread view reference is invalid", project.ErrConflict)
+		}
+		equal, compareErr := sameProjectReference(*operation.Parent, record.Workspace.Ref)
+		if compareErr != nil || !equal {
+			return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: saved thread view parent changed before focus", project.ErrConflict)
+		}
+		if found.ID != "" {
+			return project.Registry{}, project.Project{}, project.Thread{}, project.Binding{}, project.SurfaceOperation{}, fmt.Errorf("%w: multiple verified views match the selected run", project.ErrConflict)
+		}
+		found = operation
+	}
+	return registry, record, thread, binding, found, nil
+}
+
+func sameProjectReference(left, right backend.Ref) (bool, error) {
+	leftJSON, err := left.MarshalJSON()
+	if err != nil {
+		return false, err
+	}
+	rightJSON, err := right.MarshalJSON()
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(leftJSON, rightJSON), nil
 }
 
 func projectWorkspaceFinish(result backend.StartResult, tag backend.RecoveryTag) project.SurfaceFinish {
@@ -323,6 +425,21 @@ func projectThreadTimelineBootstrap(self, root, projectID, threadID string) (bac
 	return backend.NewBootstrapCommand(exec.Opaque(strings.Join(words, " ")))
 }
 
+func projectAgentsBootstrap(self, root, projectID, session, binary string) (backend.BootstrapCommand, error) {
+	if !filepath.IsAbs(binary) {
+		return backend.BootstrapCommand{}, errors.New("--herdr-binary must be absolute")
+	}
+	words := []string{self, "surface", "project", "--root", root, "agents", projectID, "--live", "--herdr-session", session, "--herdr-binary", binary}
+	for index, word := range words {
+		quoted, err := shellQuote(word)
+		if err != nil {
+			return backend.BootstrapCommand{}, err
+		}
+		words[index] = quoted
+	}
+	return backend.NewBootstrapCommand(exec.Opaque(strings.Join(words, " ")))
+}
+
 func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) *cobra.Command {
 	var options projectPresentationOptions
 	command := &cobra.Command{
@@ -336,7 +453,8 @@ func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) 
 			if err := options.validate(); err != nil {
 				return err
 			}
-			registry, record, observations, err := (project.Store{Root: *root}).Inspect(command.Context(), *projectID)
+			store := project.Store{Root: *root}
+			_, record, observations, err := store.Inspect(command.Context(), *projectID)
 			if err != nil {
 				return projectError(err)
 			}
@@ -372,14 +490,22 @@ func newSurfaceProjectThreadFocusCmd(deps module.Deps, root, projectID *string) 
 			if err != nil {
 				return projectError(err)
 			}
-			if err := presentation.FocusThread(command.Context(), record.Workspace.Ref, *operation.Ref); err != nil {
+			freshRegistry, freshRecord, _, _, freshOperation, inspectError := inspectCurrentProjectThreadView(command.Context(), store, record.ID, arguments[0], runID, options.Session, "", operation.ID)
+			if inspectError != nil {
+				return projectError(inspectError)
+			}
+			if freshOperation.ID == "" || freshOperation.Parent == nil || freshOperation.Ref == nil {
+				return projectError(fmt.Errorf("%w: this run has no verified tab; native attachment is not inferred", project.ErrConflict))
+			}
+			if err := presentation.FocusThread(command.Context(), *freshOperation.Parent, *freshOperation.Ref); err != nil {
 				return projectError(err)
 			}
 			warnings := []string{}
-			if warning := projectThreadMetadataWarning(presentation, command.Context(), record.Workspace.Ref, *operation.Ref, threadDisplayName); warning != "" {
+			if warning := projectThreadMetadataWarning(presentation, command.Context(), *freshOperation.Parent, *freshOperation.Ref, threadDisplayName); warning != "" {
 				warnings = append(warnings, warning)
 			}
-			return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: arguments[0], RunID: runID, Action: "focused", Focused: true, Operation: operation, Workspace: record.Workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
+			workspace := freshRecord.Workspace
+			return writeProjectPresentation(command.OutOrStdout(), projectPresentationReport{Version: freshRegistry.Version, Revision: freshRegistry.Revision, ProjectID: freshRecord.ID, ThreadID: arguments[0], RunID: runID, Action: "focused", Focused: true, Operation: &freshOperation, Workspace: workspace, ProcessLiveness: project.ProcessLivenessUnknown, Warnings: warnings}, options.JSON)
 		},
 	}
 	options.flags(command)

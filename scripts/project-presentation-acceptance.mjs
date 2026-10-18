@@ -1,9 +1,112 @@
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertNoDuplicateMarkers, assertUnrelatedUnchanged, commandEnvironment, herdrCommand, ownershipMarker, paneSnapshot, prepareRoot, startHerdr, stopOwnedServer, workspaceSnapshot } from "./verify-project-presentation.mjs";
+
+const AGENTS_MAX_ROWS = 64;
+const AGENTS_MAX_SPANS_PER_ROW = 64;
+const AGENTS_MAX_SPANS = 512;
+const AGENTS_MAX_JSON_BYTES = 2 << 20;
+const AGENTS_SOURCES = new Set(["codex-turn-history", "pi-agent-events", "hermes-prompt"]);
+const AGENTS_STATES = new Set(["running", "finished", "failed", "incomplete", "unknown"]);
+const AGENTS_ACTIVITY = new Map([
+  ["codex", { source: "codex-turn-history", coverage: "native-history" }],
+  ["pi", { source: "pi-agent-events", coverage: "current-process" }],
+  ["hermes", { source: "hermes-prompt", coverage: "current-process" }],
+]);
+
+function assertBoundedCount(value, label, maximum) {
+  assert(Number.isInteger(value) && value >= 0 && value <= maximum, `${label} must be a bounded non-negative integer`);
+}
+
+function assertTimedAgentSpan(span, expected, observedAt) {
+  assert.equal(span.run_id, expected.run_id);
+  assert.equal(span.native_session_id, expected.native_session_id);
+  assert.equal(span.source, expected.source);
+  assert(AGENTS_SOURCES.has(span.source), `unsupported native activity source ${span.source}`);
+  assert(span.span && typeof span.span === "object");
+  assert(typeof span.span.id === "string" && span.span.id.length > 0);
+  assert(AGENTS_STATES.has(span.span.state), `unsupported native activity state ${span.span.state}`);
+  const started = Date.parse(span.span.started_at);
+  assert(Number.isFinite(started), "native activity span lacks a valid start");
+  if (span.span.ended_at !== undefined && span.span.ended_at !== null) {
+    const ended = Date.parse(span.span.ended_at);
+    assert(Number.isFinite(ended), "native activity span has an invalid end");
+    assert(ended >= started, "native activity span ends before it starts");
+  }
+  const observed = Date.parse(observedAt);
+  assert(Number.isFinite(observed), "Agents snapshot lacks a valid observation time");
+  assert(started <= observed + 5_000, "native activity span starts after its observation");
+  if (span.span.ended_at) assert(Date.parse(span.span.ended_at) <= observed + 5_000, "native activity span ends after its observation");
+  return span.span.ended_at !== undefined && span.span.ended_at !== null;
+}
+
+export function assertAgentsSnapshot(snapshot, projectId, expectedBindings) {
+  assert(snapshot && typeof snapshot === "object" && !Array.isArray(snapshot));
+  assert.equal(snapshot.version, 1);
+  assert.equal(snapshot.project_id, projectId);
+  assert(Array.isArray(expectedBindings) && expectedBindings.length > 0);
+  assertBoundedCount(snapshot.total_threads, "Agents total_threads", AGENTS_MAX_ROWS);
+  assert.equal(snapshot.total_threads, expectedBindings.length);
+  assert(Array.isArray(snapshot.rows));
+  assert(snapshot.rows.length <= AGENTS_MAX_ROWS);
+  assert.equal(snapshot.rows.length, expectedBindings.length);
+  assert.equal(snapshot.partial ?? false, false, "connected Agents snapshot must not be partial");
+  assertBoundedCount(snapshot.dropped_threads ?? 0, "Agents dropped_threads", AGENTS_MAX_ROWS);
+  assertBoundedCount(snapshot.dropped_spans ?? 0, "Agents dropped_spans", AGENTS_MAX_SPANS);
+  assert.equal(snapshot.dropped_threads ?? 0, 0);
+  assert.equal(snapshot.dropped_spans ?? 0, 0);
+  assert(typeof snapshot.observed_at === "string" && Number.isFinite(Date.parse(snapshot.observed_at)));
+  assert(Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= AGENTS_MAX_JSON_BYTES, "Agents snapshot exceeded its JSON byte bound");
+  const seenThreads = new Set();
+  let activityCount = 0;
+  for (const expected of expectedBindings) {
+    assert(typeof expected.thread_id === "string" && expected.thread_id.length > 0);
+    assert(expected.current && expected.history?.length > 0);
+    assert(typeof expected.current.run_id === "string" && expected.current.run_id.length > 0);
+    assert(typeof expected.current.native_session_id === "string" && expected.current.native_session_id.length > 0);
+    const row = snapshot.rows.find((candidate) => candidate.thread_id === expected.thread_id);
+    assert(row, `Agents snapshot omitted bound thread ${expected.thread_id}`);
+    assert(!seenThreads.has(row.thread_id), `Agents snapshot repeated thread ${row.thread_id}`);
+    seenThreads.add(row.thread_id);
+    assert.equal(row.run_id, expected.current.run_id);
+    assert.equal(row.harness, expected.current.harness);
+    assert.equal(row.enrollment, "current");
+    assert.equal(row.partial ?? false, false, `connected Agents row ${expected.thread_id} must not be partial`);
+    assert.equal(row.coverage, expected.current.coverage);
+    assert(Array.isArray(row.spans));
+    assert(row.spans.length <= AGENTS_MAX_SPANS_PER_ROW);
+    assert(row.spans.length > 0, `Agents snapshot omitted native spans for ${expected.thread_id}`);
+    const knownSpans = new Map(expected.history.map((binding) => [`${binding.run_id}\u0000${binding.native_session_id}\u0000${binding.source}`, binding]));
+    let currentFinishedSpan = false;
+    for (const span of row.spans) {
+      activityCount += 1;
+      const known = knownSpans.get(`${span.run_id}\u0000${span.native_session_id}\u0000${span.source}`);
+      assert(known, `Agents snapshot included an unknown historical span for ${expected.thread_id}`);
+      const ended = assertTimedAgentSpan(span, known, snapshot.observed_at);
+      if (known.run_id === expected.current.run_id && known.native_session_id === expected.current.native_session_id && known.source === expected.current.source && ended && span.span.state === "finished") currentFinishedSpan = true;
+    }
+    const points = row.points ?? [];
+    assert(Array.isArray(points));
+    assert(points.length <= AGENTS_MAX_SPANS_PER_ROW);
+    const knownPoints = new Map(expected.history.map((binding) => [`${binding.run_id}\u0000${binding.source}`, binding]));
+    for (const point of points) {
+      activityCount += 1;
+      const known = knownPoints.get(`${point.run_id}\u0000${point.source}`);
+      assert(known, `Agents snapshot included an unknown historical point for ${expected.thread_id}`);
+      assert(typeof point.turn_id === "string" && point.turn_id.length > 0);
+      assert(AGENTS_STATES.has(point.state), `unsupported native activity point state ${point.state}`);
+      const at = Date.parse(point.at);
+      assert(Number.isFinite(at) && at <= Date.parse(snapshot.observed_at) + 5_000, "native activity point has an invalid timestamp");
+    }
+    assert(currentFinishedSpan, `Agents snapshot omitted a current finished timed span for ${expected.thread_id}`);
+  }
+  assert.equal(seenThreads.size, snapshot.rows.length, "Agents snapshot contains an unexpected thread");
+  assert(activityCount <= AGENTS_MAX_SPANS);
+  return snapshot;
+}
 
 export function codexViewSnapshot(response, binding, model, acceptanceRoot) {
   assert(acceptanceRoot?.startsWith("/"));
@@ -137,7 +240,101 @@ export class ProjectPresentationAcceptance {
     this.evidence.add("project-native-ui-reconnected", { projectId: this.projects.project.id, threadId: this.projects.thread("coordinator"), runId: binding.run_id, nativeSessionId: binding.native_session_id, previousOperationId: first.id, operationId: second.id, postureUnchanged: true, renderedHistoryMarker: marker });
   }
 
+  expectedAgentBindings() {
+    return [...this.projects.bindings.entries()].map(([name, binding]) => ({
+      name,
+      thread_id: this.projects.thread(name),
+      current: this.expectedAgentBinding(binding),
+      history: (this.projects.histories.get(name) ?? [binding]).map((historical) => this.expectedAgentBinding(historical)),
+    }));
+  }
+
+  expectedAgentBinding(binding) {
+    const activity = AGENTS_ACTIVITY.get(binding.harness);
+    assert(activity, `unsupported Agents harness ${binding.harness}`);
+    return { run_id: binding.run_id, native_session_id: binding.native_session_id, harness: binding.harness, ...activity };
+  }
+
+  async focusAgentsTab() {
+    const tab = this.workspace.ref.tab;
+    await herdrCommand(this.evidence, this.herdr, this.session, this.env, ["tab", "focus", tab]);
+    const focused = await workspaceSnapshot(this.evidence, this.herdr, this.session, this.env, this.workspace.ref.workspace);
+    assert.equal(focused.workspace.active_tab_id, tab);
+    assert(focused.tabs.some((candidate) => candidate.tab_id === tab));
+    return focused;
+  }
+
+  async focusWorkerFromAgents(snapshot) {
+    const workerThread = this.projects.thread("worker");
+    const workerIndex = snapshot.rows.findIndex((row) => row.thread_id === workerThread);
+    assert(workerIndex >= 0, "Agents snapshot omitted the worker row");
+    const beforeReport = await this.projects.command(["show", this.projects.project.id]);
+    const beforeSurfaceOperations = beforeReport.project.surface_operations.map((operation) => ({ id: operation.id, thread_id: operation.thread_id, run_id: operation.run_id, presentation: operation.presentation, phase: operation.phase, retirement: operation.retirement?.phase ?? null }));
+    const before = await this.focusAgentsTab();
+    await herdrCommand(this.evidence, this.herdr, this.session, this.env, ["pane", "send-keys", this.workspace.ref.pane, ...Array(AGENTS_MAX_ROWS).fill("up"), ...Array(workerIndex).fill("down")]);
+    await herdrCommand(this.evidence, this.herdr, this.session, this.env, ["pane", "send-keys", this.workspace.ref.pane, "Enter"]);
+    const workerOperation = this.views.get("worker");
+    assert(workerOperation, "worker view is required before Agents Enter acceptance");
+    let after;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      after = await workspaceSnapshot(this.evidence, this.herdr, this.session, this.env, this.workspace.ref.workspace);
+      if (after.workspace.active_tab_id === workerOperation.ref.tab) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    }
+    assert(after);
+    assert.equal(after.workspace.active_tab_id, workerOperation.ref.tab, "Agents Enter did not focus the exact worker view");
+    assert.equal(after.tabs.length, before.tabs.length, "Agents Enter created a duplicate tab");
+    assertNoDuplicateMarkers(after.workspaces, after.tabs, `fc-surface-${this.workspace.ref.tag}`, ownershipMarker(workerOperation));
+    const workerPane = await paneSnapshot(this.evidence, this.herdr, this.session, this.env, workerOperation.ref.pane);
+    assert.equal(workerPane.workspace_id, workerOperation.ref.workspace);
+    assert.equal(workerPane.tab_id, workerOperation.ref.tab);
+    assert.equal(workerPane.terminal_id, workerOperation.ref.terminal);
+    assert.equal(workerPane.display_agent, (await this.projects.command(["thread", "--project", this.projects.project.id, "show", workerThread])).thread.name);
+    const afterReport = await this.projects.command(["show", this.projects.project.id]);
+    const afterSurfaceOperations = afterReport.project.surface_operations.map((operation) => ({ id: operation.id, thread_id: operation.thread_id, run_id: operation.run_id, presentation: operation.presentation, phase: operation.phase, retirement: operation.retirement?.phase ?? null }));
+    assert.deepEqual(afterSurfaceOperations, beforeSurfaceOperations, "Agents Enter changed surface operations");
+    this.evidence.add("project-agents-enter-focus", { projectId: this.projects.project.id, workerThread, workerRunId: this.projects.bindings.get("worker").run_id, projectTab: this.workspace.ref.tab, workerTab: workerOperation.ref.tab, tabCountUnchanged: true, surfaceOperationsUnchanged: true });
+  }
+
+  async renderAgents(snapshot) {
+    await this.focusAgentsTab();
+    const shown = await this.projects.command(["thread", "--project", this.projects.project.id, "show", this.projects.thread("worker")]);
+    const output = join(this.root, `agents-render-${++this.renders}`);
+    const probe = join(dirname(fileURLToPath(import.meta.url)), "probe-project-render.py");
+    const args = [probe, "--herdr", this.herdr, "--session", this.session, "--output", output, "--expect-project", this.projects.project.name, "--expect-content", shown.thread.name];
+    const result = await this.projects.runCommand(this.evidence, "/usr/bin/python3", args, { env: this.env, cwd: this.projects.worktree, timeout: 120_000 });
+    assert.equal(result.code, 0, `Agents render probe failed: ${result.stderr}`);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.assertions.project, true);
+    assert.equal(receipt.assertions.content, true);
+    const screen = await readFile(join(output, "render.txt"), "utf8");
+    assert(screen.includes("Agents"), "Agents render omitted its title");
+    assert(screen.includes("30m"), "Agents render omitted the 30m axis label");
+    assert(screen.includes(shown.thread.name), "Agents render omitted the worker row");
+    this.evidence.add("project-agents-rendered", { projectId: this.projects.project.id, workerThread: shown.thread.id, receipt, contentMarker: "Agents", rowMarker: shown.thread.name, axisMarker: "30m", centralContent: true });
+    const negativeOutput = join(this.root, `agents-render-negative-${this.renders}`);
+    const wrongContent = `absent-agents-${randomUUID()}`;
+    const negative = await this.projects.runCommand(this.evidence, "/usr/bin/python3", [probe, "--herdr", this.herdr, "--session", this.session, "--output", negativeOutput, "--expect-project", this.projects.project.name, "--expect-content", wrongContent], { env: this.env, cwd: this.projects.worktree, timeout: 120_000 });
+    assert.equal(negative.code, 1, "Agents render probe must reject wrong content");
+    const negativeReceipt = JSON.parse(await readFile(join(negativeOutput, "render.json"), "utf8"));
+    assert.equal(negativeReceipt.ok, false);
+    assert.equal(negativeReceipt.assertions.content, false);
+    assert(negativeReceipt.screen.captured_bytes > 0, "wrong-content Agents control must capture terminal bytes");
+    this.evidence.add("project-agents-render-negative", { projectId: this.projects.project.id, wrongContent, receipt: negativeReceipt, capturedBytes: negativeReceipt.screen.captured_bytes });
+    return snapshot;
+  }
+
+  async agents() {
+    const snapshot = await this.projects.command(["agents", this.projects.project.id]);
+    assertAgentsSnapshot(snapshot, this.projects.project.id, this.expectedAgentBindings());
+    await this.renderAgents(snapshot);
+    await this.focusWorkerFromAgents(snapshot);
+    return snapshot;
+  }
+
   async audit() {
+    await this.agents();
     for (const name of this.views.keys()) await this.checkSurface(name);
     assertUnrelatedUnchanged(this.unrelatedBefore, await workspaceSnapshot(this.evidence, this.herdr, this.session, this.env, this.unrelatedId));
     this.evidence.add("project-presentation-audited", { projectId: this.projects.project.id, session: this.session, renderedClients: this.renders, unrelatedSurfaceUnchanged: true });

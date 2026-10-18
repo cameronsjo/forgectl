@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
@@ -77,6 +79,69 @@ func threadViewCommand(test *testing.T, store project.Store, created projectRepo
 		}
 	}
 	return report, stderr, code
+}
+
+func seedProjectThreadView(test *testing.T, store project.Store, created projectReport, member mail.Worker) project.SurfaceOperation {
+	test.Helper()
+	_, record, _, err := store.Inspect(test.Context(), created.Project.ID)
+	if err != nil || record.Workspace == nil {
+		test.Fatalf("workspace missing while seeding thread view: %v", err)
+	}
+	tag, err := backend.NewRecoveryTag()
+	if err != nil {
+		test.Fatal(err)
+	}
+	child := projectPresentationTestRef(test, tag, "w1:t2", "w1:p2", "terminal-2")
+	_, operation, err := store.BeginThread(test.Context(), created.Project.ID, created.Project.CoordinatorThreadID, member.RunID, "projects-test", project.SurfacePresentationTimeline, tag, record.Workspace.Ref)
+	if err != nil {
+		test.Fatal(err)
+	}
+	_, completed, err := store.FinishSurface(test.Context(), created.Project.ID, operation.ID, project.SurfaceVerified(child))
+	if err != nil {
+		test.Fatal(err)
+	}
+	return completed
+}
+
+func replaceProjectPresentationDuringConstruction(test *testing.T, presentation projectPresentation, replace func()) {
+	test.Helper()
+	previous := projectPresentationFor
+	projectPresentationFor = func(_ module.Deps, _ string, _ string, _ io.Writer) (projectPresentation, error) {
+		replace()
+		return presentation, nil
+	}
+	test.Cleanup(func() { projectPresentationFor = previous })
+}
+
+func TestSurfaceProjectThreadViewExistingOpenRefusesReplacementDuringPresentationConstruction(test *testing.T) {
+	store, created, member, presentation, fixture := prepareProjectThreadView(test)
+	operation := seedProjectThreadView(test, store, created, member)
+	replacement := member
+	replacement.RunID = "replacement-run"
+	replaceProjectPresentationDuringConstruction(test, presentation, func() {
+		registerProjectCLIMember(test, created.Ledger, replacement, true)
+	})
+
+	_, stderr, code := threadViewCommand(test, store, created, "open", "--view", "timeline")
+	if code != exitFailed || presentation.threadFocus != 0 || fixture.starts != 0 || !strings.Contains(stderr, "stale") {
+		test.Fatalf("replacement reached existing open: exit=%d stderr=%s operation=%s focus=%d starts=%d", code, stderr, operation.ID, presentation.threadFocus, fixture.starts)
+	}
+}
+
+func TestSurfaceProjectThreadFocusRefusesReplacementDuringPresentationConstruction(test *testing.T) {
+	store, created, member, presentation, fixture := prepareProjectThreadView(test)
+	operation := seedProjectThreadView(test, store, created, member)
+	replacement := member
+	replacement.RunID = "replacement-run"
+	replaceProjectPresentationDuringConstruction(test, presentation, func() {
+		registerProjectCLIMember(test, created.Ledger, replacement, true)
+	})
+
+	arguments := []string{"project", "--root", store.Root, "thread", "--project", created.Project.ID, "focus", created.Project.CoordinatorThreadID, "--session", "projects-test", "--herdr-binary", "/test/herdr", "--json"}
+	output, stderr, code := runSurface(test, "", arguments...)
+	if code != exitFailed || output != "" || presentation.threadFocus != 0 || fixture.starts != 0 || !strings.Contains(stderr, "stale") {
+		test.Fatalf("replacement reached existing focus: exit=%d stdout=%s stderr=%s operation=%s focus=%d starts=%d", code, output, stderr, operation.ID, presentation.threadFocus, fixture.starts)
+	}
 }
 
 func TestSurfaceProjectThreadViewRoundTripAndSameRunReopen(test *testing.T) {

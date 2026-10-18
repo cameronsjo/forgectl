@@ -45,6 +45,7 @@ func newSurfaceProjectCmd(deps module.Deps) *cobra.Command {
 	command.AddCommand(newSurfaceProjectShowCmd(&root))
 	command.AddCommand(newSurfaceProjectThreadCmd(deps, &root))
 	command.AddCommand(newSurfaceProjectTimelineCmd(deps, &root))
+	command.AddCommand(newSurfaceProjectAgentsCmd(deps, &root))
 	command.AddCommand(newSurfaceProjectOpenCmd(deps, &root))
 	return command
 }

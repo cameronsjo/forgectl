@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -21,6 +22,7 @@ type projectNativeObservation struct {
 	ActiveTools     []string               `json:"active_tools,omitempty"`
 	SessionPath     string                 `json:"session_path,omitempty"`
 	Turn            *projectNativeTurn     `json:"turn,omitempty"`
+	Activity        *activity.Snapshot     `json:"activity,omitempty"`
 }
 
 type projectNativeTurn struct {
@@ -55,6 +57,7 @@ func observeProjectNative(ctx context.Context, worker mail.Worker) (projectNativ
 		}
 		observation.Source = project.EvidenceSourceCodexThreadRead
 		observation.NativeSessionID, observation.Provider, observation.Model = native.NativeSessionID, native.Provider, native.Model
+		observation.Activity = native.Activity
 		if native.Turn != nil {
 			turnID, status, observedAt = native.Turn.ID, native.Turn.Status, native.Turn.ObservedAt
 		}
@@ -69,6 +72,7 @@ func observeProjectNative(ctx context.Context, worker mail.Worker) (projectNativ
 		observation.Source = project.EvidenceSourcePiInbox
 		observation.NativeSessionID, observation.Provider, observation.Model = native.SessionID, native.Provider, native.ModelID
 		observation.ActiveTools, observation.SessionPath = native.ActiveTools, native.SessionPath
+		observation.Activity = native.Activity
 		if native.Turn != nil {
 			turnID, status, observedAt = native.Turn.ID, native.Turn.Status, native.Turn.ObservedAt
 		}
@@ -79,6 +83,7 @@ func observeProjectNative(ctx context.Context, worker mail.Worker) (projectNativ
 		}
 		observation.Source = project.EvidenceSourceHermesSupervisor
 		observation.Provider, observation.Model = native.Provider, native.Model
+		observation.Activity = native.Activity
 		if native.Turn != nil {
 			turnID, status, observedAt = native.Turn.MessageID, native.Turn.Status, native.Turn.ObservedAt
 		}
@@ -129,7 +134,10 @@ func newSurfaceProjectThreadObserveCmd(root, projectID *string) *cobra.Command {
 			}
 			report := projectEvidenceReport{Version: registry.Version, Revision: registry.Revision, ProjectID: record.ID, ThreadID: thread.ID, RunID: binding.RunID, Action: "observed", Native: &native, ProcessLiveness: project.ProcessLivenessUnknown}
 			if native.Turn != nil {
-				input := project.NativeEvidenceInput{NativeSessionID: native.NativeSessionID, Source: native.Source, TurnID: native.Turn.ID, Status: native.Turn.Status, ObservedAt: native.Turn.ObservedAt}
+				input, err := projectObservedEvidence(native)
+				if err != nil {
+					return projectError(err)
+				}
 				updated, evidence, err := store.RecordNativeEvidence(command.Context(), record.ID, thread.ID, binding.RunID, input)
 				if err != nil {
 					return projectError(err)
@@ -167,6 +175,51 @@ func newSurfaceProjectThreadObserveCmd(root, projectID *string) *cobra.Command {
 
 func projectBindingWorker(thread project.Thread, binding project.Binding) mail.Worker {
 	return mail.Worker{Name: binding.Member, Harness: binding.Harness, Worktree: binding.Worktree, Socket: binding.Socket, ThreadID: binding.NativeSessionID, RunID: binding.RunID, PaneID: binding.PaneID, Coordinator: thread.Role == project.RoleCoordinator}
+}
+
+func projectObservedEvidence(native projectNativeObservation) (project.NativeEvidenceInput, error) {
+	if native.Turn == nil {
+		return project.NativeEvidenceInput{}, fmt.Errorf("%w: no settled native turn", project.ErrInvalidState)
+	}
+	input := project.NativeEvidenceInput{NativeSessionID: native.NativeSessionID, Source: native.Source, TurnID: native.Turn.ID, Status: native.Turn.Status, ObservedAt: native.Turn.ObservedAt}
+	if native.Activity == nil {
+		return input, nil
+	}
+	if err := activity.Validate(*native.Activity); err != nil {
+		return project.NativeEvidenceInput{}, fmt.Errorf("%w: invalid native activity", project.ErrInvalidState)
+	}
+	expectedSource := map[project.EvidenceSource]activity.Source{
+		project.EvidenceSourceCodexThreadRead:  activity.SourceCodex,
+		project.EvidenceSourcePiInbox:          activity.SourcePi,
+		project.EvidenceSourceHermesSupervisor: activity.SourceHermes,
+	}[native.Source]
+	if native.Activity.Source != expectedSource {
+		return project.NativeEvidenceInput{}, fmt.Errorf("%w: native activity source differs from settled turn", project.ErrInvalidState)
+	}
+	matched := false
+	for _, span := range native.Activity.Spans {
+		if span.TurnID != native.Turn.ID || span.EndedAt == nil {
+			continue
+		}
+		if matched {
+			return project.NativeEvidenceInput{}, fmt.Errorf("%w: ambiguous native interval", project.ErrInvalidState)
+		}
+		matched = true
+		expected := activity.State(native.Turn.Status)
+		if native.Turn.Status == project.EvidenceCompleted {
+			expected = activity.Finished
+		}
+		if span.State != expected {
+			return project.NativeEvidenceInput{}, fmt.Errorf("%w: native interval outcome disagrees with settled turn", project.ErrInvalidState)
+		}
+		started, ended := span.StartedAt, *span.EndedAt
+		input.StartedAt, input.EndedAt = &started, &ended
+		input.Provider, input.Model = span.Provider, span.Model
+		if native.Activity.ObservedAt.After(input.ObservedAt) {
+			input.ObservedAt = native.Activity.ObservedAt
+		}
+	}
+	return input, nil
 }
 
 func newSurfaceProjectThreadVerifyArtifactCmd(root, projectID *string) *cobra.Command {
