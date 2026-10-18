@@ -4,6 +4,7 @@ package hermes
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -185,17 +186,11 @@ func (client *nativeClient) processMessage(message nativeMessage, id int, method
 				SessionID string          `json:"sessionId"`
 				Update    json.RawMessage `json:"update"`
 			}
-			var update struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				Content       struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			}
 			if err := json.Unmarshal(message.envelope.Params, &params); err != nil || params.SessionID == "" || len(params.Update) == 0 {
 				return nil, false, errors.New("native Hermes session/update notification is malformed")
 			}
-			if err := json.Unmarshal(params.Update, &update); err != nil || update.SessionUpdate == "" {
+			update, err := parseHistoryUpdate(params.Update)
+			if err != nil {
 				return nil, false, errors.New("native Hermes session/update payload is malformed")
 			}
 			if updates != nil {
@@ -205,9 +200,9 @@ func (client *nativeClient) processMessage(message nativeMessage, id int, method
 				}
 				*updates = append(*updates, historyUpdate{
 					SessionID:      params.SessionID,
-					Kind:           update.SessionUpdate,
-					Text:           update.Content.Text,
-					ContentType:    update.Content.Type,
+					Kind:           update.Kind,
+					Text:           update.Text,
+					ContentType:    update.ContentType,
 					MetadataDigest: metadataDigest(params.Update),
 					Size:           size,
 				})
@@ -239,6 +234,46 @@ func (client *nativeClient) processMessage(message nativeMessage, id int, method
 		return nil, true, fmt.Errorf("hermes %s response lacks a result", method)
 	}
 	return message.envelope.Result, true, nil
+}
+
+type parsedHistoryUpdate struct {
+	Kind        string
+	Text        string
+	ContentType string
+}
+
+func parseHistoryUpdate(raw []byte) (parsedHistoryUpdate, error) {
+	var update struct {
+		SessionUpdate string          `json:"sessionUpdate"`
+		Content       json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &update); err != nil || update.SessionUpdate == "" {
+		return parsedHistoryUpdate{}, errors.New("history update is malformed")
+	}
+	parsed := parsedHistoryUpdate{Kind: update.SessionUpdate}
+	switch update.SessionUpdate {
+	case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
+		if len(update.Content) == 0 || bytes.Equal(update.Content, []byte("null")) {
+			return parsedHistoryUpdate{}, errors.New("text history update lacks content")
+		}
+		var content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(update.Content, &content); err != nil || content.Type != "text" {
+			return parsedHistoryUpdate{}, errors.New("text history update content is malformed")
+		}
+		parsed.Text, parsed.ContentType = content.Text, content.Type
+	case "tool_call", "tool_call_update":
+		if len(update.Content) > 0 && !bytes.Equal(update.Content, []byte("null")) {
+			var content any
+			if err := json.Unmarshal(update.Content, &content); err != nil {
+				return parsedHistoryUpdate{}, errors.New("structured history update content is malformed")
+			}
+			parsed.ContentType = "structured"
+		}
+	}
+	return parsed, nil
 }
 
 func historyBytes(updates []historyUpdate) int {

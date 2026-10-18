@@ -24,6 +24,49 @@ func TestNativeHistoryNotificationsFailClosed(test *testing.T) {
 	}
 }
 
+func TestNativeHistoryNotificationsAcceptStructuredToolReplay(test *testing.T) {
+	client := &nativeClient{}
+	updates := make([]historyUpdate, 0, 3)
+	for _, raw := range []string{
+		`{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","kind":"read","title":"read: mailbox-fixture.jsonl","toolCallId":"call-1"}}`,
+		`{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Read mailbox-fixture.jsonl"}}]}}`,
+		`{"sessionId":"session-1","update":{"sessionUpdate":"plan","entries":[{"content":"Ship it","status":"in_progress","priority":"high"}]}}`,
+	} {
+		message := nativeMessage{envelope: nativeEnvelope{Method: "session/update", Params: json.RawMessage(raw)}}
+		if _, _, err := client.processMessage(message, 1, "session/load", &updates); err != nil {
+			test.Fatalf("structured replay update rejected: %v", err)
+		}
+	}
+	if len(updates) != 3 || updates[0].Kind != "tool_call" || updates[1].Kind != "tool_call_update" || updates[2].Kind != "plan" {
+		test.Fatalf("structured replay updates = %#v", updates)
+	}
+	if updates[0].ContentType != "" || updates[1].ContentType != "structured" {
+		test.Fatalf("structured replay content types = %#v", updates[:2])
+	}
+	for _, update := range updates[:2] {
+		if update.MetadataDigest == "" || update.Size == 0 {
+			test.Fatalf("structured replay metadata was not retained: %#v", update)
+		}
+	}
+}
+
+func TestNativeHistoryNotificationsRejectMalformedTextContent(test *testing.T) {
+	client := &nativeClient{}
+	for name, raw := range map[string]string{
+		"array":  `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":[]}}`,
+		"null":   `{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","content":null}}`,
+		"image":  `{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"image","text":"no"}}}`,
+		"scalar": `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":"reply"}}`,
+	} {
+		test.Run(name, func(test *testing.T) {
+			message := nativeMessage{envelope: nativeEnvelope{Method: "session/update", Params: json.RawMessage(raw)}}
+			if _, _, err := client.processMessage(message, 1, "session/load", nil); err == nil {
+				test.Fatal("malformed text content was accepted")
+			}
+		})
+	}
+}
+
 func TestParseNativeReplyFrameStrict(test *testing.T) {
 	frame := `{"forgectl_reply":{"v":1,"in_reply_to":"input-1","body":"reply"}}`
 	body, err := parseNativeReplyFrame(frame, "input-1")
