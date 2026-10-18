@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: P1–P6, R1–R4, and V1–V4 complete; Cameron's preview-readability follow-up is in progress
-Next action: finish the scoped readability fix and refresh only the isolated preview. PR creation, installation, merge, and deployment still require separate authorization.
+Status: P1–P6, R1–R4, V1–V4, and preview-readability follow-up U1–U2 complete
+Next action: Cameron can inspect the refreshed isolated preview. PR creation, global installation, merge, and deployment still require separate authorization.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -250,9 +250,11 @@ Codex independently ran all `TestSurfaceProject`/`TestFocusProjectAgent` tests p
 Cameron launched the isolated preview after restarting, then reported that the crowded, diagnostic-heavy empty state was difficult to read. Codex is improving presentation only: outer margins, space between rows, stronger names/selection, plain-language unbound and unavailable states, a separated keyboard footer, and an aligned time axis. Unknown activity must remain unknown; no fake agents, bars, model calls, or enrollment changes are part of this fix. Detailed machine diagnostics remain in the existing printed/JSON and evidence views. Ownership markers remain unchanged.
 
 - [x] U1: Add renderer/action regressions, implement the readability changes, and run affected tests and lint.
-- [ ] U2: Rebuild committed source, refresh only the preview viewer, inspect the actual terminal render, and push the feature branch. Preserve the running preview session and do not install globally.
+- [x] U2: Rebuild committed source, refresh only the preview viewer, inspect the actual terminal render, and push the feature branch. Preserve the running preview session and do not install globally.
 
 The original renderer failed the new empty-state spacing and axis-alignment tests. Independent review found a short-height density regression and inconsistent unbound labeling; both were corrected and covered by height 9–24 and skewed-state tests. The complete TUI suite and focused Agents race tests pass with the inherited `NO_COLOR` override unset; that override changed unrelated existing icon goldens to ASCII and was not a product defect. Pinned golangci-lint v2.13.1 reports zero issues across the full TUI package. No golden files, native observation semantics, enrollment controls, or ownership rules changed.
+
+Codex rebuilt clean commit `8d74cd103837805d26351beae04ec51a0a4770e6` with Go 1.26.8 (`vcs.modified=false`) as `/private/tmp/forgectl-projects-preview.V3UasH/forgectl-readable`, SHA-256 `5f4229b6276e938240016688cea4837c72434af0aadc5525b99315053ec9a052`. After checking the exact old foreground process and stable terminal identity, Codex replaced only the viewer in named session `fp-v3uash`, pane `w2:p1`, terminal `term_65e1e7ce8cad82`. The real cmux screen showed all three rows with gaps, coordinator/worker roles, `Not connected`, a plain empty-state explanation, and bottom-aligned controls; the old diagnostic strings were absent. The user-visible preview remains open, with no model processes or fabricated activity. A fresh `git ls-remote` matched the pushed source commit exactly. This subsequent receipt-only commit does not change that tested runtime artifact.
 
 The first Agents-era native runs used a clean full clone at `1f63c9f0`, binary SHA-256 `f446b737f70cf01a2a7c155dad3e5674c6403cb51f161bf7c1fbd07a5aa797a6`, with `vcs.modified=false`. Builds from linked worktrees were rejected before use: Go 1.26.8's VCS lookup requires a `.git` directory and did not stamp the intended linked-worktree revision. A separate local clone with a real `.git` directory supplied the verified artifact; no toolchain or source workaround was introduced.
 
