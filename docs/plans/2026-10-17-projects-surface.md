@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Persistent projects on existing surfaces
 
 Status: P1–P6, R1–R4, V1–V4, and preview-readability follow-up U1–U2 complete

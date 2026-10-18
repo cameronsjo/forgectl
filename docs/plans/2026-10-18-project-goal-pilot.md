@@ -1,3 +1,7 @@
+---
+status: in-flight
+---
+
 # A real repository goal through Projects
 
 Status: in progress
@@ -68,4 +72,4 @@ Native execution and terminal acceptance remain pending. Existing Projects accep
 
 Two pre-agent setup attempts revealed the project's ledger path is declared before its directories exist; the pilot now creates the dedicated private path before enrollment. The first real attempt (`/private/tmp/fggoal.vUjZhX`, task `goal-6d6504cd-7d8f-47da-917b-7c1044a0187e`) produced a three-file Pi patch and one unconfirmed coordinator-to-reviewer message. Codex stopped the exact supervisor after proving its three recorded child processes still belonged to it. Its final state is `interrupted`, not accepted; native cleanup completed, and no old message is reused for another attempt.
 
-The queue-only correction passes `go test -race -p2 ./internal/surface/mail ./internal/cli -run 'Test(Queue|SurfaceSend)' -count=1` with Go 1.26.8, both Node contract suites, and golangci-lint 2.13.1 against the actual diff from `47edae8f`. Independent read-only review found no remaining supported blocker. The full mail suite passes. The full CLI suite is not green: `TestStateVerbsDeclareJSON` and `TestMenuJSON_LiveTree` also fail unchanged at `b08218d5`, before this correction. They identify missing group-command JSON exemptions and unnamed required project-list arguments; repairing those earlier Projects contracts is recorded as follow-up work, not hidden by the focused result.
+The queue-only correction passes `go test -race -p=2 ./internal/surface/mail ./internal/cli -run 'Test(Queue|SurfaceSend)' -count=1` with Go 1.26.8, both Node contract suites, and golangci-lint 2.13.1 against the actual diff from `47edae8f`. Independent read-only review found no remaining supported blocker. The full mail suite passes. The full CLI suite is not green: `TestStateVerbsDeclareJSON` and `TestMenuJSON_LiveTree` also fail unchanged at `b08218d5`, before this correction. They identify missing group-command JSON exemptions and unnamed required project-list arguments; repairing those earlier Projects contracts is recorded as follow-up work, not hidden by the focused result.

@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Cross-harness collaboration loop
 
 Status: Codex/Pi and Codex/Hermes collaboration, native coordinator handoff, Projects, and terminal-native Agents overview accepted; Claude deferred
