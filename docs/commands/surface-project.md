@@ -159,6 +159,48 @@ Read commands neither create a missing root nor repair permissions or corrupt da
 
 Exit codes: `0` for completed creation, binding, or inspection; `1` for state/storage failures or a conflicting binding; and `2` for invalid inputs or an unknown requested ID. Parse both the exit status and the JSON shape; do not turn an unreadable registry into an empty result.
 
+## Attended repository-goal pilot
+
+`scripts/run-project-goal.mjs` exercises one bounded repository task through an
+actual native team: Codex coordinates, Pi implements, and a separate read-only
+Codex session reviews. The operator supplies a plain-language goal, allowed
+existing tracked paths, and acceptance criteria. The supervisor flushes only the
+task's dedicated mailbox; the agents author and consume their own messages using
+`surface send --queue-only`, without attempting native transport from a sandbox.
+
+This is an opt-in source-build pilot, not a general scheduler or the interactive
+Projects launch flow. Run `node scripts/run-project-goal.mjs --help` for the
+required explicit binary, model, extension and path arguments. The included
+`scripts/project-keyboard-help-goal.json` is the first real repository goal.
+The implementation worktree must be clean, linked, owner-controlled and disjoint
+from both its primary checkout and a fresh owner-private runtime directory.
+`--expect-head` pins the source revision; `--live` authorizes native model calls.
+Supply the normal Pi authentication/safety extensions explicitly rather than
+disabling them. The pilot verifies direct OpenAI routing before model work.
+
+Inspect progress without launching anything:
+
+```sh
+node scripts/run-project-goal.mjs --status /absolute/private/runtime-root
+```
+
+`state.json` answers what is happening and whether an operator decision is
+needed. The private runtime also retains the exact goal, append-only events,
+project registry, native mailbox, reviewed `result.patch`, checkpoint and recovery
+receipts. The project can be inspected with the existing `agents` and `timeline`
+commands using the state's `project_root` and `project_id`.
+
+`ready_for_verification` is deliberately not success: `result_verified` remains
+false until a separate operator independently inspects and tests the returned
+artifact. The pilot itself never commits, pushes, merges or installs. It stops
+only processes it started and retains cleanup failures explicitly. Its recovery
+exercise replaces a settled coordinator, recovers the same goal and result, and
+proves that neither implementation dispatch nor source changes were repeated.
+It does not prove arbitrary crash recovery. Interrupted/failed roots and claimed
+worktrees are retained for inspection and cannot be automatically reused.
+Canonical paths and hashes identify trusted local package inputs; they are not
+authentication against another process running as the same OS user.
+
 ## Remaining integration
 
 These commands remain a source-build integration, not a global installation. Native Codex attachment, UI reconnect, receiver restart, and coordinator replacement have live receipts in the [Projects implementation plan](../plans/2026-10-17-projects-surface.md). Pi RPC and Hermes ACP use read-only thread timelines rather than concurrent native interfaces.

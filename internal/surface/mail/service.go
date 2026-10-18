@@ -49,15 +49,23 @@ func (s *Service) worker(name string) (Worker, error) {
 
 // Send checks policy, appends the message, and attempts delivery once. A
 // transient failure leaves it queued for the next flush.
-func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority) (SendResult, error) {
-	if err := ValidateReplyBinary(s.ReplyBinary); err != nil {
+func (service *Service) Send(ctx context.Context, from, to, body string, pri Priority) (SendResult, error) {
+	return service.send(ctx, from, to, body, pri, false)
+}
+
+func (service *Service) Queue(ctx context.Context, from, to, body string, pri Priority) (SendResult, error) {
+	return service.send(ctx, from, to, body, pri, true)
+}
+
+func (service *Service) send(ctx context.Context, from, to, body string, pri Priority, queueOnly bool) (SendResult, error) {
+	if err := ValidateReplyBinary(service.ReplyBinary); err != nil {
 		return SendResult{}, err
 	}
-	sender, err := s.worker(from)
+	sender, err := service.worker(from)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("sender: %w", err)
 	}
-	recip, err := s.worker(to)
+	recip, err := service.worker(to)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("recipient: %w", err)
 	}
@@ -74,22 +82,26 @@ func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority)
 	if pri == "" {
 		pri = PriorityNext
 	}
-	now := s.now()
-	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, FromRunID: sender.RunID, ToRunID: recip.RunID, Body: clean, Priority: pri, CreatedAt: now, ReplyBinary: s.ReplyBinary}
+	now := service.now()
+	msg := Message{V: 1, ID: newID(), From: sender.Name, To: recip.Name, FromRunID: sender.RunID, ToRunID: recip.RunID, Body: clean, Priority: pri, CreatedAt: now, ReplyBinary: service.ReplyBinary}
 
 	var res SendResult
-	err = s.Box.Locked(func(tx *Tx) error {
+	err = service.Box.Locked(func(tx *Tx) error {
 		history, err := tx.Load()
 		if err != nil {
 			return err
 		}
-		if err := s.Policy.Check(sender, recip, clean, history, now); err != nil {
+		if err := service.Policy.Check(sender, recip, clean, history, now); err != nil {
 			return err
 		}
 		if err := tx.Enqueue(msg, now); err != nil {
 			return err
 		}
-		res, err = s.attempt(ctx, tx, recip, Entry{Msg: msg, Status: StatusQueued})
+		if queueOnly {
+			res = SendResult{ID: msg.ID, Status: StatusQueued}
+			return nil
+		}
+		res, err = service.attempt(ctx, tx, recip, Entry{Msg: msg, Status: StatusQueued})
 		return err
 	})
 	return res, err

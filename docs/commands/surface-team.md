@@ -48,7 +48,7 @@ forgectl surface flush --json
 ```
 
 - `sent` (send exit `0`): the adapter reports its acceptance evidence, not completed work. Codex reports native queue acceptance. Pi requires an exact rendered-message match in a native user-message event or resumed history; an extension API return alone is insufficient.
-- `queued` (send exit `75`): definite non-acceptance is eligible for a later retry, subject to backoff, expiry, and attempt limits.
+- `queued` (send exit `75`): no acceptance yet; either deliberately deferred without an attempt or definitely not accepted by a transport. It is eligible for a later flush, subject to backoff, expiry, and attempt limits.
 - `unconfirmed` (send exit `1`): delivery may have happened. The mailbox records this state durably before invoking the transport, including when a process crashes between delivery and recording its result.
 - `failed` or `expired`: the message is no longer automatically retried. Inspect `detail` rather than interpreting an exit code alone.
 
@@ -58,7 +58,11 @@ Pi receipts retain message ID and exact rendered-text digest. The rendered envel
 
 No background broker is installed. Sends and native boundary events trigger flushing, and an operator or an existing supervisor may invoke `flush`. An entirely stopped team needs an explicit restart and flush. Unresolvable uncertainty must not be converted into a fresh message merely to obtain a green status: inspect native evidence first.
 
-A network-disabled Codex sandbox can write its authorized mailbox while refusing the receiver's Unix-socket connection. The message then stays `queued`; this is not native acceptance. The live verifier acts as a task-scoped delivery supervisor by flushing the private team's queue while waiting for replies. It never writes message bodies on an agent's behalf or expands the agent's network permissions. This supervised transport, rather than direct socket access from the sandboxed shell, is part of that acceptance topology.
+A network-disabled Codex sandbox can write its authorized mailbox while refusing native transport. A Pi socket-connect refusal leaves a definite `queued` result, but a failed Codex queue subprocess can leave `unconfirmed` because the adapter cannot prove non-acceptance. Do not retry that ambiguous message or broaden the sandbox.
+
+For a supervised team, use `surface send RECIPIENT 'BODY' --queue-only --json` from the start. This performs the same sender/run, recipient, body, peer-routing, duplicate and rate checks, then persists the message as `queued` with zero attempts. It neither flushes older messages nor invokes a transport. Exit `75` means the authorized supervisor must later call `surface flush`; `--watch` still registers its separate roster subscription. Ordinary sends retain their existing flush-first behavior. Queue-only is not permission to resend or resolve an existing unconfirmed message.
+
+The goal pilot uses this task-scoped delivery supervisor while waiting for replies. It never writes message bodies on an agent's behalf or expands the agent's network permissions. This supervised transport, rather than direct socket access from the sandboxed shell, is part of that acceptance topology.
 
 ## Source-build verification
 

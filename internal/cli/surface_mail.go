@@ -114,9 +114,10 @@ func mailUsage(err error) error {
 
 func newSurfaceSendCmd(deps module.Deps) *cobra.Command {
 	var (
-		priority string
-		watch    bool
-		asJSON   bool
+		priority  string
+		watch     bool
+		asJSON    bool
+		queueOnly bool
 	)
 	cmd := &cobra.Command{
 		Use:   "send <to> <text|@file|->",
@@ -134,8 +135,11 @@ coordinator and the coordinator messages any worker.
 The recipient sees a header saying the text came from another agent, not
 the operator, so it can never approve anything.
 
-send first retries anything already queued. A message the recipient's
+By default, send first retries anything already queued. A message the recipient's
 harness cannot take yet stays queued and later verbs retry it.
+--queue-only appends the message without flushing or attempting any native
+transport. An authorized supervisor can flush it later. It does not retry or
+resolve an earlier unconfirmed message.
 
 Exit codes: 0 sent, 75 queued (not delivered yet; a later verb retries
 it), 1 failed or unconfirmed (acceptance is unknown; never blindly resend),
@@ -154,12 +158,13 @@ A --watch that does not register is a warning on stderr, not a new code.`,
 			if err != nil {
 				return mailUsage(err)
 			}
-			return runSurfaceSend(cmd, deps, os.Getenv, args[0], args[1], pri, watch, asJSON)
+			return runSurfaceSend(cmd, deps, os.Getenv, args[0], args[1], pri, watch, asJSON, queueOnly)
 		},
 	}
 	cmd.Flags().StringVar(&priority, "priority", "next", "where it lands in the recipient's queue: now, next or later")
 	cmd.Flags().BoolVar(&watch, "watch", false, "also get one notice from forgectl when the recipient next goes idle")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&queueOnly, "queue-only", false, "persist a queued message without flushing or invoking a native transport")
 	return cmd
 }
 
@@ -172,7 +177,7 @@ type sendResult struct {
 	Watching bool   `json:"watching,omitempty"`
 }
 
-func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) string, to, source string, pri mail.Priority, watch, asJSON bool) error {
+func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) string, to, source string, pri mail.Priority, watch, asJSON, queueOnly bool) error {
 	body, err := readMailBody(source, cmd.InOrStdin())
 	if err != nil {
 		return mailUsage(err)
@@ -186,10 +191,15 @@ func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) st
 		return mailError(err)
 	}
 	ctx := cmd.Context()
-	if _, err := sess.svc.Flush(ctx); err != nil {
-		return mailError(fmt.Errorf("flush the queue first: %w", err))
+	var res mail.SendResult
+	if queueOnly {
+		res, err = sess.svc.Queue(ctx, self, to, body, pri)
+	} else {
+		if _, err := sess.svc.Flush(ctx); err != nil {
+			return mailError(fmt.Errorf("flush the queue first: %w", err))
+		}
+		res, err = sess.svc.Send(ctx, self, to, body, pri)
 	}
-	res, err := sess.svc.Send(ctx, self, to, body, pri)
 	if err != nil {
 		return mailError(err)
 	}

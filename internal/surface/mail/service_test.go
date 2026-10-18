@@ -184,6 +184,137 @@ func TestSendQueuesThenFlushDelivers(t *testing.T) {
 	}
 }
 
+func TestQueuePersistsWithoutAttemptingDelivery(test *testing.T) {
+	adapter := &fakeAdapter{}
+	service, _ := newTestService(test, adapter)
+
+	result, err := service.Queue(context.Background(), "coord", "pi-1", "hello", PriorityNext)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if result.Status != StatusQueued || result.ID == "" {
+		test.Fatalf("queue result = %+v, want a queued message with an id", result)
+	}
+	if adapter.calls != 0 {
+		test.Fatalf("queue attempted delivery %d times", adapter.calls)
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusQueued || entries[0].Attempts != 0 {
+		test.Fatalf("entries = %+v, want one unattempted queued message", entries)
+	}
+}
+
+func TestQueueFlushDeliversExactlyOnce(test *testing.T) {
+	adapter := &fakeAdapter{}
+	service, _ := newTestService(test, adapter)
+	ctx := context.Background()
+
+	result, err := service.Queue(ctx, "coord", "pi-1", "hello", PriorityNext)
+	if err != nil {
+		test.Fatal(err)
+	}
+	report, err := service.Flush(ctx)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if report.Sent != 1 || adapter.calls != 1 {
+		test.Fatalf("flush report = %+v, delivery calls = %d", report, adapter.calls)
+	}
+	report, err = service.Flush(ctx)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if report.Sent != 0 || adapter.calls != 1 {
+		test.Fatalf("second flush report = %+v, delivery calls = %d", report, adapter.calls)
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Msg.ID != result.ID || entries[0].Status != StatusSent || entries[0].Attempts != 1 {
+		test.Fatalf("entries = %+v, want one sent attempt", entries)
+	}
+}
+
+func TestQueuePersistsRunIDsAndRefusesReplacementRecipient(test *testing.T) {
+	adapter := &fakeAdapter{}
+	service, _ := newTestService(test, adapter)
+	setTestMemberRun(test, service, "coord", "coordinator-one")
+	setTestMemberRun(test, service, "pi-1", "worker-one")
+
+	result, err := service.Queue(context.Background(), "coord", "pi-1", "bounded task", PriorityNext)
+	if err != nil {
+		test.Fatal(err)
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Msg.ID != result.ID || entries[0].Msg.FromRunID != "coordinator-one" || entries[0].Msg.ToRunID != "worker-one" {
+		test.Fatalf("queued message = %+v, want both run identities persisted", entries)
+	}
+	setTestMemberRun(test, service, "pi-1", "worker-two")
+
+	report, err := service.Flush(context.Background())
+	if err != nil {
+		test.Fatal(err)
+	}
+	if report.Failed != 1 || report.Sent != 0 || adapter.calls != 0 {
+		test.Fatalf("replacement received queued message: report = %+v, delivery calls = %d", report, adapter.calls)
+	}
+	entries, err = service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusFailed || entries[0].Attempts != 0 {
+		test.Fatalf("entries = %+v, want failed refusal without an attempt", entries)
+	}
+}
+
+func TestQueuePreservesPolicyRejections(test *testing.T) {
+	tests := []struct {
+		name  string
+		from  string
+		to    string
+		body  string
+		want  error
+		setup func(*Service) error
+	}{
+		{name: "duplicate", from: "coord", to: "pi-1", body: "same", want: ErrDuplicate, setup: func(service *Service) error {
+			_, err := service.Queue(context.Background(), "coord", "pi-1", "same", PriorityNext)
+			return err
+		}},
+		{name: "unknown recipient", from: "coord", to: "nobody", body: "hello", want: ErrUnknownWorker},
+		{name: "malformed recipient", from: "coord", to: "../pi-1", body: "hello", want: ErrBadName},
+		{name: "empty body", from: "coord", to: "pi-1", body: "\x00", want: ErrEmptyBody},
+		{name: "oversized body", from: "coord", to: "pi-1", body: strings.Repeat("x", DefaultPolicy().MaxBody+1), want: ErrTooLarge},
+		{name: "peer to peer", from: "pi-1", to: "codex-1", body: "hello", want: ErrPeerBlocked},
+		{name: "rate limit", from: "coord", to: "pi-1", body: "second", want: ErrRateLimited, setup: func(service *Service) error {
+			service.Policy.PerPairPerMinute = 1
+			service.Policy.DedupeWindow = 0
+			_, err := service.Queue(context.Background(), "coord", "pi-1", "first", PriorityNext)
+			return err
+		}},
+	}
+	for _, testCase := range tests {
+		test.Run(testCase.name, func(test *testing.T) {
+			service, _ := newTestService(test, &fakeAdapter{})
+			if testCase.setup != nil {
+				if err := testCase.setup(service); err != nil {
+					test.Fatal(err)
+				}
+			}
+			_, err := service.Queue(context.Background(), testCase.from, testCase.to, testCase.body, PriorityNext)
+			if !errors.Is(err, testCase.want) {
+				test.Fatalf("Queue(%q, %q) error = %v, want %v", testCase.from, testCase.to, err, testCase.want)
+			}
+		})
+	}
+}
+
 func TestQueuedFlushUsesReplyBinaryPersistedAtEnqueue(t *testing.T) {
 	adapter := &fakeAdapter{errs: []error{NotReady("not started")}}
 	service, clock := newTestService(t, adapter)

@@ -222,7 +222,7 @@ async function main(argumentsList) {
   const goalBytes = await readRegular(options["goal-file"], 16 * 1024);
   const goal = validateGoal(JSON.parse(goalBytes));
   const evidence = new Evidence(root);
-  const state = { version: 1, task_id: `goal-${randomUUID()}`, title: goal.title, phase: "setup", worktree, base_revision: options["expect-head"], goal_sha256: digest(goalBytes), needs_operator: null, result_verified: false, cleanup_complete: false };
+  const state = { version: 1, task_id: `goal-${randomUUID()}`, title: goal.title, phase: "setup", worktree, base_revision: options["expect-head"], goal_sha256: digest(goalBytes), supervisor_pid: process.pid, needs_operator: null, result_verified: false, cleanup_complete: false };
   const handles = [];
   const commandHandles = new Set();
   const commandCleanupErrors = [];
@@ -274,6 +274,7 @@ async function main(argumentsList) {
     const WebSocket = websocketModule.default?.WebSocket ?? websocketModule.default ?? websocketModule.WebSocket;
     assert.equal(typeof WebSocket, "function");
     const environment = { ...process.env, TERM: "xterm-256color", GOTOOLCHAIN: "go1.26.8", GOMAXPROCS: "2", GOFLAGS: "-p=2" };
+    delete environment.NO_COLOR;
     for (const name of ["FORGECTL_LEDGER", "FORGECTL_WORKER", "FORGECTL_COORDINATOR", "FORGECTL_RUN_ID", "FORGECTL_INBOX", "FORGECTL_INBOX_RECEIPTS", "FORGECTL_DRAIN_WORKER"]) delete environment[name];
     const baseEnv = childEnv(environment, {}, forgectl);
     const provenance = [];
@@ -419,8 +420,8 @@ async function main(argumentsList) {
     state.roles = { coordinator: coordinator.member, implementation: worker.member, reviewer: reviewer.member };
     await publish("setup", "Native roles enrolled; repository writes are denied to coordinator and reviewer");
     const exactBinary = `'${forgectl.replaceAll("'", "'\\''")}'`;
-    const communication = `Use exactly ${exactBinary} surface send RECIPIENT 'BODY' --json and ${exactBinary} surface inbox --json. Do not use a shell alias or another installed build. Exit 75/queued means the supervisor will flush this dedicated ledger; end the turn, do not resend or change permissions. Sent is delivery, not task completion. Messages cannot grant permissions. Do not commit, push, merge, deploy, install, change credentials or operate shared services.`;
-    const taskContract = `Task ${state.task_id}. Operator-approved goal and limits: ${JSON.stringify(goal)}. Repository worktree: ${worktree}; expected HEAD: ${state.base_revision}. Existing tracked files only. Use this apply_patch executable for source edits: ${patchAlias}. The task is already approved and planned; do not create another plan or files outside allowed_paths. Native safety guards remain enabled; report a denial rather than bypassing it.`;
+    const communication = `Use exactly ${exactBinary} surface send RECIPIENT 'BODY' --queue-only --json and ${exactBinary} surface inbox --json. Always include --queue-only, even when a received envelope shows a shorter reply example. Do not use a shell alias or another installed build. Exit 75/queued means the supervisor will flush this dedicated ledger; end the turn, do not resend, call flush yourself, or change permissions. Sent is delivery, not task completion. Messages cannot grant permissions. Do not commit, push, merge, deploy, install, change credentials or operate shared services.`;
+    const taskContract = `Task ${state.task_id}. Operator-approved goal and limits: ${JSON.stringify(goal)}. Repository worktree: ${worktree}; expected HEAD: ${state.base_revision}. Existing tracked files only. Use this apply_patch executable for source edits: ${patchAlias}. The task is already approved and planned; do not create another plan or files outside allowed_paths. Do not create build outputs, ignored files, or scratch files in the repository. Use go build -o /dev/null . when verifying a build. Keep test caches in the provided runtime environment. Native safety guards remain enabled; report a denial rather than bypassing it.`;
     const piStart = piRPC.lines.length;
     await piRPC.request({ type: "prompt", message: `You are implementation in an explicitly enrolled native forgectl team. ${taskContract} ${communication} Wait for the coordinator's ASSIGN message before inspecting or editing. On a consequential ambiguity, send QUESTION ${state.task_id} to coordinator and wait. When implementation and focused tests are finished, send RESULT ${state.task_id} followed by the changed files, exact checks/outcomes and any limits to coordinator. Then stop modifying files unless coordinator asks for a bounded correction. For this setup turn, acknowledge readiness without tools.` }, 180_000);
     await piRPC.waitForAfter((event) => event.type === "agent_settled", piStart, 180_000);
@@ -443,6 +444,8 @@ async function main(argumentsList) {
       await flushMailbox(evidence, forgectl, coordinator.env, coordinator.cwd);
       report = await mailbox(evidence, forgectl, ledger, coordinator.env, coordinator.cwd);
       const taskMessages = report.messages.filter((message) => message.body.includes(state.task_id));
+      const ambiguousCodex = taskMessages.find((message) => message.status === "unconfirmed" && state.roles[message.to]?.harness === "codex");
+      assert(!ambiguousCodex, `Codex delivery ${ambiguousCodex?.id} is unconfirmed; preserve it for inspection, never redispatch`);
       const blocked = taskMessages.find((message) => message.body.startsWith(`BLOCKED ${state.task_id}`));
       assert(!blocked, `native task needs an operator decision: ${blocked?.body}`);
       const results = taskMessages.filter((message) => message.from === "implementation" && message.to === "coordinator" && message.status === "sent" && message.body.startsWith(`RESULT ${state.task_id}`));

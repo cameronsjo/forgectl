@@ -41,6 +41,17 @@ func (f *mailFakeAdapter) State(context.Context, mail.Worker) (mail.WorkerState,
 	return mail.StateUnknown, nil
 }
 
+type mailReceiptFakeAdapter struct {
+	*mailFakeAdapter
+	receipts int
+	accepted bool
+}
+
+func (adapter *mailReceiptFakeAdapter) Receipt(context.Context, mail.Worker, mail.Message) (string, bool, error) {
+	adapter.receipts++
+	return "receipt", adapter.accepted, nil
+}
+
 // useMailLedger points the mail verbs at a temp ledger with a coordinator and
 // three workers, every harness served by one fake adapter. The caller is the
 // coordinator unless the test sets FORGECTL_WORKER.
@@ -201,6 +212,128 @@ func TestSurfaceSendFlushesFirst(t *testing.T) {
 	}
 	if len(ad.texts) != 3 || !strings.HasSuffix(ad.texts[1], "first\n"+mail.EndMarker) {
 		t.Fatalf("delivery order %q, want the retry before the new send", ad.texts)
+	}
+}
+
+func TestSurfaceSendQueueOnlyDoesNotFlushAndLaterFlushes(test *testing.T) {
+	service, adapter := useMailLedger(test)
+	adapter.errs = []error{mail.NotReady("not started")}
+	if _, _, code := runSurface(test, "", "send", "pi-1", "first"); code != mailExitQueued {
+		test.Fatalf("first send exit %d, want queued", code)
+	}
+	if len(adapter.texts) != 1 {
+		test.Fatalf("first send deliveries = %d, want 1", len(adapter.texts))
+	}
+	laterClock(service)
+
+	out, errOut, code := runSurface(test, "", "send", "pi-2", "second", "--queue-only", "--json")
+	if code != mailExitQueued {
+		test.Fatalf("queue-only exit %d, want %d; stdout %q stderr %q", code, mailExitQueued, out, errOut)
+	}
+	var result sendResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		test.Fatalf("stdout %q: %v", out, err)
+	}
+	if result.Status != string(mail.StatusQueued) || len(adapter.texts) != 1 {
+		test.Fatalf("queue-only result = %+v, deliveries = %d; want queued and no extra delivery", result, len(adapter.texts))
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Status != mail.StatusQueued || entries[1].Status != mail.StatusQueued || entries[1].Attempts != 0 {
+		test.Fatalf("entries after queue-only = %+v, want both messages queued", entries)
+	}
+
+	if _, errOut, code := runSurface(test, "", "flush"); code != 0 {
+		test.Fatalf("later flush exit %d: %s", code, errOut)
+	}
+	if len(adapter.texts) != 3 {
+		test.Fatalf("later flush deliveries = %d, want 3 including the queue-only message", len(adapter.texts))
+	}
+	entries, err = service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Status != mail.StatusSent || entries[0].Attempts != 2 || entries[1].Status != mail.StatusSent || entries[1].Attempts != 1 {
+		test.Fatalf("entries after flush = %+v, want both sent", entries)
+	}
+}
+
+func TestSurfaceSendQueueOnlyLeavesUnconfirmedUnreconciled(test *testing.T) {
+	service, adapter := useMailLedger(test)
+	receipt := &mailReceiptFakeAdapter{mailFakeAdapter: adapter, accepted: true}
+	for harness := range service.Adapters {
+		service.Adapters[harness] = receipt
+	}
+	receipt.errs = []error{mail.Unconfirmed("ack lost")}
+	if _, _, code := runSurface(test, "", "send", "pi-1", "uncertain"); code != exitFailed {
+		test.Fatalf("unconfirmed send exit %d, want %d", code, exitFailed)
+	}
+	if len(adapter.texts) != 1 || receipt.receipts != 0 {
+		test.Fatalf("initial unconfirmed delivery calls = %d, receipt calls = %d", len(adapter.texts), receipt.receipts)
+	}
+
+	out, errOut, code := runSurface(test, "", "send", "pi-2", "queued", "--queue-only", "--json")
+	if code != mailExitQueued {
+		test.Fatalf("queue-only exit %d, want %d; stdout %q stderr %q", code, mailExitQueued, out, errOut)
+	}
+	if len(adapter.texts) != 1 || receipt.receipts != 0 {
+		test.Fatalf("queue-only touched older message: delivery calls = %d, receipt calls = %d", len(adapter.texts), receipt.receipts)
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Status != mail.StatusUnconfirmed || entries[1].Status != mail.StatusQueued {
+		test.Fatalf("entries = %+v, want unconfirmed then queued", entries)
+	}
+}
+
+func TestSurfaceSendQueueOnlyRejectsStaleSenderRun(test *testing.T) {
+	service, _ := useMailLedger(test)
+	if err := service.Roster.Update("coord", func(worker *mail.Worker) error {
+		worker.RunID = "coordinator-run"
+		return nil
+	}); err != nil {
+		test.Fatal(err)
+	}
+	test.Setenv(mail.EnvCoordinator, "coord")
+	test.Setenv(mail.EnvLedger, service.Box.Dir)
+	test.Setenv(mail.EnvRunID, "stale-run")
+
+	_, errOut, code := runSurface(test, "", "send", "pi-1", "must not queue", "--queue-only")
+	if code != exitUsage || !strings.Contains(errOut, "stale or missing") {
+		test.Fatalf("exit %d, stderr %q; want stale sender usage error", code, errOut)
+	}
+	entries, err := service.Messages(nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(entries) != 0 {
+		test.Fatalf("stale sender queued messages = %+v", entries)
+	}
+}
+
+func TestSurfaceSendQueueOnlyWatchRegistersWithoutDelivery(test *testing.T) {
+	service, adapter := useMailLedger(test)
+	out, errOut, code := runSurface(test, "", "send", "pi-1", "watch this", "--queue-only", "--watch", "--json")
+	if code != mailExitQueued {
+		test.Fatalf("exit %d, want %d; stdout %q stderr %q", code, mailExitQueued, out, errOut)
+	}
+	var result sendResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		test.Fatalf("stdout %q: %v", out, err)
+	}
+	if result.Status != string(mail.StatusQueued) || !result.Watching || len(adapter.texts) != 0 {
+		test.Fatalf("result = %+v, deliveries = %d; want watched queued message without delivery", result, len(adapter.texts))
+	}
+	worker, err := service.Roster.Get("pi-1")
+	if err != nil {
+		test.Fatal(err)
+	}
+	if len(worker.Watchers) != 1 || worker.Watchers[0] != "coord" {
+		test.Fatalf("watchers = %q, want [coord]", worker.Watchers)
 	}
 }
 
