@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: P1–P5, R1–R4, and V1–V4 accepted with native and terminal evidence; feature-branch delivery remains open
-Next action: push the verified feature branch and prove its exact remote SHA. Installation, PR creation, merge, and deployment remain outside this authorization.
+Status: P1–P6, R1–R4, and V1–V4 complete; native/terminal acceptance and exact feature-branch delivery verified
+Next action: wait for separate authorization before PR creation, installation, merge, or deployment. Existing installations remain unchanged.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -59,7 +59,7 @@ P2 binding snapshots never update automatically. An explicit repeat bind of the 
 - [x] P3: Integrate task-owned herdr presentation and native launch/attach capabilities. Reuse the existing surface handshake, posture, ownership, and recovery mechanisms instead of typing prompts into arbitrary panes. Verify exact current source/API contracts before extending their seam; add restart, wrong-pane, ambiguous-ack, and unrelated-workspace negative controls.
 - [x] P4: Reuse Desk's read-only renderer for project/thread run status and timeline, with a sanitized source/projection and explicit unknown/stale states. Preserve the human approval queue unchanged. Verify parsing and rendered waiting, failure, completed-turn, and independently verified-result states; malformed inputs must not become success.
 - [x] P5: Build from clean committed source and run dedicated-session live acceptance across Codex/Pi/Hermes, including one real delegated artifact, UI reconnect, coordinator replacement, thread selection, and a stopped/restarted receiver. Independently audit IDs, selected native sessions, exact artifacts, provider/posture, and cleanup. Record limitations per capability rather than claiming uniform native UI support.
-- [ ] P6: Commit/push the verified feature branch and verify exact remote SHA. Record source/runtime receipts and the no-install/no-production-change boundary. Leave PR/merge/deployment for separate authorization.
+- [x] P6: Commit/push the verified feature branch and verify exact remote SHA. Record source/runtime receipts and the no-install/no-production-change boundary. Leave PR/merge/deployment for separate authorization.
 
 Each unit lands independently with its tests and checklist update. P1/P2 do not count as a completed Projects interface; P3/P4 and live P5 remain required.
 
@@ -271,7 +271,11 @@ Fresh Hermes run `/private/tmp/fcagents-hermes4.mBFrRT` passed every native task
 
 The accepted rerun preserved project `7a48038f-d572-414a-95c0-baf40637f407`, coordinator thread `8308cda2-fbe0-418f-95bb-067a19aee1f7`, and Hermes thread `4cbcf1d8-4650-4430-ac19-de0de3bc0577` across receiver replacement and native UI reconnect. Hermes native session `72c0a2ec-c3b9-4633-8819-70873da32eab` supplied two exact message-only replies. Native-history and mailbox audits bind each reply to its original input/run/session, prove source authorship, and reject wrong-session or shell-send substitution. Codex materialized the source under its existing sandbox. The artifact SHA-256 is `a1acf19c80592bad13e4326f1c5774bf136e9bc11dd5c01e4914ecf7c54f7bff`; Codex independently re-read it, matched the mailbox source bytes, and reran valid/duplicate/missing/default-status controls with exits 0/1/1/0. Hermes's working directory remained empty, including the denied-write control. Both native harnesses used direct OpenAI; the before/after Hermes preflight retained access-only credentials, no refresh token, and OpenAI-only auxiliary routing. Global Codex auth/configuration remained unchanged.
 
-The actual Agents render is `/private/tmp/fcagents-hermes5.lmPYim/ui/agents-render-5/render.txt`: 41,110 captured terminal bytes, 259 query replies, full Codex/Hermes model labels, shared 30-minute axis, finished intervals, and an explicitly unknown reply-free recovery interval. The wrong-content control captured 36,176 bytes and failed. Enter selected the exact current Hermes view (`w2:t5`) from the project overview (`w2:t1`) without changing tab count or the surface-operation journal. Unrelated project/surface snapshots stayed unchanged. Codex independently audited all three final native observation reports against persisted run bindings, both reply/body hashes, real rendered text, and the absent owned herdr PID 11630. Combined with the accepted Codex/Pi replacement run and current source unit/race/lint/contract evidence, this closes P5/R4/V4. Only feature-branch delivery remains.
+The actual Agents render is `/private/tmp/fcagents-hermes5.lmPYim/ui/agents-render-5/render.txt`: 41,110 captured terminal bytes, 259 query replies, full Codex/Hermes model labels, shared 30-minute axis, finished intervals, and an explicitly unknown reply-free recovery interval. The wrong-content control captured 36,176 bytes and failed. Enter selected the exact current Hermes view (`w2:t5`) from the project overview (`w2:t1`) without changing tab count or the surface-operation journal. Unrelated project/surface snapshots stayed unchanged. Codex independently audited all three final native observation reports against persisted run bindings, both reply/body hashes, real rendered text, and the absent owned herdr PID 11630. Combined with the accepted Codex/Pi replacement run and current source unit/race/lint/contract evidence, this closes P5/R4/V4.
+
+### Feature-branch delivery
+
+Codex pushed the implementation and accepted receipts to `origin/codex/cross-harness-loop` at `fbdf8db472903ab04be27210f49df422a1d62753`. A fresh `git ls-remote --exit-code origin refs/heads/codex/cross-harness-loop` returned that exact SHA, and the feature worktree was clean. The only difference from the clean runtime build `665dec037631d2f1090b06b1f69475046949f4dc` is these two plan files. The subsequent checklist-only closeout preserves that runtime artifact; its final remote SHA is verified again after pushing. No PR, merge, global installation, release, or fleet change is part of this delivery.
 
 ### Deferred and out-of-scope work
 

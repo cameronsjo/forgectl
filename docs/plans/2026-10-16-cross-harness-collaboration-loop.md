@@ -1,7 +1,7 @@
 # Cross-harness collaboration loop
 
 Status: Codex/Pi and Codex/Hermes collaboration, native coordinator handoff, Projects, and terminal-native Agents overview accepted; Claude deferred
-Next action: push the verified feature branch as tracked in the [Projects plan](2026-10-17-projects-surface.md). Cameron approved the message-only Hermes reply channel; its native proof and denied-edit controls passed without changing tool permissions. Installation, PR creation, merge, and deployment remain outside this authorization.
+Next action: wait for separate PR/installation authorization; the verified feature branch is pushed as tracked in the [Projects plan](2026-10-17-projects-surface.md). Cameron approved the message-only Hermes reply channel; its native proof and denied-edit controls passed without changing tool permissions. Installation, PR creation, merge, and deployment remain outside this authorization.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authorization
