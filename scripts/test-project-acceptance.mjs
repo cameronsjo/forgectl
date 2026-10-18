@@ -62,6 +62,41 @@ for (const changed of [
   { ...report, evidence: { ...report.evidence, model: "invented-producer" } },
 ]) assert.throws(() => assertNativeEvidence(changed, "project-1", "thread-1", binding, expected));
 
+const interval = {
+  id: "span-1", turn_id: "turn-1", state: "finished", provider: "openai-codex", model: "turn-model",
+  started_at: "2026-10-17T11:59:00.000Z", ended_at: "2026-10-17T11:59:30.000Z",
+};
+const timedReport = {
+  ...report,
+  native: { ...report.native, activity: { version: 1, source: "pi-agent-events", observed_at: "2026-10-17T12:00:00.000Z", spans: [interval] } },
+  evidence: { ...report.evidence, observed_at: "2026-10-17T12:00:00.000Z", started_at: interval.started_at, ended_at: interval.ended_at, provider: interval.provider, model: interval.model },
+};
+assert.equal(assertNativeEvidence(timedReport, "project-1", "thread-1", binding, expected), timedReport);
+for (const mutation of [
+  { source: "codex-turn-history" },
+  { spans: [] },
+  { spans: [interval, { ...interval, id: "span-2" }] },
+  { spans: [{ ...interval, turn_id: "other-turn" }] },
+  { spans: [{ ...interval, ended_at: undefined }] },
+  { spans: [{ ...interval, state: "failed" }] },
+  { spans: [{ ...interval, started_at: "invalid" }] },
+  { spans: [{ ...interval, ended_at: "2026-10-17T11:58:00.000Z" }] },
+  { observed_at: "2026-10-17T11:59:00.000Z" },
+]) assert.throws(() => assertNativeEvidence({ ...timedReport, native: { ...timedReport.native, activity: { ...timedReport.native.activity, ...mutation } } }, "project-1", "thread-1", binding, expected));
+for (const mutation of [
+  { model: report.native.model },
+  { provider: "invented-provider" },
+  { started_at: undefined },
+  { ended_at: "2026-10-17T11:59:31.000Z" },
+  { source: "hermes-supervisor" },
+  { observed_at: undefined },
+  { observed_at: "2026-10-17T11:59:00.000Z" },
+]) assert.throws(() => assertNativeEvidence({ ...timedReport, evidence: { ...timedReport.evidence, ...mutation } }, "project-1", "thread-1", binding, expected));
+for (const span of [{ ...interval, turn_id: "other-turn" }, { ...interval, ended_at: undefined, state: "running" }]) {
+  const untimed = { ...timedReport, native: { ...timedReport.native, activity: { ...timedReport.native.activity, spans: [span] } }, evidence: report.evidence };
+  assert.equal(assertNativeEvidence(untimed, "project-1", "thread-1", binding, expected), untimed);
+}
+
 const nativePolicy = {
   thread: { id: binding.native_session_id, cwd: binding.worktree }, cwd: binding.worktree,
   model: "test-model", modelProvider: "openai", approvalsReviewer: "user", approvalPolicy: "never",

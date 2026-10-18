@@ -245,6 +245,10 @@ Codex independently ran all `TestSurfaceProject`/`TestFocusProjectAgent` tests p
 
 ## Local acceptance commands
 
+The first Agents-era native runs used a clean full clone at `1f63c9f0`, binary SHA-256 `f446b737f70cf01a2a7c155dad3e5674c6403cb51f161bf7c1fbd07a5aa797a6`, with `vcs.modified=false`. Builds from linked worktrees were rejected before use: Go 1.26.8's VCS lookup requires a `.git` directory and did not stamp the intended linked-worktree revision. A separate local clone with a real `.git` directory supplied the verified artifact; no toolchain or source workaround was introduced.
+
+Fresh runs `/private/tmp/fcagents-hermes.k5KWOO` and `/private/tmp/fcagents-pair.GbhqTV` reached completed native work and independently checked artifacts, then failed an obsolete acceptance assertion requiring absent historical provider/model metadata. Their native observations contain the exact closed finished interval and its captured metadata, as V2 now permits; the Hermes run also published both message-only native replies. Neither run is accepted as P5/R4/V4 completion. The verifier now compares persisted timing/metadata to the matching native interval rather than current model selection. Its negative controls retain the no-interval/no-invented-producer rule and reject wrong sources, identities, outcomes, timestamps, duplicate matches, and current-model substitution. Both captured reports pass the corrected assertion; fresh end-to-end runs remain required.
+
 Run from this feature worktree. These are machine-local evidence paths, not installations or portable credential provisioning. Each live run makes model requests and requires a fresh owner-private root. The Hermes preflight must still pass; it refuses expiring access-only credentials and does not import or refresh credentials.
 
 ```sh

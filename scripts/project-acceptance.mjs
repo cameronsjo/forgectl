@@ -37,8 +37,32 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
     assert.equal(report.evidence.native_session_id, binding.native_session_id);
     assert.equal(report.evidence.harness, binding.harness);
     assert.equal(report.evidence.turn_id, report.native.turn.id);
-    assert.equal(report.evidence.provider, undefined);
-    assert.equal(report.evidence.model, undefined);
+    const sources = {
+      codex: ["codex-thread-read", "codex-turn-history"],
+      pi: ["pi-inbox", "pi-agent-events"],
+      hermes: ["hermes-supervisor", "hermes-prompt"],
+    };
+    assert(sources[binding.harness], "unknown evidence harness");
+    assert.equal(report.evidence.source, sources[binding.harness][0]);
+    const activity = report.native.activity;
+    if (activity) {
+      assert.equal(activity.version, 1);
+      assert.equal(activity.source, sources[binding.harness][1]);
+      assert(Array.isArray(activity.spans));
+    }
+    const intervals = (activity?.spans ?? []).filter((span) => span.turn_id === report.native.turn.id && span.ended_at);
+    assert(intervals.length <= 1, "ambiguous native interval");
+    const interval = intervals[0];
+    if (interval) {
+      assert.equal(interval.state, "finished");
+      const started = Date.parse(interval.started_at), ended = Date.parse(interval.ended_at);
+      assert(Number.isFinite(started) && Number.isFinite(ended) && started <= ended);
+      assert(ended <= Date.parse(activity.observed_at));
+      assert(ended <= Date.parse(report.evidence.observed_at));
+    }
+    for (const field of ["started_at", "ended_at", "provider", "model"]) {
+      assert.equal(report.evidence[field], interval?.[field], `native interval ${field}`);
+    }
   }
   return report;
 }
