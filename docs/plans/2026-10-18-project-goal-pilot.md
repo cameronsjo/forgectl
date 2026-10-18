@@ -1,11 +1,11 @@
 ---
-status: in-flight
+status: done
 ---
 
 # A real repository goal through Projects
 
-Status: in progress
-Next action: verify the integrated, independently reviewed patch in an actual terminal, then record and push the acceptance receipts.
+Status: native repository-goal pilot and independent source/terminal acceptance complete
+Next action: wait for a separately approved next goal or productization step. PR creation, installation, merge and deployment remain outside this authorization.
 
 ## Goal and authority
 
@@ -55,20 +55,20 @@ For the recovery exercise, first establish that the coordinator's turn settled, 
 - [x] Add and test the bounded pilot entrypoint and its operator-authored goal.
 - [x] Run native delegation, implementation and independent review; preserve the actual artifacts.
 - [x] Independently verify the patch and exercise coordinator replacement without duplicate work.
-- [ ] Inspect the real terminal interaction, integrate only the verified allowed patch, and rerun affected checks.
-- [ ] Record limitations and receipts, commit/push the session feature branch, and report the result without merging or installing.
+- [x] Inspect the real terminal interaction, integrate only the verified allowed patch, and rerun affected checks.
+- [x] Record limitations and receipts, commit/push the session feature branch, and report the result without merging or installing.
 
 ## Review
 
 Codex subagent `agents_ux_review` inspected current project/dispatch/recovery seams read-only at `c420a090`. Codex independently read the cited project, mailbox and native observation contracts. Reuse is supported; project-native stop/resume remains an explicit pilot lifecycle operation, and OpenAI-only routing is an acceptance constraint rather than a universal product promise.
 
-The same independent reviewer examined this plan at `bd4bbf42` through plan, operability and UX lenses. Codex verified and incorporated its supported findings: separate infrastructure/worker file scopes; exact owned-process stop/exit rather than `close-view`; explicit atomic receipts and unknown states; a dedicated ledger; pre/post native OpenAI checks; executable reviewer write-denial and actual diff checks; precise help/dismiss/quit behavior and narrow-screen acceptance. The reviewer did not execute native acceptance. No successful implementation is claimed by this plan.
+The same independent reviewer examined this plan at `bd4bbf42` through plan, operability and UX lenses. Codex verified and incorporated its supported findings: separate infrastructure/worker file scopes; exact owned-process stop/exit rather than `close-view`; explicit atomic receipts and unknown states; a dedicated ledger; pre/post native OpenAI checks; executable reviewer write-denial and actual diff checks; precise help/dismiss/quit behavior and narrow-screen acceptance. That design review did not execute native acceptance; later implementation and acceptance have their separate receipts below.
 
 ## Completion evidence
 
 The entrypoint contract tests pass with `node scripts/test-project-goal.mjs`, including invalid input, stale message identity, incomplete recovery, private status-file checks, and an actual detached command-group termination control. The existing verifier contracts pass with `node scripts/test-cross-harness-verifier.mjs`. Independent review led to canonical runtime inputs, a private dedicated ledger, tracked command children, an exclusive retained worktree claim, and primary-checkout before/after receipts. These are local trusted-package checks, not protection against another process running as the same OS user replacing installed package bytes or dependencies.
 
-Native execution and source-level verification passed in the fresh queue-only attempt below. Terminal acceptance remains pending; the earlier Projects preview is not evidence for the new keyboard-help behavior.
+Native execution, source-level verification and actual-terminal acceptance passed in the fresh queue-only attempt below. The earlier Projects preview was used only as an unbound registry fixture; the new clean-built binary supplied the keyboard-help behavior under test.
 
 Two pre-agent setup attempts revealed the project's ledger path is declared before its directories exist; the pilot now creates the dedicated private path before enrollment. The first real attempt (`/private/tmp/fggoal.vUjZhX`, task `goal-6d6504cd-7d8f-47da-917b-7c1044a0187e`) produced a three-file Pi patch and one unconfirmed coordinator-to-reviewer message. Codex stopped the exact supervisor after proving its three recorded child processes still belonged to it. Its final state is `interrupted`, not accepted; native cleanup completed, and no old message is reused for another attempt.
 
@@ -79,3 +79,9 @@ The fresh attempt at `/private/tmp/fggoal.4ueM7r` completed native implementatio
 Recovery replaced coordinator run `5bbc5ed0-26f9-49ab-8499-bc99c6a4e1f3` with `850fbdc3-4a57-48a5-9909-0047de6bf4e0` under the same logical thread, after proving the old process group and socket had stopped. The replacement recovered matching task, goal, base, patch, result/review messages and role bindings. Patch bytes and the complete coordinator-to-implementation message-ID list stayed identical; exactly one implementation assignment exists. Final state is deliberately `ready_for_verification`, `result_verified: false`, with `cleanup_complete: true`, not an agent-authored acceptance claim.
 
 Codex independently inspected the three-file patch, verified no untracked/ignored output, ran the full TUI suite and focused `TestProjectAgents` race tests, and ran golangci-lint 2.13.1 against the actual diff from the pinned base. All passed; the patch hash stayed unchanged across checks. A behavior-only footer regression compiled and failed at the unchanged base, and the real-terminal probe rejected that base's missing help footer. Integrated files match the native-reviewed bytes exactly. The broader terminal-safety pin also fails unchanged at `b08218d5` (`TestTextPrintersUseCappedHelpers`, naming `projectMetadataName` and `safeProjectAgents`); that earlier contract is follow-up work, not silently relabeled green. Missing frontmatter in this session's three plans was corrected and the official plan-index generator/check now passes.
+
+The integrated implementation is committed at `d997ca2c676353ae8bdd6fbb9d98b0ca4aa62f2e`; both TUI checks passed again after integration, and pinned lint passed against the actual committed diff from `a2a11100`. A clean clone built `/private/tmp/forgectl-goal-accepted.qhpcmD/bin/forgectl` with Go 1.26.8, `vcs.modified=false`, that exact revision, and SHA-256 `9282875dd516f211158f3b74a70889392689f93ebabadbc6801de7b79f0cad8f`. `git push origin codex/cross-harness-loop` succeeded and an exact `git ls-remote origin refs/heads/codex/cross-harness-loop` comparison confirmed delivery of that implementation revision.
+
+`python3 /private/tmp/forgectl-goal-build.KLL9Os/verify-help.py` passed against that binary in actual 100×24 and 50×16 PTYs. It verified both help footers, all key aliases and descriptions visibly within each viewport, `?`/Escape dismissal, preserved selection/time window after each individual action/navigation/zoom key, and quitting from help via `q` at 100×24 and Ctrl-C at 50×16. Source tests separately prove focus/evidence callbacks cannot run and offset/activity snapshots remain intact. Codex read the reconstructed help/restored screens, not just the probe's exit code. Raw terminal streams, screens and `receipt.json` are under `/private/tmp/forgectl-goal-accepted.qhpcmD/ui-help`; the verifier also proves its exact child process group is gone before passing. The unchanged-build run fails on the actual missing help footer, not on setup or cleanup.
+
+Independent acceptance is recorded in `/private/tmp/fggoal.4ueM7r/independent-acceptance.json`, tying the reviewed patch, integrated file hashes, code commit, clean binary, checks and terminal receipts together. The native pilot state remains honestly `ready_for_verification`; this separate Codex receipt, not a native agent's confidence, records `result_verified: true`. A separate host check proved all four recorded native process groups returned `ESRCH` and all four sockets were absent. No PR, global installation, merge, deployment, shared service restart, or old ambiguous-message retry occurred. This proves an attended goal-to-reviewed-result loop and explicit settled-coordinator recovery, not arbitrary crash recovery, a general scheduler, or an interactive goal-launch UI.
