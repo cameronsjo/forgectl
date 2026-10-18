@@ -25,19 +25,43 @@ const expectReject = async (callback, pattern) => {
   await assert.rejects(callback, pattern);
 };
 
+const waitForProcessGone = async (pid, group = false) => {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(group ? -pid : pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  assert.fail(`owned ${group ? "process group" : "process"} ${pid} remains after close`);
+};
+
 let commandChild;
+let reportedChildPid;
+let terminationRequested = false;
 const commandEvidence = {
   add() {},
   commandStarted(child) {
     commandChild = child;
-    process.kill(-child.pid, "SIGTERM");
+    child.stdout.on("data", (chunk) => {
+      const match = String(chunk).match(/child:(\d+)/u);
+      if (!match || terminationRequested) return;
+      reportedChildPid = Number(match[1]);
+      terminationRequested = true;
+      process.kill(-child.pid, "SIGTERM");
+    });
   },
 };
-const commandResult = await runCrossHarnessCommand(commandEvidence, "/bin/sh", ["-c", "sleep 1"], { timeout: 5_000 });
+const commandResult = await runCrossHarnessCommand(commandEvidence, "/bin/sh", ["-c", "sleep 2 & child=$!; printf 'child:%s\\n' \"$child\"; wait"], { timeout: 5_000 });
 assert(commandChild && Number.isInteger(commandChild.pid) && commandChild.pid > 1, "runCommand did not retain its child process");
+assert(Number.isInteger(reportedChildPid) && reportedChildPid > 1, "shell did not report a live descendant PID");
 assert(commandResult.code !== 0 || commandResult.signal !== null, "group termination did not produce a non-success result");
 assert.equal(commandResult.signal, "SIGTERM");
-assert.throws(() => process.kill(-commandChild.pid, 0), { code: "ESRCH" }, "owned child process group remains after close");
+await waitForProcessGone(commandChild.pid, true);
+await waitForProcessGone(reportedChildPid);
 
 const validArguments = [
   "--live",

@@ -328,6 +328,9 @@ async function main(argumentsList) {
     const projectCommand = async (args) => JSON.parse(await checked(forgectl, ["surface", "project", "--root", projectRoot, ...args, "--json"], coordinatorRoot));
     const project = await projectCommand(["create", goal.title, "--worktree", worktree, "--instructions", join(root, "goal.json")]);
     ledger = project.ledger;
+    assert.match(project.project.id, /^[a-f0-9-]{36}$/u, "project ID must be a UUID");
+    assert.equal(ledger, join(projectRoot, project.project.id, "team"), "unexpected dedicated project ledger");
+    await mkdir(ledger, { recursive: true, mode: 0o700 });
     assert.equal(await realpath(ledger), ledger, "project ledger must be canonical");
     assert(ledger.startsWith(`${projectRoot}/`), "project ledger escaped the dedicated project root");
     const ledgerInfo = await lstat(ledger);
