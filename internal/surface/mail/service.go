@@ -102,6 +102,10 @@ func (s *Service) attempt(ctx context.Context, tx *Tx, w Worker, e Entry) (SendR
 		const detail = "recipient run changed; queued message was not delivered to the replacement"
 		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, false, s.now())
 	}
+	if err := s.nativeReplyAttemptAllowed(tx, e.Msg); err != nil {
+		detail := oneLine([]byte(err.Error()), 300)
+		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, false, s.now())
+	}
 	if err := ValidateReplyBinary(e.Msg.ReplyBinary); err != nil {
 		detail := oneLine([]byte(err.Error()), 300)
 		return SendResult{ID: id, Status: StatusFailed, Detail: detail}, tx.Mark(id, StatusFailed, detail, true, s.now())
@@ -198,7 +202,7 @@ func (s *Service) Flush(ctx context.Context) (FlushReport, error) {
 				return nil
 			}
 			if e.Status == StatusUnconfirmed {
-				recipient, err := s.Roster.Get(e.Msg.To)
+				recipient, err := s.workerForTx(tx, e.Msg.To)
 				if err != nil && !errors.Is(err, ErrUnknownWorker) {
 					return fmt.Errorf("roster: %w", err)
 				}
@@ -239,7 +243,7 @@ func (s *Service) Flush(ctx context.Context) (FlushReport, error) {
 			if now.Before(s.Policy.nextAttempt(e)) {
 				continue
 			}
-			w, err := s.Roster.Get(e.Msg.To)
+			w, err := s.workerForTx(tx, e.Msg.To)
 			if err != nil && !errors.Is(err, ErrUnknownWorker) {
 				// An unreadable roster says nothing about the recipient, so
 				// the message keeps its place in the queue.

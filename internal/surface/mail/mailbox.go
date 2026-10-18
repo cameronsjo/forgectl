@@ -67,7 +67,8 @@ var ErrLockTimeout = errors.New("timed out waiting for the lock; another forgect
 
 // Mailbox is mailbox.jsonl in a ledger directory.
 type Mailbox struct {
-	Dir string
+	Dir     string
+	Private bool
 }
 
 func (b Mailbox) logPath() string  { return filepath.Join(b.Dir, "mailbox.jsonl") }
@@ -76,6 +77,9 @@ func (b Mailbox) lockPath() string { return filepath.Join(b.Dir, "mailbox.lock")
 // Locked runs fn holding the mailbox's exclusive lock, so no other forgectl
 // process sends or flushes at the same time.
 func (b Mailbox) Locked(fn func(tx *Tx) error) error {
+	if b.Private {
+		return lockedPrivateMailbox(b, fn)
+	}
 	if err := os.MkdirAll(b.Dir, 0o700); err != nil {
 		return err
 	}
@@ -89,7 +93,8 @@ func (b Mailbox) Locked(fn func(tx *Tx) error) error {
 
 // Tx reads and appends while the mailbox lock is held.
 type Tx struct {
-	box Mailbox
+	box     Mailbox
+	private *privateMailbox
 	// Skipped counts lines the last Load could not use.
 	Skipped int
 }
@@ -97,7 +102,7 @@ type Tx struct {
 // Load folds the log into one Entry per message, in the order sent.
 func (t *Tx) Load() ([]Entry, error) {
 	t.Skipped = 0
-	f, err := os.Open(t.box.logPath())
+	f, err := t.openLogRead()
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -112,25 +117,49 @@ func (t *Tx) Load() ([]Entry, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), maxRecord)
 	for sc.Scan() {
 		var r record
-		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+		var decodeErr error
+		if t.private != nil {
+			decodeErr = decodePrivateRecord(sc.Bytes(), &r)
+		} else {
+			decodeErr = json.Unmarshal(sc.Bytes(), &r)
+		}
+		if decodeErr != nil {
+			if t.private != nil {
+				return nil, fmt.Errorf("%w: %v", ErrNativeReplyCorrupt, decodeErr)
+			}
 			t.Skipped++
 			continue
 		}
 		switch r.Op {
 		case opMsg:
 			if r.Msg == nil || r.Msg.ID == "" {
+				if t.private != nil {
+					return nil, fmt.Errorf("%w: invalid message record", ErrNativeReplyCorrupt)
+				}
 				t.Skipped++
 				continue
 			}
+			if t.private != nil && (r.Msg.V != 1 || !threadPattern.MatchString(r.Msg.ID) || r.At.IsZero()) {
+				return nil, fmt.Errorf("%w: invalid message record", ErrNativeReplyCorrupt)
+			}
 			if _, dup := index[r.Msg.ID]; dup {
+				if t.private != nil {
+					return nil, fmt.Errorf("%w: duplicate message id", ErrNativeReplyCorrupt)
+				}
 				t.Skipped++
 				continue
 			}
 			index[r.Msg.ID] = len(entries)
 			entries = append(entries, Entry{Msg: *r.Msg, Status: StatusQueued, UpdatedAt: r.At})
 		case opStatus:
+			if t.private != nil && (r.ID == "" || !validStatus(r.Status) || r.At.IsZero()) {
+				return nil, fmt.Errorf("%w: invalid status record", ErrNativeReplyCorrupt)
+			}
 			i, ok := index[r.ID]
 			if !ok {
+				if t.private != nil {
+					return nil, fmt.Errorf("%w: orphan status record", ErrNativeReplyCorrupt)
+				}
 				t.Skipped++
 				continue
 			}
@@ -143,6 +172,9 @@ func (t *Tx) Load() ([]Entry, error) {
 				e.LastAttempt = r.At
 			}
 		default:
+			if t.private != nil {
+				return nil, fmt.Errorf("%w: unknown mailbox record operation", ErrNativeReplyCorrupt)
+			}
 			t.Skipped++
 		}
 	}
@@ -150,6 +182,15 @@ func (t *Tx) Load() ([]Entry, error) {
 		return nil, fmt.Errorf("mailbox %s: %w", t.box.logPath(), err)
 	}
 	return entries, nil
+}
+
+func validStatus(status Status) bool {
+	switch status {
+	case StatusQueued, StatusSent, StatusUnconfirmed, StatusFailed, StatusExpired:
+		return true
+	default:
+		return false
+	}
 }
 
 // Enqueue appends a new message as queued.
@@ -174,7 +215,7 @@ func (t *Tx) append(recs ...record) error {
 			return err
 		}
 	}
-	f, err := os.OpenFile(t.box.logPath(), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := t.openLogAppend()
 	if err != nil {
 		return err
 	}

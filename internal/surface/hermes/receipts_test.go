@@ -3,11 +3,15 @@
 package hermes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,6 +104,47 @@ func TestHermesBusyAndStoppingDoNotWriteReceipts(test *testing.T) {
 	}
 }
 
+func TestHermesNativeReplyIntentPrecedesReceiptOnWriteFailure(test *testing.T) {
+	receiptDirectory := test.TempDir()
+	receiptPath := filepath.Join(receiptDirectory, "receipts.jsonl")
+	replyDirectory := test.TempDir()
+	replyPath := filepath.Join(replyDirectory, "replies.jsonl")
+	request := Request{ID: "message-1", Text: "exact text"}
+	prepareCalls := 0
+	receiver := &supervisor{
+		config: Config{
+			RunID:         "run-1",
+			NativeReplies: true,
+			PrepareReply: func(context.Context, Request) (ReplyPreparation, error) {
+				prepareCalls++
+				return ReplyPreparation{}, errors.New("test preparation stop")
+			},
+		},
+		sessionID:   "session-1",
+		receiptPath: receiptPath,
+		receipts:    map[string]receipt{},
+		replyPath:   replyDirectory,
+		replies:     map[string]replyRecord{},
+		events:      eventWriter{writer: io.Discard, mu: &sync.Mutex{}},
+	}
+	first := receiver.deliverResponse(test.Context(), request)
+	if !first.Retry || len(receiver.receipts) != 0 || len(receiver.replies) != 0 || prepareCalls != 0 {
+		test.Fatalf("failed intent write left replay state: response=%#v receipts=%#v replies=%#v prepares=%d", first, receiver.receipts, receiver.replies, prepareCalls)
+	}
+	if _, err := os.Stat(receiptPath); !errors.Is(err, os.ErrNotExist) {
+		test.Fatalf("failed intent write created receipt journal: %v", err)
+	}
+	receiver.replyPath = replyPath
+	second := receiver.deliverResponse(test.Context(), request)
+	if second.Retry || !second.Unconfirmed || receiver.receipts[request.ID].Text != request.Text {
+		test.Fatalf("same-id retry was not accepted after intent recovery: %#v receipts=%#v", second, receiver.receipts)
+	}
+	receiver.forwards.Wait()
+	if prepareCalls != 1 {
+		test.Fatalf("retry replayed native prompt unexpectedly: preparation calls=%d", prepareCalls)
+	}
+}
+
 func TestHermesNativeReplyRequiresAResult(test *testing.T) {
 	client := &nativeClient{}
 	for _, response := range []nativeEnvelope{
@@ -114,5 +159,37 @@ func TestHermesNativeReplyRequiresAResult(test *testing.T) {
 	result, done, err := client.processMessage(nativeMessage{envelope: nativeEnvelope{JSONRPC: "2.0", ID: json.RawMessage("1"), Result: json.RawMessage(`{"stopReason":"end_turn"}`)}}, 1, "session/prompt", nil)
 	if err != nil || !done || string(result) != `{"stopReason":"end_turn"}` {
 		test.Fatalf("valid reply rejected: %s, %t, %v", result, done, err)
+	}
+}
+
+func TestHermesNativeResponseIDsFailClosed(test *testing.T) {
+	for name, response := range map[string]nativeEnvelope{
+		"missing": {JSONRPC: "2.0", Result: json.RawMessage(`{"stopReason":"end_turn"}`)},
+		"invalid": {JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Result: json.RawMessage(`{"stopReason":"end_turn"}`)},
+		"foreign": {JSONRPC: "2.0", ID: json.RawMessage(`2`), Result: json.RawMessage(`{"stopReason":"end_turn"}`)},
+	} {
+		test.Run(name, func(test *testing.T) {
+			if _, done, err := (&nativeClient{}).processMessage(nativeMessage{envelope: response}, 1, "session/prompt", nil); err == nil || done {
+				test.Fatalf("malformed response id was not rejected: done=%t err=%v", done, err)
+			}
+		})
+	}
+}
+
+func TestHermesNativeReadRejectsInvalidJSONText(test *testing.T) {
+	for name, line := range map[string][]byte{
+		"invalid UTF-8":      []byte{'{', '"', 'j', 's', 'o', 'n', 'r', 'p', 'c', '"', ':', '"', '2', '.', '0', '"', ',', '"', 'x', '"', ':', '"', 0xff, '"', '}', '\n'},
+		"unpaired surrogate": []byte(`{"jsonrpc":"2.0","x":"\ud800"}` + "\n"),
+	} {
+		test.Run(name, func(test *testing.T) {
+			client := &nativeClient{events: make(chan nativeMessage, 1), readErr: make(chan struct{})}
+			client.read(bytes.NewReader(line))
+			if client.readError() == nil {
+				test.Fatal("invalid native JSON text was accepted")
+			}
+			if len(client.events) != 0 {
+				test.Fatal("invalid native JSON text reached the RPC dispatcher")
+			}
+		})
 	}
 }

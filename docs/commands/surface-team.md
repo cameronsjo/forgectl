@@ -124,6 +124,20 @@ Native permission requests are cancelled, not approved on another agent's behalf
 
 Hermes delivery persists a pending receipt before prompting and immediately remains `unconfirmed`. After the turn, an exact message in native session history can confirm consumption. `flush` asks for that receipt without resending the message. A busy receiver returns `queued`; an unknown receipt stays `unconfirmed`. Neither history acceptance nor a settled native turn proves task success.
 
+### Message-only native replies
+
+Add `--native-replies` when starting the supervisor to publish explicitly framed assistant replies without invoking a shell or granting another tool. This opt-in replaces the shell reply hint in validated incoming mailbox messages; the untrusted-agent warning remains. It does not alter Hermes's native permissions. Legacy mode is unchanged.
+
+The final assistant response must be exactly one JSON object:
+
+```json
+{"forgectl_reply":{"v":1,"in_reply_to":"incoming-message-id","body":"reply text"}}
+```
+
+There is no model-selected destination. Forgectl binds the reply to the original input, sender, enrolled runs, and native session. Both the completed live response and durable final assistant history must contain the same frame; thoughts, tool narration, malformed frames, incomplete turns, permission requests, and ambiguous history publish nothing. The encoded frame is limited to 256 KiB and its body to 32 KiB, subject to the existing mailbox policy. A body that the mailbox cleaner would change is refused rather than silently rewritten. Use ordinary unframed assistant text when no mailbox reply is wanted.
+
+Publication records intent before prompting and ready bytes before enqueueing. An exact retry of a ready reply returns the existing mailbox record rather than adding another message; contradictory bytes or replaced run identities are refused. A crash before durable ready proof leaves the reply unknown and does not authorize rerunning the native turn. Initial delivery uses the existing flush machinery; queued messages still depend on later mailbox verbs, and an unconfirmed delivery is reconciled rather than blindly resent. Reply state is separate from input consumption and from task success.
+
 To restart, stop the owned supervisor, replace the member registration with a fresh run and socket, and pass the original native session to `surface team register --thread`. The supervisor reads that registered session; its optional `--session-id` must match it. Receipt files are scoped to the member and native session in the private ledger. Another supervisor cannot concurrently own that receipt store, and an existing socket is never stolen.
 
 ### Hermes source-build verification
@@ -142,6 +156,6 @@ node scripts/verify-hermes-collaboration.mjs --live \
 
 Use absolute executable paths, retaining the virtual-environment Python path rather than resolving its interpreter symlink. `HERMES_MODEL` is the unqualified OpenAI model ID. This verifier requires a preconfigured private access-only OpenAI credential, no copied refresh token, all auxiliary models pinned to OpenAI, and no provider fallbacks. It validates that configuration through native Hermes helpers and checks that Codex's global authentication and configuration remain unchanged. An expired credential is a failed prerequisite, not permission to refresh or replace another harness's login.
 
-Hermes authors source as a bounded base64 mailbox payload; Codex materializes those exact bytes in its existing sandbox. The verifier requires executable positive, duplicate-input, missing-path, and clarified-default checks, plus native source provenance. This is worker-authored source with coordinator materialization, not a claim that Hermes wrote or executed a file. A separate real native write request must be denied. Lost acknowledgement, busy/stopped delivery, same-session restart, stale-run rejection, selected-session refusal, unique native consumption, and owned-process cleanup are independent gates. A live `ACCEPTED` receipt, not unit tests or help output, is required to claim this collaboration works.
+Hermes authors source as a bounded UTF-8 `source_text` payload inside a native reply frame; Codex materializes those exact bytes in its existing sandbox. The verifier requires executable positive, duplicate-input, missing-path, and clarified-default checks, plus native source provenance and absence of shell-based reply sends. This is worker-authored source with coordinator materialization, not a claim that Hermes wrote or executed a file. A separate real native write request must be denied and must publish no reply. Lost acknowledgement, busy/stopped delivery, same-session restart, stale-run rejection, selected-session refusal, unique native consumption, and owned-process cleanup are independent gates. A live `ACCEPTED` receipt, not unit tests or help output, is required to claim this collaboration works.
 
 The [accepted Hermes run](../plans/2026-10-16-cross-harness-collaboration-loop.md#accepted-hermes-collaboration-receipt) records the exact clean build, native sessions, artifact and evidence hashes, independent history audit, and remaining herdr/Projects gates.

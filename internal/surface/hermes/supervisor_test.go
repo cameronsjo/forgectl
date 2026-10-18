@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -72,6 +74,7 @@ func TestHermesACPHelper(test *testing.T) {
 	scanner.Buffer(make([]byte, 4096), maxLine)
 	out := json.NewEncoder(os.Stdout)
 	lastPrompt := ""
+	lastAssistant := ""
 	for scanner.Scan() {
 		var request struct {
 			ID     json.RawMessage `json:"id"`
@@ -94,21 +97,55 @@ func TestHermesACPHelper(test *testing.T) {
 		case "authenticate":
 			respond(map[string]any{})
 		case "session/new", "session/load":
+			if request.Method == "session/new" && os.Getenv("FORGECTL_HERMES_TEST_PREEXISTING") == "1" {
+				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+					"sessionId": "session-test",
+					"update":    map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": "preexisting native prompt"}},
+				}})
+			}
 			if request.Method == "session/load" && lastPrompt != "" {
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
 					"sessionId": "session-test",
 					"update":    map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": lastPrompt}},
 				}})
+				if lastAssistant != "" {
+					_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+						"sessionId": "session-test",
+						"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": lastAssistant}},
+					}})
+				}
 				lastPrompt = ""
+				lastAssistant = ""
 			}
 			respond(map[string]any{"sessionId": "session-test", "models": map[string]string{"currentModelId": "openai-codex:test"}, "modes": map[string]string{"currentModeId": "default"}})
 			if os.Getenv("FORGECTL_HERMES_TEST_CLOSE_STDOUT") == "1" {
 				_ = os.Stdout.Close()
 			}
 		case "session/prompt":
+			if marker := os.Getenv("FORGECTL_HERMES_TEST_PROMPT_MARKER"); marker != "" {
+				_ = os.WriteFile(marker, []byte("prompt-called\n"), 0o600)
+			}
 			if prompt, ok := request.Params["prompt"].([]any); ok && len(prompt) > 0 {
 				if text, ok := prompt[0].(map[string]any)["text"].(string); ok {
 					lastPrompt = text
+					if os.Getenv("FORGECTL_HERMES_TEST_NATIVE_REPLY") == "1" {
+						const marker = `"in_reply_to":"`
+						start := strings.Index(text, marker)
+						if start >= 0 {
+							start += len(marker)
+							end := strings.IndexByte(text[start:], '"')
+							if end >= 0 {
+								inputID := text[start : start+end]
+								if os.Getenv("FORGECTL_HERMES_TEST_NATIVE_REPLY_NO_FRAME") != "1" {
+									lastAssistant = fmt.Sprintf(`{"forgectl_reply":{"v":1,"in_reply_to":%q,"body":"native answer"}}`, inputID)
+									_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+										"sessionId": "session-test",
+										"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": lastAssistant}},
+									}})
+								}
+							}
+						}
+					}
 				}
 			}
 			if os.Getenv("FORGECTL_HERMES_TEST_PERMISSION") == "1" {
@@ -143,8 +180,7 @@ func TestHermesSupervisorLifecycleAndReceipts(test *testing.T) {
 	test.Setenv("FORGECTL_HERMES_TEST_HELPER", "1")
 	test.Setenv("FORGECTL_HERMES_TEST_PERMISSION", "1")
 	test.Setenv("FORGECTL_HERMES_TEST_STOP_REASON", "refusal")
-	worktree := test.TempDir()
-	ledger := shortHermesTempDir(test)
+	worktree, ledger := test.TempDir(), shortHermesTempDir(test)
 	routeSocket := filepath.Join(ledger, "route.sock")
 	listenSocket := filepath.Join(ledger, "listen.sock")
 	command, err := filepath.Abs(os.Args[0])
@@ -201,6 +237,210 @@ func TestHermesSupervisorLifecycleAndReceipts(test *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(ledger, "hermes-receipts-"+sessionKey("hermes-worker", sessionID)+".jsonl")); err != nil {
 		test.Fatalf("receipt journal missing: %v", err)
+	}
+}
+
+func TestHermesNativeReplyPublishesAndRecoversWithoutReprompt(test *testing.T) {
+	test.Setenv("FORGECTL_HERMES_TEST_HELPER", "1")
+	test.Setenv("FORGECTL_HERMES_TEST_NATIVE_REPLY", "1")
+	worktree, ledger := test.TempDir(), shortHermesTempDir(test)
+	command, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		test.Fatal(err)
+	}
+	start := func(publish func(ReplyPublication) (ReplyPublicationResult, error), output *hermesTestWriter, runID string) (<-chan error, string, context.CancelFunc) {
+		test.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			result <- Run(ctx, Config{
+				Command: command, Args: []string{"-test.run=TestHermesACPHelper", "--"}, Model: "openai-codex:test", Ledger: ledger,
+				Member: "hermes-worker", Worktree: worktree, Socket: filepath.Join(ledger, runID+"-route.sock"), ListenSocket: filepath.Join(ledger, runID+"-listen.sock"), RunID: runID,
+				NativeReplies: true,
+				PrepareReply: func(context.Context, Request) (ReplyPreparation, error) {
+					return ReplyPreparation{Prompt: `Reply with {"forgectl_reply":{"v":1,"in_reply_to":"message-1","body":"native answer"}}`, SourceDigest: digest("source"), Recipient: "coordinator", RecipientRunID: "coordinator-run"}, nil
+				},
+				PublishReply: func(_ context.Context, publication ReplyPublication) (ReplyPublicationResult, error) {
+					return publish(publication)
+				},
+				Stdout: output, Stderr: output,
+			})
+		}()
+		return result, "session-test", cancel
+	}
+	firstOutput := &hermesTestWriter{}
+	firstResult, sessionID, cancelFirst := start(func(ReplyPublication) (ReplyPublicationResult, error) {
+		return ReplyPublicationResult{}, errors.New("simulated publication transport loss")
+	}, firstOutput, "run-reply")
+	waitHermesEvent(test, firstOutput, "hermes-ready", firstResult)
+	delivery, err := hermesRequest(filepath.Join(ledger, "run-reply-listen.sock"), Request{V: 1, Type: "deliver", ID: "message-1", RunID: "run-reply", SessionID: sessionID, Text: "hello Hermes"})
+	if err != nil || !delivery.Unconfirmed {
+		test.Fatalf("native reply delivery = %#v, %v", delivery, err)
+	}
+	waitHermesReceiptForRun(test, filepath.Join(ledger, "run-reply-listen.sock"), sessionID, "message-1", "run-reply")
+	turn := waitHermesEvent(test, firstOutput, "hermes-turn-end", nil)
+	if turn["error"] != false {
+		test.Fatalf("native turn was not complete: %#v", turn)
+	}
+	firstReply := waitHermesEvent(test, firstOutput, "hermes-native-reply", nil)
+	if firstReply["state"] != "ready" || firstReply["error"] != true {
+		test.Fatalf("failed publication did not retain ready state: %#v", firstReply)
+	}
+	cancelFirst()
+	select {
+	case err := <-firstResult:
+		if err != nil {
+			test.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		test.Fatal("first supervisor did not stop")
+	}
+	secondOutput := &hermesTestWriter{}
+	publicationCount := 0
+	secondResult, _, cancelSecond := start(func(publication ReplyPublication) (ReplyPublicationResult, error) {
+		publicationCount++
+		if publication.Input.ID != "message-1" || publication.Body != "native answer" {
+			test.Fatalf("recovered publication = %#v", publication)
+		}
+		return ReplyPublicationResult{MessageID: "outgoing-1", Status: "queued"}, nil
+	}, secondOutput, "run-reply")
+	defer cancelSecond()
+	waitHermesEvent(test, secondOutput, "hermes-native-reply", nil)
+	if publicationCount != 1 {
+		test.Fatalf("recovered publication count = %d", publicationCount)
+	}
+	cancelSecond()
+	select {
+	case err := <-secondResult:
+		if err != nil {
+			test.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		test.Fatal("second supervisor did not stop")
+	}
+}
+
+func TestHermesNativeReplyRejectsPermissionAndNoFrameSeparately(test *testing.T) {
+	test.Setenv("FORGECTL_HERMES_TEST_HELPER", "1")
+	test.Setenv("FORGECTL_HERMES_TEST_NATIVE_REPLY", "1")
+	worktree := test.TempDir()
+	command, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		test.Fatal(err)
+	}
+	run := func(test *testing.T, runID string, noFrame, permission bool) {
+		test.Helper()
+		ledger := shortHermesTempDir(test)
+		if noFrame {
+			test.Setenv("FORGECTL_HERMES_TEST_NATIVE_REPLY_NO_FRAME", "1")
+		} else {
+			test.Setenv("FORGECTL_HERMES_TEST_NATIVE_REPLY_NO_FRAME", "")
+		}
+		if permission {
+			test.Setenv("FORGECTL_HERMES_TEST_PERMISSION", "1")
+		} else {
+			test.Setenv("FORGECTL_HERMES_TEST_PERMISSION", "")
+		}
+		output := &hermesTestWriter{}
+		publicationCount := 0
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			result <- Run(ctx, Config{
+				Command: command, Args: []string{"-test.run=TestHermesACPHelper", "--"}, Model: "openai-codex:test", Ledger: ledger,
+				Member: "reply-worker", Worktree: worktree, Socket: filepath.Join(ledger, runID+"-route.sock"), ListenSocket: filepath.Join(ledger, runID+"-listen.sock"), RunID: runID,
+				NativeReplies: true,
+				PrepareReply: func(context.Context, Request) (ReplyPreparation, error) {
+					return ReplyPreparation{Prompt: `Reply with {"forgectl_reply":{"v":1,"in_reply_to":"message-2","body":"native answer"}}`, SourceDigest: digest("source"), Recipient: "coordinator", RecipientRunID: "coordinator-run"}, nil
+				},
+				PublishReply: func(context.Context, ReplyPublication) (ReplyPublicationResult, error) {
+					publicationCount++
+					return ReplyPublicationResult{MessageID: "outgoing-2", Status: "queued"}, nil
+				},
+				Stdout: output, Stderr: output,
+			})
+		}()
+		ready := waitHermesEvent(test, output, "hermes-ready", result)
+		sessionID, _ := ready["session_id"].(string)
+		socket := filepath.Join(ledger, runID+"-listen.sock")
+		if delivery, err := hermesRequest(socket, Request{V: 1, Type: "deliver", ID: "message-2", RunID: runID, SessionID: sessionID, Text: "hello Hermes"}); err != nil || !delivery.Unconfirmed {
+			test.Fatalf("delivery = %#v, %v", delivery, err)
+		}
+		waitHermesReceiptForRun(test, socket, sessionID, "message-2", runID)
+		turn := waitHermesEvent(test, output, "hermes-turn-end", nil)
+		if turn["error"] != false {
+			test.Fatalf("native turn error = %#v", turn)
+		}
+		reply := waitHermesEvent(test, output, "hermes-native-reply", nil)
+		if reply["state"] != "unknown" || reply["status"] != "proof-error" || publicationCount != 0 {
+			test.Fatalf("reply proof status = %#v, publications=%d", reply, publicationCount)
+		}
+		cancel()
+		select {
+		case err := <-result:
+			if err != nil {
+				test.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			test.Fatal("supervisor did not stop")
+		}
+	}
+	test.Run("permission", func(test *testing.T) { run(test, "run-permission", false, true) })
+	test.Run("no-frame", func(test *testing.T) { run(test, "run-no-frame", true, false) })
+}
+
+func TestHermesNativeReplyRejectsPreexistingInputBeforePrompt(test *testing.T) {
+	test.Setenv("FORGECTL_HERMES_TEST_HELPER", "1")
+	test.Setenv("FORGECTL_HERMES_TEST_PREEXISTING", "1")
+	worktree, ledger := test.TempDir(), shortHermesTempDir(test)
+	marker := filepath.Join(ledger, "prompt-called")
+	test.Setenv("FORGECTL_HERMES_TEST_PROMPT_MARKER", marker)
+	command, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		test.Fatal(err)
+	}
+	output := &hermesTestWriter{}
+	publicationCount := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- Run(ctx, Config{
+			Command: command, Args: []string{"-test.run=TestHermesACPHelper", "--"}, Model: "openai-codex:test", Ledger: ledger,
+			Member: "reply-worker", Worktree: worktree, Socket: filepath.Join(ledger, "route.sock"), ListenSocket: filepath.Join(ledger, "listen.sock"), RunID: "run-preexisting",
+			NativeReplies: true,
+			PrepareReply: func(context.Context, Request) (ReplyPreparation, error) {
+				return ReplyPreparation{Prompt: "preexisting native prompt", SourceDigest: digest("source"), Recipient: "coordinator", RecipientRunID: "coordinator-run"}, nil
+			},
+			PublishReply: func(context.Context, ReplyPublication) (ReplyPublicationResult, error) {
+				publicationCount++
+				return ReplyPublicationResult{MessageID: "outgoing", Status: "queued"}, nil
+			},
+			Stdout: output, Stderr: output,
+		})
+	}()
+	ready := waitHermesEvent(test, output, "hermes-ready", result)
+	sessionID, _ := ready["session_id"].(string)
+	delivery, err := hermesRequest(filepath.Join(ledger, "listen.sock"), Request{V: 1, Type: "deliver", ID: "message-preexisting", RunID: "run-preexisting", SessionID: sessionID, Text: "hello Hermes"})
+	if err != nil || !delivery.Unconfirmed {
+		test.Fatalf("delivery = %#v, %v", delivery, err)
+	}
+	reply := waitHermesEvent(test, output, "hermes-native-reply", nil)
+	if reply["state"] != replyUnknown || reply["status"] != "turn-error" || publicationCount != 0 {
+		test.Fatalf("preexisting input proof = %#v, publications=%d", reply, publicationCount)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		test.Fatalf("native prompt was called, marker error=%v", err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			test.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		test.Fatal("supervisor did not stop")
 	}
 }
 
@@ -358,10 +598,14 @@ func hermesRequest(socket string, request Request) (Response, error) {
 }
 
 func waitHermesReceipt(test *testing.T, socket, sessionID, id string) Response {
+	return waitHermesReceiptForRun(test, socket, sessionID, id, "run-1")
+}
+
+func waitHermesReceiptForRun(test *testing.T, socket, sessionID, id, runID string) Response {
 	test.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := hermesRequest(socket, Request{V: 1, Type: "receipt", ID: id, RunID: "run-1", SessionID: sessionID})
+		response, err := hermesRequest(socket, Request{V: 1, Type: "receipt", ID: id, RunID: runID, SessionID: sessionID})
 		if err == nil && response.Accepted != nil && *response.Accepted {
 			return response
 		}

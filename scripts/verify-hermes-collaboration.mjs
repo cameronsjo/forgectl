@@ -44,41 +44,223 @@ export function parseHermesArgs(argv) {
 export function artifactPayload(body, taskId) {
   const prefix = `COMPLETED ${taskId}\n`;
   if (!body.startsWith(prefix)) throw new Error("worker completion must begin with its exact task marker");
-  const payload = JSON.parse(body.slice(prefix.length));
-  assert.deepEqual(Object.keys(payload).sort(), ["encoding", "execution_id", "filename", "source_base64", "task_id"]);
+  const payload = strictJson(body.slice(prefix.length));
+  assert.deepEqual(Object.keys(payload).sort(), ["encoding", "execution_id", "filename", "source_text", "task_id"]);
   assert.equal(payload.task_id, taskId);
   assert.equal(payload.filename, "summarize-mailbox.mjs");
-  assert.equal(payload.encoding, "base64");
+  assert.equal(payload.encoding, "utf8");
   assert.match(payload.execution_id, /^[A-Za-z0-9][A-Za-z0-9_.-]{7,127}$/);
-  assert.equal(typeof payload.source_base64, "string");
-  assert.match(payload.source_base64, /^[A-Za-z0-9+/]+={0,2}$/);
-  const source = Buffer.from(payload.source_base64, "base64");
+  assert.equal(typeof payload.source_text, "string");
+  const source = Buffer.from(payload.source_text, "utf8");
   assert(source.length > 0 && source.length <= 12_000, "worker source must be 1..12000 bytes");
-  assert.equal(source.toString("base64"), payload.source_base64, "worker source encoding must be canonical and complete");
-  assert.deepEqual(Buffer.from(source.toString("utf8")), source, "worker source must be UTF-8");
+  assert.equal(source.toString("utf8"), payload.source_text, "worker source must be valid, unchanged UTF-8");
   return { ...payload, source };
 }
 
-export function assertNativeDelivery(history, messageIds, sourcePayload) {
+const replyFrameLimit = 256 * 1024;
+const replyBodyLimit = 32 * 1024;
+
+function strictJson(text) {
+  let offset = 0;
+  const whitespace = () => {
+    while (offset < text.length && " \t\r\n".includes(text[offset])) offset += 1;
+  };
+  const parseString = () => {
+    const start = offset;
+    assert.equal(text[offset], '"');
+    offset += 1;
+    while (offset < text.length) {
+      const character = text[offset++];
+      if (character === "\\") {
+        assert(offset < text.length, "JSON string has an incomplete escape");
+        offset += 1;
+      } else if (character === '"') {
+        return JSON.parse(text.slice(start, offset));
+      } else assert(character >= " " && character !== "\u007f", "JSON string contains a control character");
+    }
+    assert.fail("JSON string is unterminated");
+  };
+  const parseValue = (depth = 0) => {
+    assert(depth <= 16, "JSON nesting exceeds the reply limit");
+    whitespace();
+    const character = text[offset];
+    if (character === '"') return parseString();
+    if (character === "{") {
+      offset += 1;
+      const result = Object.create(null);
+      const keys = new Set();
+      whitespace();
+      if (text[offset] === "}") { offset += 1; return result; }
+      while (true) {
+        whitespace();
+        assert.equal(text[offset], '"', "JSON object key must be a string");
+        const key = parseString();
+        assert(!keys.has(key), `duplicate JSON field ${key}`);
+        keys.add(key);
+        whitespace();
+        assert.equal(text[offset++], ":", "JSON object key lacks a colon");
+        result[key] = parseValue(depth + 1);
+        whitespace();
+        if (text[offset] === "}") { offset += 1; return result; }
+        assert.equal(text[offset++], ",", "JSON object lacks a comma");
+      }
+    }
+    if (character === "[") {
+      offset += 1;
+      const result = [];
+      whitespace();
+      if (text[offset] === "]") { offset += 1; return result; }
+      while (true) {
+        result.push(parseValue(depth + 1));
+        whitespace();
+        if (text[offset] === "]") { offset += 1; return result; }
+        assert.equal(text[offset++], ",", "JSON array lacks a comma");
+      }
+    }
+    const literal = text.slice(offset).match(/^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/)?.[0];
+    assert(literal, "invalid JSON value");
+    offset += literal.length;
+    return JSON.parse(literal);
+  };
+  whitespace();
+  const value = parseValue();
+  whitespace();
+  assert.equal(offset, text.length, "JSON has trailing content");
+  return value;
+}
+
+export function nativeReplyFrame(text) {
+  assert(Buffer.byteLength(text, "utf8") <= replyFrameLimit, "native reply frame exceeds 256 KiB");
+  assert.equal(text.trim(), text, "native reply frame has surrounding whitespace");
+  const frame = strictJson(text);
+  assert.deepEqual(Object.keys(frame), ["forgectl_reply"]);
+  assert.deepEqual(Object.keys(frame.forgectl_reply).sort(), ["body", "in_reply_to", "v"]);
+  const reply = frame.forgectl_reply;
+  assert.equal(reply.v, 1);
+  assert.equal(typeof reply.in_reply_to, "string");
+  assert.match(reply.in_reply_to, /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
+  assert.equal(typeof reply.body, "string");
+  assert(reply.body.length > 0, "native reply body must not be empty");
+  assert.notEqual(reply.body.trim(), "", "native reply body must not be whitespace-only");
+  assert(Buffer.byteLength(reply.body, "utf8") <= replyBodyLimit, "native reply body exceeds 32 KiB");
+  assert.equal(reply.body.normalize("NFKC"), reply.body, "native reply body must be normalization-stable");
+  assert(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\r\u2028\u2029]|\p{Cf}/u.test(reply.body), "native reply body contains a cleaned character");
+  assert(!/\[\s*\/?\s*forgectl[\p{Pd}\s_]*msg\s*\]/iu.test(reply.body), "native reply body contains a mailbox marker");
+  assert.equal(Buffer.from(reply.body, "utf8").toString("utf8"), reply.body, "native reply body must be unchanged UTF-8");
+  return reply;
+}
+
+function historySegments(history, messageIds) {
+  const headers = new Map(messageIds.map((id) => [id, `[forgectl-msg] from=coordinator to=hermes-worker id=${id}\n`]));
+  const segments = [];
+  let current;
+  for (const update of history) {
+    if (update?.sessionUpdate === "user_message_chunk" && typeof update.content?.text === "string") {
+      const id = [...headers.entries()].find(([, header]) => update.content.text.startsWith(header))?.[0];
+      if (id !== undefined) {
+        current = { id, assistant: [], updates: [] };
+        segments.push(current);
+      } else current = undefined;
+    } else if (current) {
+      current.updates.push(update);
+      if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") {
+        current.assistant = [];
+      } else if (update?.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") {
+        current.assistant.push(update.content.text);
+      }
+    }
+  }
+  return segments;
+}
+
+export function assertNoNativeShellSend(history) {
+  const shellSend = /(?:^|[\s'"`])(?:forgectl\s+)?surface\s+send(?:[\s'"`]|$)/i;
+  const toolCalls = history.filter((update) => update?.sessionUpdate === "tool_call");
+  assert.equal(toolCalls.filter((update) => shellSend.test(JSON.stringify(update))).length, 0, "native worker must not invoke shell mailbox send");
+}
+
+export function assertNativeDelivery(history, messageIds, sourcePayload, replies = [], live = undefined) {
   for (const messageId of messageIds) {
     const header = `[forgectl-msg] from=coordinator to=hermes-worker id=${messageId}\n`;
     const matches = history.filter((update) => update?.sessionUpdate === "user_message_chunk" && update.content?.text?.startsWith(header));
     assert.equal(matches.length, 1, `native history must contain exactly one user header for ${messageId}`);
   }
-  const sourceEvidence = history.filter((update) => {
-    if (update?.sessionUpdate === "agent_message_chunk") {
-      try {
-        const nativePayload = artifactPayload(update.content?.text ?? "", sourcePayload.task_id);
-        return nativePayload.execution_id === sourcePayload.execution_id && nativePayload.source_base64 === sourcePayload.source_base64;
-      } catch { return false; }
+  assertNoNativeShellSend(history);
+  const segments = historySegments(history, messageIds);
+  const expected = new Map();
+  for (const reply of replies) {
+    assert(!expected.has(reply.inReplyTo), `native reply has duplicate input ${reply.inReplyTo}`);
+    expected.set(reply.inReplyTo, reply);
+    assert.equal(typeof reply.messageId, "string");
+    assert.equal(typeof reply.body, "string");
+  }
+  const observed = [];
+  for (const segment of segments) {
+    if (expected.has(segment.id)) {
+      assert.equal(segment.updates.filter((update) => update?.sessionUpdate === "tool_call" && update.kind === "execute").length, 0, `native reply task ${segment.id} invoked an execution tool`);
     }
-    return false;
+    const text = segment.assistant.join("");
+    if (!text.trimStart().startsWith("{")) continue;
+    let frame;
+    try { frame = nativeReplyFrame(text); } catch (error) {
+      throw new Error(`native reply frame for ${segment.id} is malformed: ${error.message}`);
+    }
+    const reply = expected.get(frame.in_reply_to);
+    assert(reply, `native reply references an unexpected input ${frame.in_reply_to}`);
+    assert.equal(frame.in_reply_to, segment.id, `native reply was emitted for the wrong input ${segment.id}`);
+    assert.equal(frame.body, reply.body, `native reply body changed for ${frame.in_reply_to}`);
+    observed.push({ ...reply, frame });
+  }
+  for (const reply of replies) {
+    const matches = observed.filter((candidate) => candidate.inReplyTo === reply.inReplyTo);
+    assert.equal(matches.length, 1, `native history must contain exactly one reply frame for ${reply.inReplyTo}`);
+  }
+  assert.equal(observed.length, replies.length, "native history contains an unexpected or duplicate reply frame");
+  const sourceEvidence = observed.filter((candidate) => {
+    try {
+      const nativePayload = artifactPayload(candidate.frame.body, sourcePayload.task_id);
+      return nativePayload.execution_id === sourcePayload.execution_id && nativePayload.source_text === sourcePayload.source_text;
+    } catch { return false; }
   });
   assert.equal(sourceEvidence.length, 1, "native assistant history must contain exactly one exact worker-authored payload");
+  if (live) {
+    const allEvents = live.events.filter((event) => event?.type === "hermes-native-reply");
+    const events = allEvents.filter((event) => event.state === "published");
+    for (const messageId of live.deniedIds ?? []) {
+      assert.equal(events.filter((event) => event.message_id === messageId).length, 0, `denied input ${messageId} has a successful native reply event`);
+    }
+    assert.equal(events.length, replies.length, "live native reply evidence must contain exactly one published event per reply");
+    for (const reply of replies) {
+      const matches = events.filter((event) => event.message_id === reply.inReplyTo && event.outgoing_id === reply.messageId);
+      assert.equal(matches.length, 1, `live native reply evidence did not map ${reply.messageId} to ${reply.inReplyTo}`);
+      const event = matches[0];
+      assert.equal(event.run_id, live.runId, `live native reply run mismatch for ${reply.inReplyTo}`);
+      assert.equal(event.session_id, live.sessionId, `live native reply session mismatch for ${reply.inReplyTo}`);
+      assert.equal(event.body_sha256, digest(reply.body), `live native reply body_sha256 mismatch for ${reply.inReplyTo}`);
+      assert.equal(event.body_bytes, Buffer.byteLength(reply.body, "utf8"), `live native reply body_bytes mismatch for ${reply.inReplyTo}`);
+    }
+  }
 }
 
 function digest(contents) { return createHash("sha256").update(contents).digest("hex"); }
 function pause(milliseconds) { return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)); }
+
+export function assertNativeReplyMailbox(records, replies, origin) {
+  const outgoing = records.filter((record) => record.op === "msg" && record.msg?.from === "hermes-worker").map((record) => record.msg);
+  assert.equal(outgoing.length, replies.length, "native worker appended an unexpected or duplicate reply");
+  for (const reply of replies) {
+    const matches = outgoing.filter((message) => message.id === reply.messageId);
+    assert.equal(matches.length, 1, "native reply mailbox record is missing or duplicated");
+    const message = matches[0];
+    assert.equal(message.to, "coordinator");
+    assert.equal(message.from_run_id, origin.workerRunId);
+    assert.equal(message.to_run_id, origin.coordinatorRunId);
+    assert.equal(message.reply_session_id, origin.sessionId);
+    assert.equal(message.reply_to, reply.inReplyTo);
+    assert.equal(message.body, reply.body);
+    assert.match(message.reply_source_digest, /^[a-f0-9]{64}$/);
+  }
+}
 
 function privateNativeEvidence(evidence) {
   return {
@@ -200,7 +382,7 @@ async function run(args) {
     const worker = await register(evidence, forgectl, "hermes-worker", ["--ledger", ledger, "--harness", "hermes", "--worktree", workerRoot, "--socket", routeSocket], baseEnv, workerRoot);
     const startWorker = async (registration, listen, name) => {
       const env = { ...hermesEnv, ...registration.environment };
-      const command = ["surface", "hermes", "--command", hermes, "--model", nativeModel, "--listen-socket", listen, "--json"];
+      const command = ["surface", "hermes", "--command", hermes, "--model", nativeModel, "--listen-socket", listen, "--native-replies", "--json"];
       const child = spawn(forgectl, command, { cwd: workerRoot, env, stdio: ["ignore", "pipe", "pipe"] });
       processes.push(child);
       const stream = new JsonLinesProcess(child, nativeEvidence, name);
@@ -260,8 +442,9 @@ async function run(args) {
     const exactBinary = `'${forgectl.replaceAll("'", "'\\''")}'`;
     const prompt = `You are Codex, coordinator of an explicitly enrolled cross-harness team. Delegate task ${taskId} to hermes-worker using ${exactBinary} surface send hermes-worker '<task text>' --json. Use this exact executable, never a PATH alias. Your network-disabled sandbox may return queued exit75; the task supervisor flushes this private mailbox. Do not resend queued or unconfirmed messages, broaden permissions, or answer native approval requests. End each turn after sending and wait for native queued replies.
 Hermes must author a Node-builtins-only standalone utility named summarize-mailbox.mjs. CLI: node summarize-mailbox.mjs INPUT_PATH; read process.argv[2], never hardcode ${fixture}. It reads forgectl mailbox JSONL, counts final sent/queued/failed/unconfirmed statuses and returns exactly {"counts":{"sent":1,"queued":1,"failed":1,"unconfirmed":1},"ids":["fixture-1","fixture-2","fixture-3","fixture-4"]} for fixture ${fixture}. Fold later status records; preserve message-ID order; reject duplicate op:msg IDs with nonzero exit and duplicate-specific stderr; reject missing input path nonzero. Tell Hermes to ask how a message without a status record should count before authoring the source. Its clarification must begin CLARIFICATION ${taskId}. Do not disclose the policy in the initial delegation: when that native clarification arrives, answer through the mailbox with ANSWER ${taskId} and the policy that such a message counts as queued.
-Hermes must not create or edit task files, execute the generated utility, or request broader permissions. It may read the fixture and use native terminal solely to send enrolled-team mail. Its product is source code carried in the reply, not a file it writes. Require one mailbox completion beginning exactly COMPLETED ${taskId} followed by newline and one JSON object with exactly keys encoding="base64", filename="summarize-mailbox.mjs", source_base64=<canonical base64 of the exact UTF-8 source, max12000 source bytes>, task_id="${taskId}", execution_id=<unique identifier>. Hermes must print that exact completed body as its final assistant response too, preserving provenance. Send payloads through ${exactBinary} surface send coordinator - --json with stdin when helpful; do not use file-writing workarounds or permission bypass flags.
-You must not author or repair its utility. After receiving COMPLETED, parse the JSON, decode source_base64 without reformatting and write those exact bytes to ${artifact} with owner-only file mode 0600 inside your existing sandbox. Run node ${artifact} ${fixture}; report what passed or failed without altering its code. Do not send another worker message after completion. No human relays agent messages. This deliberately proves worker-authored source plus coordinator materialization, not worker filesystem access.`;
+Native replies are message-only. Hermes must not create or edit task files, execute the generated utility, invoke a shell or terminal for this task, or request broader permissions. It may use a native read-only file tool to inspect the fixture if needed. For each requested mailbox reply, its final assistant response must be exactly one JSON object with no markdown, prose, or extra fields: {"forgectl_reply":{"v":1,"in_reply_to":"<the exact incoming forgectl message id>","body":"<the exact reply body>"}}. The supervisor supplies the exact incoming message identity in the rendered prompt; copy it and never choose a sender, recipient, run, or session. The clarification body must begin CLARIFICATION ${taskId}.
+The completion body must begin exactly COMPLETED ${taskId} followed by a newline and one JSON object with exactly keys encoding="utf8", filename="summarize-mailbox.mjs", source_text=<the exact UTF-8 source text>, task_id="${taskId}", execution_id=<unique identifier>. Do not base64-encode or use a tool to compute the source. The supervisor forwards only the frame body to the enrolled coordinator after native live/history proof. Do not send another worker message after completion. No human relays agent messages.
+You must not author or repair its utility. After receiving COMPLETED, parse the JSON, materialize source_text as those exact UTF-8 bytes to ${artifact} with owner-only file mode 0600 inside your existing sandbox. Run node ${artifact} ${fixture}; report what passed or failed without altering its code. This deliberately proves worker-authored source plus coordinator materialization, not worker filesystem access.`;
     await coordinatorClient.turn(threadId, prompt, coordinatorRoot, root);
     const delegated = await waitMailbox(evidence, forgectl, ledger, coordinatorEnv, coordinatorRoot, (message) => message.from === "coordinator" && message.to === "hermes-worker" && message.body.includes(taskId) && ["sent", "unconfirmed"].includes(message.status), 120_000);
     assert.equal(proxy.droppedId(), delegated.id);
@@ -334,6 +517,7 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
     assert.equal(await pathExists(deniedFile), false);
     await receiver.stream.waitForAfter((event) => event.type === "hermes-permission-denied", permissionStart, startupTimeout);
     evidence.add("native-edit-denied", { messageId: permission.sent.id, pathAbsent: true });
+    const initialLiveEvents = receiver.stream.lines;
     await stopWorker(receiver);
     await closeProxy(proxy);
     assert.equal(await pathExists(routeSocket), false, "proxy must release its owned socket");
@@ -365,18 +549,24 @@ You must not author or repair its utility. After receiving COMPLETED, parse the 
       await projects.audit();
     }
     await stopWorker(receiver);
+    const restartedLiveEvents = receiver.stream.lines;
     const audit = new HermesACPClient(hermes, workerRoot, hermesEnv, evidence);
     nativeAuditors.push(audit);
     await audit.initialize();
     const history = await audit.history(nativeSession, workerRoot, nativeModel);
     const workerInputs = [delegated.id, answer.id, busy.sent.id, duringBusy.sent.id, permission.sent.id, recovery.sent.id];
-    assertNativeDelivery(history, workerInputs, sourcePayload);
+    const nativeReplies = [
+      { inReplyTo: delegated.id, messageId: clarification.id, body: clarification.body },
+      { inReplyTo: answer.id, messageId: completion.id, body: completion.body },
+    ];
+    assertNativeDelivery(history, workerInputs, sourcePayload, nativeReplies, { events: [...initialLiveEvents, ...restartedLiveEvents], runId: worker.member.run_id, sessionId: nativeSession, deniedIds: [permission.sent.id] });
+    assertNativeReplyMailbox(await readReceiptRecords(join(ledger, "mailbox.jsonl")), nativeReplies, { workerRunId: worker.member.run_id, coordinatorRunId: coordinator.member.run_id, sessionId: nativeSession });
     assert.equal(history.some((update) => update.sessionUpdate === "user_message_chunk" && update.content?.text?.includes(wrongIdentity.text)), false);
     assert(history.some((update) => update.sessionUpdate === "tool_call" && update.kind === "edit" && JSON.stringify(update).includes(deniedFile)), "native history must show the requested denied file-write control");
     assert.equal((await audit.stop()).code, 0);
     assert.deepEqual(await readFile(artifact), sourcePayload.source);
     assert.deepEqual(await readdir(workerRoot), [], "Hermes must not create task files under this source-transport contract");
-    evidence.add("native-history-audited", { sessionId: nativeSession, uniqueInputIds: workerInputs, exactSourceProvenance: true, wrongSessionAbsent: true, artifactPreserved: true });
+    evidence.add("native-history-audited", { sessionId: nativeSession, uniqueInputIds: workerInputs, replyMappings: nativeReplies.map((reply) => ({ in_reply_to: reply.inReplyTo, reply_id: reply.messageId, body_sha256: digest(reply.body), body_bytes: Buffer.byteLength(reply.body, "utf8") })), exactSourceProvenance: true, noShellMailboxSend: true, wrongSessionAbsent: true, artifactPreserved: true });
     await checkConfig();
     await coordinatorClient.waitForThreadIdle(threadId);
     await projects?.cleanup();

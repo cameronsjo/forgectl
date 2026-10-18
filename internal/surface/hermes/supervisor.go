@@ -24,24 +24,47 @@ import (
 )
 
 const (
-	maxLine       = 1 << 20
-	maxSocketPath = 103
+	maxLine          = 1 << 20
+	maxSocketPath    = 103
+	maxHistoryBytes  = 8 << 20
+	maxHistoryUpdate = 50000
 )
 
 type Config struct {
-	Command      string
-	Args         []string
-	Model        string
-	Ledger       string
-	Member       string
-	Worktree     string
-	Socket       string
-	ListenSocket string
-	RunID        string
-	SessionID    string
-	OnSession    func(string) error
-	Stdout       io.Writer
-	Stderr       io.Writer
+	Command       string
+	Args          []string
+	Model         string
+	Ledger        string
+	Member        string
+	Worktree      string
+	Socket        string
+	ListenSocket  string
+	RunID         string
+	SessionID     string
+	OnSession     func(string) error
+	NativeReplies bool
+	PrepareReply  func(context.Context, Request) (ReplyPreparation, error)
+	PublishReply  func(context.Context, ReplyPublication) (ReplyPublicationResult, error)
+	Stdout        io.Writer
+	Stderr        io.Writer
+}
+
+type ReplyPreparation struct {
+	Prompt         string
+	SourceDigest   string
+	Recipient      string
+	RecipientRunID string
+}
+
+type ReplyPublication struct {
+	Input    Request
+	Prepared ReplyPreparation
+	Body     string
+}
+
+type ReplyPublicationResult struct {
+	MessageID string
+	Status    string
 }
 
 type Ready struct {
@@ -83,18 +106,40 @@ type Response struct {
 }
 
 type historyUpdate struct {
-	SessionID string
-	Kind      string
-	Text      string
+	SessionID      string
+	Kind           string
+	Text           string
+	ContentType    string
+	MetadataDigest string
+	Size           int
 }
 
 type receipt struct {
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
-	RunID     string `json:"run_id"`
-	Digest    string `json:"digest"`
-	Text      string `json:"text"`
-	State     string `json:"state"`
+	ID           string `json:"id"`
+	SessionID    string `json:"session_id"`
+	RunID        string `json:"run_id"`
+	Digest       string `json:"digest"`
+	Text         string `json:"text"`
+	NativePrompt string `json:"native_prompt,omitempty"`
+	State        string `json:"state"`
+}
+
+type replyRecord struct {
+	ID             string `json:"id"`
+	SessionID      string `json:"session_id"`
+	RunID          string `json:"run_id"`
+	Digest         string `json:"digest"`
+	Text           string `json:"text"`
+	SourceDigest   string `json:"source_digest,omitempty"`
+	Recipient      string `json:"recipient,omitempty"`
+	RecipientRunID string `json:"recipient_run_id,omitempty"`
+	Prompt         string `json:"prompt,omitempty"`
+	PromptDigest   string `json:"prompt_digest,omitempty"`
+	Body           string `json:"body,omitempty"`
+	Frame          string `json:"frame,omitempty"`
+	MessageID      string `json:"message_id,omitempty"`
+	Status         string `json:"status,omitempty"`
+	State          string `json:"state"`
 }
 
 type nativeEnvelope struct {
@@ -128,24 +173,47 @@ type nativeClient struct {
 	mu           sync.Mutex
 	nextID       int
 	onPermission func(json.RawMessage)
+	permissionMu sync.Mutex
+	permissions  uint64
+	unsupported  uint64
 }
 
 func (client *nativeClient) processMessage(message nativeMessage, id int, method string, updates *[]historyUpdate) (json.RawMessage, bool, error) {
 	if message.envelope.Method != "" {
-		if message.envelope.Method == "session/update" && updates != nil {
+		if message.envelope.Method == "session/update" {
 			var params struct {
-				SessionID string `json:"sessionId"`
-				Update    struct {
-					SessionUpdate string `json:"sessionUpdate"`
-					Content       struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content"`
-				} `json:"update"`
+				SessionID string          `json:"sessionId"`
+				Update    json.RawMessage `json:"update"`
 			}
-			if json.Unmarshal(message.envelope.Params, &params) == nil {
-				*updates = append(*updates, historyUpdate{SessionID: params.SessionID, Kind: params.Update.SessionUpdate, Text: params.Update.Content.Text})
+			var update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+				Content       struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
 			}
+			if err := json.Unmarshal(message.envelope.Params, &params); err != nil || params.SessionID == "" || len(params.Update) == 0 {
+				return nil, false, errors.New("native Hermes session/update notification is malformed")
+			}
+			if err := json.Unmarshal(params.Update, &update); err != nil || update.SessionUpdate == "" {
+				return nil, false, errors.New("native Hermes session/update payload is malformed")
+			}
+			if updates != nil {
+				size := len(params.Update)
+				if len(*updates) >= maxHistoryUpdate || historyBytes(*updates)+size > maxHistoryBytes {
+					return nil, false, errors.New("native Hermes history exceeded the bounded update limit")
+				}
+				*updates = append(*updates, historyUpdate{
+					SessionID:      params.SessionID,
+					Kind:           update.SessionUpdate,
+					Text:           update.Content.Text,
+					ContentType:    update.Content.Type,
+					MetadataDigest: metadataDigest(params.Update),
+					Size:           size,
+				})
+			}
+		} else if len(message.envelope.ID) == 0 {
+			return nil, false, fmt.Errorf("native Hermes sent unsupported notification %q", message.envelope.Method)
 		}
 		if len(message.envelope.ID) > 0 {
 			if err := client.answer(message.envelope.ID, message.envelope.Method); err != nil {
@@ -154,9 +222,15 @@ func (client *nativeClient) processMessage(message nativeMessage, id int, method
 		}
 		return nil, false, nil
 	}
+	if len(message.envelope.ID) == 0 {
+		return nil, false, errors.New("native Hermes response lacks an id")
+	}
 	var responseID int
-	if len(message.envelope.ID) == 0 || json.Unmarshal(message.envelope.ID, &responseID) != nil || responseID != id {
-		return nil, false, nil
+	if err := json.Unmarshal(message.envelope.ID, &responseID); err != nil {
+		return nil, false, fmt.Errorf("native Hermes response id is invalid: %w", err)
+	}
+	if responseID != id {
+		return nil, false, fmt.Errorf("native Hermes response id %d does not match request %d", responseID, id)
 	}
 	if len(message.envelope.Error) > 0 && string(message.envelope.Error) != "null" {
 		return nil, true, fmt.Errorf("hermes %s returned an error: %s", method, oneLine(message.envelope.Error, 300))
@@ -165,6 +239,14 @@ func (client *nativeClient) processMessage(message nativeMessage, id int, method
 		return nil, true, fmt.Errorf("hermes %s response lacks a result", method)
 	}
 	return message.envelope.Result, true, nil
+}
+
+func historyBytes(updates []historyUpdate) int {
+	total := 0
+	for _, update := range updates {
+		total += update.Size
+	}
+	return total
 }
 
 type sessionResult struct {
@@ -191,6 +273,8 @@ type supervisor struct {
 	nativeVer    string
 	receiptPath  string
 	receipts     map[string]receipt
+	replyPath    string
+	replies      map[string]replyRecord
 	mu           sync.Mutex
 	nativeMu     sync.Mutex
 	busy         bool
@@ -202,6 +286,7 @@ type supervisor struct {
 	connections  map[net.Conn]struct{}
 	closing      bool
 	lastTurn     *TurnObservation
+	history      []historyUpdate
 }
 
 func (receiver *supervisor) currentSession() string {
@@ -265,7 +350,7 @@ func Run(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
-	receiver := &supervisor{config: config, native: native, receipts: map[string]receipt{}, connections: map[net.Conn]struct{}{}}
+	receiver := &supervisor{config: config, native: native, receipts: map[string]receipt{}, replies: map[string]replyRecord{}, connections: map[net.Conn]struct{}{}}
 	output := eventWriter{writer: writerOrDiscard(config.Stdout), mu: &receiver.eventMu}
 	receiver.events = output
 	exitEventDone := make(chan struct{})
@@ -334,6 +419,13 @@ func Run(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
+	if config.NativeReplies {
+		receiver.replyPath = filepath.Join(config.Ledger, "hermes-replies-"+sessionKey(config.Member, session)+".jsonl")
+		receiver.replies, err = loadReplies(receiver.replyPath)
+		if err != nil {
+			return err
+		}
+	}
 	if err := receiver.reconcile(updates); err != nil {
 		return err
 	}
@@ -346,6 +438,9 @@ func Run(ctx context.Context, config Config) error {
 		if err := config.OnSession(session); err != nil {
 			return err
 		}
+	}
+	if err := receiver.recoverReplies(ctx); err != nil {
+		return err
 	}
 	provider, _, _ := strings.Cut(model, ":")
 	output.write(Ready{Type: "hermes-ready", Ready: true, RunID: config.RunID, SessionID: session, NativeVersion: version, Model: model, Provider: provider, Mode: mode, RouteSocket: config.Socket, ListenSocket: config.ListenSocket})
@@ -361,6 +456,9 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	if config.ListenSocket == "" {
 		config.ListenSocket = config.Socket
+	}
+	if config.NativeReplies && (config.PrepareReply == nil || config.PublishReply == nil) {
+		return Config{}, errors.New("hermes native replies require prepare and publish callbacks")
 	}
 	if !filepath.IsAbs(config.ListenSocket) || filepath.Clean(config.ListenSocket) != config.ListenSocket {
 		return Config{}, errors.New("hermes listen socket must be an absolute clean path")
@@ -475,6 +573,10 @@ func (client *nativeClient) read(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 4096), maxLine)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
+		if err := validateReplyJSONLexemes(line); err != nil {
+			client.failRead(fmt.Errorf("hermes stdout contained invalid JSON text: %w", err))
+			return
+		}
 		var envelope nativeEnvelope
 		if err := json.Unmarshal(line, &envelope); err != nil || envelope.JSONRPC != "2.0" {
 			if err == nil {
@@ -567,8 +669,17 @@ func (client *nativeClient) call(ctx context.Context, method string, params any,
 }
 
 func (client *nativeClient) answer(id json.RawMessage, method string) error {
-	if method == "session/request_permission" && client.onPermission != nil {
-		client.onPermission(id)
+	if method == "session/request_permission" {
+		client.permissionMu.Lock()
+		client.permissions++
+		client.permissionMu.Unlock()
+		if client.onPermission != nil {
+			client.onPermission(id)
+		}
+	} else {
+		client.permissionMu.Lock()
+		client.unsupported++
+		client.permissionMu.Unlock()
 	}
 	response := struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -588,6 +699,18 @@ func (client *nativeClient) answer(id json.RawMessage, method string) error {
 	}
 	_, err = client.stdin.Write(append(line, '\n'))
 	return err
+}
+
+func (client *nativeClient) permissionCount() uint64 {
+	client.permissionMu.Lock()
+	defer client.permissionMu.Unlock()
+	return client.permissions
+}
+
+func (client *nativeClient) unsupportedCount() uint64 {
+	client.permissionMu.Lock()
+	defer client.permissionMu.Unlock()
+	return client.unsupported
 }
 
 func (receiver *supervisor) prepare(ctx context.Context) (string, string, string, string, []historyUpdate, error) {
@@ -809,6 +932,20 @@ func (receiver *supervisor) deliverResponse(ctx context.Context, request Request
 		return base
 	}
 	record := receipt{ID: request.ID, SessionID: receiver.sessionID, RunID: receiver.config.RunID, Digest: digest, Text: request.Text, State: "pending"}
+	if receiver.config.NativeReplies {
+		reply := replyRecord{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, Digest: record.Digest, Text: record.Text, State: replyIntent}
+		if previous, exists := receiver.replies[reply.ID]; exists {
+			if previous.State != replyIntent || !sameReplyIdentity(previous, reply) {
+				receiver.mu.Unlock()
+				base.Error = "native reply intent conflicts with the message"
+				return base
+			}
+		} else if err := receiver.appendReplyLocked(reply); err != nil {
+			receiver.mu.Unlock()
+			base.Retry, base.Error = true, "could not persist the native reply intent"
+			return base
+		}
+	}
 	if err := receiver.appendReceiptLocked(record); err != nil {
 		receiver.mu.Unlock()
 		base.Retry, base.Error = true, "could not persist the Hermes receipt"
@@ -826,9 +963,80 @@ func (receiver *supervisor) deliverResponse(ctx context.Context, request Request
 func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	defer receiver.forwards.Done()
 	receiver.events.write(map[string]any{"type": "hermes-turn-start", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID})
+	var preparation ReplyPreparation
+	var err error
+	if receiver.config.NativeReplies {
+		preparation, err = receiver.prepareNativeReply(ctx, record)
+		if err == nil {
+			record.NativePrompt = preparation.Prompt
+			receiver.mu.Lock()
+			current, ok := receiver.receipts[record.ID]
+			if !ok || current.State != "pending" || current.Digest != record.Digest {
+				err = errors.New("native reply receipt changed before preparation")
+			} else {
+				if err = receiver.appendReceiptLocked(record); err == nil {
+					reply := receiver.replies[record.ID]
+					if reply.State != replyIntent || reply.Digest != record.Digest {
+						err = errors.New("native reply intent changed before preparation")
+					} else {
+						reply.SourceDigest, reply.Recipient, reply.RecipientRunID = preparation.SourceDigest, preparation.Recipient, preparation.RecipientRunID
+						reply.Prompt, reply.PromptDigest, reply.State = preparation.Prompt, digest(preparation.Prompt), replyPrepared
+						err = receiver.appendReplyLocked(reply)
+					}
+				}
+			}
+			receiver.mu.Unlock()
+		}
+	}
+	if err != nil {
+		receiver.mu.Lock()
+		_ = receiver.markReplyUnknownLocked(record.ID, "preparation-error")
+		receiver.busy = false
+		receiver.mu.Unlock()
+		receiver.events.write(map[string]any{"type": "hermes-turn-end", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID, "error": true})
+		return
+	}
+	nativePrompt := record.Text
+	if receiver.config.NativeReplies {
+		nativePrompt = preparation.Prompt
+	}
 	receiver.nativeMu.Lock()
-	var updates []historyUpdate
-	result, err := receiver.native.call(ctx, "session/prompt", map[string]any{"sessionId": receiver.sessionID, "prompt": []map[string]string{{"type": "text", "text": record.Text}}}, &updates)
+	var pre []historyUpdate
+	if receiver.config.NativeReplies {
+		var currentHistory []historyUpdate
+		receiver.mu.Lock()
+		currentHistory = append(currentHistory, receiver.history...)
+		receiver.mu.Unlock()
+		oldRelevant, oldErr := replyHistoryUpdates(currentHistory, receiver.sessionID)
+		if oldErr != nil {
+			err = oldErr
+		} else {
+			for _, update := range oldRelevant {
+				if update.Kind == "user_message_chunk" && update.Text == preparation.Prompt {
+					err = errors.New("native reply input already exists in durable history")
+					break
+				}
+			}
+		}
+		if err == nil {
+			_, err = receiver.native.call(ctx, "session/load", map[string]any{"cwd": receiver.config.Worktree, "sessionId": receiver.sessionID, "mcpServers": []any{}}, &pre)
+		}
+		if err == nil {
+			freshRelevant, freshErr := replyHistoryUpdates(pre, receiver.sessionID)
+			if freshErr != nil {
+				err = freshErr
+			} else if !historyPrefix(oldRelevant, freshRelevant) || len(oldRelevant) != len(freshRelevant) {
+				err = errors.New("native reply pre-turn history changed outside the supervisor")
+			}
+		}
+	}
+	permissionStart := receiver.native.permissionCount()
+	unsupportedStart := receiver.native.unsupportedCount()
+	var liveUpdates []historyUpdate
+	var result json.RawMessage
+	if err == nil {
+		result, err = receiver.native.call(ctx, "session/prompt", map[string]any{"sessionId": receiver.sessionID, "prompt": []map[string]string{{"type": "text", "text": nativePrompt}}}, &liveUpdates)
+	}
 	var prompt struct {
 		StopReason string `json:"stopReason"`
 	}
@@ -838,18 +1046,60 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 			err = errors.New("native Hermes prompt response lacks a stop reason")
 		}
 	}
+	var postUpdates []historyUpdate
 	if err == nil {
-		updates = nil
-		_, err = receiver.native.call(ctx, "session/load", map[string]any{"cwd": receiver.config.Worktree, "sessionId": receiver.sessionID, "mcpServers": []any{}}, &updates)
+		_, err = receiver.native.call(ctx, "session/load", map[string]any{"cwd": receiver.config.Worktree, "sessionId": receiver.sessionID, "mcpServers": []any{}}, &postUpdates)
 	}
 	if err == nil {
-		err = receiver.reconcile(updates)
+		err = receiver.reconcile(postUpdates)
 	}
 	receiver.nativeMu.Unlock()
-	receiver.events.write(map[string]any{"type": "hermes-turn-end", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID, "stop_reason": prompt.StopReason, "error": err != nil})
+	nativeErr := err
+	if nativeErr == nil && ctx.Err() != nil {
+		nativeErr = ctx.Err()
+	}
+	var replyErr error
+	proofFailed := false
+	unknownReason := ""
+	if nativeErr == nil && receiver.config.NativeReplies {
+		body, proofErr := proveNativeReply(record, pre, liveUpdates, postUpdates, prompt.StopReason, receiver.native.permissionCount()-permissionStart, receiver.native.unsupportedCount()-unsupportedStart)
+		if proofErr != nil {
+			replyErr = proofErr
+			proofFailed = true
+			unknownReason = "proof-error"
+		} else {
+			var readyRecord replyRecord
+			receiver.mu.Lock()
+			if ctx.Err() != nil {
+				replyErr = ctx.Err()
+				proofFailed = true
+				unknownReason = "turn-cancelled"
+			}
+			reply := receiver.replies[record.ID]
+			if replyErr == nil && reply.State != replyPrepared {
+				replyErr = errors.New("native reply was not prepared")
+				proofFailed = true
+				unknownReason = "proof-error"
+			} else if replyErr == nil {
+				reply.Body = body
+				reply.Frame = liveReplyFrame(liveUpdates)
+				reply.State = replyReady
+				replyErr = receiver.appendReplyLocked(reply)
+				readyRecord = reply
+			}
+			receiver.mu.Unlock()
+			if replyErr == nil {
+				replyErr = receiver.publishReady(ctx, readyRecord)
+			}
+		}
+	}
+	if nativeErr != nil && unknownReason == "" {
+		unknownReason = "turn-error"
+	}
+	receiver.events.write(map[string]any{"type": "hermes-turn-end", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID, "stop_reason": prompt.StopReason, "error": nativeErr != nil})
 	receiver.mu.Lock()
 	status := "unknown"
-	if err == nil {
+	if nativeErr == nil {
 		if prompt.StopReason == "end_turn" {
 			status = "completed"
 		} else {
@@ -858,25 +1108,32 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	}
 	receiver.lastTurn = &TurnObservation{MessageID: record.ID, Status: status, ObservedAt: time.Now().UTC()}
 	receiver.busy = false
+	if receiver.config.NativeReplies && (nativeErr != nil || proofFailed || replyErr != nil && receiver.replies[record.ID].State == replyPrepared) {
+		if unknownReason == "" {
+			unknownReason = "turn-error"
+		}
+		_ = receiver.markReplyUnknownLocked(record.ID, unknownReason)
+	}
 	receiver.mu.Unlock()
 }
 
 func (receiver *supervisor) reconcile(updates []historyUpdate) error {
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
+	receiver.history = append(receiver.history[:0], updates...)
 	textOwners := map[string]int{}
 	for _, record := range receiver.receipts {
 		if record.SessionID == receiver.sessionID {
-			textOwners[record.Text]++
+			textOwners[receiptNativeText(record)]++
 		}
 	}
 	for id, record := range receiver.receipts {
-		if record.SessionID != receiver.sessionID || record.State != "pending" || textOwners[record.Text] != 1 {
+		if record.SessionID != receiver.sessionID || record.State != "pending" || textOwners[receiptNativeText(record)] != 1 {
 			continue
 		}
 		matches := 0
 		for _, update := range updates {
-			if update.SessionID == receiver.sessionID && update.Kind == "user_message_chunk" && update.Text == record.Text {
+			if update.SessionID == receiver.sessionID && update.Kind == "user_message_chunk" && update.Text == receiptNativeText(record) {
 				matches++
 			}
 		}
@@ -890,6 +1147,13 @@ func (receiver *supervisor) reconcile(updates []historyUpdate) error {
 		}
 	}
 	return nil
+}
+
+func receiptNativeText(record receipt) string {
+	if record.NativePrompt != "" {
+		return record.NativePrompt
+	}
+	return record.Text
 }
 
 func (receiver *supervisor) appendReceiptLocked(record receipt) error {

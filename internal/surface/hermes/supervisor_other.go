@@ -9,19 +9,40 @@ import (
 )
 
 type Config struct {
-	Command      string
-	Args         []string
-	Model        string
-	Ledger       string
-	Member       string
-	Worktree     string
-	Socket       string
-	ListenSocket string
-	RunID        string
-	SessionID    string
-	OnSession    func(string) error
-	Stdout       io.Writer
-	Stderr       io.Writer
+	Command       string
+	Args          []string
+	Model         string
+	Ledger        string
+	Member        string
+	Worktree      string
+	Socket        string
+	ListenSocket  string
+	RunID         string
+	SessionID     string
+	OnSession     func(string) error
+	NativeReplies bool
+	PrepareReply  func(context.Context, Request) (ReplyPreparation, error)
+	PublishReply  func(context.Context, ReplyPublication) (ReplyPublicationResult, error)
+	Stdout        io.Writer
+	Stderr        io.Writer
+}
+
+type ReplyPreparation struct {
+	Prompt         string
+	SourceDigest   string
+	Recipient      string
+	RecipientRunID string
+}
+
+type ReplyPublication struct {
+	Input    Request
+	Prepared ReplyPreparation
+	Body     string
+}
+
+type ReplyPublicationResult struct {
+	MessageID string
+	Status    string
 }
 
 type Ready struct {

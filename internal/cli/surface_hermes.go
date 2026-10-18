@@ -10,23 +10,27 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/hermes"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
 
-func newSurfaceHermesCmd() *cobra.Command {
+var runHermesSupervisor = hermes.Run
+
+func newSurfaceHermesCmd(deps module.Deps) *cobra.Command {
 	var (
-		commandPath string
-		model       string
-		ledger      string
-		member      string
-		worktree    string
-		socket      string
-		listen      string
-		runID       string
-		sessionID   string
-		nativeArgs  []string
-		asJSON      bool
+		commandPath   string
+		model         string
+		ledger        string
+		member        string
+		worktree      string
+		socket        string
+		listen        string
+		runID         string
+		sessionID     string
+		nativeArgs    []string
+		asJSON        bool
+		nativeReplies bool
 	)
 	command := &cobra.Command{
 		Use:          "hermes",
@@ -102,7 +106,7 @@ func newSurfaceHermesCmd() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(command.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			return hermes.Run(ctx, hermes.Config{
+			config := hermes.Config{
 				Command:      commandPath,
 				Args:         nativeArgs,
 				Model:        model,
@@ -128,7 +132,13 @@ func newSurfaceHermesCmd() *cobra.Command {
 				},
 				Stdout: command.OutOrStdout(),
 				Stderr: command.ErrOrStderr(),
-			})
+			}
+			if nativeReplies {
+				if err := configureHermesReplies(&config, deps, registered); err != nil {
+					return err
+				}
+			}
+			return runHermesSupervisor(ctx, config)
 		},
 	}
 	command.Flags().StringVar(&commandPath, "command", "", "absolute Hermes ACP executable")
@@ -142,5 +152,6 @@ func newSurfaceHermesCmd() *cobra.Command {
 	command.Flags().StringVar(&sessionID, "session-id", "", "existing native session to load")
 	command.Flags().StringArrayVar(&nativeArgs, "arg", nil, "argument passed to the native ACP executable (repeatable)")
 	command.Flags().BoolVar(&asJSON, "json", false, "emit one JSON event per line")
+	command.Flags().BoolVar(&nativeReplies, "native-replies", false, "publish explicit native assistant reply frames to the original enrolled sender")
 	return command
 }
