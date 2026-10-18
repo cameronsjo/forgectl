@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { assertBoundRun, assertNativeEvidence } from "./project-acceptance.mjs";
-import { assertAgentsSnapshot, codexViewSnapshot } from "./project-presentation-acceptance.mjs";
+import { assertAgentsSnapshot, codexViewSnapshot, ProjectPresentationAcceptance } from "./project-presentation-acceptance.mjs";
 
 const member = { name: "worker", run_id: "run-1", harness: "pi", thread_id: "native-1", worktree: "/private/task/worker", socket: "/private/task/pi.sock" };
 const binding = { member: member.name, run_id: member.run_id, harness: member.harness, native_session_id: member.thread_id, worktree: member.worktree, socket: member.socket };
@@ -43,6 +43,14 @@ for (const mutation of [
   { rows: [{ ...agentsSnapshot.rows[0], points: [{ ...agentsSnapshot.rows[0].points[0], source: "unknown" }] }] },
   { rows: [{ ...agentsSnapshot.rows[0], spans: [agentsSnapshot.rows[0].spans[0], { ...agentsSnapshot.rows[0].spans[1], span: { ...agentsSnapshot.rows[0].spans[1].span, state: "unknown" } }] }] },
 ]) assert.throws(() => assertAgentsSnapshot({ ...agentsSnapshot, ...mutation }, "project-1", [agentsBinding]));
+const unknownAgents = structuredClone(agentsSnapshot);
+unknownAgents.rows[0].spans[1].span.state = "unknown";
+unknownAgents.rows[0].spans[1].span.turn_id = "recovery-turn";
+const unknownBinding = { ...agentsBinding, current: { ...agentsBinding.current, state: "unknown", turnId: "recovery-turn" } };
+assert.equal(assertAgentsSnapshot(unknownAgents, "project-1", [unknownBinding]), unknownAgents);
+assert.throws(() => assertAgentsSnapshot(unknownAgents, "project-1", [agentsBinding]));
+assert.throws(() => assertAgentsSnapshot(unknownAgents, "project-1", [{ ...unknownBinding, current: { ...unknownBinding.current, turnId: "different-turn" } }]));
+assert.throws(() => assertAgentsSnapshot(agentsSnapshot, "project-1", [unknownBinding]));
 
 const report = {
   project_id: "project-1", thread_id: "thread-1", run_id: "run-1", process_liveness: "unknown",
@@ -96,6 +104,26 @@ for (const span of [{ ...interval, turn_id: "other-turn" }, { ...interval, ended
   const untimed = { ...timedReport, native: { ...timedReport.native, activity: { ...timedReport.native.activity, spans: [span] } }, evidence: report.evidence };
   assert.equal(assertNativeEvidence(untimed, "project-1", "thread-1", binding, expected), untimed);
 }
+const unknownReport = structuredClone(timedReport);
+unknownReport.native.turn.status = "unknown";
+unknownReport.evidence.status = "unknown";
+unknownReport.native.activity.spans[0].state = "unknown";
+const unknownExpected = { provider: expected.provider, model: expected.model, status: "unknown", turnId: "turn-1" };
+assert.equal(assertNativeEvidence(unknownReport, "project-1", "thread-1", binding, unknownExpected), unknownReport);
+assert.throws(() => assertNativeEvidence(unknownReport, "project-1", "thread-1", binding, expected));
+assert.throws(() => assertNativeEvidence(unknownReport, "project-1", "thread-1", binding, { ...unknownExpected, turnId: "other-turn" }));
+assert.throws(() => assertNativeEvidence(timedReport, "project-1", "thread-1", binding, unknownExpected));
+
+const keyCalls = [];
+let keyCode = 0;
+const keyTarget = {
+  evidence: {}, herdr: "/private/herdr", session: "isolated-session", env: {}, workspace: { ref: { pane: "w1:p1" } },
+  projects: { runCommand: async (...args) => { keyCalls.push(args); return { code: keyCode, stdout: "", stderr: keyCode ? "refused" : "" }; } },
+};
+await ProjectPresentationAcceptance.prototype.sendKeys.call(keyTarget, ["up", "down", "Enter"]);
+assert.deepEqual(keyCalls[0][2], ["--session", "isolated-session", "pane", "send-keys", "w1:p1", "up", "down", "Enter"]);
+keyCode = 1;
+await assert.rejects(() => ProjectPresentationAcceptance.prototype.sendKeys.call(keyTarget, ["Enter"]), /herdr send-keys failed: refused/);
 
 const nativePolicy = {
   thread: { id: binding.native_session_id, cwd: binding.worktree }, cwd: binding.worktree,

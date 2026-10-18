@@ -29,14 +29,17 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
   assert(report.native.provider.length > 0 && report.native.model.length > 0);
   if (expected.provider) assert.equal(report.native.provider, expected.provider);
   if (expected.model) assert.equal(report.native.model, expected.model);
-  if (expected.completed) {
-    assert.equal(report.native.turn.status, "completed");
-    assert.equal(report.evidence?.status, "completed");
+  const expectedStatus = expected.status ?? (expected.completed ? "completed" : undefined);
+  if (expectedStatus) {
+    assert(["completed", "incomplete", "failed", "unknown"].includes(expectedStatus));
+    assert.equal(report.native.turn.status, expectedStatus);
+    assert.equal(report.evidence?.status, expectedStatus);
     assert.equal(report.evidence.thread_id, threadId);
     assert.equal(report.evidence.run_id, binding.run_id);
     assert.equal(report.evidence.native_session_id, binding.native_session_id);
     assert.equal(report.evidence.harness, binding.harness);
     assert.equal(report.evidence.turn_id, report.native.turn.id);
+    if (expected.turnId) assert.equal(report.native.turn.id, expected.turnId);
     const sources = {
       codex: ["codex-thread-read", "codex-turn-history"],
       pi: ["pi-inbox", "pi-agent-events"],
@@ -54,7 +57,7 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
     assert(intervals.length <= 1, "ambiguous native interval");
     const interval = intervals[0];
     if (interval) {
-      assert.equal(interval.state, "finished");
+      assert.equal(interval.state, expectedStatus === "completed" ? "finished" : expectedStatus);
       const started = Date.parse(interval.started_at), ended = Date.parse(interval.ended_at);
       assert(Number.isFinite(started) && Number.isFinite(ended) && started <= ended);
       assert(ended <= Date.parse(activity.observed_at));
@@ -196,7 +199,7 @@ export class ProjectAcceptance {
     return report;
   }
 
-  async audit() {
+  async audit(expectedActivity = {}) {
     const shown = await this.command(["show", this.project.id]);
     for (const [name, threadId] of this.threads) {
       const thread = shown.project.threads.find((entry) => entry.id === threadId);
@@ -218,7 +221,7 @@ export class ProjectAcceptance {
       assert(this.presentation, "presentation acceptance never ran");
       await this.presentation.render("worker");
       await this.presentation.render("coordinator");
-      await this.presentation.audit();
+      await this.presentation.audit(expectedActivity);
     }
     return shown;
   }

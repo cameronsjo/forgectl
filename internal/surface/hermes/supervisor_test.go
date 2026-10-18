@@ -444,6 +444,10 @@ func TestHermesNativeReplyRejectsPermissionAndNoFrameSeparately(test *testing.T)
 		if reply["state"] != "unknown" || reply["status"] != "proof-error" || publicationCount != 0 {
 			test.Fatalf("reply proof status = %#v, publications=%d", reply, publicationCount)
 		}
+		inspection, err := hermesRequest(socket, Request{V: 1, Type: "inspect", RunID: runID, SessionID: sessionID})
+		if err != nil || inspection.Inspection == nil || inspection.Inspection.Turn == nil || inspection.Inspection.Turn.Status != "unknown" {
+			test.Fatalf("unproven reply became completed turn evidence: %#v, %v", inspection, err)
+		}
 		cancel()
 		select {
 		case err := <-result:

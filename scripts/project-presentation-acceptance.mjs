@@ -80,13 +80,15 @@ export function assertAgentsSnapshot(snapshot, projectId, expectedBindings) {
     assert(row.spans.length <= AGENTS_MAX_SPANS_PER_ROW);
     assert(row.spans.length > 0, `Agents snapshot omitted native spans for ${expected.thread_id}`);
     const knownSpans = new Map(expected.history.map((binding) => [`${binding.run_id}\u0000${binding.native_session_id}\u0000${binding.source}`, binding]));
-    let currentFinishedSpan = false;
+    const expectedState = expected.current.state ?? "finished";
+    assert(["finished", "incomplete", "failed", "unknown"].includes(expectedState));
+    let currentMatchingSpan = false;
     for (const span of row.spans) {
       activityCount += 1;
       const known = knownSpans.get(`${span.run_id}\u0000${span.native_session_id}\u0000${span.source}`);
       assert(known, `Agents snapshot included an unknown historical span for ${expected.thread_id}`);
       const ended = assertTimedAgentSpan(span, known, snapshot.observed_at);
-      if (known.run_id === expected.current.run_id && known.native_session_id === expected.current.native_session_id && known.source === expected.current.source && ended && span.span.state === "finished") currentFinishedSpan = true;
+      if (known.run_id === expected.current.run_id && known.native_session_id === expected.current.native_session_id && known.source === expected.current.source && ended && span.span.state === expectedState && (!expected.current.turnId || span.span.turn_id === expected.current.turnId)) currentMatchingSpan = true;
     }
     const points = row.points ?? [];
     assert(Array.isArray(points));
@@ -101,7 +103,7 @@ export function assertAgentsSnapshot(snapshot, projectId, expectedBindings) {
       const at = Date.parse(point.at);
       assert(Number.isFinite(at) && at <= Date.parse(snapshot.observed_at) + 5_000, "native activity point has an invalid timestamp");
     }
-    assert(currentFinishedSpan, `Agents snapshot omitted a current finished timed span for ${expected.thread_id}`);
+    assert(currentMatchingSpan, `Agents snapshot omitted the current ${expectedState} timed span for ${expected.thread_id}`);
   }
   assert.equal(seenThreads.size, snapshot.rows.length, "Agents snapshot contains an unexpected thread");
   assert(activityCount <= AGENTS_MAX_SPANS);
@@ -240,11 +242,11 @@ export class ProjectPresentationAcceptance {
     this.evidence.add("project-native-ui-reconnected", { projectId: this.projects.project.id, threadId: this.projects.thread("coordinator"), runId: binding.run_id, nativeSessionId: binding.native_session_id, previousOperationId: first.id, operationId: second.id, postureUnchanged: true, renderedHistoryMarker: marker });
   }
 
-  expectedAgentBindings() {
+  expectedAgentBindings(expectedActivity = {}) {
     return [...this.projects.bindings.entries()].map(([name, binding]) => ({
       name,
       thread_id: this.projects.thread(name),
-      current: this.expectedAgentBinding(binding),
+      current: { ...this.expectedAgentBinding(binding), ...expectedActivity[name] },
       history: (this.projects.histories.get(name) ?? [binding]).map((historical) => this.expectedAgentBinding(historical)),
     }));
   }
@@ -271,8 +273,8 @@ export class ProjectPresentationAcceptance {
     const beforeReport = await this.projects.command(["show", this.projects.project.id]);
     const beforeSurfaceOperations = beforeReport.project.surface_operations.map((operation) => ({ id: operation.id, thread_id: operation.thread_id, run_id: operation.run_id, presentation: operation.presentation, phase: operation.phase, retirement: operation.retirement?.phase ?? null }));
     const before = await this.focusAgentsTab();
-    await herdrCommand(this.evidence, this.herdr, this.session, this.env, ["pane", "send-keys", this.workspace.ref.pane, ...Array(AGENTS_MAX_ROWS).fill("up"), ...Array(workerIndex).fill("down")]);
-    await herdrCommand(this.evidence, this.herdr, this.session, this.env, ["pane", "send-keys", this.workspace.ref.pane, "Enter"]);
+    await this.sendKeys([...Array(AGENTS_MAX_ROWS).fill("up"), ...Array(workerIndex).fill("down")]);
+    await this.sendKeys(["Enter"]);
     const workerOperation = this.views.get("worker");
     assert(workerOperation, "worker view is required before Agents Enter acceptance");
     let after;
@@ -295,6 +297,11 @@ export class ProjectPresentationAcceptance {
     const afterSurfaceOperations = afterReport.project.surface_operations.map((operation) => ({ id: operation.id, thread_id: operation.thread_id, run_id: operation.run_id, presentation: operation.presentation, phase: operation.phase, retirement: operation.retirement?.phase ?? null }));
     assert.deepEqual(afterSurfaceOperations, beforeSurfaceOperations, "Agents Enter changed surface operations");
     this.evidence.add("project-agents-enter-focus", { projectId: this.projects.project.id, workerThread, workerRunId: this.projects.bindings.get("worker").run_id, projectTab: this.workspace.ref.tab, workerTab: workerOperation.ref.tab, tabCountUnchanged: true, surfaceOperationsUnchanged: true });
+  }
+
+  async sendKeys(keys) {
+    const result = await this.projects.runCommand(this.evidence, this.herdr, ["--session", this.session, "pane", "send-keys", this.workspace.ref.pane, ...keys], { env: this.env });
+    assert.equal(result.code, 0, `herdr send-keys failed: ${result.stderr}`);
   }
 
   async renderAgents(snapshot) {
@@ -325,16 +332,16 @@ export class ProjectPresentationAcceptance {
     return snapshot;
   }
 
-  async agents() {
+  async agents(expectedActivity = {}) {
     const snapshot = await this.projects.command(["agents", this.projects.project.id]);
-    assertAgentsSnapshot(snapshot, this.projects.project.id, this.expectedAgentBindings());
+    assertAgentsSnapshot(snapshot, this.projects.project.id, this.expectedAgentBindings(expectedActivity));
     await this.renderAgents(snapshot);
     await this.focusWorkerFromAgents(snapshot);
     return snapshot;
   }
 
-  async audit() {
-    await this.agents();
+  async audit(expectedActivity = {}) {
+    await this.agents(expectedActivity);
     for (const name of this.views.keys()) await this.checkSurface(name);
     assertUnrelatedUnchanged(this.unrelatedBefore, await workspaceSnapshot(this.evidence, this.herdr, this.session, this.env, this.unrelatedId));
     this.evidence.add("project-presentation-audited", { projectId: this.projects.project.id, session: this.session, renderedClients: this.renders, unrelatedSurfaceUnchanged: true });

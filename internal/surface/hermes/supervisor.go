@@ -1176,7 +1176,7 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	receiver.events.write(map[string]any{"type": "hermes-turn-end", "message_id": record.ID, "session_id": receiver.sessionID, "run_id": receiver.config.RunID, "stop_reason": prompt.StopReason, "error": nativeErr != nil})
 	receiver.mu.Lock()
 	status := "unknown"
-	if nativeErr == nil {
+	if nativeErr == nil && !proofFailed && promptActivityState != activity.Unknown {
 		if prompt.StopReason == "end_turn" {
 			status = "completed"
 		} else {

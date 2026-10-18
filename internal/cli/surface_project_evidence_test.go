@@ -130,7 +130,7 @@ func TestSurfaceProjectEvidenceRefusesReplacementDuringObservation(test *testing
 }
 
 func TestSurfaceProjectEvidenceCapturesOnlyMatchingNativeInterval(test *testing.T) {
-	for _, scenario := range []string{"matched", "unrelated", "open", "duplicate", "outcome", "source"} {
+	for _, scenario := range []string{"matched", "unknown", "unrelated", "open", "duplicate", "outcome", "source"} {
 		test.Run(scenario, func(test *testing.T) {
 			store, created, member := prepareProjectEvidence(test)
 			now := time.Now().UTC()
@@ -138,6 +138,9 @@ func TestSurfaceProjectEvidenceCapturesOnlyMatchingNativeInterval(test *testing.
 			span := activity.Span{ID: "activity-1", TurnID: "native-turn", StartedAt: started, EndedAt: &ended, State: activity.Finished, Provider: "openai", Model: "captured-model"}
 			native := projectNativeObservation{Source: project.EvidenceSourceCodexThreadRead, NativeSessionID: member.ThreadID, Provider: "different-provider", Model: "currently-selected-model", Turn: &projectNativeTurn{ID: "native-turn", Status: project.EvidenceCompleted, ObservedAt: ended}, Activity: &activity.Snapshot{Version: activity.Version, Source: activity.SourceCodex, Coverage: activity.CoverageNativeHistory, ObservedAt: now, Spans: []activity.Span{span}}}
 			switch scenario {
+			case "unknown":
+				native.Turn.Status = project.EvidenceUnknown
+				native.Activity.Spans[0].State = activity.Unknown
 			case "unrelated":
 				native.Activity.Spans[0].TurnID = "another-turn"
 			case "open":
@@ -161,7 +164,10 @@ func TestSurfaceProjectEvidenceCapturesOnlyMatchingNativeInterval(test *testing.
 			if code != 0 || report.Evidence == nil {
 				test.Fatalf("observation rejected: exit=%d stderr=%s", code, stderr)
 			}
-			if scenario == "matched" {
+			if report.Evidence.Status != native.Turn.Status {
+				test.Fatalf("native outcome changed: got %s, want %s", report.Evidence.Status, native.Turn.Status)
+			}
+			if scenario == "matched" || scenario == "unknown" {
 				if report.Evidence.StartedAt == nil || !report.Evidence.StartedAt.Equal(started) || report.Evidence.EndedAt == nil || !report.Evidence.EndedAt.Equal(ended) || report.Evidence.Provider != "openai" || report.Evidence.Model != "captured-model" || !report.Evidence.ObservedAt.Equal(now) {
 					test.Fatalf("captured interval was altered: %+v", report.Evidence)
 				}
