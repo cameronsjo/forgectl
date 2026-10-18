@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -305,6 +306,137 @@ func TestProjectAgentsNarrowViewAndSafety(test *testing.T) {
 	for _, line := range strings.Split(out, "\n") {
 		if ansi.StringWidth(line) > 50 {
 			test.Fatalf("narrow line overflow: %d: %q", ansi.StringWidth(line), line)
+		}
+	}
+}
+
+func TestProjectAgentsFootersAdvertiseKeyboardHelp(test *testing.T) {
+	now := time.Now().UTC()
+	snapshot := projectview.AgentsSnapshot{Rows: []projectview.AgentRow{{ThreadID: "thread", Name: "worker", State: "idle"}}}
+	for _, width := range []int{50, 80} {
+		for _, footer := range []string{"", "source unavailable"} {
+			plain := ansi.Strip(renderProjectAgents(snapshot, width, 8, "thread", projectAgentsDefaultView, now, false, theme.Default(), "", false, footer))
+			if !strings.Contains(plain, "? help") {
+				test.Fatalf("width %d footer %q omitted keyboard help: %q", width, footer, plain)
+			}
+		}
+	}
+}
+
+func TestProjectAgentsHelpListsControlsWithinViewport(test *testing.T) {
+	plain := ansi.Strip(renderProjectAgentsHelp(50, 16, false, theme.Default()))
+	for _, expected := range []string{
+		"Keyboard help",
+		"Up / k · select previous thread",
+		"Down / j · select next thread",
+		"Enter · focus selected thread",
+		"e · open evidence details",
+		"+ / = · show a longer time window",
+		"- / _ · show a shorter time window",
+		"? · close keyboard help",
+		"Escape · close keyboard help",
+		"q / Ctrl-C · quit Agents",
+	} {
+		if !strings.Contains(plain, expected) {
+			test.Fatalf("help omitted %q: %q", expected, plain)
+		}
+	}
+	if lines := strings.Split(plain, "\n"); len(lines) != 16 {
+		test.Fatalf("help rendered %d rows, want 16", len(lines))
+	}
+
+	small := renderProjectAgentsHelp(12, 4, true, theme.Default())
+	for _, line := range strings.Split(small, "\n") {
+		if ansi.StringWidth(line) > 12 {
+			test.Fatalf("small help overflowed: %q", line)
+		}
+	}
+	if lines := strings.Split(small, "\n"); len(lines) != 4 {
+		test.Fatalf("small help rendered %d rows, want 4", len(lines))
+	}
+}
+
+func TestProjectAgentsHelpBlocksUnderlyingViewMutations(test *testing.T) {
+	called := false
+	callback := func(context.Context, string, string) error {
+		called = true
+		return nil
+	}
+	originalSnapshot := projectview.AgentsSnapshot{
+		ProjectName: "original",
+		Rows: []projectview.AgentRow{
+			{ThreadID: "one", Name: "first", State: "idle"},
+			{ThreadID: "two", Name: "second", State: "idle"},
+			{ThreadID: "three", Name: "third", State: "idle"},
+		},
+	}
+	model := newProjectAgentsModel(context.Background(), ProjectAgentsOptions{Focus: callback, OpenEvidence: callback})
+	model.snapshot = originalSnapshot
+	model.selected = "two"
+	model.offset = 1
+	model.window = 20 * time.Minute
+	model.width = 80
+	model.height = 8
+	model.loadSequence = 4
+	model.loading = true
+
+	model.Update(tea.KeyPressMsg{Text: "?"})
+	if !model.helpVisible || !strings.Contains(ansi.Strip(model.View().Content), "Keyboard help") {
+		test.Fatal("question mark did not open keyboard help")
+	}
+	for _, key := range []tea.KeyPressMsg{
+		{Text: "enter"}, {Text: "e"}, {Code: tea.KeyUp}, {Code: tea.KeyDown},
+		{Text: "j"}, {Text: "k"}, {Text: "+"}, {Text: "="}, {Text: "-"}, {Text: "_"},
+	} {
+		_, command := model.Update(key)
+		if command != nil {
+			test.Fatalf("help key %q scheduled an action", key.String())
+		}
+	}
+	model.Update(tea.WindowSizeMsg{Width: 50, Height: 6})
+	model.Update(projectAgentsLoadMsg{sequence: 4, snapshot: projectview.AgentsSnapshot{ProjectName: "replacement"}})
+	if called {
+		test.Fatal("help invoked a focus or evidence callback")
+	}
+	if model.selected != "two" || model.offset != 1 || model.window != 20*time.Minute || !reflect.DeepEqual(model.snapshot, originalSnapshot) {
+		test.Fatalf("help mutated underlying view: selected=%q offset=%d window=%s snapshot=%q", model.selected, model.offset, model.window, model.snapshot.ProjectName)
+	}
+
+	model.Update(tea.KeyPressMsg{Text: "?"})
+	if model.helpVisible {
+		test.Fatal("question mark did not close keyboard help")
+	}
+	model.Update(tea.KeyPressMsg{Text: "?"})
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if model.helpVisible {
+		test.Fatal("Escape did not close keyboard help")
+	}
+}
+
+func TestProjectAgentsHelpRetainsQuitKeysAndSafeStates(test *testing.T) {
+	for _, key := range []tea.KeyPressMsg{{Text: "q"}, {Code: 'c', Mod: tea.ModCtrl}} {
+		model := newProjectAgentsModel(context.Background(), ProjectAgentsOptions{})
+		model.helpVisible = true
+		_, command := model.Update(key)
+		if command == nil {
+			test.Fatalf("%q did not quit while help was open", key.String())
+		}
+		if _, ok := command().(tea.QuitMsg); !ok {
+			test.Fatalf("%q returned a non-quit command", key.String())
+		}
+	}
+
+	for _, model := range []*projectAgentsModel{
+		newProjectAgentsModel(context.Background(), ProjectAgentsOptions{}),
+		newProjectAgentsModel(context.Background(), ProjectAgentsOptions{Load: func(context.Context) (projectview.AgentsSnapshot, error) {
+			return projectview.AgentsSnapshot{}, errors.New("offline")
+		}}),
+	} {
+		model.snapshot.Rows = []projectview.AgentRow{{ThreadID: "thread", State: "unbound", Enrollment: "unbound"}}
+		model.sourceError = "offline"
+		model.helpVisible = true
+		if content := model.View().Content; !strings.Contains(ansi.Strip(content), "Keyboard help") {
+			test.Fatalf("safe state did not render help: %q", content)
 		}
 	}
 }

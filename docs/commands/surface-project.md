@@ -61,7 +61,7 @@ forgectl surface project --root /absolute/private/projects \
   --herdr-binary /absolute/herdr
 ```
 
-The Agents overview has one row per logical thread, harness/current-model subtitles, and native activity intervals on a shared rolling time axis. It runs inside a terminal tab, preserving herdr's existing sidebar and tabs. Use Up/Down or `j`/`k` to select a thread, `+`/`-` to change the visible window from 5 to 60 minutes, and `q` to exit. Narrow terminals retain the identity/status list. `--no-icons` selects ASCII markers.
+The Agents overview has one row per logical thread, harness/current-model subtitles, and native activity intervals on a shared rolling time axis. It runs inside a terminal tab, preserving herdr's existing sidebar and tabs. Press `?` for keyboard help in normal or narrow terminals; press `?` again or Escape to dismiss it. The help lists all controls: Up/Down or `k`/`j` select a thread, Enter focuses it, `e` opens its evidence details, `+`/`=` and `-`/`_` change the visible window from 5 to 60 minutes, and `q` or Ctrl-C exits. Narrow terminals retain the identity/status list. `--no-icons` selects ASCII markers.
 
 Unbound threads show their coordinator/worker role and `Not connected`, rather than missing-model diagnostics. When every thread is unbound, an explanation replaces the empty time axis. Roomy terminals add margins and gaps between rows; short terminals keep a compact layout so spacing does not hide threads. Live status uses plain-language labels such as `Working`, `Activity unknown`, and `current session only`; exact source, reason, and coverage fields remain available in printed/JSON output. Enter or `e` on an unbound thread explains that no session is connected without attempting a surface action.
 

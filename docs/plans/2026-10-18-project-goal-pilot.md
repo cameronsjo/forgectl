@@ -5,7 +5,7 @@ status: in-flight
 # A real repository goal through Projects
 
 Status: in progress
-Next action: exercise a real implementation and independent review through native team sessions, then independently verify the returned patch.
+Next action: verify the integrated, independently reviewed patch in an actual terminal, then record and push the acceptance receipts.
 
 ## Goal and authority
 
@@ -53,8 +53,8 @@ For the recovery exercise, first establish that the coordinator's turn settled, 
 - [x] Inspect reuse candidates, actual source contracts, current backlog, and the observed UI gap.
 - [x] Review the pilot and resolve supported safety/operability findings.
 - [x] Add and test the bounded pilot entrypoint and its operator-authored goal.
-- [ ] Run native delegation, implementation and independent review; preserve the actual artifacts.
-- [ ] Independently verify the patch and exercise coordinator replacement without duplicate work.
+- [x] Run native delegation, implementation and independent review; preserve the actual artifacts.
+- [x] Independently verify the patch and exercise coordinator replacement without duplicate work.
 - [ ] Inspect the real terminal interaction, integrate only the verified allowed patch, and rerun affected checks.
 - [ ] Record limitations and receipts, commit/push the session feature branch, and report the result without merging or installing.
 
@@ -68,8 +68,14 @@ The same independent reviewer examined this plan at `bd4bbf42` through plan, ope
 
 The entrypoint contract tests pass with `node scripts/test-project-goal.mjs`, including invalid input, stale message identity, incomplete recovery, private status-file checks, and an actual detached command-group termination control. The existing verifier contracts pass with `node scripts/test-cross-harness-verifier.mjs`. Independent review led to canonical runtime inputs, a private dedicated ledger, tracked command children, an exclusive retained worktree claim, and primary-checkout before/after receipts. These are local trusted-package checks, not protection against another process running as the same OS user replacing installed package bytes or dependencies.
 
-Native execution and terminal acceptance remain pending. Existing Projects acceptance and the readable preview are prerequisites, not evidence that this repository-goal milestone has passed.
+Native execution and source-level verification passed in the fresh queue-only attempt below. Terminal acceptance remains pending; the earlier Projects preview is not evidence for the new keyboard-help behavior.
 
 Two pre-agent setup attempts revealed the project's ledger path is declared before its directories exist; the pilot now creates the dedicated private path before enrollment. The first real attempt (`/private/tmp/fggoal.vUjZhX`, task `goal-6d6504cd-7d8f-47da-917b-7c1044a0187e`) produced a three-file Pi patch and one unconfirmed coordinator-to-reviewer message. Codex stopped the exact supervisor after proving its three recorded child processes still belonged to it. Its final state is `interrupted`, not accepted; native cleanup completed, and no old message is reused for another attempt.
 
 The queue-only correction passes `go test -race -p=2 ./internal/surface/mail ./internal/cli -run 'Test(Queue|SurfaceSend)' -count=1` with Go 1.26.8, both Node contract suites, and golangci-lint 2.13.1 against the actual diff from `47edae8f`. Independent read-only review found no remaining supported blocker. The full mail suite passes. The full CLI suite is not green: `TestStateVerbsDeclareJSON` and `TestMenuJSON_LiveTree` also fail unchanged at `b08218d5`, before this correction. They identify missing group-command JSON exemptions and unnamed required project-list arguments; repairing those earlier Projects contracts is recorded as follow-up work, not hidden by the focused result.
+
+The fresh attempt at `/private/tmp/fggoal.4ueM7r` completed native implementation, independent review and explicit settled-coordinator replacement with exit 0. Its task is `goal-9e5a4f41-a23e-4bf4-ab06-ac0651513fe8`, project `7309673b-85ed-4dc5-9c36-7643f05c6226`, and implementation base `f6b0c7ccaa4a93e35001a1d6ae96c0b98e66996e`. The reviewed full-index patch SHA-256 is `4ebf9c4384d48220d95a979e38fa5906c02865732f75c937d96f7c9e36c2355c`. The Pi result is message `1e93565b-f54c-4486-85e8-4ce9fed23efb`; independent Codex review is `00beef2b-4d10-4512-a476-73da4ea9a7d4`. All three native roles reported the requested OpenAI provider and `gpt-5.6-sol` model. Native sandbox probes denied coordinator/reviewer writes to the source worktree before model execution.
+
+Recovery replaced coordinator run `5bbc5ed0-26f9-49ab-8499-bc99c6a4e1f3` with `850fbdc3-4a57-48a5-9909-0047de6bf4e0` under the same logical thread, after proving the old process group and socket had stopped. The replacement recovered matching task, goal, base, patch, result/review messages and role bindings. Patch bytes and the complete coordinator-to-implementation message-ID list stayed identical; exactly one implementation assignment exists. Final state is deliberately `ready_for_verification`, `result_verified: false`, with `cleanup_complete: true`, not an agent-authored acceptance claim.
+
+Codex independently inspected the three-file patch, verified no untracked/ignored output, ran the full TUI suite and focused `TestProjectAgents` race tests, and ran golangci-lint 2.13.1 against the actual diff from the pinned base. All passed; the patch hash stayed unchanged across checks. A behavior-only footer regression compiled and failed at the unchanged base, and the real-terminal probe rejected that base's missing help footer. Integrated files match the native-reviewed bytes exactly. The broader terminal-safety pin also fails unchanged at `b08218d5` (`TestTextPrintersUseCappedHelpers`, naming `projectMetadataName` and `safeProjectAgents`); that earlier contract is follow-up work, not silently relabeled green. Missing frontmatter in this session's three plans was corrected and the official plan-index generator/check now passes.

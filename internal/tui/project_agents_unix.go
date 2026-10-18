@@ -56,6 +56,7 @@ type projectAgentsModel struct {
 	loadSequence uint64
 	sourceError  string
 	actionBusy   bool
+	helpVisible  bool
 	selected     string
 	offset       int
 	footer       string
@@ -139,7 +140,9 @@ func (model *projectAgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := msg.(type) {
 	case tea.WindowSizeMsg:
 		model.width, model.height = message.Width, message.Height
-		model.ensureVisible()
+		if !model.helpVisible {
+			model.ensureVisible()
+		}
 		return model, nil
 	case tea.BackgroundColorMsg:
 		if model.theme.Mode() == theme.ModeAuto {
@@ -152,6 +155,9 @@ func (model *projectAgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model, nil
 		}
 		model.loading = false
+		if model.helpVisible {
+			return model, nil
+		}
 		if message.err != nil {
 			model.sourceError = termsafe.SafeLineMax(message.err.Error(), 160)
 			model.footer = model.styles.Danger.Render("! source unavailable: " + model.sourceError)
@@ -164,6 +170,9 @@ func (model *projectAgentsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.footer = ""
 		return model, nil
 	case projectAgentsTickMsg:
+		if model.helpVisible {
+			return model, model.tick()
+		}
 		return model, tea.Batch(model.startLoad(), model.tick())
 	case projectAgentsActionMsg:
 		model.actionBusy = false
@@ -184,6 +193,19 @@ func (model *projectAgentsModel) updateKey(key tea.KeyPressMsg) (tea.Model, tea.
 	switch key.String() {
 	case "q", "ctrl+c":
 		return model, tea.Quit
+	case "?":
+		model.helpVisible = !model.helpVisible
+		return model, nil
+	case "esc":
+		if model.helpVisible {
+			model.helpVisible = false
+		}
+		return model, nil
+	}
+	if model.helpVisible {
+		return model, nil
+	}
+	switch key.String() {
 	case "up", "k":
 		model.moveSelection(-1)
 	case "down", "j":
@@ -337,6 +359,12 @@ func maxProjectAgentsWindow(value time.Duration) time.Duration {
 }
 
 func (model projectAgentsModel) View() tea.View {
+	if model.helpVisible {
+		view := tea.NewView(renderProjectAgentsHelp(model.width, model.height, model.ascii, model.theme))
+		view.AltScreen = true
+		view.WindowTitle = "forgectl Agents Help"
+		return view
+	}
 	now := time.Now()
 	if model.now != nil {
 		now = model.now()
@@ -469,17 +497,19 @@ func renderProjectAgents(snapshot projectview.AgentsSnapshot, width, height int,
 		}
 	}
 	if footer == "" {
-		footerText := "↑↓ select · enter open · e details · +/- zoom · q quit"
+		footerText := "↑↓/jk select · enter/e open · +/- zoom · ? help · q quit"
 		if ascii {
-			footerText = "j/k select - enter open - e details - +/- zoom - q quit"
+			footerText = "j/k select - enter/e open - +/- zoom - ? help - q quit"
 		}
-		if unbound {
-			footerText = "↑/↓ select   q quit"
+		if narrow || unbound {
+			footerText = "↑↓/jk select · ? help · q quit"
 			if ascii {
-				footerText = "j/k select   q quit"
+				footerText = "j/k select - ? help - q quit"
 			}
 		}
 		footer = styles.Meta.Render(footerText)
+	} else {
+		footer = styles.Meta.Render("? help"+separator) + footer
 	}
 	if len(lines) >= height {
 		lines = lines[:height-1]
@@ -490,6 +520,43 @@ func renderProjectAgents(snapshot projectview.AgentsSnapshot, width, height int,
 	lines = append(lines, fitProjectAgentsLine(footer, width))
 	for index, line := range lines {
 		lines[index] = strings.Repeat(" ", inset) + fitProjectAgentsLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderProjectAgentsHelp(width, height int, ascii bool, th theme.Theme) string {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	styles := th.Styles()
+	separator := "  "
+	if !ascii {
+		separator = " · "
+	}
+	lines := []string{
+		styles.Header.Render("Keyboard help"),
+		"",
+		styles.Fg.Render("Up / k" + separator + "select previous thread"),
+		styles.Fg.Render("Down / j" + separator + "select next thread"),
+		styles.Fg.Render("Enter" + separator + "focus selected thread"),
+		styles.Fg.Render("e" + separator + "open evidence details"),
+		styles.Fg.Render("+ / =" + separator + "show a longer time window"),
+		styles.Fg.Render("- / _" + separator + "show a shorter time window"),
+		styles.Fg.Render("?" + separator + "close keyboard help"),
+		styles.Fg.Render("Escape" + separator + "close keyboard help"),
+		styles.Fg.Render("q / Ctrl-C" + separator + "quit Agents"),
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	for index, line := range lines {
+		lines[index] = fitProjectAgentsLine(line, width)
 	}
 	return strings.Join(lines, "\n")
 }
