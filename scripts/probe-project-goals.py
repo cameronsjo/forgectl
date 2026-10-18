@@ -411,15 +411,21 @@ def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathl
                 raise ProbeError("check artifact identity/content mismatch")
             expected_outputs.append(receipt["content"])
         artifacts = {"detail": detail}
+        arrow_scrolled = False
         for key, label, heading in ((b"2", "patch", "Evidence · Diff"), (b"3", "check", "Evidence · Checks"), (b"4", "json", "Details · JSON")):
             session.send(key)
             screen = session.wait_for(lambda text, expected=heading: _exact_visible(text, expected), f"{label} evidence tab")
+            if label == "patch":
+                loaded = session.wait_for(lambda text: "diff --git" in text, "loaded diff content")
+                session.send(b"\x1b[B")
+                arrow_scrolled = session.drain(0.1) != loaded
             scanned, _ = _scan(session)
             artifacts[label] = screen + "\n" + scanned
         process = session.close()
         assertions = {
             "detail": _exact_visible(detail, "Status") and _detail_matches_goal(detail, selected),
             "patch_content": _visible_wrapped(artifacts["patch"], "diff --git"),
+            "arrow_scrolled": arrow_scrolled,
             "all_check_outputs": all(all(_visible_wrapped(artifacts["check"], line) for line in receipt.splitlines() if line.strip()) for receipt in expected_outputs),
             "all_check_headings": all(_visible_wrapped(artifacts["check"], f"Check {index + 1}") for index in range(len(expected_outputs))),
             "json_version": re.search(r'"version"\s*:\s*1\b', artifacts["json"]) is not None,

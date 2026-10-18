@@ -185,6 +185,30 @@ func TestProjectGoalsLateListCannotReplaceOpenedRun(t *testing.T) {
 	}
 }
 
+func TestProjectGoalsArrowScrollAndEditorResume(t *testing.T) {
+	state := projectGoalsStateFixture()
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.states = []goal.State{state}
+	model.selectedID = state.ID
+	model.screen = projectGoalsRun
+	model.runTab = 1
+	model.width, model.height = 50, 16
+	model.viewerText = strings.Split(strings.Repeat("evidence line\n", 30), "\n")
+	before := model.View().Content
+	model.updateDetail("down", "")
+	if model.View().Content == before {
+		t.Fatal("ordinary Down did not scroll the evidence")
+	}
+	model.screen = projectGoalsSetup
+	model.setupFocus = model.setupButtonIndex(projectGoalsFieldGoal)
+	model.beginSetupEdit()
+	model.editorManualScroll = true
+	model.updateSetup("left", "")
+	if model.editorManualScroll {
+		t.Fatal("editing did not restore caret tracking after manual scrolling")
+	}
+}
+
 func TestProjectGoalsNarrowDashboardDoesNotOverflow(t *testing.T) {
 	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default(), Repository: "/repo", Model: "gpt-5-codex"})
 	model.width, model.height = 50, 16

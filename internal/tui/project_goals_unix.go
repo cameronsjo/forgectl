@@ -527,6 +527,10 @@ func (model *projectGoalsModel) updateSetup(name, text string) (tea.Model, tea.C
 		}
 		return model, nil
 	}
+	if !setupFieldText(field) {
+		return model, nil
+	}
+	model.editorManualScroll = false
 	if name == "ctrl+u" {
 		model.edit = nil
 		model.cursor = 0
@@ -860,8 +864,10 @@ func (model *projectGoalsModel) updateDetail(name, text string) (tea.Model, tea.
 		model.scroll = 0
 	case "up", "k":
 		model.scroll--
+		model.editorManualScroll = true
 	case "down", "j":
 		model.scroll++
+		model.editorManualScroll = true
 	case "pgup", "pageup":
 		model.scroll -= 8
 		model.editorManualScroll = true

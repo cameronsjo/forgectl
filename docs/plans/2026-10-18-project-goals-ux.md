@@ -55,6 +55,8 @@ Actual PTY checks at 100x24 and 50x16 exercised normal multiline goal entry, pre
 
 The new-form verifier rejects the old wizard binary. Probe regressions also distinguish focus from an unfocused mention, hard-wrapped argv from changed bytes, and genuine scrolling from a static screen even when the first and last viewport match. Clean committed-build provenance and remote equality remain the final delivery gate.
 
+The first clean committed build (`7b4c406e`) passed all four terminal journeys and exact remote-head verification. Final integration also exposed ordinary Down being overridden by caret-following; its regression failed before the fix. Ordinary evidence arrows now scroll, and editing restores caret tracking after Page Up/Down. The full TUI package, pinned lint and probe contract tests passed again after that bounded fix.
+
 ## Future work
 
 - Saved personal presets and cross-session preference persistence are separate work; this pass supplies useful built-in presets without introducing hidden remembered permissions.
