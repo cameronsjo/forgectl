@@ -304,14 +304,26 @@ def _run_wizard(executable: pathlib.Path, root: pathlib.Path, repository: pathli
             process = session.close()
 
 
+def _selected_goal_prefix(screen: str) -> str | None:
+    match = re.search(r"(?m)^\s*>\s+\S+\s+(goal-[a-f0-9]{13})(?:\s|$)", screen)
+    return match.group(1) if match else None
+
+
+def _detail_matches_goal(screen: str, prefix: str) -> bool:
+    return re.search(r"(?m)^\s*Goal:\s+" + re.escape(prefix) + r"[a-f0-9]{11}\b", screen) is not None
+
+
 def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathlib.Path, args: argparse.Namespace, rows: int, cols: int, output: pathlib.Path) -> dict:
     session = PTYSession(executable, root, args.model, repository, rows, cols)
     process = None
     try:
         session.start()
-        dashboard = session.wait_for(lambda text: bool(re.search(r"goal-[a-f0-9]{24}", text)), "first retained goal")
+        dashboard = session.wait_for(lambda text: _selected_goal_prefix(text) is not None, "first retained goal")
+        selected = _selected_goal_prefix(dashboard)
+        if selected is None:
+            raise ProbeError("no selected goal in reconstructed dashboard")
         session.send(b"\r")
-        detail = session.wait_for(lambda text: _exact_visible(text, "Status"), "first goal detail")
+        detail = session.wait_for(lambda text: _exact_visible(text, "Status") and _detail_matches_goal(text, selected), "selected goal detail")
         artifacts = {"detail": detail}
         for key, label in ((b"d", "patch"), (b"v", "check"), (b"e", "json")):
             session.send(key)
@@ -325,7 +337,7 @@ def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathl
             session.wait_for(lambda text: _exact_visible(text, "Status"), f"detail after {label}")
         process = session.close()
         assertions = {
-            "detail": _exact_visible(detail, "Status"),
+            "detail": _exact_visible(detail, "Status") and _detail_matches_goal(detail, selected),
             "patch_content": _visible_wrapped(artifacts["patch"], "diff --git"),
             "check_content": _visible_wrapped(artifacts["check"], "stdout:"),
             "json_version": re.search(r'"version"\s*:\s*1\b', artifacts["json"]) is not None,

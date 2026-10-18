@@ -159,6 +159,170 @@ Read commands neither create a missing root nor repair permissions or corrupt da
 
 Exit codes: `0` for completed creation, binding, or inspection; `1` for state/storage failures or a conflicting binding; and `2` for invalid inputs or an unknown requested ID. Parse both the exit status and the JSON shape; do not turn an unreadable registry into an empty result.
 
+## Self-service repository goals
+
+`forgectl projects goals` is the compiled, interactive self-service flow for one
+bounded change in an existing local Git checkout. Run it from the repository you
+want to change in a terminal:
+
+```sh
+cd /path/to/repository
+forgectl projects goals
+```
+
+This is separate from both the persistent project-identity commands above and
+the attended pilot below. It creates its own retained project, mailbox, native
+sessions, branch and linked worktree; it does not reuse a project merely because
+the label or repository path matches.
+
+The start wizard has eight steps: repository, title, objective, allowed paths,
+acceptance criteria, checks, OpenAI model and duration. Allowed paths are
+repository-relative literal files or directory prefixes, not globs; `.` opts in
+to repository-wide source changes while Git metadata, agent metadata and `.env`
+files remain excluded. Enter checks as JSON argument arrays, for example:
+
+```json
+[["/usr/bin/git","diff","--check"]]
+```
+
+Each inner array is the exact executable and argv used for verification. There
+is no shell parsing, so pipes, redirects, variable expansion and a single command
+string do not work. The duration is 1–30 minutes and is not a token or spending
+cap. After step eight, inspect the prepared repository, exact base revision,
+source-dirty warning, model, scope, acceptance criteria and checks. Preparation
+does not start a model. Press `s` on **Review before start** for the separate,
+explicit confirmation; Escape returns to editing.
+
+With no `--root`, goals use the owner-private platform state directory
+`$XDG_STATE_HOME/forgectl/projects`, falling back to
+`$HOME/.local/state/forgectl/projects`. To keep the registry and generated
+worktrees under another private location, use an absolute, clean path:
+
+```sh
+forgectl projects goals --root /path/to/private/goal-registry
+```
+
+The dashboard polls retained goals. Enter opens details, `a` answers a pending
+question, `d`/`v`/`e` show the retained patch/check/JSON evidence, and `c` opens
+a cancellation confirmation. `q` only detaches from the screen: the detached
+supervisor continues. Cancellation is different—it queues a request to the
+owning supervisor. Treat it as complete only when status is `canceled` and
+`cleanup_complete` is true; state and any worktree or evidence already created
+are still retained.
+
+### Scripted CLI walkthrough
+
+The singular `forgectl projects goal` tree provides the same retained product
+without the TUI. Put the goal in a bounded regular, non-symlink JSON file:
+
+```json
+{
+  "version": 1,
+  "title": "Document widget setup",
+  "objective": "Add the approved widget setup guide.",
+  "repository": "/path/to/repository",
+  "base_revision": "",
+  "allowed_paths": ["docs/widget.md"],
+  "acceptance": ["The guide contains a tested setup walkthrough."],
+  "checks": [["/usr/bin/git", "diff", "--check"]],
+  "model": "gpt-5-codex",
+  "limit_minutes": 10
+}
+```
+
+Replace the example model with the exact OpenAI model available to the local
+Codex installation.
+
+First prepare and review the returned `prepared.spec.base_revision`. Then copy
+that full Git object ID into `--expect-head`; `start` refuses to launch unless
+both the exact revision and `--approve` are present:
+
+```sh
+forgectl projects goal prepare --file /path/to/goal.json --json
+forgectl projects goal start --file /path/to/goal.json \
+  --expect-head <full-sha-from-prepare> --approve --json
+
+forgectl projects goal list --json
+forgectl projects goal status <goal-id> --json
+```
+
+The singular CLI uses the same default registry. To select the explicit root
+shown above, place `--root /path/to/private/goal-registry` after `goal` in each
+command, for example:
+
+```sh
+forgectl projects goal --root /path/to/private/goal-registry \
+  status <goal-id> --json
+```
+
+If the source HEAD changed after preparation, prepare again and review the new
+revision; do not substitute it silently. A dirty source checkout is allowed but
+warned about: only committed HEAD enters the isolated worktree, never local
+edits or untracked files.
+
+When status is `needs_operator`, copy the current question ID and provide the
+answer as bounded literal input. The answer clarifies the existing goal and
+cannot expand its permissions:
+
+```sh
+forgectl projects goal respond <goal-id> --question <question-id> \
+  --answer-file /path/to/answer.txt --json
+# Or read the literal answer from stdin:
+forgectl projects goal respond <goal-id> --question <question-id> \
+  --answer-file - --json
+```
+
+Inspect or stop a retained run with:
+
+```sh
+forgectl projects goal artifact <goal-id> --kind patch
+forgectl projects goal artifact <goal-id> --kind check --index 0
+forgectl projects goal artifact <goal-id> --kind json --json
+forgectl projects goal cancel <goal-id> --json
+```
+
+`artifact` verifies retained patch and check bytes against their recorded
+digests before returning them. Goal state remains after `ready`, failure or
+confirmed cancellation. Any branch, linked worktree, native receipts, result
+patch or check outputs already created are retained with it for inspection; an
+early failure or cancellation may happen before some or all of those artifacts
+exist. The flow never commits, pushes, merges, deploys or installs the result,
+and it provides no automatic cleanup command.
+
+### What the result means
+
+When a run reaches model execution, it uses exactly three native Codex sessions
+on the selected direct OpenAI model: a coordinator, an implementation worker
+and an independent reviewer. It does not offer Pi or Hermes presets. A run may
+fail or be canceled during workspace preparation before those sessions start.
+On the model-execution path, the implementation worker is the only model role
+allowed to edit the isolated worktree. After it stops, the supervisor freezes a
+patch, requires the reviewer to pass that exact digest, then executes each
+approved verification argv directly. A check must exit zero without changing
+the reviewed patch, and the original source checkout must remain unchanged.
+
+Native sessions run with approval policy `never`, owner-private control state
+and workspace-scoped writes. Apps, hooks, memories, multi-agent mode, plugins,
+configured MCP servers, notifications and web search are disabled. Tool and
+verification network access is disabled; only the direct OpenAI model transport
+remains enabled. A denied operation is a refusal, not a reason to weaken the
+boundary or select an external tool.
+
+`ready` means the frozen patch passed independent native review, every approved
+check passed, the patch stayed unchanged and the source checkout stayed
+unchanged. It does **not** mean Cameron accepted the change, and it does not
+mean committed, merged or deployed; `human_accepted` remains false. Review the
+result patch, check outputs, native receipts and related artifacts in the
+retained run directory, using `artifact` and `status` where applicable. Inspect
+the separate linked worktree on its own before deciding what to do next.
+
+If a nonterminal goal's heartbeat becomes stale, status reports `unknown` and
+states whether the supervisor lease is still held. `unknown` is not proof that
+the process is dead or safe to restart. Status, list and artifact reads never
+restart or replay work, and respond/cancel refuse an unresponsive goal. Inspect
+the retained state and supervisor log, plus guardian and native receipts when
+present; there is no blind replay or promise of arbitrary crash recovery.
+
 ## Attended repository-goal pilot
 
 `scripts/run-project-goal.mjs` exercises one bounded repository task through an
@@ -168,8 +332,9 @@ existing tracked paths, and acceptance criteria. The supervisor flushes only the
 task's dedicated mailbox; the agents author and consume their own messages using
 `surface send --queue-only`, without attempting native transport from a sandbox.
 
-This is an opt-in source-build pilot, not a general scheduler or the interactive
-Projects launch flow. Run `node scripts/run-project-goal.mjs --help` for the
+This older attended workflow is an opt-in source-build pilot, not the compiled
+self-service flow above, a general scheduler or the interactive Projects launch
+flow. Run `node scripts/run-project-goal.mjs --help` for the
 required explicit binary, model, extension and path arguments. The included
 `scripts/project-keyboard-help-goal.json` is the first real repository goal.
 The implementation worktree must be clean, linked, owner-controlled and disjoint

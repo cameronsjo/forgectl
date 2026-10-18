@@ -17,6 +17,8 @@ forgectl projects worktree <query> [branch] # same ambiguity contract as clone; 
 forgectl projects pull-all --json          # [{"name","status"}]; exits 1 when any pull failed, as without --json
 forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
 forgectl projects clone --wing mcp <target> # override the wing table for this one clone
+forgectl projects goals                    # interactive, bounded repository-goal dashboard
+forgectl projects goal status <goal-id> --json # inspect a retained self-service goal
 
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
@@ -24,6 +26,13 @@ forgectl review --json --limit 50        # first 50 rows in a {truncated,total,s
 forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
+
+`projects goals` runs the compiled self-service repository-goal workflow: an
+eight-step setup, explicit confirmation, isolated worktree, three native Codex
+roles, retained patch/check evidence and operator-question handling. It is
+different from the attended Codex/Pi/Codex pilot. See the practical
+[self-service repository goals guide](surface-project.md#self-service-repository-goals)
+for the TUI and `prepare`/`start`/`status`/`respond`/`cancel`/`artifact` CLI.
 
 `review` refuses a `--repo` that is not `owner/name` and a `--kind` other than `issue` or `pr` with exit 2 (`usage_error` under `--json`) before any query runs. When every source fails, it exits 1; under `--json` the per-source notes, each with its cause and fix (`gh is not signed in to github.com; run gh auth login`), go inside the one failure object's `error` rather than as note lines before it.
 
