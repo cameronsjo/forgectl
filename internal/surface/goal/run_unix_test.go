@@ -190,6 +190,30 @@ func TestNativeEventRequiresMatchingThreadAndRole(t *testing.T) {
 	}
 }
 
+func TestNativeEventRetainsBoundedFailureReason(t *testing.T) {
+	fixture := newGoalFixture(t, "src")
+	engine := newGoalTestExecution(fixture, Role{Name: "coordinator", NativeSessionID: "thread-coordinator"})
+	message := "Model authorization failed. " + strings.Repeat("detail ", 1000)
+	payload, err := json.Marshal(map[string]any{
+		"method": "turn/completed",
+		"params": map[string]any{
+			"threadId": "thread-coordinator",
+			"turn": map[string]any{
+				"id": "turn-failed", "status": "failed",
+				"error": map[string]string{"message": message},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.nativeEvent("coordinator", payload)
+	turn := engine.latestTurn("coordinator")
+	if turn.Status != "failed" || !strings.HasPrefix(turn.Error, "Model authorization failed.") || len(turn.Error) > 2100 || !strings.HasSuffix(turn.Error, "(truncated)") {
+		t.Fatalf("native failure reason was lost or unbounded: %#v", turn)
+	}
+}
+
 func newGoalTestExecution(fixture goalFixture, roles ...Role) *execution {
 	state := fixture.state
 	state.Roles = roles

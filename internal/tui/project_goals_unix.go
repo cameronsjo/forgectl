@@ -72,17 +72,18 @@ type projectGoalsModel struct {
 	opts   ProjectGoalsOptions
 	screen projectGoalsScreen
 
-	states     []goal.State
-	selected   int
-	selectedID string
-	loading    bool
-	actionBusy bool
-	loadSeq    uint64
-	footer     string
-	errText    string
-	width      int
-	height     int
-	scroll     int
+	states             []goal.State
+	selected           int
+	selectedID         string
+	loading            bool
+	actionBusy         bool
+	loadSeq            uint64
+	footer             string
+	errText            string
+	width              int
+	height             int
+	scroll             int
+	editorManualScroll bool
 
 	draft      goal.Spec
 	prepared   *goal.Prepared
@@ -282,6 +283,7 @@ func (model *projectGoalsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		model.errText = ""
 		if model.screen == projectGoalsQuestion || model.screen == projectGoalsCancel {
 			model.screen = projectGoalsDetail
+			model.editorManualScroll = false
 		}
 		return model, model.loadSelected()
 	case projectGoalsArtifactMsg:
@@ -339,6 +341,7 @@ func (model *projectGoalsModel) updatePaste(content string) (tea.Model, tea.Cmd)
 		}
 		model.insertEdit(content)
 		model.errText = ""
+		model.editorManualScroll = false
 	case projectGoalsQuestion:
 		if len(string(model.answer))+len(content) > projectGoalsAnswerPasteLimit {
 			model.errText = "pasted answer exceeds 8 KiB"
@@ -346,6 +349,7 @@ func (model *projectGoalsModel) updatePaste(content string) (tea.Model, tea.Cmd)
 		}
 		model.insertAnswer(content)
 		model.errText = ""
+		model.editorManualScroll = false
 	}
 	return model, nil
 }
@@ -396,22 +400,36 @@ func (model *projectGoalsModel) updateWizard(name, text string) (tea.Model, tea.
 	if name == "ctrl+u" {
 		model.edit = nil
 		model.cursor = 0
+		model.editorManualScroll = false
+		return model, nil
+	}
+	if name == "ctrl+up" || name == "ctrl+down" {
+		if name == "ctrl+up" {
+			model.scroll--
+		} else {
+			model.scroll++
+		}
+		model.editorManualScroll = true
+		model.clampScroll()
 		return model, nil
 	}
 	if name == "left" {
 		if model.cursor > 0 {
 			model.cursor--
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "right" {
 		if model.cursor < len(model.edit) {
 			model.cursor++
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "ctrl+j" || (name == "enter" && (model.wizardStep == 2 || model.wizardStep == 4)) {
 		model.insertEdit("\n")
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "backspace" {
@@ -419,6 +437,7 @@ func (model *projectGoalsModel) updateWizard(name, text string) (tea.Model, tea.
 			model.edit = append(model.edit[:model.cursor-1], model.edit[model.cursor:]...)
 			model.cursor--
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "enter" || name == "ctrl+s" {
@@ -432,10 +451,12 @@ func (model *projectGoalsModel) updateWizard(name, text string) (tea.Model, tea.
 		}
 		model.wizardStep++
 		model.beginWizardEdit()
+		model.scroll = 0
 		return model, nil
 	}
 	if text != "" && !strings.HasPrefix(name, "ctrl+") {
 		model.insertEdit(text)
+		model.editorManualScroll = false
 	}
 	return model, nil
 }
@@ -490,6 +511,7 @@ func (model *projectGoalsModel) updateDetail(name string) (tea.Model, tea.Cmd) {
 			model.answerCursor = 0
 			model.screen = projectGoalsQuestion
 			model.scroll = 0
+			model.editorManualScroll = false
 		}
 	case "c":
 		if state, ok := model.selectedState(); ok && !state.Phase.Terminal() {
@@ -513,6 +535,17 @@ func (model *projectGoalsModel) updateQuestion(name, text string) (tea.Model, te
 	}
 	if name == "esc" {
 		model.screen = projectGoalsDetail
+		model.editorManualScroll = false
+		return model, nil
+	}
+	if name == "ctrl+up" || name == "ctrl+down" {
+		if name == "ctrl+up" {
+			model.scroll--
+		} else {
+			model.scroll++
+		}
+		model.editorManualScroll = true
+		model.clampScroll()
 		return model, nil
 	}
 	if name == "backspace" {
@@ -520,18 +553,21 @@ func (model *projectGoalsModel) updateQuestion(name, text string) (tea.Model, te
 			model.answer = append(model.answer[:model.answerCursor-1], model.answer[model.answerCursor:]...)
 			model.answerCursor--
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "left" {
 		if model.answerCursor > 0 {
 			model.answerCursor--
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "right" {
 		if model.answerCursor < len(model.answer) {
 			model.answerCursor++
 		}
+		model.editorManualScroll = false
 		return model, nil
 	}
 	if name == "enter" {
@@ -552,6 +588,7 @@ func (model *projectGoalsModel) updateQuestion(name, text string) (tea.Model, te
 	}
 	if text != "" && !strings.HasPrefix(name, "ctrl+") {
 		model.insertAnswer(text)
+		model.editorManualScroll = false
 	}
 	return model, nil
 }
@@ -598,6 +635,7 @@ func (model *projectGoalsModel) startWizard() {
 	model.prepared = nil
 	model.errText = ""
 	model.scroll = 0
+	model.editorManualScroll = false
 	model.beginWizardEdit()
 }
 
@@ -625,6 +663,7 @@ func (model *projectGoalsModel) beginWizardEdit() {
 	}
 	model.edit = []rune(value)
 	model.cursor = len(model.edit)
+	model.editorManualScroll = false
 }
 
 func (model *projectGoalsModel) commitWizardStep() error {
@@ -820,8 +859,12 @@ func (model projectGoalsModel) render() string {
 	}
 	footer := model.footerText()
 	available := goalMax(height-1, 1)
+	scroll := model.scroll
+	if (model.screen == projectGoalsWizard || model.screen == projectGoalsQuestion) && !model.editorManualScroll {
+		scroll = model.editorScroll(lines, contentWidth, available)
+	}
 	if len(lines) > available {
-		start := goalMin(model.scroll, len(lines)-available)
+		start := goalMin(scroll, len(lines)-available)
 		lines = lines[start:]
 		if len(lines) > available {
 			lines = lines[:available]
@@ -986,11 +1029,58 @@ func (model projectGoalsModel) renderDetail(width int) []string {
 func (model projectGoalsModel) renderQuestion(width int) []string {
 	lines := []string{model.styles.Header.Render("Question for Cameron"), model.styles.Meta.Render("This answer clarifies the approved goal; it cannot grant permissions."), ""}
 	lines = append(lines, goalWrap(model.questionText, width)...)
-	lines = append(lines, "", model.styles.Header.Render("Answer"), safeGoalField(goalCursorText(model.answer, model.answerCursor), width))
+	lines = append(lines, "", model.styles.Header.Render("Answer"))
+	for _, line := range goalWrap(goalCursorText(model.answer, model.answerCursor), width) {
+		lines = append(lines, model.styles.Fg.Render(line))
+	}
 	if model.errText != "" {
 		lines = append(lines, "", model.styles.Danger.Render("! "+model.errText))
 	}
 	return lines
+}
+
+func (model projectGoalsModel) editorScroll(lines []string, width, available int) int {
+	maxStart := goalMax(len(lines)-available, 0)
+	start := model.scroll
+	cursorLine := model.editorCursorLine(width)
+	if cursorLine < start {
+		start = cursorLine
+	}
+	if cursorLine >= start+available {
+		start = cursorLine - available + 1
+	}
+	return goalMin(goalMax(start, 0), maxStart)
+}
+
+func (model projectGoalsModel) editorCursorLine(width int) int {
+	switch model.screen {
+	case projectGoalsWizard:
+		return 1 + 3 + goalCursorLine(model.edit, model.cursor, goalMax(width-2, 1))
+	case projectGoalsQuestion:
+		questionLines := goalWrap(model.questionText, width)
+		return 1 + 3 + len(questionLines) + 2 + goalCursorLine(model.answer, model.answerCursor, width)
+	default:
+		return 0
+	}
+}
+
+func goalCursorLine(value []rune, cursor, width int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(value) {
+		cursor = len(value)
+	}
+	remaining := strings.Count(string(value[:cursor]), "▏")
+	lines := goalWrap(goalCursorText(value, cursor), width)
+	for index, line := range lines {
+		markers := strings.Count(line, "▏")
+		if remaining < markers {
+			return index
+		}
+		remaining -= markers
+	}
+	return goalMax(len(lines)-1, 0)
 }
 
 func (model projectGoalsModel) renderCancel(width int) []string {
@@ -1037,9 +1127,9 @@ func (model projectGoalsModel) footerText() string {
 		return "a answer · c cancel · d patch · v checks · e JSON · esc list · q detach"
 	case projectGoalsQuestion:
 		if compact {
-			return "enter send · esc back · ^c quit"
+			return "^c quit · esc back · ^↑/↓ scroll · enter send"
 		}
-		return "enter send answer · esc back · ctrl+c cancel"
+		return "enter send answer · ctrl+↑/↓ scroll · esc back · ctrl+c cancel"
 	case projectGoalsCancel:
 		if compact {
 			return "y cancel · n keep · q quit"

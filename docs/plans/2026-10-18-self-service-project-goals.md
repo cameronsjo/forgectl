@@ -5,7 +5,7 @@ status: in-flight
 # Self-service repository goals in Projects
 
 Status: approved outcome; implementation in progress
-Next action: finish native tool isolation, then run product-level native and terminal acceptance.
+Next action: finish the live documentation goal, inspect its retained result, and verify the final committed build.
 
 ## Goal and authority
 
@@ -49,7 +49,7 @@ Each run has one bounded child supervisor, not a persistent daemon. Each native 
 
 - [x] Record independent plan security/operability and user/agent-experience review; resolve supported findings.
 - [x] Implement durable goal contract/store, isolated workspace preparation and sequenced operator controls.
-- [ ] Implement failure-safe supervisor/native ownership and verify cancellation/crash cleanup.
+- [x] Implement failure-safe supervisor/native ownership and verify cancellation/crash cleanup.
 - [ ] Implement native Codex runtime, bounded team loop, exact-mail evidence and sandboxed verification.
 - [x] Implement Projects goal setup/dashboard/result/decision UX and equivalent JSON CLI.
 - [ ] Add focused contract, negative-control and lifecycle tests; document supported behavior and recovery limits.
@@ -58,7 +58,7 @@ Each run has one bounded child supervisor, not a persistent daemon. Each native 
 
 ## Review
 
-Independent security/operability review examined this plan and the current project/mail/launch/exec implementation. Supported findings were incorporated: cooperative mail is not authentication; native verification is separate from ordinary exec; supervisor death requires guardian-owned target spawning and an exclusive lease; controls remain outside agent-writable roots; argv is exact rather than shell-reconstructed; bounds are numeric; cleanup evidence and unknown liveness are distinct. Root Codex independently read the cited ledger identity disclaimer and native protocol implementation. User/agent-experience review added full-field confirmation, visible cursors, multiline input, narrow-pane controls, discoverable registry location and safe multiline artifacts. Native tool isolation also must disable inherited MCP servers, plugins, hooks, apps and subagents rather than treating a shell sandbox as a boundary for remote tools. Native sandbox, crash cleanup and UI acceptance remain unverified.
+Independent security/operability review examined this plan and the current project/mail/launch/exec implementation. Supported findings were incorporated: cooperative mail is not authentication; native verification is separate from ordinary exec; supervisor death requires guardian-owned target spawning and an exclusive lease; controls remain outside agent-writable roots; argv is exact rather than shell-reconstructed; bounds are numeric; cleanup evidence and unknown liveness are distinct. Root Codex independently read the cited ledger identity disclaimer and native protocol implementation. User/agent-experience review added full-field confirmation, visible cursors, multiline input, narrow-pane controls, discoverable registry location and safe multiline artifacts. Native tool isolation disables inherited MCP servers, plugins, hooks, apps and subagents rather than treating a shell sandbox as a boundary for remote tools. Consuming-tool sandbox assertions, crash cleanup and interactive start/question/cancel behavior are verified below; the live result is still under independent review.
 
 ## Completion evidence
 
@@ -67,6 +67,10 @@ The durable contract/store/workspace tests pass with Go 1.26.8: `GOMAXPROCS=2 go
 The current implementation passes focused goal/native/CLI/TUI tests, `go test -race -p=2 ./internal/surface/goal ./internal/surface/goalnative -count=1`, and the complete `go test -p=2 ./internal/tui -count=1` with `TERM=xterm-256color` and `NO_COLOR` unset. The real-PTY wizard probe passes at 100x24 and 50x16, including all eight fields, full confirmation content, scrolling and edit-back preservation; it never starts a model or creates a goal registry. These checks cover the current working source, not an accepted native end-to-end result. Existing menu argument and terminal-safety baseline failures were reproduced independently in clean committed pre-integration source rather than attributed to this change.
 
 Codex independently ran `FORGECTL_GOALNATIVE_INTEGRATION=1 FORGECTL_GOALNATIVE_MODEL=gpt-5.6-sol go test -p=2 ./internal/surface/goalnative -run '^TestGoalNativeRealCodexBoundaryIntegration$' -count=1 -v -timeout=45s` against `/opt/homebrew/bin/codex` 0.153.4 on Darwin/arm64 with Go 1.26.8. It passed actual consuming-tool configuration assertions, allowed/denied native writes, and termination of an owned long-running native command on close, without any model turn. Repository-pinned golangci-lint 2.13.1 reports zero new findings over the self-service delta from `67369726`. The PTY verifier's known-present forbidden-label control exits 1 at both sizes rather than fabricating a pass.
+
+The real `TestGoalNativeRealCodexAbruptSupervisorDeath` acceptance kills only its owned supervisor helper with SIGKILL, then proves the guardian observes lease EOF, the exact native process group and its shell/sleep descendants disappear, and the socket/cleanup receipt agree. The initial verifier incorrectly parsed a newline-separated PID pair with `Sscanf`; `Sscan` and an explicit newline/early-exit regression correct the verifier. Both real-native lifecycle tests use a private empty Codex home and require no model turn. The UI/native follow-up retains actionable bounded native error messages and keeps long wizard/question edits wrapped with the actual caret visible, including whole-word wrapping and literal caret-marker text. Fresh full TUI/goal/native package tests and goal/native race tests pass after these edits; local Unix-socket and PTY access are required rather than treating sandbox denials as product failures.
+
+Compiled revision `48ef22a3` started goal `goal-e0f2b16b582fdecd0ae9b546` in an isolated local source clone. Its coordinator asked the requested wording question, the 50x16 UI detached without answering, a stale-question CLI response failed closed, and Cameron's explicit choice of generic example paths was then submitted through the actual question UI. A separate no-edit goal, `goal-46905d5cd276b98c5fd61637`, was started and canceled through the 100x24 UI after native roles became observable. Its final state is canceled with confirmed cleanup, all three guardian receipts prove stopped groups and removed sockets, independent `killpg(..., 0)` checks report those exact groups absent, and source/worktree status remains clean. Private raw PTY and JSON receipts are retained under `/private/tmp/forgectl-self-service.BrhHRh/`.
 
 ## Future work
 

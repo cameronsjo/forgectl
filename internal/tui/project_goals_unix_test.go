@@ -126,6 +126,100 @@ func TestProjectGoalsWizardFooterMatchesMultilineInput(t *testing.T) {
 	}
 }
 
+func TestProjectGoalsWizardEditorFollowsCaretInNarrowPane(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsWizard
+	model.wizardStep = 2
+	model.edit = []rune(strings.Repeat("objective ", 1200) + "wizard-tail")
+	model.cursor = len(model.edit)
+	out := model.View().Content
+	if !strings.Contains(out, "wizard-tail") || !strings.Contains(out, "▏") {
+		t.Fatalf("wizard editor hid the tail or caret: %q", out)
+	}
+}
+
+func TestProjectGoalsWizardEditorKeepsBeginningCaretVisible(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsWizard
+	model.wizardStep = 2
+	model.edit = []rune("wizard-begin " + strings.Repeat("wizard-filler ", 400))
+	model.cursor = 0
+	if out := model.View().Content; !strings.Contains(out, "▏wizard-begin") {
+		t.Fatalf("wizard editor hid the beginning caret: %q", out)
+	}
+}
+
+func TestProjectGoalsWizardEditorKeepsMiddleCaretVisible(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsWizard
+	model.wizardStep = 2
+	prefix := strings.Repeat("wizard-filler ", 150)
+	model.edit = []rune(prefix + "wizard-middle" + strings.Repeat(" tail", 150))
+	model.cursor = len([]rune(prefix + "wizard-middle"))
+	if out := model.View().Content; !strings.Contains(out, "wizard-middle▏") {
+		t.Fatalf("wizard editor hid the middle caret: %q", out)
+	}
+}
+
+func TestProjectGoalsQuestionEditorFollowsAnswerCaretAndInspectsPrompt(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsQuestion
+	model.questionText = "question-start " + strings.Repeat("question ", 500) + "question-tail"
+	model.answer = []rune(strings.Repeat("answer ", 500) + "answer-tail")
+	model.answerCursor = len(model.answer)
+	out := model.View().Content
+	if !strings.Contains(out, "answer-tail") || !strings.Contains(out, "▏") {
+		t.Fatalf("question editor hid the answer tail or caret: %q", out)
+	}
+	model.Update(projectGoalsKey("ctrl+up"))
+	if out = model.View().Content; !strings.Contains(out, "question-start") {
+		t.Fatalf("question scroll did not expose the prompt: %q", out)
+	}
+	if !strings.Contains(string(model.answer), "answer-tail") {
+		t.Fatal("manual prompt scrolling changed the answer")
+	}
+}
+
+func TestProjectGoalsQuestionEditorKeepsBeginningCaretVisible(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsQuestion
+	model.questionText = "question"
+	model.answer = []rune("answer-begin " + strings.Repeat("answer-filler ", 400))
+	model.answerCursor = 0
+	if out := model.View().Content; !strings.Contains(out, "▏answer-begin") {
+		t.Fatalf("answer editor hid the beginning caret: %q", out)
+	}
+}
+
+func TestProjectGoalsQuestionEditorKeepsMiddleCaretVisible(t *testing.T) {
+	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.width, model.height = 50, 16
+	model.screen = projectGoalsQuestion
+	model.questionText = "question"
+	prefix := strings.Repeat("answer-filler ", 150)
+	model.answer = []rune(prefix + "answer-middle" + strings.Repeat(" tail", 150))
+	model.answerCursor = len([]rune(prefix + "answer-middle"))
+	if out := model.View().Content; !strings.Contains(out, "answer-middle▏") {
+		t.Fatalf("answer editor hid the middle caret: %q", out)
+	}
+}
+
+func TestProjectGoalsCaretTracksFullWordWrapAndLiteralMarkers(t *testing.T) {
+	for _, value := range []string{"12345 abcdefghi", "▏abcd efghijklm"} {
+		if line := goalCursorLine([]rune(value), 8, 10); line != 1 {
+			t.Fatalf("caret line for %q = %d, want wrapped line 1", value, line)
+		}
+	}
+	if line := goalCursorLine([]rune("▏abcd efghijklm"), 0, 10); line != 0 {
+		t.Fatalf("beginning caret before a literal marker = %d, want line 0", line)
+	}
+}
+
 func TestProjectGoalsArtifactMessagePreservesLinesAndSanitizes(t *testing.T) {
 	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
 	_, command := model.Update(projectGoalsArtifactMsg{kind: "patch", text: "first\nsecond\x1b[31m"})

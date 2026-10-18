@@ -41,6 +41,13 @@ func TestMain(main *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv("GOALNATIVE_ABRUPT_HELPER") == "1" {
+		if err := runAbruptSupervisorHelper(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	os.Exit(main.Run())
 }
 
@@ -208,6 +215,271 @@ func TestGoalNativeRealCodexBoundaryIntegration(t *testing.T) {
 	if !waitForProcessGone(pid, 5*time.Second) {
 		t.Fatalf("owned command process %d survived session close", pid)
 	}
+}
+
+func TestGoalNativeRealCodexAbruptSupervisorDeath(t *testing.T) {
+	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
+		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 to run the real Codex integration")
+	}
+	native, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skipf("codex is unavailable: %v", err)
+	}
+	root, err := os.MkdirTemp("/tmp", "gn-abrupt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	configHome := filepath.Join(root, "codex-home")
+	control := filepath.Join(root, "control")
+	worktree := filepath.Join(root, "worktree")
+	for _, directory := range []string{configHome, control, worktree} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := "[mcp_servers.\"secret.server\"]\ncommand = \"/bin/echo\"\n[plugins.sample]\nenabled = true\n[apps.calendar]\nenabled = true\n"
+	if err := os.WriteFile(filepath.Join(configHome, "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(control, "abrupt-state.json")
+	pidPath := filepath.Join(worktree, "long-command.pids")
+	model := os.Getenv("FORGECTL_GOALNATIVE_MODEL")
+	if model == "" {
+		model = "gpt-5"
+	}
+	binary, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := exec.CommandContext(t.Context(), binary, "-test.run=TestGoalNativeAbruptSupervisorHelper", "--") //nolint:gosec // test launches only its own resolved executable
+	helper.Env = append(filteredHelperEnvironment(os.Environ()),
+		"GOALNATIVE_ABRUPT_HELPER=1",
+		"GOALNATIVE_ABRUPT_CONFIG_HOME="+configHome,
+		"GOALNATIVE_ABRUPT_CONTROL="+control,
+		"GOALNATIVE_ABRUPT_NATIVE="+native,
+		"GOALNATIVE_ABRUPT_MODEL="+model,
+		"GOALNATIVE_ABRUPT_PID_PATH="+pidPath,
+		"GOALNATIVE_ABRUPT_STATE="+statePath,
+		"GOALNATIVE_ABRUPT_WORKTREE="+worktree,
+	)
+	helper.Stdout = os.Stderr
+	helper.Stderr = os.Stderr
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if helper.Process != nil {
+			_ = helper.Process.Kill()
+		}
+		_ = helper.Wait()
+	}()
+	state, err := waitForAbruptSupervisorState(statePath, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Ready || state.SupervisorPID != helper.Process.Pid || state.NativePID <= 1 || state.ProcessGroup != state.NativePID || state.ShellPID <= 1 || state.ChildPID <= 1 || state.ShellPID == state.ChildPID {
+		t.Fatalf("abrupt helper state = %#v", state)
+	}
+	if !processAlive(state.NativePID) || !processAlive(state.ShellPID) || !processAlive(state.ChildPID) {
+		t.Fatalf("abrupt helper did not publish live owned processes: %#v", state)
+	}
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatalf("kill abrupt helper: %v", err)
+	}
+	if err := helper.Wait(); err == nil {
+		t.Fatal("abrupt helper exited successfully after SIGKILL")
+	}
+	receipt, err := waitForGuardianReceipt(filepath.Join(control, "guardian-receipt.json"), 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != "stopped" || receipt.NativePID != state.NativePID || receipt.ProcessGroup != state.ProcessGroup || receipt.Socket != filepath.Join(control, "app.sock") || !receipt.SocketGone || !receipt.GroupGone || receipt.Error != "" {
+		t.Fatalf("abrupt cleanup receipt = %#v", receipt)
+	}
+	for _, pid := range []int{state.NativePID, state.ShellPID, state.ChildPID} {
+		if !waitForProcessGone(pid, 5*time.Second) {
+			t.Fatalf("owned process %d survived abrupt supervisor death", pid)
+		}
+	}
+}
+
+type abruptSupervisorState struct {
+	Ready         bool   `json:"ready"`
+	Error         string `json:"error,omitempty"`
+	SupervisorPID int    `json:"supervisor_pid"`
+	NativePID     int    `json:"native_pid"`
+	ProcessGroup  int    `json:"process_group"`
+	ShellPID      int    `json:"shell_pid"`
+	ChildPID      int    `json:"child_pid"`
+}
+
+type abruptCommandOutcome struct {
+	Result CommandResult
+	Err    error
+}
+
+func runAbruptSupervisorHelper() error {
+	control, err := abruptHelperEnv("GOALNATIVE_ABRUPT_CONTROL")
+	if err != nil {
+		return err
+	}
+	worktree, err := abruptHelperEnv("GOALNATIVE_ABRUPT_WORKTREE")
+	if err != nil {
+		return err
+	}
+	configHome, err := abruptHelperEnv("GOALNATIVE_ABRUPT_CONFIG_HOME")
+	if err != nil {
+		return err
+	}
+	native, err := abruptHelperEnv("GOALNATIVE_ABRUPT_NATIVE")
+	if err != nil {
+		return err
+	}
+	model := os.Getenv("GOALNATIVE_ABRUPT_MODEL")
+	if model == "" || !safeToken(model) {
+		return errors.New("GOALNATIVE_ABRUPT_MODEL is missing or invalid")
+	}
+	pidPath, err := abruptHelperEnv("GOALNATIVE_ABRUPT_PID_PATH")
+	if err != nil {
+		return err
+	}
+	statePath, err := abruptHelperEnv("GOALNATIVE_ABRUPT_STATE")
+	if err != nil {
+		return err
+	}
+	environment := append(filteredHelperEnvironment(os.Environ()), "CODEX_HOME="+configHome, "GOALNATIVE_HOST_HELPER=1")
+	supervisor, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		return err
+	}
+	session, err := Start(context.Background(), Config{Binary: native, SupervisorBinary: supervisor, ControlDir: control, Cwd: worktree, Socket: filepath.Join(control, "app.sock"), Model: model, Environment: environment, WritableRoots: []string{worktree}})
+	if err != nil {
+		_ = writePrivateJSON(statePath, abruptSupervisorState{Error: err.Error(), SupervisorPID: os.Getpid()})
+		return err
+	}
+	defer func() { _ = session.Close(context.Background()) }()
+	started, err := readGuardianReceipt(startupReceiptPath(control))
+	if err != nil {
+		return writeAbruptHelperError(statePath, err)
+	}
+	commandDone := make(chan abruptCommandOutcome, 1)
+	go func() {
+		result, commandErr := session.Exec(context.Background(), []string{"/bin/sh", "-c", `printf '%s\n' "$$" > "$1"; sleep 60 & child=$!; printf '%s\n' "$child" >> "$1"; wait "$child"`, "goal-abrupt-long", pidPath}, worktree, []string{worktree}, time.Minute)
+		commandDone <- abruptCommandOutcome{Result: result, Err: commandErr}
+	}()
+	shellPID, childPID, outcome, err := waitForPIDPairOrCommand(pidPath, commandDone, 10*time.Second)
+	if err != nil {
+		if outcome != nil {
+			return writeAbruptHelperError(statePath, fmt.Errorf("%w: result=%#v error=%v", err, outcome.Result, outcome.Err))
+		}
+		return writeAbruptHelperError(statePath, err)
+	}
+	state := abruptSupervisorState{Ready: true, SupervisorPID: os.Getpid(), NativePID: started.NativePID, ProcessGroup: started.ProcessGroup, ShellPID: shellPID, ChildPID: childPID}
+	if err := writePrivateJSON(statePath, state); err != nil {
+		return err
+	}
+	if outcome := <-commandDone; outcome.Err != nil {
+		return writeAbruptHelperError(statePath, fmt.Errorf("owned command failed after readiness: result=%#v error=%v", outcome.Result, outcome.Err))
+	}
+	return writeAbruptHelperError(statePath, errors.New("owned long command completed before supervisor death"))
+}
+
+func abruptHelperEnv(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return "", fmt.Errorf("%s is missing or not an absolute clean path", name)
+	}
+	return value, nil
+}
+
+func filteredHelperEnvironment(environment []string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "CODEX_HOME=") || strings.HasPrefix(entry, "GOALNATIVE_ABRUPT_") || strings.HasPrefix(entry, "GOALNATIVE_HOST_HELPER=") || strings.HasPrefix(entry, "GOALNATIVE_NATIVE_HELPER=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func writeAbruptHelperError(path string, err error) error {
+	stateErr := writePrivateJSON(path, abruptSupervisorState{Error: err.Error(), SupervisorPID: os.Getpid()})
+	return errors.Join(err, stateErr)
+}
+
+func waitForAbruptSupervisorState(path string, timeout time.Duration) (abruptSupervisorState, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path) //nolint:gosec // path is a test-generated fixture below the owner-private temp directory
+		if err == nil {
+			var state abruptSupervisorState
+			if json.Unmarshal(data, &state) == nil {
+				if state.Error != "" {
+					return abruptSupervisorState{}, errors.New(state.Error)
+				}
+				if state.Ready {
+					return state, nil
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return abruptSupervisorState{}, fmt.Errorf("abrupt supervisor did not publish ready state in %s", path)
+}
+
+func waitForGuardianReceipt(path string, timeout time.Duration) (guardianReceipt, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		receipt, err := readGuardianReceipt(path)
+		if err == nil && receipt.Status == "stopped" {
+			return receipt, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return guardianReceipt{}, fmt.Errorf("guardian receipt did not confirm stopped cleanup in %s", path)
+}
+
+func waitForPIDPairOrCommand(path string, commandDone <-chan abruptCommandOutcome, timeout time.Duration) (int, int, *abruptCommandOutcome, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case outcome := <-commandDone:
+			return 0, 0, &outcome, errors.New("owned command completed before PID publication")
+		default:
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // path is a test-generated PID file below the owner-private temp directory
+		if err == nil {
+			var shellPID, childPID int
+			if _, scanErr := fmt.Sscan(string(data), &shellPID, &childPID); scanErr == nil && shellPID > 1 && childPID > 1 {
+				return shellPID, childPID, nil, nil
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return 0, 0, nil, fmt.Errorf("owned command did not publish shell and child PIDs in %s", path)
+}
+
+func TestPIDPairReadinessAcceptsNewlinesAndRejectsEarlyExit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "command.pids")
+	if err := os.WriteFile(path, []byte("12345\n23456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commandDone := make(chan abruptCommandOutcome, 1)
+	shellPID, childPID, outcome, err := waitForPIDPairOrCommand(path, commandDone, time.Second)
+	if err != nil || outcome != nil || shellPID != 12345 || childPID != 23456 {
+		t.Fatalf("PID pair readiness = %d %d %#v %v", shellPID, childPID, outcome, err)
+	}
+	commandDone <- abruptCommandOutcome{Result: CommandResult{ExitCode: 1, Stderr: "fixture failure"}}
+	_, _, outcome, err = waitForPIDPairOrCommand(path, commandDone, time.Second)
+	if err == nil || outcome == nil || outcome.Result.Stderr != "fixture failure" {
+		t.Fatalf("early command failure was hidden: %#v %v", outcome, err)
+	}
+}
+
+func processAlive(pid int) bool {
+	return pid > 1 && syscall.Kill(pid, 0) == nil
 }
 
 func waitForPIDFile(path string, timeout time.Duration) (int, error) {

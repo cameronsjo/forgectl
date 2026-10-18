@@ -31,7 +31,7 @@ type nativeRole struct {
 	Closed    bool
 }
 
-type nativeTurn struct{ ID, Status, Text string }
+type nativeTurn struct{ ID, Status, Text, Error string }
 type nativeInput struct{ TurnID, Content string }
 type nativeTrace struct {
 	Turns  map[string]nativeTurn
@@ -269,6 +269,9 @@ func (engine *execution) nativeEvent(role string, event json.RawMessage) {
 			Turn     struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
+				Error  struct {
+					Message string `json:"message"`
+				} `json:"error"`
 			} `json:"turn"`
 			Item struct {
 				Type    string          `json:"type"`
@@ -303,6 +306,10 @@ func (engine *execution) nativeEvent(role string, event json.RawMessage) {
 	case "turn/completed":
 		turn := trace.Turns[envelope.Params.Turn.ID]
 		turn.ID, turn.Status = envelope.Params.Turn.ID, envelope.Params.Turn.Status
+		turn.Error = envelope.Params.Turn.Error.Message
+		if len(turn.Error) > 2048 {
+			turn.Error = turn.Error[:2048] + " (truncated)"
+		}
 		trace.Turns[turn.ID] = turn
 		trace.Latest = turn.ID
 	case "item/completed":
@@ -589,7 +596,7 @@ func (engine *execution) coordinate(ctx context.Context) error {
 		for _, name := range []string{"coordinator", "implementation", "reviewer"} {
 			turn := engine.latestTurn(name)
 			if turn.Status != "" && turn.Status != "completed" && turn.Status != "inProgress" {
-				return fmt.Errorf("%s native turn ended %s", name, turn.Status)
+				return fmt.Errorf("%s native turn ended %s: %s", name, turn.Status, turn.Error)
 			}
 		}
 		coordinator := engine.latestTurn("coordinator")

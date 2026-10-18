@@ -360,13 +360,27 @@ func (session *Session) Turn(ctx context.Context, prompt string) (TurnResult, er
 		return TurnResult{}, err
 	}
 	if params.Turn.Status != "completed" {
-		return TurnResult{ID: turnID, Status: params.Turn.Status}, fmt.Errorf("native turn ended with status %s", params.Turn.Status)
+		return TurnResult{ID: turnID, Status: params.Turn.Status}, nativeTurnFailure(params.Turn.Status, params.Turn.Error)
 	}
 	text := session.finalText(turnID)
 	if strings.TrimSpace(text) == "" {
 		return TurnResult{ID: turnID, Status: params.Turn.Status}, errors.New("native turn completed without final agent text")
 	}
 	return TurnResult{ID: turnID, Status: params.Turn.Status, Text: text}, nil
+}
+
+func nativeTurnFailure(status string, raw json.RawMessage) error {
+	var detail struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &detail) != nil || strings.TrimSpace(detail.Message) == "" {
+		return fmt.Errorf("native turn ended with status %s", status)
+	}
+	message := strings.TrimSpace(detail.Message)
+	if len(message) > 2048 {
+		message = message[:2048] + " (truncated)"
+	}
+	return fmt.Errorf("native turn ended with status %s: %s", status, message)
 }
 
 func (session *Session) Exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration) (CommandResult, error) {
