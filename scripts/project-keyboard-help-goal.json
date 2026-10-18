@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "title": "Discoverable Projects keyboard help",
+  "goal": "Make the Agents overview's keyboard controls discoverable without crowding the live activity view, including the narrow terminal pane Cameron uses. Inspect the current implementation and existing tests, choose the smallest consistent change, and return a reviewable patch with meaningful regression tests. Do not implement a launcher, change native permissions, or change the activity/evidence model.",
+  "allowed_paths": [
+    "internal/tui/project_agents_unix.go",
+    "internal/tui/project_agents_unix_test.go",
+    "docs/commands/surface-project.md"
+  ],
+  "acceptance": [
+    "Both normal and narrow footers advertise ? help. The help view lists every current keyboard action and alias in plain language.",
+    "? opens and closes help; Escape dismisses it. q and Ctrl-C retain their existing quit behavior.",
+    "While help is open, Enter/e cannot call focus/evidence, and selection and zoom keys cannot mutate the underlying view. Dismissing preserves selected thread, scroll offset, zoom window and current activity snapshot.",
+    "Help fits 50 columns by 16 rows and stays within smaller terminal dimensions; empty, unbound and source-error states remain safe.",
+    "Add focused regression tests that fail against the unchanged implementation and pass for the result. Follow repository guidance, including no generated changelog edits.",
+    "Update the command documentation's controls. No changes outside the three allowed paths, no commits, pushes, PRs, merges, installs, credential changes or shared-service operations. Use apply_patch for edits; do not add inline comments or one-letter variable names."
+  ]
+}
