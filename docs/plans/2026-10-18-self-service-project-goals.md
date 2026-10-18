@@ -5,7 +5,7 @@ status: in-flight
 # Self-service repository goals in Projects
 
 Status: approved outcome; implementation in progress
-Next action: review the execution boundary, then implement the native runtime and Projects journey.
+Next action: finish native tool isolation, then run product-level native and terminal acceptance.
 
 ## Goal and authority
 
@@ -48,7 +48,8 @@ Each run has one bounded child supervisor, not a persistent daemon. Each native 
 ## Work
 
 - [ ] Record independent plan security/operability and user/agent-experience review; resolve supported findings.
-- [ ] Implement durable goal contract/store, isolated workspace preparation, operator controls and failure-safe ownership.
+- [x] Implement durable goal contract/store, isolated workspace preparation and sequenced operator controls.
+- [ ] Implement failure-safe supervisor/native ownership and verify cancellation/crash cleanup.
 - [ ] Implement native Codex runtime, bounded team loop, exact-mail evidence and sandboxed verification.
 - [ ] Implement Projects goal setup/dashboard/result/decision UX and equivalent JSON CLI.
 - [ ] Add focused contract, negative-control and lifecycle tests; document supported behavior and recovery limits.
@@ -57,11 +58,11 @@ Each run has one bounded child supervisor, not a persistent daemon. Each native 
 
 ## Review
 
-Independent security/operability review examined this plan and the current project/mail/launch/exec implementation. Supported findings were incorporated: cooperative mail is not authentication; native verification is separate from ordinary exec; supervisor death requires guardian-owned target spawning and an exclusive lease; controls remain outside agent-writable roots; argv is exact rather than shell-reconstructed; bounds are numeric; cleanup evidence and unknown liveness are distinct. Root Codex independently read the cited ledger identity disclaimer and native protocol implementation. User/agent-experience review is in progress. Native sandbox, crash cleanup and UI acceptance are still unverified.
+Independent security/operability review examined this plan and the current project/mail/launch/exec implementation. Supported findings were incorporated: cooperative mail is not authentication; native verification is separate from ordinary exec; supervisor death requires guardian-owned target spawning and an exclusive lease; controls remain outside agent-writable roots; argv is exact rather than shell-reconstructed; bounds are numeric; cleanup evidence and unknown liveness are distinct. Root Codex independently read the cited ledger identity disclaimer and native protocol implementation. User/agent-experience review added full-field confirmation, visible cursors, multiline input, narrow-pane controls, discoverable registry location and safe multiline artifacts. Native tool isolation also must disable inherited MCP servers, plugins, hooks, apps and subagents rather than treating a shell sandbox as a boundary for remote tools. Native sandbox, crash cleanup and UI acceptance remain unverified.
 
 ## Completion evidence
 
-Not yet implemented or verified. The prior pilot is evidence for the protocol and mail design, not acceptance of this self-service product.
+The durable contract/store/workspace tests pass with Go 1.26.8: `GOMAXPROCS=2 go test -p=2 ./internal/surface/goal -count=1`. Negative controls cover unsafe paths/private files, immutable-goal tampering, inactive/stale controls, source revision changes, out-of-scope/symlink patches, and source index/untracked-content changes hidden by an unchanged status listing. Source isolation hashes Git-visible tracked/index content and nonignored untracked files (bounded to 256 MiB), not ignored build caches. Native execution and interactive acceptance are not complete; the prior pilot is evidence for protocol design, not acceptance of this product.
 
 ## Future work
 
