@@ -1,0 +1,70 @@
+---
+status: in-flight
+---
+
+# Self-service repository goals in Projects
+
+Status: approved outcome; implementation in progress
+Next action: review the execution boundary, then implement the native runtime and Projects journey.
+
+## Goal and authority
+
+Cameron requested: “I want it self-service. Be ambitious.” This approves the proposed Start goal journey in Projects: enter a repository goal, confirm boundaries, see progress and decisions needing Cameron, and receive a reviewable result with independent verification. Cameron should not assemble pilot flags, prepare a worktree, relay agent messages, or ask Codex to inspect every retained receipt.
+
+Codex continues in the existing `codex/cross-harness-loop` linked worktree. Source commits and this feature-branch push are authorized. No PR, merge, deployment, global installation/configuration, credential change, shared-service restart, or third-party repository write is included. Native execution stays OpenAI-only. A goal's messages cannot authorize any of those actions or broaden its approved scope.
+
+## Product and approach
+
+Extend the existing `surface project` family, its project/thread identities, and native team mail. Do not introduce a second dispatcher, service installation, browser app, scheduler, or transcript database. The Estate's delivery-automation card identifies forgectl as the execution owner; the older forgectl card is only discovery evidence, and current source governs.
+
+The new Projects goals screen is a usable entry point with an empty state and a Start goal action. The setup flow collects repository, goal, allowed paths, acceptance criteria, verification commands, exact model, and a bounded duration. It displays the actual repository/base revision and execution boundary before explicit confirmation. CLI callers have equivalent versioned JSON commands and must explicitly approve execution; merely inspecting or preparing a goal launches no model.
+
+Forgectl prepares a unique linked Git worktree and feature branch from the confirmed source HEAD without changing the source checkout. The exact OID, branch and destination are recorded before no-hooks Git creation, and source HEAD is rechecked immediately before creation. Partial work is retained with its exact state rather than silently adopted or deleted. An existing source worktree may be dirty: the run starts from its committed HEAD, never silently imports its dirty files, and the confirmation says so. The runtime and repository workspace are disjoint, owner-private/controlled, and retained rather than automatically deleted. No arbitrary existing worktree or shared team ledger is adopted.
+
+Move the proven pilot's orchestration into compiled Go using the installed native Codex app-server protocol and existing mailbox. The first built-in team is Codex coordinator, Codex implementation, and an independently enrolled read-only Codex reviewer. This deliberately avoids making self-service depend on the pilot's machine-specific Pi authentication/safety extensions, apply_patch helper, Node runtime, or WebSocket module path. Cross-harness mail remains unchanged; Pi/Hermes team presets are future work, not falsely advertised support.
+
+Each run has one bounded child supervisor, not a persistent daemon. Each native process has a small guardian that itself spawns and owns the target process group. Only the supervisor holds the close-on-exec lease writer; supervisor death closes the pipe, and the guardian stops its exact native group and records verified cleanup outside agent-writable roots. Leaving the screen detaches; reopening it reads the same run. State records exact role/run/native identities, phase, heartbeat, questions, review and verification receipts, and retained result paths. The UI never kills a PID recovered from disk. Cancel remains requested until guardian cleanup receipts and process-group absence are confirmed. Stale heartbeat without cleanup evidence is unknown, not a claimed stop. Viewing an interrupted run is not resuming its side effects.
+
+## Execution boundary
+
+- Native provider is explicitly `openai`; the exact requested model and returned thread identity/provider/posture are checked before work. Missing executables, unsupported native protocol, or unavailable model/authentication fail with actionable diagnostics rather than selecting another provider or dropping a guard.
+- All agent shells have native network-disabled workspace policies and never-approve escalation. Coordinator and reviewer can write only their own runtime working directories and the dedicated team ledger, not source or operator control records. Implementation can write its isolated workspace and its own runtime working directory/ledger. Scope matching is an additional result gate, not a claim of per-file OS isolation.
+- Operator control/goal/verification receipts live outside every agent-writable root. Team mail is a cooperative same-user channel: workers can write its ledger, so role labels and message hashes are not authentication or security evidence. Agent messages are untrusted task data, not permission. Only directly captured native events can establish native completion. Questions may clarify the existing goal; scope, model, network, command, or external-effect changes require a new explicitly approved goal.
+- Commands for independent verification are explicit operator-approved argv, entered as JSON arrays with no shell parsing or reconstruction. They run through native sandboxed `command/exec`, not an unrestricted supervisor shell. Native exit status, bounded private output, time, and before/after patch digest are retained. A failed, timed-out, incomplete, or patch-changing verification does not pass. Tool and verification network access is disabled; OpenAI model transport necessarily retains its provider connection.
+- Native setup proves the policy with allowed and denied write controls before model work. The reviewer is not permitted to implement or run arbitrary repository scripts. Config comes from transient flags; no trust entry or global configuration is edited.
+- Goal duration is at most 30 minutes and correction rounds at most two, persisted and enforced by the supervisor rather than an agent. This is not a dollar/token spending cap. No secret values, inherited team identity, or operator control capability is inserted into prompts or subprocess argv.
+- Mail remains authoritative: queued is deferred transport, unconfirmed is uncertainty, and neither is task completion. The supervisor flushes only its own ledger. It validates exact sender/recipient incarnations and task correlation, and never blindly resends ambiguous work.
+- Results require a settled implementation, independent review of the exact current patch digest corroborated by the reviewer's directly captured native completion, allowed changed paths, unchanged HEAD/branch ref, explicit successful verification, and guardian-confirmed child cleanup. Mail review text alone is insufficient. “Ready” means reviewed patch and checks passed, not merged, deployed, or human accepted. A goal without executable checks cannot claim verified readiness.
+
+## Requirements and acceptance
+
+1. A human can open Projects, enter a goal, review the actual boundaries, start it, detach and reconnect, answer an in-scope question, inspect the diff/check output, and cancel without private scripts or manual filesystem setup.
+2. A non-TTY caller gets versioned JSON, honest errors, no hidden prompts, and explicit execution approval. Root defaults are private and discoverable; explicit roots remain supported for isolation/testing. Existing project command semantics remain backward compatible except the documented safe default root.
+3. Source checkout state and existing branches are preserved. A changed source HEAD between confirmation and creation is rejected. Unsafe roots, malformed paths, modified immutable goal, stale controls, and out-of-scope patch are fail-closed.
+4. A terminal never overflows at 50x16; empty, launching, active, waiting-for-Cameron, failed/interrupted, canceling, and ready states have a clear next action. Terminal control bytes in goals, questions, output and errors cannot become escape sequences.
+5. Tests exercise refusal and partial-failure paths, not only happy-path snapshots. Native acceptance uses the compiled product entrypoint and actual OpenAI sessions against an isolated repository task. UI acceptance uses a real PTY with terminal replies at wide and narrow sizes.
+6. The final source build is made from clean committed content and records its real VCS revision. Checks run after the last relevant edit. Delivery is the feature-branch push, not installation or merge.
+
+## Work
+
+- [ ] Record independent plan security/operability and user/agent-experience review; resolve supported findings.
+- [ ] Implement durable goal contract/store, isolated workspace preparation, operator controls and failure-safe ownership.
+- [ ] Implement native Codex runtime, bounded team loop, exact-mail evidence and sandboxed verification.
+- [ ] Implement Projects goal setup/dashboard/result/decision UX and equivalent JSON CLI.
+- [ ] Add focused contract, negative-control and lifecycle tests; document supported behavior and recovery limits.
+- [ ] Run real self-service native and PTY acceptance, independently inspect artifacts, and fix supported failures.
+- [ ] Reconcile plan, commit/push the feature branch, and report exact verification and remaining boundaries.
+
+## Review
+
+Independent security/operability review examined this plan and the current project/mail/launch/exec implementation. Supported findings were incorporated: cooperative mail is not authentication; native verification is separate from ordinary exec; supervisor death requires guardian-owned target spawning and an exclusive lease; controls remain outside agent-writable roots; argv is exact rather than shell-reconstructed; bounds are numeric; cleanup evidence and unknown liveness are distinct. Root Codex independently read the cited ledger identity disclaimer and native protocol implementation. User/agent-experience review is in progress. Native sandbox, crash cleanup and UI acceptance are still unverified.
+
+## Completion evidence
+
+Not yet implemented or verified. The prior pilot is evidence for the protocol and mail design, not acceptance of this self-service product.
+
+## Future work
+
+- Additional native team presets after their portable safety/authentication setup is independently proven.
+- Explicit recovery of interrupted execution with native identity and ambiguous-delivery reconciliation; no blind replay.
+- Opt-in release/merge/install workflows remain separate authorization boundaries.
