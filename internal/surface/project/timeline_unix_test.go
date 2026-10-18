@@ -70,6 +70,107 @@ func TestMailTimelineIsTransportOnlyWithoutInventedAttribution(test *testing.T) 
 	}
 }
 
+func TestMailTimelineAcceptsNativeReplyProvenanceAsTransportOnly(test *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	validMessage := mail.Message{
+		V:                 1,
+		ID:                "reply-1",
+		From:              "lead",
+		To:                "worker",
+		Body:              "private native reply",
+		Priority:          mail.PriorityNext,
+		CreatedAt:         now,
+		ReplyTo:           "input-1",
+		ReplySessionID:    "session-1",
+		ReplySourceDigest: strings.Repeat("a", 64),
+	}
+	writeMailbox := func(test *testing.T, malformed []byte) MailTimeline {
+		test.Helper()
+		store, worktree := testStore(test)
+		_, created, err := store.CreateProject(context.Background(), "Alpha", worktree, "")
+		if err != nil {
+			test.Fatal(err)
+		}
+		teamPath := filepath.Join(store.Root, created.ID, projectDirectoryName)
+		box := mail.Mailbox{Dir: teamPath}
+		if err := box.Locked(func(tx *mail.Tx) error {
+			if err := tx.Enqueue(validMessage, now); err != nil {
+				return err
+			}
+			return tx.Mark(validMessage.ID, mail.StatusSent, "", false, now.Add(time.Second))
+		}); err != nil {
+			test.Fatal(err)
+		}
+		if malformed != nil {
+			mailboxPath := filepath.Join(teamPath, "mailbox.jsonl")
+			contents := append(readTestFile(test, mailboxPath), malformed...)
+			writeTestFile(test, mailboxPath, append(contents, '\n'), 0o600)
+		}
+		timeline, err := store.MailTimeline(context.Background(), created.ID)
+		if err != nil {
+			test.Fatal(err)
+		}
+		return timeline
+	}
+
+	valid := writeMailbox(test, nil)
+	if len(valid.Entries) != 1 || valid.Skipped != 0 || valid.Partial {
+		test.Fatalf("valid native reply timeline = %#v", valid)
+	}
+	if entry := valid.Entries[0]; entry.MessageID != validMessage.ID || entry.From != validMessage.From || entry.To != validMessage.To || entry.Status != MailTransportAccepted {
+		test.Fatalf("valid native reply transport observation = %#v", entry)
+	}
+	if got := string(mustJSON(test, valid)); strings.Contains(got, "private native reply") || strings.Contains(got, "input-1") || strings.Contains(got, "session-1") || strings.Contains(got, strings.Repeat("a", 64)) {
+		test.Fatalf("timeline exposed native reply content or provenance: %s", got)
+	}
+
+	encodeMessage := func(id string, mutate func(map[string]any)) []byte {
+		messageFields := map[string]any{
+			"v": 1, "id": id, "from": validMessage.From, "to": validMessage.To,
+			"body": validMessage.Body, "priority": validMessage.Priority, "created_at": validMessage.CreatedAt,
+			"reply_to": validMessage.ReplyTo, "reply_session_id": validMessage.ReplySessionID, "reply_source_digest": validMessage.ReplySourceDigest,
+		}
+		if mutate != nil {
+			mutate(messageFields)
+		}
+		encoded, err := json.Marshal(map[string]any{"op": "msg", "at": now, "msg": messageFields})
+		if err != nil {
+			test.Fatal(err)
+		}
+		return encoded
+	}
+	cases := map[string][]byte{
+		"only reply target":   encodeMessage("reply-only-target", func(fields map[string]any) { delete(fields, "reply_session_id"); delete(fields, "reply_source_digest") }),
+		"only reply session":  encodeMessage("reply-only-session", func(fields map[string]any) { delete(fields, "reply_to"); delete(fields, "reply_source_digest") }),
+		"only reply digest":   encodeMessage("reply-only-digest", func(fields map[string]any) { delete(fields, "reply_to"); delete(fields, "reply_session_id") }),
+		"target and session":  encodeMessage("reply-target-session", func(fields map[string]any) { delete(fields, "reply_source_digest") }),
+		"target and digest":   encodeMessage("reply-target-digest", func(fields map[string]any) { delete(fields, "reply_session_id") }),
+		"session and digest":  encodeMessage("reply-session-digest", func(fields map[string]any) { delete(fields, "reply_to") }),
+		"empty target":        encodeMessage("reply-empty-target", func(fields map[string]any) { fields["reply_to"] = "" }),
+		"null target":         encodeMessage("reply-null-target", func(fields map[string]any) { fields["reply_to"] = nil }),
+		"invalid target type": encodeMessage("reply-invalid-target", func(fields map[string]any) { fields["reply_to"] = 7 }),
+		"malformed digest":    encodeMessage("reply-malformed-digest", func(fields map[string]any) { fields["reply_source_digest"] = "ABC" }),
+		"uppercase digest":    encodeMessage("reply-uppercase-digest", func(fields map[string]any) { fields["reply_source_digest"] = strings.Repeat("A", 64) }),
+		"oversized target":    encodeMessage("reply-oversized-target", func(fields map[string]any) { fields["reply_to"] = strings.Repeat("a", 129) }),
+		"oversized session":   encodeMessage("reply-oversized-session", func(fields map[string]any) { fields["reply_session_id"] = strings.Repeat("a", 129) }),
+		"control target":      encodeMessage("reply-control-target", func(fields map[string]any) { fields["reply_to"] = "bad\nid" }),
+		"control session":     encodeMessage("reply-control-session", func(fields map[string]any) { fields["reply_session_id"] = "bad\nid" }),
+		"extra field":         encodeMessage("reply-extra-field", func(fields map[string]any) { fields["unexpected"] = true }),
+		"duplicate field":     []byte(strings.Replace(string(encodeMessage("reply-duplicate-field", nil)), `"reply_to":"input-1"`, `"reply_to":"input-1","reply_to":"input-2"`, 1)),
+	}
+	for name, malformed := range cases {
+		test.Run(name, func(test *testing.T) {
+			if _, _, ok := decodeMailboxRecord(malformed); ok {
+				test.Fatalf("malformed %s record decoded successfully", name)
+			}
+			timeline := writeMailbox(test, malformed)
+			if len(timeline.Entries) != 1 || timeline.Skipped != 1 || !timeline.Partial {
+				test.Fatalf("malformed %s timeline = %#v", name, timeline)
+			}
+		})
+	}
+}
+
 func TestMailTimelineKeepsMalformedAndHeldInputVisible(test *testing.T) {
 	store, worktree := testStore(test)
 	_, created, err := store.CreateProject(context.Background(), "Alpha", worktree, "")

@@ -58,8 +58,8 @@ assert.throws(() => assertAgentsModelLabels("pi / gpt-5.6-sol", modelSnapshot));
 
 const report = {
   project_id: "project-1", thread_id: "thread-1", run_id: "run-1", process_liveness: "unknown",
-  native: { native_session_id: "native-1", provider: "openai-codex", model: "test-model", turn: { id: "turn-1", status: "completed" } },
-  evidence: { thread_id: "thread-1", run_id: "run-1", native_session_id: "native-1", harness: "pi", source: "pi-inbox", turn_id: "turn-1", status: "completed" },
+  native: { native_session_id: "native-1", provider: "openai-codex", model: "test-model", turn: { id: "turn-1", status: "completed", observed_at: "2026-10-17T12:00:00.000Z" } },
+  evidence: { thread_id: "thread-1", run_id: "run-1", native_session_id: "native-1", harness: "pi", source: "pi-inbox", turn_id: "turn-1", status: "completed", observed_at: "2026-10-17T12:00:00.000Z" },
 };
 const expected = { provider: "openai-codex", model: "test-model", completed: true };
 assert.equal(assertNativeEvidence(report, "project-1", "thread-1", binding, expected), report);
@@ -73,6 +73,11 @@ for (const changed of [
   { ...report, evidence: { ...report.evidence, status: "failed" } },
   { ...report, evidence: { ...report.evidence, model: "invented-producer" } },
 ]) assert.throws(() => assertNativeEvidence(changed, "project-1", "thread-1", binding, expected));
+for (const observed_at of [undefined, null, 123, "invalid", "0001-01-01T00:00:00Z"]) {
+  assert.throws(() => assertNativeEvidence({ ...report, evidence: { ...report.evidence, observed_at } }, "project-1", "thread-1", binding, expected));
+  assert.throws(() => assertNativeEvidence({ ...report, native: { ...report.native, turn: { ...report.native.turn, observed_at } } }, "project-1", "thread-1", binding, expected));
+}
+assert.throws(() => assertNativeEvidence({ ...report, evidence: { ...report.evidence, observed_at: "2026-10-17T12:00:01.000Z" } }, "project-1", "thread-1", binding, expected));
 
 const interval = {
   id: "span-1", turn_id: "turn-1", state: "finished", provider: "openai-codex", model: "turn-model",
@@ -84,6 +89,8 @@ const timedReport = {
   evidence: { ...report.evidence, observed_at: "2026-10-17T12:00:00.000Z", started_at: interval.started_at, ended_at: interval.ended_at, provider: interval.provider, model: interval.model },
 };
 assert.equal(assertNativeEvidence(timedReport, "project-1", "thread-1", binding, expected), timedReport);
+const repeatedReport = { ...timedReport, evidence: { ...timedReport.evidence, observed_at: "2026-10-17T11:59:45.000Z" } };
+assert.equal(assertNativeEvidence(repeatedReport, "project-1", "thread-1", binding, expected), repeatedReport);
 for (const mutation of [
   { source: "codex-turn-history" },
   { spans: [] },
@@ -103,6 +110,7 @@ for (const mutation of [
   { source: "hermes-supervisor" },
   { observed_at: undefined },
   { observed_at: "2026-10-17T11:59:00.000Z" },
+  { observed_at: "2026-10-17T12:00:01.000Z" },
 ]) assert.throws(() => assertNativeEvidence({ ...timedReport, evidence: { ...timedReport.evidence, ...mutation } }, "project-1", "thread-1", binding, expected));
 for (const span of [{ ...interval, turn_id: "other-turn" }, { ...interval, ended_at: undefined, state: "running" }]) {
   const untimed = { ...timedReport, native: { ...timedReport.native, activity: { ...timedReport.native.activity, spans: [span] } }, evidence: report.evidence };

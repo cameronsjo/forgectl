@@ -288,10 +288,19 @@ func decodeMailboxRecord(line []byte) (mailboxRecord, mail.Message, bool) {
 		if err := json.Unmarshal(raw["msg"], &messageFields); err != nil || messageFields == nil {
 			return mailboxRecord{}, mail.Message{}, false
 		}
-		if err := checkKeys(messageFields, "v", "id", "from", "to", "from_run_id", "to_run_id", "body", "priority", "created_at", "reply_binary"); err != nil {
+		if err := checkKeys(messageFields, "v", "id", "from", "to", "from_run_id", "to_run_id", "body", "priority", "created_at", "reply_binary", "reply_to", "reply_session_id", "reply_source_digest"); err != nil {
 			return mailboxRecord{}, mail.Message{}, false
 		}
 		if err := requireFields(messageFields, "v", "id", "from", "to", "body", "priority", "created_at"); err != nil || hasNullFields(messageFields) {
+			return mailboxRecord{}, mail.Message{}, false
+		}
+		replyFieldCount := 0
+		for _, field := range []string{"reply_to", "reply_session_id", "reply_source_digest"} {
+			if _, present := messageFields[field]; present {
+				replyFieldCount++
+			}
+		}
+		if replyFieldCount != 0 && replyFieldCount != 3 {
 			return mailboxRecord{}, mail.Message{}, false
 		}
 		var msg mail.Message
@@ -317,6 +326,14 @@ func decodeMailboxRecord(line []byte) (mailboxRecord, mail.Message, bool) {
 		}
 		if err := mail.ValidateReplyBinary(msg.ReplyBinary); err != nil {
 			return mailboxRecord{}, mail.Message{}, false
+		}
+		if replyFieldCount == 3 {
+			if err := validateRunID(msg.ReplyTo, "message reply target"); err != nil {
+				return mailboxRecord{}, mail.Message{}, false
+			}
+			if err := validateRunID(msg.ReplySessionID, "message reply session"); err != nil || !validDigest(msg.ReplySourceDigest) {
+				return mailboxRecord{}, mail.Message{}, false
+			}
 		}
 		return record, msg, true
 	case "status":

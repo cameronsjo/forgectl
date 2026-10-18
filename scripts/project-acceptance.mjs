@@ -40,6 +40,8 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
     assert.equal(report.evidence.harness, binding.harness);
     assert.equal(report.evidence.turn_id, report.native.turn.id);
     if (expected.turnId) assert.equal(report.native.turn.id, expected.turnId);
+    const turnObserved = observedTime(report.native.turn.observed_at, "native turn");
+    const evidenceObserved = observedTime(report.evidence.observed_at, "persisted evidence");
     const sources = {
       codex: ["codex-thread-read", "codex-turn-history"],
       pi: ["pi-inbox", "pi-agent-events"],
@@ -52,10 +54,13 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
       assert.equal(activity.version, 1);
       assert.equal(activity.source, sources[binding.harness][1]);
       assert(Array.isArray(activity.spans));
+      observedTime(activity.observed_at, "native activity");
     }
     const intervals = (activity?.spans ?? []).filter((span) => span.turn_id === report.native.turn.id && span.ended_at);
     assert(intervals.length <= 1, "ambiguous native interval");
     const interval = intervals[0];
+    const latestObservation = interval ? Math.max(turnObserved, Date.parse(activity.observed_at)) : turnObserved;
+    assert(evidenceObserved <= latestObservation, "persisted evidence exceeds its native observation");
     if (interval) {
       assert.equal(interval.state, expectedStatus === "completed" ? "finished" : expectedStatus);
       const started = Date.parse(interval.started_at), ended = Date.parse(interval.ended_at);
@@ -68,6 +73,13 @@ export function assertNativeEvidence(report, projectId, threadId, binding, expec
     }
   }
   return report;
+}
+
+function observedTime(value, label) {
+  assert.equal(typeof value, "string", `${label} observation time is missing`);
+  const parsed = Date.parse(value);
+  assert(Number.isFinite(parsed) && parsed !== Date.parse("0001-01-01T00:00:00Z"), `${label} observation time is invalid`);
+  return parsed;
 }
 
 export class ProjectAcceptance {
