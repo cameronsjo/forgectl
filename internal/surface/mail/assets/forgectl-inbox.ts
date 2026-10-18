@@ -28,7 +28,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
@@ -36,6 +36,7 @@ import { isAbsolute } from "node:path";
 const MAX_REQUEST = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 5_000;
 const OBSERVATION_TIMEOUT_MS = 300;
+const MAX_ACTIVITY_SPANS = 64;
 
 type Request = {
   v?: number;
@@ -52,6 +53,28 @@ type TurnObservation = {
   status: "completed" | "failed";
   observed_at: string;
   error?: "error" | "aborted";
+};
+
+type ActivityState = "running" | "finished" | "failed" | "incomplete" | "unknown";
+
+type ActivitySpan = {
+  id: string;
+  turn_id?: string;
+  started_at: string;
+  ended_at?: string;
+  state: ActivityState;
+  provider?: string;
+  model?: string;
+};
+
+type ActivitySnapshot = {
+  version: 1;
+  source: "pi-agent-events";
+  coverage: "current-process";
+  observed_at: string;
+  since: string;
+  spans: ActivitySpan[];
+  partial?: boolean;
 };
 
 type ReceiptState = "pending" | "accepted" | "rejected";
@@ -88,6 +111,7 @@ type InspectionOutcome = {
   model_id?: string;
   active_tools?: string[];
   turn?: TurnObservation;
+  activity?: ActivitySnapshot;
   error?: string;
 };
 
@@ -187,6 +211,11 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   let observationContext: ObservationContext | undefined;
   let turnCandidate: TurnObservation | undefined;
   let settledTurn: TurnObservation | undefined;
+  let activitySince: string | undefined;
+  let activitySpans: ActivitySpan[] = [];
+  let activeActivity: ActivitySpan | undefined;
+  let activityOutcome: ActivityState = "unknown";
+  let activityPartial = false;
   const inFlight = new Map<string, Promise<DeliveryOutcome>>();
   const observationWaiters = new Map<string, Set<(accepted: boolean) => void>>();
 
@@ -221,6 +250,45 @@ export default function forgectlInbox(pi: ExtensionAPI) {
       if (record.state === "pending" && record.digest === digest && sessionMatches(record)) return record;
     }
     return undefined;
+  };
+
+  const observationTime = (): string => new Date().toISOString();
+
+  const resetActivity = (since: string): void => {
+    activitySince = since;
+    activitySpans = [];
+    activeActivity = undefined;
+    activityPartial = false;
+  };
+
+  const activityMetadata = (): { provider?: string; model?: string } => {
+    try {
+      const ctx = observationContext;
+      if (!ctx?.sessionManager?.getSessionId || !ctx.model || !sessionId || ctx.sessionManager.getSessionId() !== sessionId) return {};
+      const provider = safeMetadataString(ctx.model.provider);
+      const model = safeMetadataString(ctx.model.id);
+      if (!provider || !model || /\p{White_Space}/u.test(provider + model)) return {};
+      return { provider, model };
+    } catch {
+      return {};
+    }
+  };
+
+  const appendActivity = (span: ActivitySpan): void => {
+    activitySpans.push(span);
+    if (activitySpans.length > MAX_ACTIVITY_SPANS) {
+      activitySpans.shift();
+      activityPartial = true;
+    }
+  };
+
+  const finishActivity = (state: ActivityState, endedAt: string): void => {
+    if (!activeActivity) return;
+    activeActivity.state = state;
+    activeActivity.ended_at = endedAt;
+    if (settledTurn?.id) activeActivity.turn_id = settledTurn.id;
+    appendActivity(activeActivity);
+    activeActivity = undefined;
   };
 
   const notifyObservation = (id: string, accepted: boolean): void => {
@@ -278,6 +346,11 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   };
 
   pi.on("agent_start", () => {
+    const startedAt = observationTime();
+    if (activeActivity) finishActivity("unknown", startedAt);
+    const metadata = activityMetadata();
+    activeActivity = { id: randomUUID(), started_at: startedAt, state: "running", ...metadata };
+    activityOutcome = "unknown";
     idle = false;
     turnCandidate = undefined;
     settledTurn = undefined;
@@ -288,13 +361,16 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   // the worker idle at agent_end lost a message delivered in that gap on pi
   // 1.0.4 (spike S3), so idle starts at agent_settled.
   pi.on("agent_settled", () => {
+    const endedAt = observationTime();
     idle = true;
     settledTurn = turnCandidate;
+    finishActivity(settledTurn?.status === "completed" ? "finished" : settledTurn?.status === "failed" ? "failed" : activityOutcome, endedAt);
     report("idle");
   });
 
   pi.on("turn_end", (event: { message?: { role?: unknown; stopReason?: unknown } }, ctx: ObservationContext) => {
     turnCandidate = undefined;
+    activityOutcome = "unknown";
     if (event.message?.role !== "assistant") return;
     try {
       const leaf = ctx.sessionManager?.getLeafEntry?.() as { type?: unknown; id?: unknown; timestamp?: unknown; message?: unknown } | undefined;
@@ -302,8 +378,12 @@ export default function forgectlInbox(pi: ExtensionAPI) {
       const observedAt = new Date(leaf.timestamp).toISOString();
       if (event.message.stopReason === "stop") {
         turnCandidate = { id: leaf.id, status: "completed", observed_at: observedAt };
+        activityOutcome = "finished";
       } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
         turnCandidate = { id: leaf.id, status: "failed", observed_at: observedAt, error: event.message.stopReason };
+        activityOutcome = "failed";
+      } else {
+        activityOutcome = "incomplete";
       }
     } catch {
       turnCandidate = undefined;
@@ -319,14 +399,16 @@ export default function forgectlInbox(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event: unknown, ctx: ObservationContext) => {
+    const previousSessionID = sessionId;
     observationContext = ctx;
     turnCandidate = undefined;
     settledTurn = undefined;
     reconcileHistory(ctx);
+    if (!activitySince || sessionId !== previousSessionID) resetActivity(observationTime());
   });
 
   const safeMetadataString = (value: unknown, max = 256): string | undefined => {
-    if (typeof value !== "string" || value.length === 0 || value.length > max || /[\p{Cc}\p{Cf}]/u.test(value)) return undefined;
+    if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > max || /[\uD800-\uDFFF]/u.test(value) || /[\u2800\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/u.test(value)) return undefined;
     return value;
   };
 
@@ -337,13 +419,22 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     }
     try {
       const currentSessionID = safeMetadataString(ctx.sessionManager.getSessionId(), 256);
+      const observedAt = observationTime();
+      if (!currentSessionID || currentSessionID !== sessionId) {
+        resetActivity(observedAt);
+        return { ok: false, unknown: true, session_id: currentSessionID, error: "current pi native metadata is unavailable" };
+      }
       const sessionPath = safeMetadataString(ctx.sessionManager.getSessionFile(), 4096);
       const provider = safeMetadataString(ctx.model.provider);
       const modelID = safeMetadataString(ctx.model.id);
       const activeTools = pi.getActiveTools();
-      if (!currentSessionID || currentSessionID !== sessionId || !sessionPath || !isAbsolute(sessionPath) || !provider || !modelID || !Array.isArray(activeTools) || activeTools.length > 64 || !activeTools.every((tool) => safeMetadataString(tool, 128))) {
+      if (!sessionPath || !isAbsolute(sessionPath) || !provider || !modelID || !Array.isArray(activeTools) || activeTools.length > 64 || !activeTools.every((tool) => safeMetadataString(tool, 128))) {
         return { ok: false, unknown: true, session_id: currentSessionID, error: "current pi native metadata is unavailable" };
       }
+      const spans = activitySpans.map((span) => ({ ...span }));
+      if (activeActivity) spans.push({ ...activeActivity });
+      const activityWasTruncated = activityPartial || spans.length > MAX_ACTIVITY_SPANS;
+      if (spans.length > MAX_ACTIVITY_SPANS) spans.splice(0, spans.length - MAX_ACTIVITY_SPANS);
       return {
         ok: true,
         known: true,
@@ -353,6 +444,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
         model_id: modelID,
         active_tools: [...activeTools],
         ...(settledTurn ? { turn: { ...settledTurn } } : {}),
+        ...(activitySince ? { activity: { version: 1, source: "pi-agent-events", coverage: "current-process", observed_at: observedAt, since: activitySince, spans, ...(activityWasTruncated ? { partial: true } : {}) } } : {}),
       };
     } catch {
       return { ok: false, unknown: true, error: "current pi native metadata is unavailable" };

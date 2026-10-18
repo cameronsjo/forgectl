@@ -7,18 +7,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/surface/hermes"
 )
 
 func TestHermesInspectionRequiresExactIdentityAndBoundedEvidence(test *testing.T) {
 	valid := func() *hermes.Inspection {
-		return &hermes.Inspection{Provider: "openai-codex", Model: "test-model", Mode: "default", ModelEvidence: "native-startup-handshake", Idle: true, Turn: &hermes.TurnObservation{MessageID: "message-1", Status: "completed", ObservedAt: time.Now().UTC()}}
+		now := time.Now().UTC()
+		since := now.Add(-time.Second)
+		return &hermes.Inspection{Provider: "openai-codex", Model: "test-model", Mode: "default", ModelEvidence: "native-startup-handshake", Idle: true, Turn: &hermes.TurnObservation{MessageID: "message-1", Status: "completed", ObservedAt: now}, Activity: &activity.Snapshot{Version: activity.Version, Source: activity.SourceHermes, Coverage: activity.CoverageCurrentProcess, ObservedAt: now, Since: &since, Spans: []activity.Span{}}}
 	}
 	path, requests := startHermes(test, shortTempDir(test), func(hermesRequest) hermesResponse {
 		return hermesResponse{V: 1, OK: true, Inspection: valid()}
 	})
 	observation, err := (HermesAdapter{}).Inspect(test.Context(), hermesWorker(path))
-	if err != nil || observation.Provider != "openai-codex" || observation.Turn == nil || observation.Turn.Status != "completed" {
+	if err != nil || observation.Provider != "openai-codex" || observation.Turn == nil || observation.Turn.Status != "completed" || observation.Activity == nil || observation.Activity.Source != activity.SourceHermes {
 		test.Fatalf("inspection = %#v, %v", observation, err)
 	}
 	request := <-requests
@@ -38,6 +41,8 @@ func TestHermesInspectionRequiresExactIdentityAndBoundedEvidence(test *testing.T
 		{"missing message", func(response *hermesResponse) { response.Inspection.Turn.MessageID = "" }},
 		{"unknown turn", func(response *hermesResponse) { response.Inspection.Turn.Status = "sent" }},
 		{"zero time", func(response *hermesResponse) { response.Inspection.Turn.ObservedAt = time.Time{} }},
+		{"wrong activity source", func(response *hermesResponse) { response.Inspection.Activity.Source = activity.SourceCodex }},
+		{"invalid activity", func(response *hermesResponse) { response.Inspection.Activity.Since = nil }},
 		{"conflicting outcome", func(response *hermesResponse) { response.Unconfirmed = true }},
 	} {
 		test.Run(scenario.name, func(test *testing.T) {

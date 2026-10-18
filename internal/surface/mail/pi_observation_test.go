@@ -1,13 +1,19 @@
+//go:build unix
+
 package mail
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 )
 
 func TestPiInspectReturnsCurrentNativeMetadata(test *testing.T) {
 	tools := []string{"read", "bash", "find"}
+	now := time.Now().UTC()
+	ended := now
 	path, got := startPi(test, shortTempDir(test), func(req piRequest) piResponse {
 		if req.V != piIdentityProtocol || req.Type != "inspect" || req.RunID != "run-1" || req.SessionID != "session-1" {
 			return piResponse{V: piIdentityProtocol, OK: false, Error: "unexpected inspect identity"}
@@ -23,6 +29,7 @@ func TestPiInspectReturnsCurrentNativeMetadata(test *testing.T) {
 			ActiveTools: tools,
 			SessionPath: "/private/tmp/pi-session.jsonl",
 			Turn:        &PiTurnObservation{ID: "native-entry-4", Status: "failed", ObservedAt: time.Now().UTC(), Error: "error"},
+			Activity:    &activity.Snapshot{Version: activity.Version, Source: activity.SourcePi, Coverage: activity.CoverageCurrentProcess, ObservedAt: now, Since: &now, Spans: []activity.Span{{ID: "span-1", StartedAt: now, EndedAt: &ended, State: activity.Finished, Provider: "openai-codex", Model: "gpt-5.6-sol"}}},
 		}
 	})
 	adapter := PiAdapter{Timeout: 2 * time.Second}
@@ -39,6 +46,9 @@ func TestPiInspectReturnsCurrentNativeMetadata(test *testing.T) {
 	if observation.Turn == nil || observation.Turn.Status != "failed" || observation.Turn.ID != "native-entry-4" {
 		test.Fatalf("turn = %#v", observation.Turn)
 	}
+	if observation.Activity == nil || len(observation.Activity.Spans) != 1 || observation.Activity.Spans[0].Model != "gpt-5.6-sol" {
+		test.Fatalf("activity = %#v", observation.Activity)
+	}
 	if request := <-got; request.Type != "inspect" {
 		test.Fatalf("request = %#v", request)
 	}
@@ -54,6 +64,27 @@ func TestPiInspectUnknownMetadataStaysUnknown(test *testing.T) {
 	}
 	if observation.Known {
 		test.Fatalf("unknown observation reported known: %#v", observation)
+	}
+}
+
+func TestPiInspectRejectsInvalidNativeActivity(test *testing.T) {
+	path, _ := startPi(test, shortTempDir(test), func(req piRequest) piResponse {
+		now := time.Now().UTC()
+		ended := now
+		return piResponse{V: piIdentityProtocol, OK: true, Known: true, RunID: req.RunID, SessionID: req.SessionID, Provider: "openai-codex", ModelID: "gpt", ActiveTools: []string{"read"}, SessionPath: "/tmp/session", Activity: &activity.Snapshot{Version: activity.Version, Source: activity.SourcePi, Coverage: activity.CoverageCurrentProcess, ObservedAt: now, Since: &now, Spans: []activity.Span{{ID: "span-1", StartedAt: now, EndedAt: &ended, State: activity.Running}}}}
+	})
+	if _, err := (PiAdapter{Timeout: time.Second}).Inspect(context.Background(), versionedPiWorker(path)); !IsUnconfirmed(err) {
+		test.Fatalf("Inspect error = %v, want unconfirmed invalid activity", err)
+	}
+}
+
+func TestPiInspectRejectsActivityFromAnotherSource(test *testing.T) {
+	path, _ := startPi(test, shortTempDir(test), func(req piRequest) piResponse {
+		now := time.Now().UTC()
+		return piResponse{V: piIdentityProtocol, OK: true, Known: true, RunID: req.RunID, SessionID: req.SessionID, Provider: "openai-codex", ModelID: "gpt", ActiveTools: []string{"read"}, SessionPath: "/tmp/session", Activity: &activity.Snapshot{Version: activity.Version, Source: activity.SourceHermes, Coverage: activity.CoverageCurrentProcess, ObservedAt: now, Since: &now, Spans: []activity.Span{}}}
+	})
+	if _, err := (PiAdapter{Timeout: time.Second}).Inspect(context.Background(), versionedPiWorker(path)); !IsUnconfirmed(err) {
+		test.Fatalf("Inspect error = %v, want unconfirmed foreign activity source", err)
 	}
 }
 

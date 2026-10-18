@@ -23,6 +23,8 @@ type codexObservationFake struct {
 	path       string
 	listener   net.Listener
 	turn       map[string]any
+	turns      []map[string]any
+	nextCursor string
 	threadID   string
 	threadCWD  string
 	model      string
@@ -114,10 +116,14 @@ func (fake *codexObservationFake) handle(ws *websocket.Conn) {
 				"id": fake.threadID, "cwd": fake.threadCWD, "model": fake.model, "modelProvider": fake.provider,
 			}}
 		case "thread/turns/list":
-			if fake.turn == nil {
-				result = map[string]any{"data": []any{}}
+			turns := fake.turns
+			if turns == nil && fake.turn != nil {
+				turns = []map[string]any{fake.turn}
+			}
+			if turns == nil {
+				result = map[string]any{"data": []any{}, "nextCursor": fake.nextCursor}
 			} else {
-				result = map[string]any{"data": []any{fake.turn}}
+				result = map[string]any{"data": turns, "nextCursor": fake.nextCursor}
 			}
 		case "thread/resume":
 			result = fake.resume
@@ -189,8 +195,93 @@ func TestCodexObservationReadsNativeMetadataWithoutMutation(test *testing.T) {
 		SortDirection string `json:"sortDirection"`
 		ItemsView     string `json:"itemsView"`
 	}
-	if err := json.Unmarshal(turnsParams[0], &turnsRequest); err != nil || turnsRequest.ThreadID != fake.threadID || turnsRequest.Limit != 1 || turnsRequest.SortDirection != "desc" || turnsRequest.ItemsView != "notLoaded" {
+	if err := json.Unmarshal(turnsParams[0], &turnsRequest); err != nil || turnsRequest.ThreadID != fake.threadID || turnsRequest.Limit != 64 || turnsRequest.SortDirection != "desc" || turnsRequest.ItemsView != "notLoaded" {
 		test.Fatalf("thread/turns/list params = %s", turnsParams[0])
+	}
+}
+
+func TestCodexObservationActivityUsesOnlyNativeTiming(test *testing.T) {
+	fake := newCodexObservationFake(test)
+	fake.turns = []map[string]any{
+		{"id": "turn-running", "status": "inProgress", "startedAt": int64(1700000100)},
+		{"id": "turn-finished", "status": "completed", "startedAt": int64(1700000000), "completedAt": int64(1700000060), "error": nil},
+		{"id": "turn-partial", "status": "failed", "startedAt": int64(1700000200), "error": nil},
+	}
+	observation, err := (CodexAdapter{Timeout: time.Second}).Inspect(context.Background(), fake.worker())
+	if err != nil {
+		test.Fatal(err)
+	}
+	if observation.Activity == nil || len(observation.Activity.Spans) != 2 || !observation.Activity.Partial {
+		test.Fatalf("activity = %#v", observation.Activity)
+	}
+	if observation.Activity.Spans[0].State != "running" || observation.Activity.Spans[0].EndedAt != nil {
+		test.Fatalf("running span = %#v", observation.Activity.Spans[0])
+	}
+	if observation.Activity.Spans[1].State != "finished" || observation.Activity.Spans[1].EndedAt == nil {
+		test.Fatalf("finished span = %#v", observation.Activity.Spans[1])
+	}
+	if observation.Activity.Spans[1].Provider != "" || observation.Activity.Spans[1].Model != "" {
+		test.Fatalf("historical model metadata = %#v", observation.Activity.Spans[1])
+	}
+	if observation.Turn == nil || observation.Turn.ID != "turn-finished" {
+		test.Fatalf("settled turn = %#v", observation.Turn)
+	}
+}
+
+func TestCodexObservationActivityReportsNativeHistoryTruncation(test *testing.T) {
+	fake := newCodexObservationFake(test)
+	fake.nextCursor = "older-turns"
+	fake.turns = []map[string]any{{"id": "turn-1", "status": "completed", "startedAt": int64(1700000000), "completedAt": int64(1700000060)}}
+	observation, err := (CodexAdapter{Timeout: time.Second}).Inspect(context.Background(), fake.worker())
+	if err != nil {
+		test.Fatal(err)
+	}
+	if observation.Activity == nil || !observation.Activity.Partial {
+		test.Fatalf("activity = %#v, want partial history", observation.Activity)
+	}
+}
+
+func TestCodexObservationRejectsCompletedErrorInOlderHistory(test *testing.T) {
+	fake := newCodexObservationFake(test)
+	fake.turns = []map[string]any{
+		{"id": "turn-new", "status": "completed", "startedAt": int64(1700000100), "completedAt": int64(1700000160)},
+		{"id": "turn-old", "status": "completed", "startedAt": int64(1700000000), "completedAt": int64(1700000060), "error": map[string]any{"message": "native failure"}},
+	}
+	if _, err := (CodexAdapter{Timeout: time.Second}).Inspect(context.Background(), fake.worker()); err == nil {
+		test.Fatal("Inspect accepted a completed historical turn with an error")
+	}
+}
+
+func TestCodexObservationActivityRejectsInvalidNativeTiming(test *testing.T) {
+	for name, turn := range map[string]map[string]any{
+		"negative":             {"id": "turn-1", "status": "completed", "startedAt": int64(-1), "completedAt": int64(1)},
+		"overflow":             {"id": "turn-1", "status": "completed", "startedAt": "not-a-number", "completedAt": int64(1)},
+		"too-many":             {"id": "turn-1", "status": "completed", "startedAt": int64(1), "completedAt": int64(2)},
+		"future-without-start": {"id": "turn-1", "status": "completed", "completedAt": time.Now().Add(time.Hour).Unix()},
+		"reversed":             {"id": "turn-1", "status": "completed", "startedAt": int64(2), "completedAt": int64(1)},
+	} {
+		test.Run(name, func(test *testing.T) {
+			fake := newCodexObservationFake(test)
+			if name == "too-many" {
+				fake.turns = make([]map[string]any, 65)
+				for index := range fake.turns {
+					fake.turns[index] = map[string]any{"id": fmt.Sprintf("turn-%d", index), "status": "completed", "startedAt": int64(1), "completedAt": int64(2)}
+				}
+			} else {
+				fake.turn = turn
+			}
+			if _, err := (CodexAdapter{Timeout: time.Second}).Inspect(context.Background(), fake.worker()); err == nil {
+				test.Fatal("Inspect unexpectedly accepted invalid activity timing")
+			}
+		})
+	}
+}
+
+func TestCodexObservationRejectsDuplicateUntimedTurnIdentity(test *testing.T) {
+	fake := newCodexObservationFake(test)
+	fake.turns = []map[string]any{{"id": "repeated", "status": "completed"}, {"id": "repeated", "status": "failed"}}
+	if _, err := (CodexAdapter{Timeout: time.Second}).Inspect(test.Context(), fake.worker()); err == nil {
+		test.Fatal("duplicate untimed native identity was accepted")
 	}
 }
 

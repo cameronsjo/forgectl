@@ -16,6 +16,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/net/websocket"
+
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 )
 
 const (
@@ -42,6 +44,7 @@ type CodexObservation struct {
 	Model           string                `json:"model"`
 	CWD             string                `json:"cwd"`
 	Turn            *CodexTurnObservation `json:"turn,omitempty"`
+	Activity        *activity.Snapshot    `json:"activity,omitempty"`
 }
 
 type codexRPCRequest struct {
@@ -70,12 +73,14 @@ type codexThread struct {
 }
 
 type codexTurnsList struct {
-	Data json.RawMessage `json:"data"`
+	Data       json.RawMessage `json:"data"`
+	NextCursor string          `json:"nextCursor"`
 }
 
 type codexTurn struct {
 	ID          string          `json:"id"`
 	Status      string          `json:"status"`
+	StartedAt   json.RawMessage `json:"startedAt"`
 	CompletedAt json.RawMessage `json:"completedAt"`
 	Error       json.RawMessage `json:"error"`
 }
@@ -95,7 +100,7 @@ func (adapter CodexAdapter) Inspect(ctx context.Context, worker Worker) (CodexOb
 		}
 		turnsResult, err := client.call(ctx, "thread/turns/list", map[string]any{
 			"threadId":      worker.ThreadID,
-			"limit":         1,
+			"limit":         activity.MaxSpans,
 			"sortDirection": "desc",
 			"itemsView":     "notLoaded",
 		})
@@ -110,18 +115,27 @@ func (adapter CodexAdapter) Inspect(ctx context.Context, worker Worker) (CodexOb
 		if string(turns.Data) == "null" {
 			return errors.New("codex thread/turns/list returned malformed metadata")
 		}
-		if err := json.Unmarshal(turns.Data, &nativeTurns); err != nil || len(nativeTurns) > 1 {
+		if err := json.Unmarshal(turns.Data, &nativeTurns); err != nil || len(nativeTurns) > activity.MaxSpans {
 			return errors.New("codex thread/turns/list returned malformed metadata")
 		}
-		observation = CodexObservation{NativeSessionID: thread.ID, Provider: thread.ModelProvider, Model: thread.Model, CWD: thread.CWD}
-		if len(nativeTurns) == 0 {
-			return nil
-		}
-		turn, err := codexSettledTurn(nativeTurns[0])
+		observedAt := time.Now().UTC()
+		activitySnapshot, err := codexActivitySnapshot(nativeTurns, observedAt)
 		if err != nil {
 			return err
 		}
-		observation.Turn = turn
+		activitySnapshot.Partial = activitySnapshot.Partial || turns.NextCursor != ""
+		observation = CodexObservation{NativeSessionID: thread.ID, Provider: thread.ModelProvider, Model: thread.Model, CWD: thread.CWD, Activity: &activitySnapshot}
+		var settled *CodexTurnObservation
+		for _, nativeTurn := range nativeTurns {
+			turn, turnErr := codexSettledTurn(nativeTurn)
+			if turnErr != nil {
+				return turnErr
+			}
+			if settled == nil && turn != nil {
+				settled = turn
+			}
+		}
+		observation.Turn = settled
 		return nil
 	})
 	return observation, err
@@ -408,6 +422,90 @@ func codexSettledTurn(native codexTurn) (*CodexTurnObservation, error) {
 		turn.ObservedAt = time.Unix(seconds, 0).UTC()
 	}
 	return turn, nil
+}
+
+func codexActivitySnapshot(turns []codexTurn, observedAt time.Time) (activity.Snapshot, error) {
+	snapshot := activity.Snapshot{
+		Version:    activity.Version,
+		Source:     activity.SourceCodex,
+		Coverage:   activity.CoverageNativeHistory,
+		ObservedAt: observedAt,
+		Spans:      make([]activity.Span, 0, len(turns)),
+	}
+	seen := make(map[string]struct{}, len(turns))
+	for _, native := range turns {
+		if !threadPattern.MatchString(native.ID) {
+			return activity.Snapshot{}, errors.New("codex activity has an invalid turn identity")
+		}
+		if _, duplicate := seen[native.ID]; duplicate {
+			return activity.Snapshot{}, errors.New("codex history repeats a turn identity")
+		}
+		seen[native.ID] = struct{}{}
+		startedAt, hasStartedAt, err := codexUnixTime(native.StartedAt)
+		if err != nil {
+			return activity.Snapshot{}, err
+		}
+		endedAt, hasEndedAt, err := codexUnixTime(native.CompletedAt)
+		if err != nil {
+			return activity.Snapshot{}, err
+		}
+		state, err := codexActivityState(native.Status)
+		if err != nil {
+			return activity.Snapshot{}, err
+		}
+		if state == activity.Finished && len(native.Error) != 0 && string(native.Error) != "null" {
+			return activity.Snapshot{}, errors.New("codex completed turn contains an error")
+		}
+		if hasStartedAt && startedAt.After(observedAt.Add(time.Second)) || hasEndedAt && endedAt.After(observedAt.Add(time.Second)) {
+			return activity.Snapshot{}, errors.New("codex activity has a future timestamp")
+		}
+		if !hasStartedAt || (state != activity.Running && !hasEndedAt) {
+			snapshot.Partial = true
+			continue
+		}
+		span := activity.Span{ID: native.ID, TurnID: native.ID, StartedAt: startedAt, State: state}
+		if hasEndedAt {
+			span.EndedAt = &endedAt
+		}
+		if err := activity.ValidateSpan(span); err != nil {
+			return activity.Snapshot{}, err
+		}
+		snapshot.Spans = append(snapshot.Spans, span)
+	}
+	if err := activity.Validate(snapshot); err != nil {
+		return activity.Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func codexActivityState(status string) (activity.State, error) {
+	switch status {
+	case "inProgress":
+		return activity.Running, nil
+	case "completed":
+		return activity.Finished, nil
+	case "failed":
+		return activity.Failed, nil
+	case "interrupted":
+		return activity.Incomplete, nil
+	default:
+		return "", errors.New("codex activity has an invalid turn status")
+	}
+}
+
+func codexUnixTime(raw json.RawMessage) (time.Time, bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return time.Time{}, false, nil
+	}
+	var seconds int64
+	if err := json.Unmarshal(raw, &seconds); err != nil || seconds < 0 {
+		return time.Time{}, false, errors.New("codex activity has an invalid Unix timestamp")
+	}
+	value := time.Unix(seconds, 0).UTC()
+	if value.Year() < 1970 || value.Year() > 9999 {
+		return time.Time{}, false, errors.New("codex activity has an out-of-range Unix timestamp")
+	}
+	return value, true, nil
 }
 
 func safeCodexToken(value string) bool {

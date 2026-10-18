@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -306,30 +307,34 @@ type sessionResult struct {
 }
 
 type supervisor struct {
-	config       Config
-	native       *nativeClient
-	listener     net.Listener
-	listenerInfo os.FileInfo
-	sessionID    string
-	model        string
-	mode         string
-	nativeVer    string
-	receiptPath  string
-	receipts     map[string]receipt
-	replyPath    string
-	replies      map[string]replyRecord
-	mu           sync.Mutex
-	nativeMu     sync.Mutex
-	busy         bool
-	eventMu      sync.Mutex
-	events       eventWriter
-	receiptLock  *os.File
-	handlers     sync.WaitGroup
-	forwards     sync.WaitGroup
-	connections  map[net.Conn]struct{}
-	closing      bool
-	lastTurn     *TurnObservation
-	history      []historyUpdate
+	config               Config
+	native               *nativeClient
+	listener             net.Listener
+	listenerInfo         os.FileInfo
+	sessionID            string
+	model                string
+	mode                 string
+	nativeVer            string
+	receiptPath          string
+	receipts             map[string]receipt
+	replyPath            string
+	replies              map[string]replyRecord
+	mu                   sync.Mutex
+	nativeMu             sync.Mutex
+	busy                 bool
+	eventMu              sync.Mutex
+	events               eventWriter
+	receiptLock          *os.File
+	handlers             sync.WaitGroup
+	forwards             sync.WaitGroup
+	connections          map[net.Conn]struct{}
+	closing              bool
+	lastTurn             *TurnObservation
+	history              []historyUpdate
+	activitySince        time.Time
+	activitySessionStart time.Time
+	activitySpans        []activity.Span
+	activityPartial      bool
 }
 
 func (receiver *supervisor) currentSession() string {
@@ -449,9 +454,7 @@ func Run(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
-	receiver.mu.Lock()
-	receiver.sessionID, receiver.model, receiver.mode, receiver.nativeVer = session, model, mode, version
-	receiver.mu.Unlock()
+	receiver.setNativeSession(session, model, mode, version)
 	if receiver.receiptLock == nil {
 		if err := receiver.acquireReceiptLock(); err != nil {
 			return err
@@ -795,6 +798,9 @@ func (receiver *supervisor) prepare(ctx context.Context) (string, string, string
 	}
 	var session sessionResult
 	updates := make([]historyUpdate, 0)
+	receiver.mu.Lock()
+	receiver.activitySessionStart = time.Now().UTC()
+	receiver.mu.Unlock()
 	if receiver.config.SessionID == "" {
 		result, err = receiver.native.call(ctx, "session/new", map[string]any{"cwd": receiver.config.Worktree, "mcpServers": []any{}}, &updates)
 	} else {
@@ -900,6 +906,7 @@ func (receiver *supervisor) handleRequest(ctx context.Context, request Request) 
 				turn := *receiver.lastTurn
 				base.Inspection.Turn = &turn
 			}
+			base.Inspection.Activity = receiver.activitySnapshotLocked(time.Now().UTC())
 		}
 		receiver.mu.Unlock()
 		return base
@@ -1077,8 +1084,12 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	unsupportedStart := receiver.native.unsupportedCount()
 	var liveUpdates []historyUpdate
 	var result json.RawMessage
+	var promptEndedAt time.Time
 	if err == nil {
+		receiver.beginActivity(record.ID, time.Now().UTC())
 		result, err = receiver.native.call(ctx, "session/prompt", map[string]any{"sessionId": receiver.sessionID, "prompt": []map[string]string{{"type": "text", "text": nativePrompt}}}, &liveUpdates)
+		promptEndedAt = time.Now().UTC()
+		receiver.finishActivity(record.ID, activity.Unknown, promptEndedAt)
 	}
 	var prompt struct {
 		StopReason string `json:"stopReason"`
@@ -1089,6 +1100,7 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 			err = errors.New("native Hermes prompt response lacks a stop reason")
 		}
 	}
+	promptActivityState := hermesActivityState(err, prompt.StopReason, receiver.native.permissionCount()-permissionStart, receiver.native.unsupportedCount()-unsupportedStart)
 	var postUpdates []historyUpdate
 	if err == nil {
 		_, err = receiver.native.call(ctx, "session/load", map[string]any{"cwd": receiver.config.Worktree, "sessionId": receiver.sessionID, "mcpServers": []any{}}, &postUpdates)
@@ -1154,6 +1166,9 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 				replyErr = receiver.publishReady(ctx, readyRecord)
 			}
 		}
+	}
+	if nativeErr == nil && !proofFailed && promptActivityState != activity.Unknown {
+		receiver.resolveActivity(record.ID, promptActivityState)
 	}
 	if nativeErr != nil && unknownReason == "" {
 		unknownReason = "turn-error"

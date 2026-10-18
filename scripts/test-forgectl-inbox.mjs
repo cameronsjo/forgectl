@@ -239,6 +239,67 @@ const testNativeInspectionReflectsCurrentMetadata = async (directory) => {
   }
 };
 
+const testNativeActivityBoundariesAndMetadata = async (directory) => {
+  const harness = spawnHarness(directory, "activity.sock", "inspect", { worker: "pi-activity", runId: "run-activity" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const initial = await harness.exchange({ type: "inspect", id: "activity-initial" });
+    assert.equal(initial.ok, true);
+    assert.deepEqual(initial.activity.spans, []);
+    assert.equal(initial.activity.coverage, "current-process");
+    await harness.command({ type: "set-model", provider: "openai-codex", model: "gpt-start" });
+    await harness.command({ type: "event", name: "agent_start" });
+    const running = await harness.exchange({ type: "inspect", id: "activity-running" });
+    assert.equal(running.activity.spans.length, 1);
+    assert.equal(running.activity.spans[0].state, "running");
+    assert.equal(running.activity.spans[0].ended_at, undefined);
+    assert.equal(running.activity.spans[0].provider, "openai-codex");
+    assert.equal(running.activity.spans[0].model, "gpt-start");
+    assert.match(running.activity.spans[0].id, /^[A-Fa-f0-9-]{36}$/);
+    await harness.command({ type: "event", name: "agent_end" });
+    const beforeSettled = await harness.exchange({ type: "inspect", id: "activity-before-settled" });
+    assert.equal(beforeSettled.activity.spans[0].state, "running");
+    assert.equal(beforeSettled.activity.spans[0].ended_at, undefined);
+    await harness.command({ type: "set-model", provider: "openai-codex", model: "gpt-after" });
+    const changedWhileRunning = await harness.exchange({ type: "inspect", id: "activity-model-change" });
+    assert.equal(changedWhileRunning.model_id, "gpt-after");
+    assert.equal(changedWhileRunning.activity.spans[0].model, "gpt-start");
+    await harness.command({ type: "event", name: "turn_end" });
+    await harness.command({ type: "event", name: "agent_settled" });
+    const finished = await harness.exchange({ type: "inspect", id: "activity-finished" });
+    assert.equal(finished.activity.spans[0].state, "finished");
+    assert.equal(finished.activity.spans[0].turn_id, "entry-1");
+    assert.ok(Number.isFinite(Date.parse(finished.activity.spans[0].started_at)));
+    assert.ok(Number.isFinite(Date.parse(finished.activity.spans[0].ended_at)));
+
+    await harness.command({ type: "event", name: "agent_start" });
+    await harness.command({ type: "event", name: "turn_end", stopReason: "length" });
+    await harness.command({ type: "event", name: "agent_settled" });
+    const incomplete = await harness.exchange({ type: "inspect", id: "activity-incomplete" });
+    assert.equal(incomplete.activity.spans.at(-1).state, "incomplete");
+    await harness.command({ type: "event", name: "agent_start" });
+    await harness.command({ type: "event", name: "agent_settled" });
+    const unknown = await harness.exchange({ type: "inspect", id: "activity-unknown" });
+    assert.equal(unknown.activity.spans.at(-1).state, "unknown");
+
+    for (let index = 0; index < 65; index += 1) {
+      await harness.command({ type: "event", name: "agent_start" });
+      await harness.command({ type: "event", name: "turn_end" });
+      await harness.command({ type: "event", name: "agent_settled" });
+    }
+    const bounded = await harness.exchange({ type: "inspect", id: "activity-bounded" });
+    assert.equal(bounded.activity.spans.length, 64);
+    assert.equal(bounded.activity.partial, true);
+
+    await harness.command({ type: "switch-session", session: "session-2" });
+    const switched = await harness.exchange({ type: "inspect", id: "activity-reset", session_id: "session-2" });
+    assert.equal(switched.activity.spans.length, 0);
+    assert.notEqual(switched.activity.since, bounded.activity.since);
+  } finally {
+    await harness.stop();
+  }
+};
+
 const testNativeInspectionUnknownMetadata = async (directory) => {
   for (const mode of ["missing-model", "missing-session-path", "missing-tools"]) {
     const harness = spawnHarness(directory, `${mode}.sock`, mode, { worker: `pi-${mode}`, runId: `run-${mode}` });
@@ -252,6 +313,18 @@ const testNativeInspectionUnknownMetadata = async (directory) => {
     } finally {
       await harness.stop();
     }
+  }
+};
+
+const testNativeInspectionPreservesSessionPathSpaces = async (directory) => {
+  const harness = spawnHarness(directory, "path-spaces.sock", "path-spaces", { worker: "pi-spaces", runId: "run-spaces" });
+  try {
+    await waitForSocket(harness.socketPath);
+    const observation = await harness.exchange({ type: "inspect", id: "path-spaces" });
+    assert.equal(observation.ok, true);
+    assert.equal(observation.session_path, "/tmp/pi sessions/session 1.jsonl");
+  } finally {
+    await harness.stop();
   }
 };
 
@@ -471,7 +544,7 @@ const childMain = async (mode) => {
   let currentSession = mode === "missing-session" ? undefined : mode.startsWith("wrong-") ? "session-2" : "session-1";
   let currentModel = mode === "missing-model" ? undefined : { provider: "openai-codex", id: "gpt-initial" };
   let currentTools = mode === "missing-tools" ? undefined : ["read", "bash"];
-  let currentSessionFile = mode === "missing-session-path" ? undefined : "/tmp/pi-session-1.jsonl";
+  let currentSessionFile = mode === "missing-session-path" ? undefined : mode === "path-spaces" ? "/tmp/pi sessions/session 1.jsonl" : "/tmp/pi-session-1.jsonl";
   let leafEntry;
   let entryNumber = 0;
   const sessionManager = {
@@ -521,6 +594,11 @@ const childMain = async (mode) => {
       if (request.type === "calls") process.stdout.write(`${JSON.stringify({ calls, handlers: [...handlers.keys()] })}\n`);
       else if (request.type === "set-model") {
         currentModel = { provider: request.provider, id: request.model };
+        process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      else if (request.type === "switch-session") {
+        currentSession = request.session;
+        await handlers.get("session_start")?.({ type: "session_start", reason: "switch" }, eventContext);
         process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
       }
       else if (request.type === "event") {
@@ -813,6 +891,8 @@ const main = async () => {
     await testCoordinatorIdentityActivates(directory);
     await testBoundIdentityRefusals(directory);
     await testNativeInspectionReflectsCurrentMetadata(directory);
+    await testNativeActivityBoundariesAndMetadata(directory);
+    await testNativeInspectionPreservesSessionPathSpaces(directory);
     await testNativeInspectionUnknownMetadata(directory);
     await testSettledFailureIsNeverReportedCompleted(directory);
     await testNativeInspectionRequiresSettledExactEntries(directory);

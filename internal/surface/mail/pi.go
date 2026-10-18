@@ -9,6 +9,8 @@ import (
 	"net"
 	"path/filepath"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 )
 
 // PiAdapter talks to the forgectl pi extension (assets/forgectl-inbox.ts)
@@ -46,6 +48,7 @@ type piResponse struct {
 	ActiveTools []string           `json:"active_tools,omitempty"`
 	SessionPath string             `json:"session_path,omitempty"`
 	Turn        *PiTurnObservation `json:"turn,omitempty"`
+	Activity    *activity.Snapshot `json:"activity,omitempty"`
 	Unconfirmed bool               `json:"unconfirmed,omitempty"`
 	Error       string             `json:"error,omitempty"`
 	// Retry marks a refusal pi may not repeat, such as a send that raced

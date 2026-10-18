@@ -87,6 +87,9 @@ func TestHermesACPHelper(test *testing.T) {
 		respond := func(result any) {
 			_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(request.ID), "result": result})
 		}
+		respondError := func() {
+			_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(request.ID), "error": map[string]any{"code": -32001, "message": "test prompt failure"}})
+		}
 		switch request.Method {
 		case "initialize":
 			respond(map[string]any{
@@ -104,6 +107,14 @@ func TestHermesACPHelper(test *testing.T) {
 				}})
 			}
 			if request.Method == "session/load" && lastPrompt != "" {
+				if marker := os.Getenv("FORGECTL_HERMES_TEST_POST_HISTORY_MARKER"); marker != "" {
+					_ = writeHermesTestFile(marker, []byte("post-history-called\n"))
+				}
+				if gate := os.Getenv("FORGECTL_HERMES_TEST_POST_HISTORY_GATE"); gate != "" {
+					for hermesTestFilePresent(gate) {
+						time.Sleep(5 * time.Millisecond)
+					}
+				}
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
 					"sessionId": "session-test",
 					"update":    map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]string{"type": "text", "text": lastPrompt}},
@@ -123,7 +134,20 @@ func TestHermesACPHelper(test *testing.T) {
 			}
 		case "session/prompt":
 			if marker := os.Getenv("FORGECTL_HERMES_TEST_PROMPT_MARKER"); marker != "" {
-				_ = os.WriteFile(marker, []byte("prompt-called\n"), 0o600)
+				_ = writeHermesTestFile(marker, []byte("prompt-called\n"))
+			}
+			if os.Getenv("FORGECTL_HERMES_TEST_PROMPT_DISCONNECT") == "1" {
+				_ = os.Stdout.Close()
+				os.Exit(0)
+			}
+			if gate := os.Getenv("FORGECTL_HERMES_TEST_PROMPT_GATE"); gate != "" {
+				for hermesTestFilePresent(gate) {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+			if os.Getenv("FORGECTL_HERMES_TEST_PROMPT_ERROR") == "1" {
+				respondError()
+				continue
 			}
 			if prompt, ok := request.Params["prompt"].([]any); ok && len(prompt) > 0 {
 				if text, ok := prompt[0].(map[string]any)["text"].(string); ok {
@@ -176,6 +200,34 @@ func TestHermesACPHelper(test *testing.T) {
 	os.Exit(0)
 }
 
+func writeHermesTestFile(path string, contents []byte) error {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.WriteFile(filepath.Base(path), contents, 0o600)
+}
+
+func removeHermesTestFile(path string) error {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.Remove(filepath.Base(path))
+}
+
+func hermesTestFilePresent(path string) bool {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	_, err = root.Stat(filepath.Base(path))
+	return err == nil
+}
+
 func TestHermesSupervisorLifecycleAndReceipts(test *testing.T) {
 	test.Setenv("FORGECTL_HERMES_TEST_HELPER", "1")
 	test.Setenv("FORGECTL_HERMES_TEST_PERMISSION", "1")
@@ -202,6 +254,10 @@ func TestHermesSupervisorLifecycleAndReceipts(test *testing.T) {
 	if sessionID != "session-test" {
 		test.Fatalf("session id = %q", sessionID)
 	}
+	idleInspection, err := hermesRequest(listenSocket, Request{V: 1, Type: "inspect", RunID: "run-1", SessionID: sessionID})
+	if err != nil || !idleInspection.OK || idleInspection.Inspection == nil || idleInspection.Inspection.Activity == nil || len(idleInspection.Inspection.Activity.Spans) != 0 {
+		test.Fatalf("idle activity inspection = %#v, %v", idleInspection, err)
+	}
 	wrong, err := hermesRequest(listenSocket, Request{V: 1, Type: "state", RunID: "run-1", SessionID: "wrong-session"})
 	if err != nil || wrong.OK || wrong.Error == "" {
 		test.Fatalf("wrong-session response = %#v, %v", wrong, err)
@@ -221,6 +277,14 @@ func TestHermesSupervisorLifecycleAndReceipts(test *testing.T) {
 	turn := waitHermesEvent(test, &output, "hermes-turn-end", nil)
 	if turn["stop_reason"] != "refusal" || turn["error"] != false {
 		test.Fatalf("native stop reason was not preserved: %#v", turn)
+	}
+	settledInspection, err := hermesRequest(listenSocket, Request{V: 1, Type: "inspect", RunID: "run-1", SessionID: sessionID})
+	if err != nil || !settledInspection.OK || settledInspection.Inspection == nil || settledInspection.Inspection.Activity == nil || len(settledInspection.Inspection.Activity.Spans) != 1 {
+		test.Fatalf("settled activity inspection = %#v, %v", settledInspection, err)
+	}
+	span := settledInspection.Inspection.Activity.Spans[0]
+	if span.State != "unknown" || span.EndedAt == nil || span.ID != "message-1" || span.TurnID != "message-1" {
+		test.Fatalf("permission/refusal activity = %#v", span)
 	}
 	cancel()
 	select {
@@ -281,6 +345,10 @@ func TestHermesNativeReplyPublishesAndRecoversWithoutReprompt(test *testing.T) {
 	turn := waitHermesEvent(test, firstOutput, "hermes-turn-end", nil)
 	if turn["error"] != false {
 		test.Fatalf("native turn was not complete: %#v", turn)
+	}
+	inspection, err := hermesRequest(filepath.Join(ledger, "run-reply-listen.sock"), Request{V: 1, Type: "inspect", RunID: "run-reply", SessionID: sessionID})
+	if err != nil || inspection.Inspection == nil || inspection.Inspection.Activity == nil || len(inspection.Inspection.Activity.Spans) != 1 || inspection.Inspection.Activity.Spans[0].State != "finished" || inspection.Inspection.Activity.Spans[0].EndedAt == nil {
+		test.Fatalf("successful native activity = %#v, %v", inspection, err)
 	}
 	firstReply := waitHermesEvent(test, firstOutput, "hermes-native-reply", nil)
 	if firstReply["state"] != "ready" || firstReply["error"] != true {

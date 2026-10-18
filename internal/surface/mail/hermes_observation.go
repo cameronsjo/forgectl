@@ -6,6 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/surface/hermes"
 )
 
@@ -30,6 +31,16 @@ func (adapter HermesAdapter) Inspect(ctx context.Context, worker Worker) (hermes
 		default:
 			return hermes.Inspection{}, errors.New("hermes turn observation has invalid status")
 		}
+	}
+	if observation.Activity != nil {
+		if observation.Activity.Source != activity.SourceHermes {
+			return hermes.Inspection{}, errors.New("hermes native activity has the wrong source")
+		}
+		if err := activity.Validate(*observation.Activity); err != nil {
+			return hermes.Inspection{}, errors.New("hermes native activity is invalid")
+		}
+		cloned := activity.Clone(*observation.Activity)
+		observation.Activity = &cloned
 	}
 	return observation, nil
 }

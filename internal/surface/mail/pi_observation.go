@@ -7,6 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cameronsjo/forgectl/internal/surface/activity"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -31,6 +32,7 @@ type PiObservation struct {
 	SessionID   string             `json:"session_id,omitempty"`
 	SessionPath string             `json:"session_path,omitempty"`
 	Turn        *PiTurnObservation `json:"turn,omitempty"`
+	Activity    *activity.Snapshot `json:"activity,omitempty"`
 }
 
 // Inspect asks the identity-bound Pi extension for current native metadata.
@@ -52,6 +54,14 @@ func (adapter PiAdapter) Inspect(ctx context.Context, worker Worker) (PiObservat
 	}
 	if resp.Unknown || !resp.OK || !resp.Known || resp.Retry || resp.Unconfirmed {
 		return PiObservation{}, nil
+	}
+	if resp.Activity != nil {
+		if resp.Activity.Source != activity.SourcePi {
+			return PiObservation{}, Unconfirmed("pi inspection returned activity from another source")
+		}
+		if err := activity.Validate(*resp.Activity); err != nil {
+			return PiObservation{}, Unconfirmed("pi inspection returned invalid native activity")
+		}
 	}
 	if !safePiObservationString(resp.Provider, 256) || !safePiObservationString(resp.ModelID, 256) || resp.SessionID != worker.ThreadID || !safePiObservationPath(resp.SessionPath) || resp.ActiveTools == nil || len(resp.ActiveTools) > 64 {
 		return PiObservation{}, nil
@@ -83,6 +93,7 @@ func (adapter PiAdapter) Inspect(ctx context.Context, worker Worker) (PiObservat
 		SessionID:   resp.SessionID,
 		SessionPath: resp.SessionPath,
 		Turn:        resp.Turn,
+		Activity:    resp.Activity,
 	}, nil
 }
 
