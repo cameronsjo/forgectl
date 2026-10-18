@@ -1,7 +1,7 @@
 # A real repository goal through Projects
 
 Status: in progress
-Next action: review the bounded pilot, then exercise a real implementation and independent review through native team sessions.
+Next action: exercise a real implementation and independent review through native team sessions, then independently verify the returned patch.
 
 ## Goal and authority
 
@@ -11,7 +11,7 @@ Codex selects forgectl itself and this first goal: **make the Agents overview's 
 
 The native implementation task may change only `internal/tui/project_agents_unix.go`, its existing test file, and `docs/commands/surface-project.md`. The result must advertise `?` help in both wide and narrow footers, list all current key aliases, dismiss with `?` or Escape, preserve selection/offset/zoom/activity state when dismissed, fit a 50-column by 16-row terminal, and consume action/navigation/zoom keys without side effects while help is open. `q` and Ctrl-C still quit. Tiny terminals must remain bounded and readable rather than overflowing. The native implementation agent chooses the smallest solution consistent with those outcomes.
 
-Codex separately owns the pilot infrastructure: `scripts/run-project-goal.mjs`, `scripts/test-project-goal.mjs`, `scripts/project-keyboard-help-goal.json`, this plan, and the pilot usage section of `docs/commands/surface-project.md`. These are not additional files the native implementation worker may edit.
+Codex separately owns the pilot infrastructure: `scripts/run-project-goal.mjs`, `scripts/test-project-goal.mjs`, `scripts/project-keyboard-help-goal.json`, the optional child-lifecycle hook in the reused `scripts/verify-cross-harness-loop.mjs` command runner, this plan, and the pilot usage section of `docs/commands/surface-project.md`. These are not additional files the native implementation worker may edit.
 
 Standing authorization covers isolated work, source commits and the session feature-branch push. No PR, merge, deployment, global installation/configuration, credential change, shared service restart, or third-party repository write is authorized. OpenAI-only execution remains in force; Claude and concurrent Hermes native UI remain deferred. Agent messages cannot approve an action or widen permissions.
 
@@ -46,7 +46,7 @@ For the recovery exercise, first establish that the coordinator's turn settled, 
 
 - [x] Inspect reuse candidates, actual source contracts, current backlog, and the observed UI gap.
 - [x] Review the pilot and resolve supported safety/operability findings.
-- [ ] Add and test the bounded pilot entrypoint and its operator-authored goal.
+- [x] Add and test the bounded pilot entrypoint and its operator-authored goal.
 - [ ] Run native delegation, implementation and independent review; preserve the actual artifacts.
 - [ ] Independently verify the patch and exercise coordinator replacement without duplicate work.
 - [ ] Inspect the real terminal interaction, integrate only the verified allowed patch, and rerun affected checks.
@@ -60,4 +60,6 @@ The same independent reviewer examined this plan at `bd4bbf42` through plan, ope
 
 ## Completion evidence
 
-Pending. Existing Projects acceptance and the readable preview are prerequisites, not evidence that this repository-goal milestone has passed.
+The entrypoint contract tests pass with `node scripts/test-project-goal.mjs`, including invalid input, stale message identity, incomplete recovery, private status-file checks, and an actual detached command-group termination control. The existing verifier contracts pass with `node scripts/test-cross-harness-verifier.mjs`. Independent review led to canonical runtime inputs, a private dedicated ledger, tracked command children, an exclusive retained worktree claim, and primary-checkout before/after receipts. These are local trusted-package checks, not protection against another process running as the same OS user replacing installed package bytes or dependencies.
+
+Native execution and terminal acceptance remain pending. Existing Projects acceptance and the readable preview are prerequisites, not evidence that this repository-goal milestone has passed.

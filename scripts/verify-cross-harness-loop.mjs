@@ -165,7 +165,7 @@ function runCommand(evidence, command, args, options = {}) {
   const env = { ...(options.env ?? process.env) };
   evidence.add("command-start", { command, args, cwd: options.cwd, env: safeEnv(env) });
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd: options.cwd, env, detached: typeof evidence.commandStarted === "function", stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -178,6 +178,7 @@ function runCommand(evidence, command, args, options = {}) {
       evidence.add("command-result", { command, args, code, signal, stdout: bounded(stdout), stderr: bounded(stderr) });
       resolvePromise(result);
     });
+    evidence.commandStarted?.(child);
   });
 }
 
