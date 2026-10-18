@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
 Status: P1/P2/P3/P4 implemented and verified; R1/R2/R3 message-only Hermes replies pass local tests and lint; final native acceptance and the requested Agents overview remain open
-Next action: build clean committed source and run native acceptance in fresh OpenAI-only sessions. Resolve the Agents overview surface with Cameron before its implementation. Do not retry or reroute the previously denied command.
+Next action: verify the structured Hermes history-replay correction, then rerun native acceptance in fresh OpenAI-only sessions. Plan and implement Cameron's selected terminal-native Agents overview inside herdr. Do not retry or reroute the previously denied command.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -190,9 +190,17 @@ The repository JSON-emitter guard found three raw serializers in the new private
 
 After the last source edit, full Hermes/mail unit tests passed (1.569s/4.712s) and race tests passed (24.200s/15.530s). `go test ./internal/cli -run 'TestJSONStderr_NoUnwrappedErrorSites|TestJSONEmittersUseTermsafeEncoder' -count=1` passed (72.497s). Golangci-lint v2.13.1 configuration verification and the final affected Hermes/mail scan passed with zero issues; the preceding broader scan included CLI and reported only the subsequently resolved fixture finding. An independent read-only review of the exact serialization/configuration delta found no supported regression. The clean committed executable and fresh full native Projects acceptance remain required by R4/P5/P6. Local checks do not replace native authorship, rendered UI, policy, cleanup, or remote delivery evidence.
 
+### Structured native history correction
+
+The first message-only native acceptance on clean commit `ba00d496` at `/private/tmp/fchnative.ta3THH` failed: the clarification published, but the artifact reply remained unknown after post-turn history replay. The pinned Hermes ACP implementation emits `tool_call_update.content` as an array of structured objects, while the previous client decoded every update's content as a text object. A read-only replay of the exact native session confirmed that shape without another model turn. Both original child processes exited with status zero, the final cleanup event was recorded, and all three owned sockets were absent; no acceptance marker was written. The earlier policy-denied session was not touched.
+
+The regression test against the old clean source failed specifically with `native Hermes session/update payload is malformed`. The correction dispatches by native update kind: message/thought chunks require a text object with a present non-null string; tool content, when present, requires an array of objects. Tool metadata remains bounded and hashed rather than interpreted as reply text. Missing/null optional tool content remains valid. Malformed text, scalar/object tool content, and non-object array entries have negative controls. The completed live/history agreement and permission-denied suppression rules are unchanged.
+
+Codex independently ran the final affected Hermes unit suite (1.449s), race suite (15.438s), and pinned golangci-lint v2.13.1 scan (zero issues). The initial sandbox run failed at Unix socket binding and was rerun with host socket access. This verifies the parser correction locally, not the still-pending fresh native acceptance.
+
 ### Requested Agents overview
 
-Cameron supplied a visual reference and requested a view like it: an agent list with harness/model subtitles, a shared time axis, labeled horizontal activity spans, and running state. The current Desk-backed project view shows evidence as a list/flow, not this multi-thread activity overview. Codex recommended a terminal-native overview inside herdr while retaining its sidebar/tabs, and asked whether Cameron instead wants a browser dashboard for closer visual fidelity. That surface choice is pending; no new overview implementation is authorized by an inferred answer. Actual task durations require observed start/end evidence, not timestamps invented from mailbox delivery or enrollment.
+Cameron supplied a visual reference and requested a view like it: an agent list with harness/model subtitles, a shared time axis, labeled horizontal activity spans, and running state. Cameron explicitly selected the terminal-native overview inside herdr, retaining its sidebar/tabs and opening a selected thread from the overview; the browser-dashboard alternative was declined. The current Desk-backed project view shows evidence as a list/flow, not this multi-thread activity overview. Actual activity durations require observed start/end evidence, not timestamps invented from mailbox delivery or enrollment. The implementation plan and source-specific observation seams are being reviewed before edits to the overview.
 
 ## Local acceptance commands
 

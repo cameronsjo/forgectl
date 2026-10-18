@@ -53,15 +53,30 @@ func TestNativeHistoryNotificationsAcceptStructuredToolReplay(test *testing.T) {
 func TestNativeHistoryNotificationsRejectMalformedTextContent(test *testing.T) {
 	client := &nativeClient{}
 	for name, raw := range map[string]string{
-		"array":  `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":[]}}`,
-		"null":   `{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","content":null}}`,
-		"image":  `{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"image","text":"no"}}}`,
-		"scalar": `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":"reply"}}`,
+		"array":        `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":[]}}`,
+		"null":         `{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","content":null}}`,
+		"image":        `{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"image","text":"no"}}}`,
+		"scalar":       `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":"reply"}}`,
+		"missing text": `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text"}}}`,
+		"null text":    `{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":null}}}`,
 	} {
 		test.Run(name, func(test *testing.T) {
 			message := nativeMessage{envelope: nativeEnvelope{Method: "session/update", Params: json.RawMessage(raw)}}
 			if _, _, err := client.processMessage(message, 1, "session/load", nil); err == nil {
 				test.Fatal("malformed text content was accepted")
+			}
+		})
+	}
+}
+
+func TestNativeHistoryNotificationsRejectMalformedToolContent(test *testing.T) {
+	for _, content := range []string{`{}`, `"text"`, `1`, `true`, `[null]`, `["text"]`, `[[]]`} {
+		test.Run(content, func(test *testing.T) {
+			raw := `{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","content":` + content + `}}`
+			message := nativeMessage{envelope: nativeEnvelope{Method: "session/update", Params: json.RawMessage(raw)}}
+			client := &nativeClient{}
+			if _, _, err := client.processMessage(message, 1, "session/load", nil); err == nil {
+				test.Fatal("malformed tool content was accepted")
 			}
 		})
 	}

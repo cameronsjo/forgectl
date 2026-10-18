@@ -253,22 +253,30 @@ func parseHistoryUpdate(raw []byte) (parsedHistoryUpdate, error) {
 	parsed := parsedHistoryUpdate{Kind: update.SessionUpdate}
 	switch update.SessionUpdate {
 	case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
-		if len(update.Content) == 0 || bytes.Equal(update.Content, []byte("null")) {
+		contentRaw := bytes.TrimSpace(update.Content)
+		if len(contentRaw) == 0 || bytes.Equal(contentRaw, []byte("null")) {
 			return parsedHistoryUpdate{}, errors.New("text history update lacks content")
 		}
 		var content struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type string  `json:"type"`
+			Text *string `json:"text"`
 		}
-		if err := json.Unmarshal(update.Content, &content); err != nil || content.Type != "text" {
+		if err := json.Unmarshal(contentRaw, &content); err != nil || content.Type != "text" || content.Text == nil {
 			return parsedHistoryUpdate{}, errors.New("text history update content is malformed")
 		}
-		parsed.Text, parsed.ContentType = content.Text, content.Type
+		parsed.Text, parsed.ContentType = *content.Text, content.Type
 	case "tool_call", "tool_call_update":
-		if len(update.Content) > 0 && !bytes.Equal(update.Content, []byte("null")) {
-			var content any
-			if err := json.Unmarshal(update.Content, &content); err != nil {
+		contentRaw := bytes.TrimSpace(update.Content)
+		if len(contentRaw) > 0 && !bytes.Equal(contentRaw, []byte("null")) {
+			var content []json.RawMessage
+			if err := json.Unmarshal(contentRaw, &content); err != nil {
 				return parsedHistoryUpdate{}, errors.New("structured history update content is malformed")
+			}
+			for _, item := range content {
+				var entry map[string]json.RawMessage
+				if err := json.Unmarshal(item, &entry); err != nil || entry == nil {
+					return parsedHistoryUpdate{}, errors.New("structured history update entry is malformed")
+				}
 			}
 			parsed.ContentType = "structured"
 		}
