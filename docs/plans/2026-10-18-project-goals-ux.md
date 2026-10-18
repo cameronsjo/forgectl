@@ -35,7 +35,7 @@ Continue on `codex/cross-harness-loop` in its existing linked worktree. Commit a
 ## Work
 
 - [ ] Review the plan and approval/preset risks independently; resolve supported findings.
-- [ ] Add bounded preset suggestions and negative tests without executing repository code.
+- [x] Add bounded preset suggestions and negative tests without executing repository code.
 - [ ] Replace setup wizard with one form, normal controls and invalidatable compact approval.
 - [ ] Consolidate run questions, evidence and cancellation into one workspace.
 - [ ] Update documentation and real-PTY probes for the new journey.
@@ -47,7 +47,7 @@ Root Codex owns this plan, preset helpers/tests, documentation and Python PTY pr
 
 ## Completion evidence
 
-Pending. Baseline is clean committed `8b668d7b`; its native documentation goal already completed review/checks/cleanup. Existing unrelated menu/terminal-safety test failures remain outside this UI task. No full-suite or hosted-CI success is assumed.
+Baseline is clean committed `8b668d7b`; its native documentation goal already completed review/checks/cleanup. Preset helper tests pass both inside the TUI package and as the isolated two-file unit while the UI refactor is in progress. Tests cover Go/Rust/JavaScript suggestions, absent/invalid/oversized manifests, symlink refusal, independent editable slices and docs-only paths. An executable fake-runner control first writes a marker to prove detection would be observable; preset discovery then leaves that marker absent with every runner stubbed on PATH. No model or repository test command is run by discovery. Existing unrelated menu/terminal-safety test failures remain outside this UI task. No full-suite or hosted-CI success is assumed.
 
 ## Future work
 
