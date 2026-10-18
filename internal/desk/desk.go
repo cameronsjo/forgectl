@@ -272,7 +272,7 @@ func splitAfter(value string) []string {
 // already carries may not be given again; the result must carry both WHAT and
 // WHY.
 func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
-	what, why, tty := h.What, h.Why, h.TTY
+	what, why, tty := strings.TrimSpace(h.What), strings.TrimSpace(h.Why), h.TTY
 	for _, f := range [...]struct{ label, v string }{{"--what", what}, {"--why", why}} {
 		if strings.ContainsAny(f.v, "\r\n") {
 			return nil, fmt.Errorf("desk: %s must be one line", f.label)
@@ -282,17 +282,20 @@ func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
 		return nil, errors.New("desk: a batch manifest cannot be a TTY item (steps never get a terminal)")
 	}
 	have := ParseHeaders(body)
+	// A header with only whitespace after the colon is no header: it names
+	// nothing, so a flag may fill it and no flag leaves the item without one.
+	fileWhat, fileWhy := strings.TrimSpace(have.What), strings.TrimSpace(have.Why)
 	var lines []string
 	// A flag that repeats the file's own line is accepted and adds nothing; one
 	// that differs is refused, since either value could be the one meant.
-	if what != "" && strings.TrimSpace(have.What) != what {
-		if have.What != "" {
+	if what != "" && fileWhat != what {
+		if fileWhat != "" {
 			return nil, errors.New("desk: the file's '# WHAT:' line differs from --what; make them match, or drop --what to use the file's")
 		}
 		lines = append(lines, "# WHAT: "+what)
 	}
-	if why != "" && strings.TrimSpace(have.Why) != why {
-		if have.Why != "" {
+	if why != "" && fileWhy != why {
+		if fileWhy != "" {
 			return nil, errors.New("desk: the file's '# WHY:' line differs from --why; make them match, or drop --why to use the file's")
 		}
 		lines = append(lines, "# WHY: "+why)
@@ -315,7 +318,7 @@ func insertHeaders(body []byte, kind Kind, h Headers) ([]byte, error) {
 		}
 		lines = append(lines, "# AFTER: "+strings.Join(after, ","))
 	}
-	if (have.What == "" && what == "") || (have.Why == "" && why == "") {
+	if (fileWhat == "" && what == "") || (fileWhy == "" && why == "") {
 		return nil, errors.New("desk: an item needs both WHAT and WHY (flags or '# WHAT:'/'# WHY:' lines)")
 	}
 	if len(lines) == 0 {

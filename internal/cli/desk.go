@@ -200,7 +200,8 @@ must not be a terminal.
 
 --what and --why are required unless the file carries its own "# WHAT:" or
 "# WHY:" line, which add then uses unchanged. A flag that matches the file's line
-is accepted; one that differs is refused.
+is accepted; one that differs is refused. The line is read from anywhere in the
+file, and must start at column 1.
 
 When an item is queued, add tells the operator: a herdr notification and the
 queuing pane's needs-you state (inside herdr), and a macOS notification
@@ -274,10 +275,10 @@ func checkFlagText(flag, v string) error {
 // (#1278).
 func requireAddHeaders(o deskAddOpts, data []byte) error {
 	have := desk.ParseHeaders(data)
-	if strings.TrimSpace(o.what) == "" && have.What == "" {
+	if strings.TrimSpace(o.what) == "" && strings.TrimSpace(have.What) == "" {
 		return deskUsage("desk add: --what is required unless the file has a '# WHAT:' line (one line: what the script does)")
 	}
-	if strings.TrimSpace(o.why) == "" && have.Why == "" {
+	if strings.TrimSpace(o.why) == "" && strings.TrimSpace(have.Why) == "" {
 		return deskUsage("desk add: --why is required unless the file has a '# WHY:' line (one line: why it needs the operator)")
 	}
 	return nil

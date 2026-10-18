@@ -443,6 +443,7 @@ func TestAddValidates(t *testing.T) {
 		{"missing why", "x.sh", "true", "w", "", false, "WHAT and WHY"},
 		{"multi-line what", "x.sh", "true", "w\nrm -rf /", "y", false, "one line"},
 		{"header differs", "x.sh", "# WHAT: here\ntrue", "w", "y", false, "differs from --what"},
+		{"blank header, no flag", "x.sh", "# WHAT:\t\n# WHY: y\ntrue", "", "", false, "WHAT and WHY"},
 		{"tty batch", "b.manifest", "a -- true", "w", "y", true, "TTY"},
 		{"bad manifest", "b.manifest", "a after=zz -- true", "w", "y", false, "unknown dependency"},
 	} {
@@ -459,6 +460,28 @@ func TestAddValidates(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(d.Path(), DirPending)); len(entries) != 0 {
 		t.Errorf("a refused add left %v in pending/", entries)
+	}
+}
+
+// A direct caller's padded flag matches the file's line, and a header with only
+// whitespace after the colon is filled by the flag rather than refused as
+// differing.
+func TestAddPaddedFlagAndBlankHeader(t *testing.T) {
+	d := openDesk(t)
+	dir := t.TempDir()
+	same := filepath.Join(dir, "same.sh")
+	writeFile(t, same, "# WHAT: here\n# WHY: because\ntrue\n", 0o600)
+	if _, err := d.Add(same, "  here ", " because\t", false); err != nil {
+		t.Errorf("padded matching flags: %v", err)
+	}
+	blank := filepath.Join(dir, "blank.sh")
+	writeFile(t, blank, "# WHAT:\t\n# WHY: because\ntrue\n", 0o600)
+	a, err := d.Add(blank, "filled", "", false)
+	if err != nil {
+		t.Fatalf("flag over a blank header: %v", err)
+	}
+	if got, _ := os.ReadFile(a.Path); !strings.HasPrefix(string(got), "# WHAT: filled\n") {
+		t.Errorf("queued = %q; want the flag's WHAT first", got)
 	}
 }
 
