@@ -1,11 +1,11 @@
 ---
-status: in-flight
+status: done
 ---
 
 # Goal-first Projects interface
 
-Status: approved interface implemented; clean-build delivery verification in progress
-Next action: build from the committed source, repeat the terminal acceptance checks, and push the feature branch.
+Status: implemented, independently verified and pushed on the feature branch
+Next action: none in this scope; Cameron can run the verified local build below.
 
 ## Outcome and authority
 
@@ -39,7 +39,7 @@ Continue on `codex/cross-harness-loop` in its existing linked worktree. Commit a
 - [x] Replace setup wizard with one form, normal controls and invalidatable compact approval.
 - [x] Consolidate run questions, evidence and cancellation into one workspace.
 - [x] Update documentation and real-PTY probes for the new journey.
-- [ ] Verify unit/negative tests, actual terminal behavior and clean-build provenance; commit and push.
+- [x] Verify unit/negative tests, actual terminal behavior and clean-build provenance; commit and push.
 
 ## Ownership and review
 
@@ -53,9 +53,13 @@ Root Codex ran `go test -p=2 ./internal/tui -count=1`, focused goal tests with `
 
 Actual PTY checks at 100x24 and 50x16 exercised normal multiline goal entry, preset selection, advanced editing, frozen approval with Edit focused by default, and invalidation without creating a run. Separate PTYs verified long-path Home/End, long-goal beginning/middle/tail carets and the next visible button. The retained real native goal's patch, both check outputs and JSON are readable through one workspace with pinned identity/status. A clearly synthetic private registry fixture verified actual answer/control callbacks, ordinary multiline typing across polling, explicit Send, safe Keep-running default and explicit cancellation; it did not start a model or claim native cleanup. The earlier real native goal and its source/receipts remain unchanged.
 
-The new-form verifier rejects the old wizard binary. Probe regressions also distinguish focus from an unfocused mention, hard-wrapped argv from changed bytes, and genuine scrolling from a static screen even when the first and last viewport match. Clean committed-build provenance and remote equality remain the final delivery gate.
+The new-form verifier rejects the old wizard binary. Probe regressions also distinguish focus from an unfocused mention, hard-wrapped argv from changed bytes, and genuine scrolling from a static screen even when the first and last viewport match. Clean committed-build provenance and remote equality passed the final delivery gate.
 
 The first clean committed build (`7b4c406e`) passed all four terminal journeys and exact remote-head verification. Final integration also exposed ordinary Down being overridden by caret-following; its regression failed before the fix. Ordinary evidence arrows now scroll, and editing restores caret tracking after Page Up/Down. The full TUI package, pinned lint and probe contract tests passed again after that bounded fix.
+
+All four terminal journeys passed again against clean committed `a9774ebc`, including ordinary evidence-arrow scrolling and restoring the caret after manual scrolling. `verify-delivery.py verified-a9774ebc` verified clean source/clone, exact remote equality, the embedded VCS revision with `modified=false`, unchanged original native-result bytes, and the original source checkout's unchanged revision/status. The final documentation-only closure does not change executable source.
+
+Verified local entry point: `/private/tmp/forgectl-goals-ux.XRQW09/bin/forgectl projects goals --model gpt-5.6-sol`. Build metadata and private verification receipts live beside that binary. The binary is not globally installed. No PR, merge, deployment or shared-service change was performed.
 
 ## Future work
 
