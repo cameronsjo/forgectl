@@ -72,6 +72,131 @@ func TestRecordNativeEvidenceDeduplicatesAndRejectsConflicts(test *testing.T) {
 	}
 }
 
+func TestRecordNativeEvidenceEnrichesTimingAndMetadataOneWay(test *testing.T) {
+	fixture := newRetirementFixture(test)
+	observedAt := time.Now().UTC().Truncate(time.Microsecond)
+	input := NativeEvidenceInput{
+		NativeSessionID: "native-1", Source: EvidenceSourceCodexThreadRead,
+		TurnID: "turn-enrichment", Status: EvidenceCompleted,
+		ObservedAt: observedAt.Add(-time.Minute),
+	}
+	registry, evidence, err := fixture.store.RecordNativeEvidence(context.Background(), fixture.project.ID, fixture.thread.ID, "run-1", input)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if evidence.StartedAt != nil || evidence.EndedAt != nil || evidence.Provider != "" || evidence.Model != "" {
+		test.Fatalf("untimed evidence = %#v", evidence)
+	}
+	registryPath := filepath.Join(fixture.store.Root, registryName)
+	start := observedAt.Add(-2 * time.Minute)
+	end := start.Add(30 * time.Second)
+	enriched := input
+	enriched.ObservedAt = observedAt
+	enriched.Provider = "openai"
+	enriched.Model = "gpt-5"
+	enriched.StartedAt = &start
+	enriched.EndedAt = &end
+	registry, evidence, err = fixture.store.RecordNativeEvidence(context.Background(), fixture.project.ID, fixture.thread.ID, "run-1", enriched)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if registry.Revision == 0 || evidence.StartedAt == nil || evidence.EndedAt == nil || !evidence.StartedAt.Equal(start) || !evidence.EndedAt.Equal(end) || evidence.Provider != "openai" || evidence.Model != "gpt-5" {
+		test.Fatalf("enriched evidence = %#v", evidence)
+	}
+	if !evidence.ObservedAt.Equal(input.ObservedAt) {
+		test.Fatalf("enrichment replaced original observed time: got %s want %s", evidence.ObservedAt, input.ObservedAt)
+	}
+	beforeRevision := registry.Revision
+	beforeBytes := readTestFile(test, registryPath)
+	missing := input
+	missing.ObservedAt = observedAt.Add(time.Hour)
+	repeated, repeatedEvidence, err := fixture.store.RecordNativeEvidence(context.Background(), fixture.project.ID, fixture.thread.ID, "run-1", missing)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if repeated.Revision != beforeRevision || string(readTestFile(test, registryPath)) != string(beforeBytes) {
+		test.Fatal("repeat with missing optional data changed registry")
+	}
+	if repeatedEvidence.Provider != "openai" || repeatedEvidence.Model != "gpt-5" || repeatedEvidence.StartedAt == nil || repeatedEvidence.EndedAt == nil || !repeatedEvidence.ObservedAt.Equal(input.ObservedAt) {
+		test.Fatalf("repeat erased enriched data: %#v", repeatedEvidence)
+	}
+
+	conflicts := map[string]NativeEvidenceInput{
+		"metadata": func() NativeEvidenceInput {
+			candidate := enriched
+			candidate.Model = "gpt-5-mini"
+			return candidate
+		}(),
+		"timing": func() NativeEvidenceInput {
+			candidate := enriched
+			candidate.StartedAt = func() *time.Time { value := start.Add(time.Second); return &value }()
+			return candidate
+		}(),
+		"outcome": func() NativeEvidenceInput {
+			candidate := enriched
+			candidate.Status = EvidenceFailed
+			return candidate
+		}(),
+	}
+	for name, candidate := range conflicts {
+		test.Run(name, func(test *testing.T) {
+			before := readTestFile(test, registryPath)
+			if _, _, err := fixture.store.RecordNativeEvidence(context.Background(), fixture.project.ID, fixture.thread.ID, "run-1", candidate); !errors.Is(err, ErrConflict) {
+				test.Fatalf("conflicting evidence = %v, want ErrConflict", err)
+			}
+			if got := readTestFile(test, registryPath); string(got) != string(before) {
+				test.Fatal("conflicting evidence changed registry")
+			}
+		})
+	}
+}
+
+func TestValidateNativeEvidenceTimingAndArtifactRules(test *testing.T) {
+	observedAt := time.Now().UTC()
+	start := observedAt.Add(-time.Minute)
+	end := observedAt.Add(-30 * time.Second)
+	valid := NativeEvidenceInput{
+		NativeSessionID: "native-1", Source: EvidenceSourceCodexThreadRead,
+		TurnID: "turn-1", Status: EvidenceCompleted, ObservedAt: observedAt,
+		StartedAt: &start, EndedAt: &end,
+	}
+	invalid := map[string]NativeEvidenceInput{
+		"half end": func() NativeEvidenceInput {
+			candidate := valid
+			candidate.EndedAt = nil
+			return candidate
+		}(),
+		"reversed": func() NativeEvidenceInput {
+			candidate := valid
+			candidate.StartedAt = &end
+			candidate.EndedAt = &start
+			return candidate
+		}(),
+		"future": func() NativeEvidenceInput {
+			candidate := valid
+			future := observedAt.Add(time.Second)
+			candidate.EndedAt = &future
+			return candidate
+		}(),
+	}
+	for name, candidate := range invalid {
+		test.Run(name, func(test *testing.T) {
+			if err := validateNativeEvidenceInput(candidate); !errors.Is(err, ErrInvalidInput) {
+				test.Fatalf("validateNativeEvidenceInput = %v, want ErrInvalidInput", err)
+			}
+		})
+	}
+	artifact := Evidence{
+		ThreadID: "thread-1", RunID: "run-1", Harness: mail.HarnessCodex,
+		Source: EvidenceSourceArtifactDigest, Status: EvidenceDigestMatch,
+		ObservedAt: observedAt, StartedAt: &start, EndedAt: &end,
+		Artifact: &ArtifactDigest{RelativePath: "result.txt", Size: 1, SHA256: strings.Repeat("0", 64)},
+	}
+	if err := validateEvidenceRecord(artifact); err == nil {
+		test.Fatal("artifact evidence with native timing was accepted")
+	}
+}
+
 func TestRecordVerifiedArtifactUsesBoundWorktreeAndDeduplicates(test *testing.T) {
 	fixture := newRetirementFixture(test)
 	artifactPath := filepath.Join(fixture.project.Worktree, "result.txt")

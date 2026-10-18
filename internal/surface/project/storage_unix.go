@@ -600,7 +600,7 @@ func checkSchemaKeys(data []byte) error {
 				if evidence == nil {
 					return fmt.Errorf("projects[%d].evidence[%d] is null", projectIndex, evidenceIndex)
 				}
-				if err := checkKeys(evidence, "thread_id", "run_id", "native_session_id", "harness", "source", "turn_id", "status", "provider", "model", "observed_at", "artifact"); err != nil {
+				if err := checkKeys(evidence, "thread_id", "run_id", "native_session_id", "harness", "source", "turn_id", "status", "provider", "model", "observed_at", "started_at", "ended_at", "artifact"); err != nil {
 					return fmt.Errorf("projects[%d].evidence[%d]: %w", projectIndex, evidenceIndex, err)
 				}
 				if err := requireFields(evidence, "thread_id", "run_id", "harness", "source", "status", "observed_at"); err != nil {

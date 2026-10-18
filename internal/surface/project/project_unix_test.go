@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func testStore(test *testing.T) (Store, string) {
@@ -324,6 +325,55 @@ func TestStoreRejectsInvalidStructuredStateWithoutMutation(test *testing.T) {
 			observed := readTestFile(test, registryPath)
 			if string(observed) != string(contents) {
 				test.Fatalf("invalid state was replaced: %q", observed)
+			}
+			writeTestFile(test, registryPath, original, 0o600)
+		})
+	}
+}
+
+func TestStoreEvidenceTimingSchemaRejectsUnknownAndNullWithoutMutation(test *testing.T) {
+	fixture := newRetirementFixture(test)
+	observedAt := time.Now().UTC().Truncate(time.Microsecond)
+	startedAt := observedAt.Add(-time.Minute)
+	endedAt := observedAt.Add(-30 * time.Second)
+	if _, _, err := fixture.store.RecordNativeEvidence(context.Background(), fixture.project.ID, fixture.thread.ID, "run-1", NativeEvidenceInput{
+		NativeSessionID: "native-1", Source: EvidenceSourceCodexThreadRead, TurnID: "turn-schema",
+		Status: EvidenceCompleted, ObservedAt: observedAt, StartedAt: &startedAt, EndedAt: &endedAt,
+	}); err != nil {
+		test.Fatal(err)
+	}
+	registryPath := filepath.Join(fixture.store.Root, registryName)
+	original := readTestFile(test, registryPath)
+	observedJSON, err := json.Marshal(observedAt)
+	if err != nil {
+		test.Fatal(err)
+	}
+	startedJSON, err := json.Marshal(startedAt)
+	if err != nil {
+		test.Fatal(err)
+	}
+	endedJSON, err := json.Marshal(endedAt)
+	if err != nil {
+		test.Fatal(err)
+	}
+	needle := `,"observed_at":` + string(observedJSON) + `,"started_at":` + string(startedJSON) + `,"ended_at":` + string(endedJSON)
+	if !strings.Contains(string(original), needle) {
+		test.Fatalf("timed evidence JSON did not contain expected fields: %s", original)
+	}
+	unknown := strings.Replace(string(original), needle, strings.Replace(needle, `,"started_at":`, `,"unexpected":0,"started_at":`, 1), 1)
+	nullStarted := strings.Replace(string(original), needle, strings.Replace(needle, `,"started_at":`+string(startedJSON), `,"started_at":null`, 1), 1)
+	invalidStates := map[string]string{
+		"unknown timing sibling": unknown,
+		"null optional timing":   nullStarted,
+	}
+	for name, contents := range invalidStates {
+		test.Run(name, func(test *testing.T) {
+			writeTestFile(test, registryPath, []byte(contents), 0o600)
+			if _, err := fixture.store.Snapshot(context.Background()); !errors.Is(err, ErrInvalidState) {
+				test.Fatalf("Snapshot = %v, want ErrInvalidState", err)
+			}
+			if got := readTestFile(test, registryPath); string(got) != contents {
+				test.Fatal("rejected schema changed the private registry file")
 			}
 			writeTestFile(test, registryPath, original, 0o600)
 		})

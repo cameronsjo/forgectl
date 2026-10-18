@@ -48,6 +48,8 @@ type Evidence struct {
 	Provider        string          `json:"provider,omitempty"`
 	Model           string          `json:"model,omitempty"`
 	ObservedAt      time.Time       `json:"observed_at"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	EndedAt         *time.Time      `json:"ended_at,omitempty"`
 	Artifact        *ArtifactDigest `json:"artifact,omitempty"`
 }
 
@@ -59,6 +61,8 @@ type NativeEvidenceInput struct {
 	Provider        string         `json:"provider"`
 	Model           string         `json:"model"`
 	ObservedAt      time.Time      `json:"observed_at"`
+	StartedAt       *time.Time     `json:"started_at,omitempty"`
+	EndedAt         *time.Time     `json:"ended_at,omitempty"`
 }
 
 func (store Store) RecordNativeEvidence(ctx context.Context, projectID, threadID, runID string, input NativeEvidenceInput) (Registry, Evidence, error) {
@@ -102,7 +106,7 @@ func (store Store) RecordNativeEvidence(ctx context.Context, projectID, threadID
 			ThreadID: threadID, RunID: runID, NativeSessionID: binding.NativeSessionID,
 			Harness: binding.Harness, Source: input.Source, TurnID: input.TurnID,
 			Status: input.Status, Provider: input.Provider, Model: input.Model,
-			ObservedAt: input.ObservedAt.UTC(),
+			ObservedAt: input.ObservedAt.UTC(), StartedAt: input.StartedAt, EndedAt: input.EndedAt,
 		}
 		if err := validateEvidenceRecord(evidence); err != nil {
 			return fmt.Errorf("%w: evidence: %v", ErrInvalidInput, err)
@@ -202,6 +206,9 @@ func validateNativeEvidenceInput(input NativeEvidenceInput) error {
 	if input.ObservedAt.IsZero() {
 		return fmt.Errorf("%w: evidence observed time is required", ErrInvalidInput)
 	}
+	if err := validateEvidenceTiming(input.StartedAt, input.EndedAt, input.ObservedAt, "native evidence"); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
 	return nil
 }
 
@@ -237,15 +244,43 @@ func sameEvidenceBinding(left, right Binding) bool {
 }
 
 func appendEvidence(project *Project, candidate Evidence, recorded *Evidence) error {
-	for _, existing := range project.Evidence {
+	for index, existing := range project.Evidence {
 		if !sameEvidenceIdentity(existing, candidate) {
 			continue
 		}
-		if equivalentEvidence(existing, candidate) {
-			*recorded = existing
-			return errNoChange
+		if !sameEvidenceOutcome(existing, candidate) {
+			return fmt.Errorf("%w: evidence identity already has a different result", ErrConflict)
 		}
-		return fmt.Errorf("%w: evidence identity already has a different result", ErrConflict)
+		enriched := existing
+		changed := false
+		if err := enrichEvidenceText(&enriched.Provider, candidate.Provider, "provider"); err != nil {
+			return err
+		}
+		if enriched.Provider != existing.Provider {
+			changed = true
+		}
+		if err := enrichEvidenceText(&enriched.Model, candidate.Model, "model"); err != nil {
+			return err
+		}
+		if enriched.Model != existing.Model {
+			changed = true
+		}
+		if existing.StartedAt == nil && candidate.StartedAt != nil {
+			startedAt := *candidate.StartedAt
+			endedAt := *candidate.EndedAt
+			enriched.StartedAt = &startedAt
+			enriched.EndedAt = &endedAt
+			changed = true
+		} else if existing.StartedAt != nil && candidate.StartedAt != nil && !sameEvidenceTiming(existing, candidate) {
+			return fmt.Errorf("%w: evidence identity already has different timing", ErrConflict)
+		}
+		if changed {
+			project.Evidence[index] = enriched
+			*recorded = enriched
+			return nil
+		}
+		*recorded = existing
+		return errNoChange
 	}
 	if len(project.Evidence) >= maxEvidenceRecords {
 		return fmt.Errorf("%w: evidence history exceeds %d records", ErrInvalidInput, maxEvidenceRecords)
@@ -265,8 +300,8 @@ func sameEvidenceIdentity(left, right Evidence) bool {
 	return left.TurnID == right.TurnID
 }
 
-func equivalentEvidence(left, right Evidence) bool {
-	if !sameEvidenceIdentity(left, right) || left.Harness != right.Harness || left.Status != right.Status || left.Provider != right.Provider || left.Model != right.Model {
+func sameEvidenceOutcome(left, right Evidence) bool {
+	if !sameEvidenceIdentity(left, right) || left.Harness != right.Harness || left.Status != right.Status {
 		return false
 	}
 	if (left.Artifact == nil) != (right.Artifact == nil) {
@@ -276,6 +311,20 @@ func equivalentEvidence(left, right Evidence) bool {
 		return false
 	}
 	return true
+}
+
+func enrichEvidenceText(existing *string, candidate, label string) error {
+	if *existing != "" && candidate != "" && *existing != candidate {
+		return fmt.Errorf("%w: evidence identity already has different %s", ErrConflict, label)
+	}
+	if *existing == "" && candidate != "" {
+		*existing = candidate
+	}
+	return nil
+}
+
+func sameEvidenceTiming(left, right Evidence) bool {
+	return left.StartedAt != nil && right.StartedAt != nil && left.EndedAt != nil && right.EndedAt != nil && left.StartedAt.Equal(*right.StartedAt) && left.EndedAt.Equal(*right.EndedAt)
 }
 
 func validateEvidence(project Project) error {
@@ -359,6 +408,9 @@ func validateEvidenceRecord(evidence Evidence) error {
 		if err := validateEvidenceText(evidence.Model, "evidence model"); err != nil {
 			return err
 		}
+		if err := validateEvidenceTiming(evidence.StartedAt, evidence.EndedAt, evidence.ObservedAt, "native evidence"); err != nil {
+			return err
+		}
 		if evidence.Artifact != nil {
 			return fmt.Errorf("native evidence carries an artifact")
 		}
@@ -369,6 +421,9 @@ func validateEvidenceRecord(evidence Evidence) error {
 		if evidence.TurnID != "" || evidence.Provider != "" || evidence.Model != "" {
 			return fmt.Errorf("artifact evidence carries native fields")
 		}
+		if evidence.StartedAt != nil || evidence.EndedAt != nil {
+			return fmt.Errorf("artifact evidence carries native timing")
+		}
 		if evidence.Artifact == nil {
 			return fmt.Errorf("artifact evidence has no digest")
 		}
@@ -377,6 +432,25 @@ func validateEvidenceRecord(evidence Evidence) error {
 		}
 	default:
 		return fmt.Errorf("evidence has an unknown source %q", evidence.Source)
+	}
+	return nil
+}
+
+func validateEvidenceTiming(startedAt, endedAt *time.Time, observedAt time.Time, label string) error {
+	if (startedAt == nil) != (endedAt == nil) {
+		return fmt.Errorf("%s timing must include both started and ended times", label)
+	}
+	if startedAt == nil {
+		return nil
+	}
+	if startedAt.IsZero() || endedAt.IsZero() {
+		return fmt.Errorf("%s timing cannot contain a zero time", label)
+	}
+	if endedAt.Before(*startedAt) {
+		return fmt.Errorf("%s timing ends before it starts", label)
+	}
+	if startedAt.After(observedAt) || endedAt.After(observedAt) {
+		return fmt.Errorf("%s timing is after its observed time", label)
 	}
 	return nil
 }
