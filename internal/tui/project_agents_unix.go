@@ -208,6 +208,10 @@ func (model *projectAgentsModel) startAction(evidence bool) tea.Cmd {
 	if !ok {
 		return nil
 	}
+	if row.Enrollment == "unbound" || row.State == "unbound" {
+		model.footer = model.styles.Meta.Render("No session connected to this thread yet.")
+		return nil
+	}
 	callback := model.focus
 	label := "opened "
 	if evidence {
@@ -365,6 +369,11 @@ func renderProjectAgents(snapshot projectview.AgentsSnapshot, width, height int,
 		now = time.Now()
 	}
 	styles := th.Styles()
+	inset := 0
+	if width >= 40 {
+		inset = 2
+	}
+	width -= inset * 2
 	separator := projectAgentsSeparator(ascii)
 	rows := snapshot.Rows
 	if len(rows) > projectview.MaxAgentRows {
@@ -377,7 +386,7 @@ func renderProjectAgents(snapshot projectview.AgentsSnapshot, width, height int,
 		mark = "*"
 	}
 	header := styles.Brand.Render(mark) + " " + styles.Header.Render("Agents")
-	header += styles.Muted.Render(fmt.Sprintf("  %d active%sLast %s", active, separator, windowLabel))
+	header += styles.Meta.Render(fmt.Sprintf("  %d active%sLast %s", active, separator, windowLabel))
 	var notes []string
 	if snapshot.Partial {
 		notes = append(notes, "partial")
@@ -388,59 +397,113 @@ func renderProjectAgents(snapshot projectview.AgentsSnapshot, width, height int,
 	if snapshot.DroppedSpans > 0 {
 		notes = append(notes, fmt.Sprintf("dropped %d spans", snapshot.DroppedSpans))
 	}
-	if snapshot.Reason != "" {
-		notes = append(notes, "reason: "+safeProjectAgents(snapshot.Reason, 80))
-	}
-	if len(notes) > 0 {
-		header += styles.Warn.Render(separator + strings.Join(notes, separator))
-	}
 	if sourceError != "" {
-		header += styles.Danger.Render(separator + "source unavailable")
+		header += styles.Danger.Render(separator + "live updates unavailable")
 	} else if loading {
 		loadingLabel := "loading…"
 		if ascii {
 			loadingLabel = "loading..."
 		}
-		header += styles.Muted.Render(separator + loadingLabel)
+		header += styles.Meta.Render(separator + loadingLabel)
 	}
-	if snapshot.ProjectName != "" {
-		header += styles.Dim.Render(separator + safeProjectAgents(snapshot.ProjectName, 48))
+	unbound := projectAgentsAllUnbound(rows)
+	spacedHeight := 7 + len(rows)*3
+	if unbound {
+		spacedHeight += 3
 	}
-	lines := []string{fitProjectAgentsLine(header, width)}
+	if len(notes) > 0 {
+		spacedHeight++
+	}
+	comfortable := height >= max(12, spacedHeight)
+	lines := make([]string, 0, height)
+	if comfortable {
+		lines = append(lines, "")
+	}
+	lines = append(lines, fitProjectAgentsLine(header, width))
+	if len(notes) > 0 {
+		lines = append(lines, styles.Warn.Render(strings.Join(notes, separator)))
+	}
+	if comfortable {
+		if snapshot.ProjectName != "" {
+			lines = append(lines, styles.Fg.Render(safeProjectAgents(snapshot.ProjectName, width)))
+		}
+		lines = append(lines, "")
+	}
+	if comfortable && unbound {
+		lines = append(lines, styles.Fg.Render("No agents connected yet."), styles.Meta.Render("Connect a harness to a thread to begin."), "")
+	}
 	narrow := width < projectAgentsMinWidth
+	rowHeight := 2
+	if comfortable {
+		rowHeight = 3
+	}
 	if len(rows) == 0 {
-		lines = append(lines, fitProjectAgentsLine(styles.Muted.Render("No agent threads observed"), width))
+		lines = append(lines, fitProjectAgentsLine(styles.Meta.Render("No agent threads observed"), width))
 	} else if narrow {
-		room := max(height-len(lines)-1, 1)
+		room := max((height-len(lines)-1)/rowHeight, 1)
 		start, end := projectAgentsWindowRows(rows, selection, room)
 		for _, row := range rows[start:end] {
-			lines = append(lines, renderProjectAgentsListRow(row, row.ThreadID == selection, width, ascii, styles, now, sourceError != ""))
+			lines = append(lines, strings.Split(renderProjectAgentsListRow(row, row.ThreadID == selection, width, ascii, styles, now, sourceError != ""), "\n")...)
+			if comfortable {
+				lines = append(lines, "")
+			}
 		}
 	} else {
 		timelineStart := now.Add(-window)
 		barWidth := max(width-projectAgentsNameWidth-3, 16)
-		lines = append(lines, renderProjectAgentsAxis(timelineStart, now, barWidth, ascii, styles))
-		room := max((height-len(lines)-1)/2, 1)
+		if unbound {
+			lines = append(lines, styles.Meta.Render("  "+fitProjectAgentsText("THREAD", projectAgentsNameWidth)+" STATUS"))
+		} else {
+			lines = append(lines, renderProjectAgentsAxis(timelineStart, now, barWidth, ascii, styles))
+		}
+		if comfortable {
+			lines = append(lines, "")
+		}
+		room := max((height-len(lines)-1)/rowHeight, 1)
 		start, end := projectAgentsWindowRows(rows, selection, room)
 		for _, row := range rows[start:end] {
 			lines = append(lines, strings.Split(renderProjectAgentsRow(row, row.ThreadID == selection, timelineStart, now, now, width, barWidth, ascii, styles, sourceError != ""), "\n")...)
+			if comfortable {
+				lines = append(lines, "")
+			}
 		}
 	}
 	if footer == "" {
-		footerText := "↑↓/jk move · enter focus · e evidence · +/- window · q quit"
+		footerText := "↑↓ select · enter open · e details · +/- zoom · q quit"
 		if ascii {
-			footerText = "up/down j/k move - enter focus - e evidence - +/- window - q quit"
+			footerText = "j/k select - enter open - e details - +/- zoom - q quit"
 		}
-		footer = styles.Muted.Render(footerText)
+		if unbound {
+			footerText = "↑/↓ select   q quit"
+			if ascii {
+				footerText = "j/k select   q quit"
+			}
+		}
+		footer = styles.Meta.Render(footerText)
 	}
-	lines = append(lines, fitProjectAgentsLine(footer, width))
-	if height > 0 && len(lines) > height {
-		lines = lines[:height]
+	if len(lines) >= height {
+		lines = lines[:height-1]
 	}
-	for len(lines) < height {
+	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
+	lines = append(lines, fitProjectAgentsLine(footer, width))
+	for index, line := range lines {
+		lines[index] = strings.Repeat(" ", inset) + fitProjectAgentsLine(line, width)
+	}
 	return strings.Join(lines, "\n")
+}
+
+func projectAgentsAllUnbound(rows []projectview.AgentRow) bool {
+	if len(rows) == 0 {
+		return false
+	}
+	for _, row := range rows {
+		if row.Enrollment != "unbound" && row.State != "unbound" {
+			return false
+		}
+	}
+	return true
 }
 
 func projectAgentsWindowRows(rows []projectview.AgentRow, selection string, room int) (int, int) {
@@ -475,7 +538,7 @@ func renderProjectAgentsAxis(start, end time.Time, width int, ascii bool, styles
 	line = replaceProjectAgentsAt(line, 0, left)
 	line = replaceProjectAgentsAt(line, max((width-ansi.StringWidth(middle))/2, 0), middle)
 	line = replaceProjectAgentsAt(line, max(width-ansi.StringWidth(right), 0), right)
-	return styles.Dim.Render(strings.Repeat(" ", projectAgentsNameWidth+1) + fitProjectAgentsText(line, width))
+	return styles.Meta.Render(strings.Repeat(" ", projectAgentsNameWidth+3) + fitProjectAgentsText(line, width))
 }
 
 func renderProjectAgentsRow(row projectview.AgentRow, selected bool, start, end, now time.Time, totalWidth, barWidth int, ascii bool, styles theme.Styles, sourceError bool) string {
@@ -489,31 +552,35 @@ func renderProjectAgentsRow(row projectview.AgentRow, selected bool, start, end,
 		lead = styles.Selected.Render("> ")
 	}
 	bar := projectAgentsBar(row, start, end, barWidth, ascii, styles, now, sourceError)
-	first := lead + fitProjectAgentsText(name, projectAgentsNameWidth) + " " + bar
+	nameStyle := styles.Fg.Bold(true)
+	if selected {
+		nameStyle = styles.Selected
+	}
+	if row.Enrollment == "unbound" || row.State == "unbound" {
+		bar = styles.Meta.Render("Not connected")
+	}
+	first := lead + nameStyle.Render(name) + " " + bar
 	subtitle := projectAgentsSubtitle(row)
-	state := projectAgentsState(row, now, sourceError)
-	coverage := projectAgentsCoverage(row)
-	labels := projectAgentsActivityLabels(row, now, sourceError)
 	leftColumn := strings.Repeat(" ", 2) + fitProjectAgentsText(subtitle, projectAgentsNameWidth)
-	rightColumn := state + projectAgentsSeparator(ascii) + coverage + projectAgentsSeparator(ascii) + labels
-	second := leftColumn + " " + rightColumn
+	second := styles.Meta.Render(leftColumn + " " + projectAgentsSummary(row, now, sourceError, ascii))
 	return fitProjectAgentsLine(first, totalWidth) + "\n" + fitProjectAgentsLine(second, totalWidth)
 }
 
 func renderProjectAgentsListRow(row projectview.AgentRow, selected bool, width int, ascii bool, styles theme.Styles, now time.Time, sourceError bool) string {
 	name := safeProjectAgents(row.Name, 48)
 	subtitle := projectAgentsSubtitle(row)
-	state := projectAgentsState(row, now, sourceError)
-	text := name + projectAgentsSeparator(ascii) + subtitle + projectAgentsSeparator(ascii) + state
+	text := name + projectAgentsSeparator(ascii) + projectAgentsStateLabel(row, now, sourceError)
 	if selected {
 		text = "> " + text
 	} else {
 		text = "  " + text
 	}
 	if selected {
-		return fitProjectAgentsLine(styles.Selected.Render(text), width)
+		text = styles.Selected.Render(text)
+	} else {
+		text = styles.Fg.Bold(true).Render(text)
 	}
-	return fitProjectAgentsLine(styles.Fg.Render(text), width)
+	return fitProjectAgentsLine(text, width) + "\n" + fitProjectAgentsLine(styles.Meta.Render("  "+subtitle), width)
 }
 
 func projectAgentsBar(row projectview.AgentRow, start, end time.Time, width int, ascii bool, styles theme.Styles, now time.Time, sourceError bool) string {
@@ -742,69 +809,58 @@ func projectAgentsSpanIdentifier(span activity.Span) string {
 }
 
 func projectAgentsSubtitle(row projectview.AgentRow) string {
+	if row.Enrollment == "unbound" || row.State == "unbound" {
+		if row.Role == "coordinator" {
+			return "Coordinator"
+		}
+		return "Worker"
+	}
 	harness := safeProjectAgents(row.Harness, 24)
 	model := safeProjectAgents(row.Model, 40)
 	if model != "" {
 		return capProjectAgentsText(harness+" / "+model, 68)
 	}
 	if harness != "" {
-		return harness + " / model unknown"
+		return harness + " / model unavailable"
 	}
-	return "harness unknown / model unknown"
+	return "Harness unavailable"
 }
 
-func projectAgentsActivityLabels(row projectview.AgentRow, now time.Time, sourceError bool) string {
-	labels := make([]string, 0, 4)
-	seen := make(map[string]bool)
-	for _, item := range row.Spans {
-		state := item.Span.State
-		if state == activity.Running && !projectAgentsRowFresh(row, now, sourceError) {
-			state = activity.Unknown
-		}
-		label := projectAgentsSourceName(item.Source) + "/" + string(state)
-		if label == "" {
-			label = "native activity"
-		}
-		if seen[label] {
-			continue
-		}
-		seen[label] = true
-		labels = append(labels, safeProjectAgents(label, 40))
-		if len(labels) == 4 {
-			break
-		}
+func projectAgentsStateLabel(row projectview.AgentRow, now time.Time, sourceError bool) string {
+	if row.Enrollment == "unbound" {
+		return "Not connected"
 	}
-	if len(labels) == 0 {
-		for _, point := range row.Points {
-			if len(labels) == 4 {
-				break
-			}
-			labels = append(labels, safeProjectAgents(projectAgentsSourceName(point.Source)+"/point/"+string(point.State), 40))
-		}
+	switch projectAgentsState(row, now, sourceError) {
+	case "unbound":
+		return "Not connected"
+	case "active":
+		return "Working"
+	case "idle":
+		return "Idle"
+	case "stale":
+		return "Session changed"
+	default:
+		return "Activity unknown"
+	}
+}
+
+func projectAgentsSummary(row projectview.AgentRow, now time.Time, sourceError, ascii bool) string {
+	if row.Enrollment == "unbound" || row.State == "unbound" {
+		return ""
+	}
+	parts := []string{projectAgentsStateLabel(row, now, sourceError)}
+	switch row.Coverage {
+	case activity.CoverageCurrentProcess:
+		parts = append(parts, "current session only")
+	case activity.CoverageNativeHistory:
+		parts = append(parts, "native history")
+	default:
+		parts = append(parts, "history unavailable")
 	}
 	if row.Partial {
-		labels = append(labels, "partial")
+		parts = append(parts, "partial data")
 	}
-	if row.Reason != "" {
-		labels = append(labels, "reason/"+safeProjectAgents(row.Reason, 60))
-	}
-	if len(labels) == 0 {
-		return "native activity unavailable"
-	}
-	return "native activity: " + strings.Join(labels, ", ")
-}
-
-func projectAgentsSourceName(source activity.Source) string {
-	switch source {
-	case activity.SourceCodex:
-		return "codex"
-	case activity.SourcePi:
-		return "pi"
-	case activity.SourceHermes:
-		return "hermes"
-	default:
-		return safeProjectAgents(string(source), 24)
-	}
+	return strings.Join(parts, projectAgentsSeparator(ascii))
 }
 
 func projectAgentsSeparator(ascii bool) string {
@@ -827,13 +883,6 @@ func projectAgentsState(row projectview.AgentRow, now time.Time, sourceError boo
 
 func projectAgentsRowFresh(row projectview.AgentRow, now time.Time, sourceError bool) bool {
 	return !sourceError && strings.EqualFold(row.State, "active") && projectAgentsFresh(row.ObservedAt, now)
-}
-
-func projectAgentsCoverage(row projectview.AgentRow) string {
-	if row.Coverage == "" {
-		return "coverage unknown"
-	}
-	return safeProjectAgents(string(row.Coverage), 24)
 }
 
 func countProjectAgentsActive(rows []projectview.AgentRow, now time.Time, sourceError string) int {

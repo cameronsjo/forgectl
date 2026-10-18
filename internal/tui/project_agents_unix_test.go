@@ -39,7 +39,7 @@ func TestRenderProjectAgentsKnownAndMissingGeometry(test *testing.T) {
 	for _, ascii := range []bool{false, true} {
 		out := RenderProjectAgents(snapshot, 100, 10, "thread-1", 30*time.Minute, now, ascii, theme.Default())
 		plain := ansi.Strip(out)
-		if !strings.Contains(plain, "build") || !strings.Contains(plain, "native activity") || !strings.Contains(plain, "pi / gpt-5") {
+		if !strings.Contains(plain, "build") || !strings.Contains(plain, "Working") || !strings.Contains(plain, "pi / gpt-5") {
 			test.Fatalf("renderer omitted row metadata (ascii=%v): %q", ascii, plain)
 		}
 		if ascii && !strings.Contains(plain, "=") {
@@ -69,15 +69,95 @@ func TestRenderProjectAgentsKeepsNativeModelsVisible(test *testing.T) {
 	}
 }
 
-func TestProjectAgentsActivityLabelsDeduplicateNativeStates(test *testing.T) {
+func TestProjectAgentsUnboundLayoutHasBreathingRoom(test *testing.T) {
 	now := time.Now().UTC()
-	row := projectview.AgentRow{ObservedAt: now, Coverage: activity.CoverageCurrentProcess, Spans: []projectview.AgentSpan{
-		{Source: activity.SourcePi, Span: activity.Span{State: activity.Finished}},
-		{Source: activity.SourcePi, Span: activity.Span{State: activity.Finished}},
-		{Source: activity.SourceCodex, Span: activity.Span{State: activity.Finished}},
+	snapshot := projectview.AgentsSnapshot{ProjectName: "Projects preview", Rows: []projectview.AgentRow{
+		{ThreadID: "coordinator", Name: "Projects preview", Role: "coordinator", State: "unbound", Enrollment: "unbound", Reason: "thread-unbound"},
+		{ThreadID: "worker", Name: "Implementation", Role: "worker", State: "unbound", Enrollment: "unbound", Reason: "thread-unbound"},
+		{ThreadID: "review", Name: "Review", Role: "worker", State: "unbound", Enrollment: "unbound", Reason: "thread-unbound"},
 	}}
-	label := projectAgentsActivityLabels(row, now, false)
-	if label != "native activity: pi/finished, codex/finished" {
+	for _, width := range []int{50, 80, 132} {
+		plain := ansi.Strip(RenderProjectAgents(snapshot, width, 24, "worker", projectAgentsDefaultView, now, true, theme.Default()))
+		for _, want := range []string{"No agents connected", "Not connected", "Coordinator", "Implementation", "Review"} {
+			if !strings.Contains(plain, want) {
+				test.Fatalf("width %d omitted %q: %q", width, want, plain)
+			}
+		}
+		for _, forbidden := range []string{"harness unknown", "model unknown", "coverage unknown", "reason/", "native activity:", "thread-unbound"} {
+			if strings.Contains(plain, forbidden) {
+				test.Fatalf("width %d leaked diagnostic %q: %q", width, forbidden, plain)
+			}
+		}
+		lines := strings.Split(plain, "\n")
+		if len(lines) != 24 || strings.TrimSpace(lines[0]) != "" {
+			test.Fatalf("width %d lost viewport or top margin: %q", width, plain)
+		}
+		for lineIndex, line := range lines {
+			if ansi.StringWidth(line) > width {
+				test.Fatalf("width %d overflowed: %q", width, line)
+			}
+			if strings.Contains(line, "Implementation") && (lineIndex+2 >= len(lines) || strings.TrimSpace(lines[lineIndex+2]) != "") {
+				test.Fatalf("width %d has no gap after the selected row: %q", width, plain)
+			}
+		}
+	}
+}
+
+func TestProjectAgentsAxisAndBarsShareColumn(test *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 30, 0, 0, time.UTC)
+	ended := now
+	snapshot := projectview.AgentsSnapshot{Rows: []projectview.AgentRow{{
+		ThreadID: "thread", Name: "Implementation", Harness: "pi", Model: "gpt-5.6-sol", State: "idle", ObservedAt: now,
+		Spans: []projectview.AgentSpan{{Source: activity.SourcePi, Span: activity.Span{StartedAt: now.Add(-30 * time.Minute), EndedAt: &ended, State: activity.Finished}}},
+	}}}
+	plain := ansi.Strip(RenderProjectAgents(snapshot, 100, 24, "thread", projectAgentsDefaultView, now, true, theme.Default()))
+	axisColumn, barColumn := -1, -1
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "12:00") {
+			axisColumn = strings.Index(line, "12:00")
+		}
+		if strings.Contains(line, "Implementation") {
+			barColumn = strings.Index(line, "=")
+		}
+	}
+	if axisColumn < 0 || barColumn < 0 || axisColumn != barColumn {
+		test.Fatalf("axis column %d does not match bar column %d: %q", axisColumn, barColumn, plain)
+	}
+}
+
+func TestProjectAgentsSpacingDoesNotHideRowsInShortViewports(test *testing.T) {
+	now := time.Now().UTC()
+	for _, state := range []string{"idle", "unbound"} {
+		rows := []projectview.AgentRow{
+			{ThreadID: "one", Name: "Coordinator", State: state},
+			{ThreadID: "two", Name: "Implementation", State: state},
+			{ThreadID: "three", Name: "Review", State: state},
+		}
+		for height := 9; height <= 24; height++ {
+			plain := ansi.Strip(RenderProjectAgents(projectview.AgentsSnapshot{ProjectName: "preview", Rows: rows}, 80, height, "three", projectAgentsDefaultView, now, true, theme.Default()))
+			for _, row := range rows {
+				if !strings.Contains(plain, row.Name) {
+					test.Fatalf("height %d state %s hid %s: %q", height, state, row.Name, plain)
+				}
+			}
+		}
+	}
+}
+
+func TestProjectAgentsUnboundLabelDoesNotDependOnActivityState(test *testing.T) {
+	for _, state := range []string{"", "unknown", "stale"} {
+		row := projectview.AgentRow{Enrollment: "unbound", State: state}
+		if got := projectAgentsStateLabel(row, time.Now(), false); got != "Not connected" {
+			test.Fatalf("unbound enrollment with state %q rendered %q", state, got)
+		}
+	}
+}
+
+func TestProjectAgentsSummaryKeepsCoverageWithoutRawDiagnostics(test *testing.T) {
+	now := time.Now().UTC()
+	row := projectview.AgentRow{State: "idle", ObservedAt: now, Coverage: activity.CoverageCurrentProcess, Partial: true, Reason: "native-read-failed"}
+	label := projectAgentsSummary(row, now, false, true)
+	if label != "Idle - current session only - partial data" {
 		test.Fatalf("unexpected labels: %s", label)
 	}
 }
@@ -180,7 +260,7 @@ func TestProjectAgentsCoverageAndPartialStatusStayVisible(test *testing.T) {
 	if !strings.Contains(out, "partial") || !strings.Contains(out, "dropped 4 threads") || !strings.Contains(out, "dropped 8 spans") {
 		test.Fatalf("partial coverage was hidden by project label: %q", out)
 	}
-	if !strings.Contains(out, "idle") || !strings.Contains(out, "current-process") {
+	if !strings.Contains(out, "Idle") || !strings.Contains(out, "current session only") {
 		test.Fatalf("row state/coverage metadata was hidden: %q", out)
 	}
 }
@@ -254,7 +334,7 @@ func TestProjectAgentsPartialCoveragePointsAndASCII(test *testing.T) {
 		}},
 	}
 	out := ansi.Strip(RenderProjectAgents(snapshot, 100, 10, "thread-1", projectAgentsDefaultView, now, true, theme.Default()))
-	for _, want := range []string{"partial", "dropped 2 threads", "dropped 3 spans", "current-process", "pi/finished", "o"} {
+	for _, want := range []string{"partial", "dropped 2 threads", "dropped 3 spans", "current session only", "Session changed", "=", "o"} {
 		if !strings.Contains(out, want) {
 			test.Fatalf("ASCII renderer omitted %q: %q", want, out)
 		}
@@ -297,6 +377,26 @@ func TestProjectAgentsActionsUseExactIdentity(test *testing.T) {
 	}
 	if gotThread != "thread" || gotRun != "run" {
 		test.Fatalf("focus callback got %q/%q", gotThread, gotRun)
+	}
+}
+
+func TestProjectAgentsUnboundActionExplainsWithoutCallingSurface(test *testing.T) {
+	called := false
+	callback := func(context.Context, string, string) error {
+		called = true
+		return nil
+	}
+	model := newProjectAgentsModel(context.Background(), ProjectAgentsOptions{Focus: callback, OpenEvidence: callback})
+	model.snapshot.Rows = []projectview.AgentRow{{ThreadID: "thread", State: "unbound", Enrollment: "unbound"}}
+	model.selected = "thread"
+	for _, evidence := range []bool{false, true} {
+		if command := model.startAction(evidence); command != nil {
+			command()
+			test.Fatal("unbound row scheduled a surface action")
+		}
+	}
+	if called || !strings.Contains(ansi.Strip(model.footer), "No session connected") {
+		test.Fatalf("missing honest unbound explanation: called=%v footer=%q", called, model.footer)
 	}
 }
 

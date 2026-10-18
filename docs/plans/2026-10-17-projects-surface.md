@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: P1–P6, R1–R4, and V1–V4 complete; native/terminal acceptance and exact feature-branch delivery verified
-Next action: wait for separate authorization before PR creation, installation, merge, or deployment. Existing installations remain unchanged.
+Status: P1–P6, R1–R4, and V1–V4 complete; Cameron's preview-readability follow-up is in progress
+Next action: finish the scoped readability fix and refresh only the isolated preview. PR creation, installation, merge, and deployment still require separate authorization.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -244,6 +244,15 @@ V2/V3 integration now supplies printed/JSON snapshots, a live terminal-native Ag
 Codex independently ran all `TestSurfaceProject`/`TestFocusProjectAgent` tests plus both JSON-emitter guard suites (20.344s), including unchanged registry bytes, partial output with nonzero status, and no invented historical model. The full TUI suite passed (17.768s) after removing the calling shell's `NO_COLOR` override; the initial golden mismatch was ASCII versus icon output, not a source defect. All-lines CLI lint exposes 378 findings outside `surface_project*`; its parsed report contains zero Projects findings, including new files. Native adapter/TUI all-lines lint is clean. The acceptance scripts now assert current native finished intervals alongside exact historical bindings, positive central-pane rendering, a wrong-content negative control, and Enter focus without duplicate surfaces. Their assertion/terminal-probe contract tests pass; real execution of those new gates remains required by V4/P5.
 
 ## Local acceptance commands
+
+### Preview readability follow-up
+
+Cameron launched the isolated preview after restarting, then reported that the crowded, diagnostic-heavy empty state was difficult to read. Codex is improving presentation only: outer margins, space between rows, stronger names/selection, plain-language unbound and unavailable states, a separated keyboard footer, and an aligned time axis. Unknown activity must remain unknown; no fake agents, bars, model calls, or enrollment changes are part of this fix. Detailed machine diagnostics remain in the existing printed/JSON and evidence views. Ownership markers remain unchanged.
+
+- [x] U1: Add renderer/action regressions, implement the readability changes, and run affected tests and lint.
+- [ ] U2: Rebuild committed source, refresh only the preview viewer, inspect the actual terminal render, and push the feature branch. Preserve the running preview session and do not install globally.
+
+The original renderer failed the new empty-state spacing and axis-alignment tests. Independent review found a short-height density regression and inconsistent unbound labeling; both were corrected and covered by height 9–24 and skewed-state tests. The complete TUI suite and focused Agents race tests pass with the inherited `NO_COLOR` override unset; that override changed unrelated existing icon goldens to ASCII and was not a product defect. Pinned golangci-lint v2.13.1 reports zero issues across the full TUI package. No golden files, native observation semantics, enrollment controls, or ownership rules changed.
 
 The first Agents-era native runs used a clean full clone at `1f63c9f0`, binary SHA-256 `f446b737f70cf01a2a7c155dad3e5674c6403cb51f161bf7c1fbd07a5aa797a6`, with `vcs.modified=false`. Builds from linked worktrees were rejected before use: Go 1.26.8's VCS lookup requires a `.git` directory and did not stamp the intended linked-worktree revision. A separate local clone with a real `.git` directory supplied the verified artifact; no toolchain or source workaround was introduced.
 
