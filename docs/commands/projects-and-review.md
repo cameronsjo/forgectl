@@ -27,9 +27,10 @@ forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
 
-`projects goals` runs the compiled self-service repository-goal workflow: an
-eight-step setup, explicit confirmation, isolated worktree, three native Codex
-roles, retained patch/check evidence and operator-question handling. It is
+`projects goals` runs the compiled self-service repository-goal workflow: a
+single setup form with task presets, explicit confirmation, an isolated worktree,
+three native Codex roles, and one run workspace for questions and patch/check
+evidence. It is
 different from the attended Codex/Pi/Codex pilot. See the practical
 [self-service repository goals guide](surface-project.md#self-service-repository-goals)
 for the TUI and `prepare`/`start`/`status`/`respond`/`cancel`/`artifact` CLI.

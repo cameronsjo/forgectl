@@ -61,25 +61,33 @@ func TestProjectGoalPresetsSuggestFixedCommandsWithoutExecution(test *testing.T)
 
 func TestProjectGoalPresetDetectionDoesNotExecuteRunners(test *testing.T) {
 	directory := test.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
 	marker := filepath.Join(directory, "execution-marker")
 	bin := filepath.Join(directory, "bin")
-	if err := os.Mkdir(bin, 0o700); err != nil {
+	if err := root.Mkdir("bin", 0o700); err != nil {
 		test.Fatal(err)
 	}
 	for _, name := range []string{"git", "go", "cargo", "npm", "pnpm", "yarn", "bun"} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nprintf ran > \"$FORGECTL_PRESET_EXECUTION_MARKER\"\n"), 0o700); err != nil {
+		if err := root.WriteFile(filepath.Join("bin", name), []byte("#!/bin/sh\nprintf ran > \"$FORGECTL_PRESET_EXECUTION_MARKER\"\n"), 0o700); err != nil {
 			test.Fatal(err)
 		}
 	}
 	test.Setenv("PATH", bin)
 	test.Setenv("FORGECTL_PRESET_EXECUTION_MARKER", marker)
-	if err := exec.CommandContext(test.Context(), filepath.Join(bin, "npm"), "run", "test").Run(); err != nil {
+	if executable, err := exec.LookPath("npm"); err != nil || executable != filepath.Join(bin, "npm") {
+		test.Fatalf("execution control resolved outside its private directory: %q %v", executable, err)
+	}
+	if err := exec.CommandContext(test.Context(), "npm", "run", "test").Run(); err != nil {
 		test.Fatal(err)
 	}
-	if data, err := os.ReadFile(marker); err != nil || string(data) != "ran" {
+	if data, err := root.ReadFile("execution-marker"); err != nil || string(data) != "ran" {
 		test.Fatalf("execution control did not engage: %q %v", data, err)
 	}
-	if err := os.Remove(marker); err != nil {
+	if err := root.Remove("execution-marker"); err != nil {
 		test.Fatal(err)
 	}
 	for _, name := range []string{"package.json", "go.mod", "Cargo.toml"} {
@@ -91,7 +99,7 @@ func TestProjectGoalPresetDetectionDoesNotExecuteRunners(test *testing.T) {
 			test.Fatalf("test runner not detected from %s", name)
 		}
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+	if _, err := root.Stat("execution-marker"); !os.IsNotExist(err) {
 		test.Fatalf("preset detection executed a runner or marker check failed: %v", err)
 	}
 }

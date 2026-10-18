@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe the Projects Goals wizard over a real pty without starting a goal."""
+"""Probe the Projects Goals form over a real pty without starting a goal."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import pathlib
 import re
 import select
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -228,7 +229,7 @@ def _assert_dashboard(screen: str, negative: str) -> dict[str, bool]:
     checks = {
         "header": _exact_visible(screen, "Projects · Goals"),
         "empty": _exact_visible(screen, "No goals yet."),
-        "start_hint": _exact_visible(screen, "Press n to start a repository goal."),
+        "new_goal": _exact_visible(screen, "New goal"),
         "negative_absent": not _exact_visible(screen, negative),
     }
     return checks
@@ -237,43 +238,107 @@ def _assert_dashboard(screen: str, negative: str) -> dict[str, bool]:
 def _visible_wrapped(screen: str, value: str) -> bool:
     normalized_screen = re.sub(r"\s+", " ", screen).strip()
     normalized_value = re.sub(r"\s+", " ", value).strip()
-    return _exact_visible(normalized_screen, normalized_value)
+    if _exact_visible(normalized_screen, normalized_value):
+        return True
+    characters = [r"\s+" if character.isspace() else re.escape(character) for character in normalized_value]
+    pattern = r"(?<!\w)" + r"\s*".join(characters) + r"(?!\w)"
+    return re.search(pattern, screen) is not None
 
 
-def _run_wizard(executable: pathlib.Path, root: pathlib.Path, repository: pathlib.Path, args: argparse.Namespace, rows: int, cols: int, output: pathlib.Path) -> dict:
+def _focused(screen: str, label: str) -> bool:
+    return re.search(r"(?m)^\s*>\s+(?:\[\s*)?" + re.escape(label) + r"(?=[:\s\]]|$)", screen) is not None
+
+
+def _focus(session: PTYSession, label: str) -> str:
+    for _ in range(16):
+        screen = session.drain(0.08)
+        if _focused(screen, label):
+            return screen
+        session.send(b"\t")
+    raise ProbeError(f"could not focus {label}; last screen:\n{session.screen.text()}")
+
+
+def _type_lines(session: PTYSession, value: str) -> None:
+    for index, line in enumerate(value.split("\n")):
+        if index:
+            session.send(b"\r")
+        session.send(line.encode())
+        session.drain(0.05)
+
+
+def _fill(session: PTYSession, label: str, value: str) -> None:
+    _focus(session, label)
+    session.send(b"\x15")
+    _type_lines(session, value)
+    session.send(b"\t")
+
+
+def _scan(session: PTYSession) -> tuple[str, bool]:
+    screens = [session.drain(0.08)]
+    for _ in range(16):
+        session.send(b"\x1b[5~")
+        screens.append(session.drain(0.025))
+    for _ in range(32):
+        session.send(b"\x1b[6~")
+        screens.append(session.drain(0.025))
+    return "\n".join(screens), len(set(screens)) > 1
+
+
+def _registry_ids(root: pathlib.Path) -> list[str]:
+    goals = root / "goals"
+    if not goals.exists():
+        return []
+    return sorted(path.name for path in goals.iterdir() if path.is_dir())
+
+
+def _run_setup(executable: pathlib.Path, root: pathlib.Path, repository: pathlib.Path, args: argparse.Namespace, rows: int, cols: int, output: pathlib.Path) -> dict:
     values = _fixture_args(args)
-    labels = ["Repository", "Title", "Objective", "Allowed paths", "Acceptance", "Checks (JSON arrays)", "OpenAI model", "Duration (minutes)"]
     session = PTYSession(executable, root, args.model, repository, rows, cols)
-    process = None
+    before_ids = _registry_ids(root)
     try:
         session.start()
-        dashboard = session.wait_for(lambda text: "No goals yet." in text or re.search(r"goal-[a-f0-9]{24}", text), "empty dashboard")
+        dashboard = session.wait_for(lambda text: "No goals yet." in text, "empty dashboard")
         dashboard_checks = _assert_dashboard(dashboard, args.negative_expected_label)
         if not all(dashboard_checks.values()):
             if not dashboard_checks["negative_absent"]:
                 raise ProbeError("negative expected label appeared in reconstructed screen")
             raise ProbeError(f"dashboard assertions failed: {dashboard_checks}")
-        session.send(b"n")
-        steps = {}
-        field_names = ["repository", "title", "objective", "scope", "acceptance", "checks", "model", "duration"]
-        for index, label in enumerate(labels):
-            header = f"Start goal · step {index + 1}/8 · {label}"
-            screen = session.wait_for(lambda text, expected=header: _exact_visible(text, expected), header)
-            steps[f"step_{index + 1}"] = screen
-            session.send(b"\x15")
-            session.send(values[field_names[index]].encode())
-            session.send(b"\x13")
-        review = session.wait_for(lambda text: _exact_visible(text, "Review before start"), "review screen")
-        review_before = review
-        scroll_screens = []
-        for _ in range(32):
-            session.send(b"j")
-            scroll_screens.append(session.drain(0.04))
-        review_after = session.screen.text()
-        combined = "\n".join([review_before, *scroll_screens, review_after])
+        session.send(b"\r")
+        session.wait_for(lambda text: _focused(text, "Repository"), "single setup form")
+        _focus(session, "Preset")
+        for _ in range(4):
+            if "[Docs]" in session.drain(0.08):
+                break
+            session.send(b"\x1b[C")
+        session.wait_for(lambda text: "[Docs]" in text, "Docs preset")
+        _focus(session, "Goal")
+        _type_lines(session, values["objective"])
+        session.send(b"\r")
+        _type_lines(session, "q d v c stay ordinary goal text")
+        session.send(b"\t")
+        _focus(session, "Prepare goal")
+        session.send(b"\r")
+        minimal_review = session.wait_for(lambda text: _focused(text, "Edit"), "prepared approval with safe default")
+        minimal_scan, _ = _scan(session)
+        minimal_review += "\n" + minimal_scan
+        _focus(session, "Edit")
+        session.send(b"\r")
+        _focus(session, "Advanced")
+        session.send(b"\r")
+        session.wait_for(lambda text: "Advanced: expanded" in text, "inline advanced settings")
+        for label, field in (("Title", "title"), ("Allowed scope", "scope"), ("Acceptance", "acceptance"), ("Checks", "checks"), ("OpenAI model", "model"), ("Duration (minutes)", "duration")):
+            _fill(session, label, values[field])
+        _focus(session, "Prepare goal")
+        session.send(b"\r")
+        review_before = session.wait_for(lambda text: _focused(text, "Edit"), "custom approval")
+        combined, scrolled = _scan(session)
         rendered_checks = [json.dumps(check, separators=(",", ":")) for check in json.loads(values["checks"])]
         checks = {
-            "review": _exact_visible(combined, "Review before start"),
+            "single_form": "step 1/8" not in minimal_review,
+            "docs_preset": _visible_wrapped(minimal_review, "docs"),
+            "ordinary_multiline_text": _visible_wrapped(minimal_review, "q d v c stay ordinary goal text"),
+            "safe_approval_focus": _focused(review_before, "Edit"),
+            "review": _exact_visible(combined, "Approval"),
             "title": _exact_visible(combined, values["title"]),
             "scope": _exact_visible(combined, values["scope"]),
             "model": _exact_visible(combined, values["model"]),
@@ -281,27 +346,27 @@ def _run_wizard(executable: pathlib.Path, root: pathlib.Path, repository: pathli
             "objective": _visible_wrapped(combined, values["objective"]),
             "acceptance": all(_visible_wrapped(combined, line) for line in values["acceptance"].splitlines() if line),
             "checks": all(_visible_wrapped(combined, check) for check in rendered_checks),
-            "scrolled": review_before != review_after,
+            "scrolled": scrolled,
             "negative_absent": not _exact_visible(combined, args.negative_expected_label),
         }
-        session.send(b"\x1b")
-        edit_header = "Start goal · step 8/8 · Duration (minutes)"
-        edit_screen = session.wait_for(lambda text: _exact_visible(text, edit_header), "duration edit after review")
+        _focus(session, "Edit")
+        session.send(b"\r")
+        edit_screen = session.wait_for(lambda text: _focused(text, "Prepare goal"), "edit invalidates approval")
         checks.update({
-            "esc_edit": _exact_visible(edit_screen, edit_header),
-            "duration_preserved": _exact_visible(edit_screen, values["duration"]),
+            "approval_invalidated": "[ Start ]" not in edit_screen,
             "negative_absent": checks["negative_absent"] and not _exact_visible(edit_screen, args.negative_expected_label),
+            "no_run_created": before_ids == _registry_ids(root),
         })
         process = session.close()
         checks.update({"captured": bool(session.raw), "reaped": bool(process.get("reaped"))})
-        raw_path = output / f"{rows}x{cols}-wizard.raw"
+        raw_path = output / f"{rows}x{cols}-setup.raw"
         screen_path = output / f"{rows}x{cols}-review.txt"
         _write_private(raw_path, bytes(session.raw))
-        _write_private(screen_path, combined.encode())
-        return {"size": {"rows": rows, "cols": cols}, "dashboard": dashboard, "steps": steps, "review_before": review_before, "review_after": review_after, "assertions": checks, "process": process, "artifacts": {"raw": str(raw_path), "review": str(screen_path)}}
+        _write_private(screen_path, (minimal_review + "\n" + combined).encode())
+        return {"size": {"rows": rows, "cols": cols}, "dashboard": dashboard, "minimal_review": minimal_review, "review": combined, "assertions": checks, "process": process, "artifacts": {"raw": str(raw_path), "review": str(screen_path)}}
     finally:
         if session.pid is not None:
-            process = session.close()
+            session.close()
 
 
 def _selected_goal_prefix(screen: str) -> str | None:
@@ -311,6 +376,17 @@ def _selected_goal_prefix(screen: str) -> str | None:
 
 def _detail_matches_goal(screen: str, prefix: str) -> bool:
     return re.search(r"(?m)^\s*Goal:\s+" + re.escape(prefix) + r"[a-f0-9]{11}\b", screen) is not None
+
+
+def _goal_json(executable: pathlib.Path, root: pathlib.Path, goal_id: str, operation: str, *options: str) -> dict:
+    command = [str(executable), "projects", "goal", operation, goal_id, "--root", str(root), "--json", *options]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False, env=_environment())
+    if result.returncode != 0:
+        raise ProbeError(f"goal {operation} failed ({result.returncode}): {result.stderr}")
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise ProbeError(f"goal {operation} did not return an object")
+    return value
 
 
 def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathlib.Path, args: argparse.Namespace, rows: int, cols: int, output: pathlib.Path) -> dict:
@@ -324,23 +400,30 @@ def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathl
             raise ProbeError("no selected goal in reconstructed dashboard")
         session.send(b"\r")
         detail = session.wait_for(lambda text: _exact_visible(text, "Status") and _detail_matches_goal(text, selected), "selected goal detail")
+        goal_id = re.search(r"(?m)^\s*Goal:\s+(goal-[a-f0-9]{24})\b", detail).group(1)
+        state = _goal_json(executable, root, goal_id, "status")
+        if state.get("id") != goal_id or not isinstance(state.get("checks"), list) or not state["checks"]:
+            raise ProbeError("retained goal status has no matching identity/check receipts")
+        expected_outputs = []
+        for index in range(len(state["checks"])):
+            receipt = _goal_json(executable, root, goal_id, "artifact", "--kind", "check", "--index", str(index))
+            if receipt.get("goal_id") != goal_id or receipt.get("kind") != "check" or not isinstance(receipt.get("content"), str):
+                raise ProbeError("check artifact identity/content mismatch")
+            expected_outputs.append(receipt["content"])
         artifacts = {"detail": detail}
-        for key, label in ((b"d", "patch"), (b"v", "check"), (b"e", "json")):
+        for key, label, heading in ((b"2", "patch", "Evidence · Diff"), (b"3", "check", "Evidence · Checks"), (b"4", "json", "Details · JSON")):
             session.send(key)
-            screen = session.wait_for(lambda text, expected="Artifact · " + label: _exact_visible(text, expected), f"{label} artifact")
-            screens = [screen]
-            for _ in range(96):
-                session.send(b"j")
-                screens.append(session.drain(0.025))
-            artifacts[label] = "\n".join(screens)
-            session.send(b"\x1b")
-            session.wait_for(lambda text: _exact_visible(text, "Status"), f"detail after {label}")
+            screen = session.wait_for(lambda text, expected=heading: _exact_visible(text, expected), f"{label} evidence tab")
+            scanned, _ = _scan(session)
+            artifacts[label] = screen + "\n" + scanned
         process = session.close()
         assertions = {
             "detail": _exact_visible(detail, "Status") and _detail_matches_goal(detail, selected),
             "patch_content": _visible_wrapped(artifacts["patch"], "diff --git"),
-            "check_content": _visible_wrapped(artifacts["check"], "stdout:"),
+            "all_check_outputs": all(all(_visible_wrapped(artifacts["check"], line) for line in receipt.splitlines() if line.strip()) for receipt in expected_outputs),
+            "all_check_headings": all(_visible_wrapped(artifacts["check"], f"Check {index + 1}") for index in range(len(expected_outputs))),
             "json_version": re.search(r'"version"\s*:\s*1\b', artifacts["json"]) is not None,
+            "stable_identity": all(_detail_matches_goal(text, selected) and "Status:" in text for text in artifacts.values()),
             "negative_absent": all(not _exact_visible(text, args.negative_expected_label) for text in artifacts.values()),
             "captured": bool(session.raw),
             "reaped": bool(process.get("reaped")),
@@ -366,7 +449,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forgectl", required=True, help="absolute compiled forgectl executable")
     parser.add_argument("--root", required=True, help="absolute private goal registry root")
-    parser.add_argument("--repository", required=True, help="absolute Git checkout supplied to the wizard")
+    parser.add_argument("--repository", required=True, help="absolute Git checkout supplied to the form")
     parser.add_argument("--model", required=True, help="exact model supplied to projects goals")
     parser.add_argument("--output", required=True, help="absolute private artifact directory")
     parser.add_argument("--title", default="Acceptance Goal")
@@ -406,8 +489,8 @@ def run(args: argparse.Namespace) -> int:
             report["inspect"] = {"wide": wide, "narrow": narrow}
             checks = {"wide": wide["assertions"], "narrow": narrow["assertions"]}
         else:
-            wide = _run_wizard(executable, root, repository, args, 24, 100, run_dir)
-            narrow = _run_wizard(executable, root, repository, args, 16, 50, run_dir)
+            wide = _run_setup(executable, root, repository, args, 24, 100, run_dir)
+            narrow = _run_setup(executable, root, repository, args, 16, 50, run_dir)
             report.update({"wide": wide, "narrow": narrow})
             checks = {"wide": wide["assertions"], "narrow": narrow["assertions"]}
         report.update({"executable": str(executable), "root": str(root), "repository": str(repository), "model": args.model, "checks": checks})
@@ -416,7 +499,7 @@ def run(args: argparse.Namespace) -> int:
             if any(not values.get("negative_absent", True) for values in checks.values()):
                 raise ProbeError("negative expected label appeared in reconstructed screen")
             raise ProbeError("one or more goal probe assertions failed")
-    except (OSError, ProbeError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, ProbeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:
         report["error"] = str(error)
     if output is not None and report_path is not None:
         report["report"] = str(report_path)

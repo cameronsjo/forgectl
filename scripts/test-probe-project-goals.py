@@ -29,7 +29,66 @@ def test_detail_must_match_selected_goal() -> None:
     assert not PROBE._detail_matches_goal("Summary: " + detail.replace("\n", " "), prefix)
 
 
+def test_focused_controls_are_not_unfocused_mentions() -> None:
+    assert PROBE._focused("  > Goal:\n    a multiline objective", "Goal")
+    assert PROBE._focused("  > [ Prepare goal ]", "Prepare goal")
+    assert PROBE._focused("  > Duration (minutes): 5", "Duration (minutes)")
+    assert not PROBE._focused("  [ Prepare goal ]", "Prepare goal")
+    assert not PROBE._focused("  > Goalkeeping: wrong field", "Goal")
+    assert not PROBE._focused("Summary mentions > [ Start ]", "Start")
+
+
+def test_multiline_typing_uses_ordinary_enter() -> None:
+    class Session:
+        def __init__(self):
+            self.inputs = []
+
+        def send(self, data):
+            self.inputs.append(data)
+
+        def drain(self, duration):
+            return ""
+
+    session = Session()
+    PROBE._type_lines(session, "question with spaces\nsecond line")
+    assert session.inputs == [b"question with spaces", b"\r", b"second line"]
+    assert b"\x0a" not in session.inputs
+    assert b"\x13" not in session.inputs
+
+
+def test_wrapped_commands_keep_every_non_whitespace_character() -> None:
+    command = '["go","test","./internal/surface/goal"]'
+    screen = 'Commands: ["go","test","./internal/surface/goa\n  l"]'
+    assert PROBE._visible_wrapped(screen, command)
+    assert not PROBE._visible_wrapped(screen.replace("goa", "gob"), command)
+    assert not PROBE._visible_wrapped(screen.replace("goa", "go"), command)
+    assert not PROBE._visible_wrapped("flow.\\nq d v c", "q d v c")
+    assert PROBE._visible_wrapped("flow.\nq d v c", "q d v c")
+
+
+def test_scan_detects_movement_even_when_start_and_finish_match() -> None:
+    class Session:
+        def __init__(self, movable):
+            self.movable = movable
+            self.position = "bottom"
+
+        def send(self, data):
+            if self.movable:
+                self.position = "top" if data == b"\x1b[5~" else "bottom"
+
+        def drain(self, duration):
+            return self.position
+
+    text, changed = PROBE._scan(Session(True))
+    assert changed and text.startswith("bottom") and text.endswith("bottom")
+    assert PROBE._scan(Session(False))[1] is False
+
+
 if __name__ == "__main__":
     test_selected_dashboard_id_is_display_width_bounded()
     test_detail_must_match_selected_goal()
+    test_focused_controls_are_not_unfocused_mentions()
+    test_multiline_typing_uses_ordinary_enter()
+    test_wrapped_commands_keep_every_non_whitespace_character()
+    test_scan_detects_movement_even_when_start_and_finish_match()
     print("Projects goal probe contract tests passed")

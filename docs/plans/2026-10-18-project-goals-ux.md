@@ -4,8 +4,8 @@ status: in-flight
 
 # Goal-first Projects interface
 
-Status: Cameron approved the proposed redesign; implementation in progress
-Next action: replace the wizard and separate result/question screens, then verify the real keyboard journey.
+Status: approved interface implemented; clean-build delivery verification in progress
+Next action: build from the committed source, repeat the terminal acceptance checks, and push the feature branch.
 
 ## Outcome and authority
 
@@ -34,20 +34,26 @@ Continue on `codex/cross-harness-loop` in its existing linked worktree. Commit a
 
 ## Work
 
-- [ ] Review the plan and approval/preset risks independently; resolve supported findings.
+- [x] Review the plan and approval/preset risks independently; resolve supported findings.
 - [x] Add bounded preset suggestions and negative tests without executing repository code.
-- [ ] Replace setup wizard with one form, normal controls and invalidatable compact approval.
-- [ ] Consolidate run questions, evidence and cancellation into one workspace.
-- [ ] Update documentation and real-PTY probes for the new journey.
+- [x] Replace setup wizard with one form, normal controls and invalidatable compact approval.
+- [x] Consolidate run questions, evidence and cancellation into one workspace.
+- [x] Update documentation and real-PTY probes for the new journey.
 - [ ] Verify unit/negative tests, actual terminal behavior and clean-build provenance; commit and push.
 
 ## Ownership and review
 
-Root Codex owns this plan, preset helpers/tests, documentation and Python PTY probes. The UI subagent owns `internal/tui/project_goals_unix.go`, its tests and an optional form-specific companion file. Reviewer assignments are read-only. The initial UI inspection confirmed seven screen states plus an eight-step wizard, and identified preparation invalidation and polling-safe inline input as critical acceptance gates. Independent plan/security/UX review is pending; it will examine the explicit approval boundary, default-command suggestions and the actual view/focus design.
+Root Codex owns this plan, preset helpers/tests, documentation and Python PTY probes. The UI subagent implemented `internal/tui/project_goals_unix.go` and its tests; root Codex took ownership again for final integration. Reviewer assignments were read-only. The initial UI inspection confirmed seven screen states plus an eight-step wizard. Independent review found stale preparation/action/artifact responses, polling-sensitive answer input, missing busy guards and narrow-screen clipping. Request generations and goal/question identity checks now reject stale responses without clearing a newer operation; polling has separate loading state. Root Codex independently found and fixed a shallow-copy renderer that mutated the retained question, tested its failing case before the fix, and verified that a refreshed question cannot leave answer submission permanently busy.
 
 ## Completion evidence
 
 Baseline is clean committed `8b668d7b`; its native documentation goal already completed review/checks/cleanup. Preset helper tests pass both inside the TUI package and as the isolated two-file unit while the UI refactor is in progress. Tests cover Go/Rust/JavaScript suggestions, absent/invalid/oversized manifests, symlink refusal, independent editable slices and docs-only paths. An executable fake-runner control first writes a marker to prove detection would be observable; preset discovery then leaves that marker absent with every runner stubbed on PATH. No model or repository test command is run by discovery. Existing unrelated menu/terminal-safety test failures remain outside this UI task. No full-suite or hosted-CI success is assumed.
+
+Root Codex ran `go test -p=2 ./internal/tui -count=1`, focused goal tests with `-race`, the repository-pinned golangci-lint 2.13.1 against the changed TUI package, and `python3 scripts/test-probe-project-goals.py`. All passed with the current UI source; the existing TTY tests require host PTY permissions, and their sandbox-only failures were not attributed to the product. Literal argument spaces and long evidence lines retain their content while wrapping; multiline editors display real newlines, not escaped newline text.
+
+Actual PTY checks at 100x24 and 50x16 exercised normal multiline goal entry, preset selection, advanced editing, frozen approval with Edit focused by default, and invalidation without creating a run. Separate PTYs verified long-path Home/End, long-goal beginning/middle/tail carets and the next visible button. The retained real native goal's patch, both check outputs and JSON are readable through one workspace with pinned identity/status. A clearly synthetic private registry fixture verified actual answer/control callbacks, ordinary multiline typing across polling, explicit Send, safe Keep-running default and explicit cancellation; it did not start a model or claim native cleanup. The earlier real native goal and its source/receipts remain unchanged.
+
+The new-form verifier rejects the old wizard binary. Probe regressions also distinguish focus from an unfocused mention, hard-wrapped argv from changed bytes, and genuine scrolling from a static screen even when the first and last viewport match. Clean committed-build provenance and remote equality remain the final delivery gate.
 
 ## Future work
 

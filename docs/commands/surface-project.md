@@ -175,11 +175,25 @@ the attended pilot below. It creates its own retained project, mailbox, native
 sessions, branch and linked worktree; it does not reuse a project merely because
 the label or repository path matches.
 
-The start wizard has eight steps: repository, title, objective, allowed paths,
-acceptance criteria, checks, OpenAI model and duration. Allowed paths are
-repository-relative literal files or directory prefixes, not globs; `.` opts in
-to repository-wide source changes while Git metadata, agent metadata and `.env`
-files remain excluded. Enter checks as JSON argument arrays, for example:
+Start on one form: choose the repository and a **Bug fix**, **Feature**, **Docs**
+or **Custom** preset, then describe the goal. Enter inserts a newline in the
+goal; Tab and Shift+Tab move between fields and visible buttons. Enter or Space
+activates a focused button. There is no Ctrl+J/Ctrl+S step-by-step wizard.
+
+Presets suggest scope, acceptance criteria and verification commands without
+replacing your goal text. Bug fix and Feature inspect known local manifests for
+Go, Rust or JavaScript test commands; they do not execute detection commands,
+run repository scripts or install dependencies during setup. Docs suggests
+`docs` and root README paths with a whitespace check. When no test runner is
+detected, the form explicitly says that only a whitespace check is suggested.
+That is not a claim that behavior tests passed. Custom keeps explicit edits.
+
+**Advanced** expands on the same form for title, allowed paths, acceptance
+criteria, checks, OpenAI model and duration. The title otherwise comes from the
+goal. Allowed paths are repository-relative literal files or directory prefixes,
+not globs; `.` opts in to repository-wide source changes while Git metadata,
+agent metadata and `.env` files remain excluded. Enter checks as JSON argument
+arrays, for example:
 
 ```json
 [["/usr/bin/git","diff","--check"]]
@@ -188,10 +202,11 @@ files remain excluded. Enter checks as JSON argument arrays, for example:
 Each inner array is the exact executable and argv used for verification. There
 is no shell parsing, so pipes, redirects, variable expansion and a single command
 string do not work. The duration is 1–30 minutes and is not a token or spending
-cap. After step eight, inspect the prepared repository, exact base revision,
-source-dirty warning, model, scope, acceptance criteria and checks. Preparation
-does not start a model. Press `s` on **Review before start** for the separate,
-explicit confirmation; Escape returns to editing.
+cap. Review the compact approval summary before Start: the actual repository,
+exact base revision, source-dirty warning, model, scope, acceptance criteria and
+exact commands. Preparation does not start a model. Start is a separate,
+explicit confirmation; changing a field or preset invalidates the prepared
+approval instead of silently launching the old values.
 
 With no `--root`, goals use the owner-private platform state directory
 `$XDG_STATE_HOME/forgectl/projects`, falling back to
@@ -202,13 +217,23 @@ worktrees under another private location, use an absolute, clean path:
 forgectl projects goals --root /path/to/private/goal-registry
 ```
 
-The dashboard polls retained goals. Enter opens details, `a` answers a pending
-question, `d`/`v`/`e` show the retained patch/check/JSON evidence, and `c` opens
-a cancellation confirmation. `q` only detaches from the screen: the detached
-supervisor continues. Cancellation is different—it queues a request to the
-owning supervisor. Treat it as complete only when status is `canceled` and
-`cleanup_complete` is true; state and any worktree or evidence already created
-are still retained.
+The dashboard polls retained goals. Open a goal to stay in one run workspace:
+progress and status, inline questions, and labeled sections for the patch, all
+check receipts and JSON details. Enter adds a newline to an answer; move to the
+Send button to submit it explicitly. Reading evidence does not require an
+Escape chain through separate screens. Cancellation asks for confirmation in
+the same workspace and defaults to keeping the run active.
+
+Use `1`–`4` for Overview, Diff, Checks and JSON; `a` or Tab enters a pending
+answer, and `c` opens cancellation. Page Up/Down scrolls the form or evidence.
+Outside an editor, `q` detaches; inside an editor it is ordinary text. Ctrl-C
+always detaches. Tab and Shift+Tab move between answer/Send or cancellation
+choices, and Escape leaves the answer editor without losing its draft.
+
+Detaching only leaves the screen: the supervisor continues. Cancellation is
+different—it queues a request to the owning supervisor. Treat it as complete
+only when status is `canceled` and `cleanup_complete` is true; state and any
+worktree or evidence already created are still retained.
 
 ### Scripted CLI walkthrough
 
@@ -293,7 +318,8 @@ and it provides no automatic cleanup command.
 
 When a run reaches model execution, it uses exactly three native Codex sessions
 on the selected direct OpenAI model: a coordinator, an implementation worker
-and an independent reviewer. It does not offer Pi or Hermes presets. A run may
+and an independent reviewer. Task presets do not change that team; there are no
+Pi or Hermes team presets. A run may
 fail or be canceled during workspace preparation before those sessions start.
 On the model-execution path, the implementation worker is the only model role
 allowed to edit the isolated worktree. After it stops, the supervisor freezes a
