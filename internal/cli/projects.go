@@ -54,10 +54,13 @@ var projectsModule = module.Manifest{
 		if err != nil {
 			return newProjectsConfigErrorCmd(err)
 		}
-		return newProjectsCmd(projects.New(deps.Runner,
+		command := newProjectsCmd(projects.New(deps.Runner,
 			projects.WithGitHubOwners(deps.Cfg.Projects.Owners),
 			projects.WithGitHubHost(host),
 			projects.WithWings(wings)), deps.Theme)
+		command.AddCommand(newProjectGoalsCmd(deps, nil))
+		command.AddCommand(newProjectGoalCmd(deps, nil))
+		return command
 	},
 }
 

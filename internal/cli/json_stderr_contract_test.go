@@ -298,6 +298,7 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 		{name: "k8s ns: namespace argument", args: []string{"k8s", "ns", "staging", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
 		{name: "tasks show: not an id", args: []string{"tasks", "show", "abc", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "not a task id"},
 		{name: "tasks show: no id", args: []string{"tasks", "show", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "missing <id>"},
+		{name: "surface project goal: missing approval", args: []string{"surface", "project", "goal", "start", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "explicit --approve"},
 		{name: "launch stats: bad window", args: []string{"launch", "stats", "soon", "--json"}, wantCode: jsonCodeFailed, wantExit: 1},
 		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "takes no arguments"},
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},

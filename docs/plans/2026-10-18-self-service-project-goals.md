@@ -47,11 +47,11 @@ Each run has one bounded child supervisor, not a persistent daemon. Each native 
 
 ## Work
 
-- [ ] Record independent plan security/operability and user/agent-experience review; resolve supported findings.
+- [x] Record independent plan security/operability and user/agent-experience review; resolve supported findings.
 - [x] Implement durable goal contract/store, isolated workspace preparation and sequenced operator controls.
 - [ ] Implement failure-safe supervisor/native ownership and verify cancellation/crash cleanup.
 - [ ] Implement native Codex runtime, bounded team loop, exact-mail evidence and sandboxed verification.
-- [ ] Implement Projects goal setup/dashboard/result/decision UX and equivalent JSON CLI.
+- [x] Implement Projects goal setup/dashboard/result/decision UX and equivalent JSON CLI.
 - [ ] Add focused contract, negative-control and lifecycle tests; document supported behavior and recovery limits.
 - [ ] Run real self-service native and PTY acceptance, independently inspect artifacts, and fix supported failures.
 - [ ] Reconcile plan, commit/push the feature branch, and report exact verification and remaining boundaries.
@@ -63,6 +63,10 @@ Independent security/operability review examined this plan and the current proje
 ## Completion evidence
 
 The durable contract/store/workspace tests pass with Go 1.26.8: `GOMAXPROCS=2 go test -p=2 ./internal/surface/goal -count=1`. Negative controls cover unsafe paths/private files, immutable-goal tampering, inactive/stale controls, source revision changes, out-of-scope/symlink patches, and source index/untracked-content changes hidden by an unchanged status listing. Source isolation hashes Git-visible tracked/index content and nonignored untracked files (bounded to 256 MiB), not ignored build caches. Native execution and interactive acceptance are not complete; the prior pilot is evidence for protocol design, not acceptance of this product.
+
+The current implementation passes focused goal/native/CLI/TUI tests, `go test -race -p=2 ./internal/surface/goal ./internal/surface/goalnative -count=1`, and the complete `go test -p=2 ./internal/tui -count=1` with `TERM=xterm-256color` and `NO_COLOR` unset. The real-PTY wizard probe passes at 100x24 and 50x16, including all eight fields, full confirmation content, scrolling and edit-back preservation; it never starts a model or creates a goal registry. These checks cover the current working source, not an accepted native end-to-end result. Existing menu argument and terminal-safety baseline failures were reproduced independently in clean committed pre-integration source rather than attributed to this change.
+
+Codex independently ran `FORGECTL_GOALNATIVE_INTEGRATION=1 FORGECTL_GOALNATIVE_MODEL=gpt-5.6-sol go test -p=2 ./internal/surface/goalnative -run '^TestGoalNativeRealCodexBoundaryIntegration$' -count=1 -v -timeout=45s` against `/opt/homebrew/bin/codex` 0.153.4 on Darwin/arm64 with Go 1.26.8. It passed actual consuming-tool configuration assertions, allowed/denied native writes, and termination of an owned long-running native command on close, without any model turn. Repository-pinned golangci-lint 2.13.1 reports zero new findings over the self-service delta from `67369726`. The PTY verifier's known-present forbidden-label control exits 1 at both sizes rather than fabricating a pass.
 
 ## Future work
 

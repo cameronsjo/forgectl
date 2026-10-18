@@ -133,6 +133,10 @@ func acquireSupervisorLease(t testing.TB, fixture goalFixture) *os.File {
 
 func TestStoreRequestRequiresActiveLeaseAndSequencesControls(t *testing.T) {
 	fixture := newGoalFixture(t, "src")
+	fixture.state.SupervisorActive = true
+	if err := fixture.store.Save(t.Context(), fixture.state); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.store.Request(context.Background(), fixture.state.ID, "cancel", "", ""); err == nil {
 		t.Fatal("Request without supervisor lease succeeded")
 	} else {

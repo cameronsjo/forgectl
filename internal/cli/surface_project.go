@@ -34,12 +34,14 @@ func newSurfaceProjectCmd(deps module.Deps) *cobra.Command {
 	var root string
 	command := &cobra.Command{
 		Use:          "project",
-		Short:        "Keep persistent collaboration projects and threads without launching agents",
+		Short:        "Keep collaboration projects and run explicitly approved repository goals",
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE:         func(command *cobra.Command, _ []string) error { return command.Help() },
 	}
-	command.PersistentFlags().StringVar(&root, "root", "", "absolute private registry root (required; no global default)")
+	command.PersistentFlags().StringVar(&root, "root", "", "absolute private registry root (identity verbs require it; goals default to private state)")
+	command.AddCommand(newProjectGoalsCmd(deps, &root))
+	command.AddCommand(newProjectGoalCmd(deps, &root))
 	command.AddCommand(newSurfaceProjectCreateCmd(&root))
 	command.AddCommand(newSurfaceProjectListCmd(&root))
 	command.AddCommand(newSurfaceProjectShowCmd(&root))

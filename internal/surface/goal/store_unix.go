@@ -302,6 +302,7 @@ func (store Store) Load(ctx context.Context, id string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	state.SupervisorActive = false
 	directory, err := store.directory(id, false)
 	if err != nil {
 		return State{}, err
