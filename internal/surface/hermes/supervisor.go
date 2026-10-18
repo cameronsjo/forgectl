@@ -1105,11 +1105,30 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 	proofFailed := false
 	unknownReason := ""
 	if nativeErr == nil && receiver.config.NativeReplies {
-		body, proofErr := proveNativeReply(record, pre, liveUpdates, postUpdates, prompt.StopReason, receiver.native.permissionCount()-permissionStart, receiver.native.unsupportedCount()-unsupportedStart)
+		proof, proofErr := proveNativeReplyEvidence(record, pre, liveUpdates, postUpdates, prompt.StopReason, receiver.native.permissionCount()-permissionStart, receiver.native.unsupportedCount()-unsupportedStart)
 		if proofErr != nil {
 			replyErr = proofErr
 			proofFailed = true
 			unknownReason = "proof-error"
+			var diagnosticError *nativeReplyProofError
+			if errors.As(proofErr, &diagnosticError) {
+				receiver.events.write(map[string]any{
+					"type":                 "hermes-native-reply-proof",
+					"message_id":           record.ID,
+					"session_id":           record.SessionID,
+					"run_id":               record.RunID,
+					"proof_stage":          diagnosticError.Diagnostics.Stage,
+					"pre_update_count":     diagnosticError.Diagnostics.PreUpdateCount,
+					"live_update_count":    diagnosticError.Diagnostics.LiveUpdateCount,
+					"post_update_count":    diagnosticError.Diagnostics.PostUpdateCount,
+					"durable_frame_bytes":  diagnosticError.Diagnostics.DurableFrameBytes,
+					"durable_frame_sha256": diagnosticError.Diagnostics.DurableFrameSHA256,
+					"live_frame_bytes":     diagnosticError.Diagnostics.LiveFrameBytes,
+					"live_frame_sha256":    diagnosticError.Diagnostics.LiveFrameSHA256,
+					"fixed_prefix_count":   diagnosticError.Diagnostics.FixedPrefixCount,
+					"error":                true,
+				})
+			}
 		} else {
 			var readyRecord replyRecord
 			receiver.mu.Lock()
@@ -1124,8 +1143,8 @@ func (receiver *supervisor) forward(ctx context.Context, record receipt) {
 				proofFailed = true
 				unknownReason = "proof-error"
 			} else if replyErr == nil {
-				reply.Body = body
-				reply.Frame = liveReplyFrame(liveUpdates)
+				reply.Body = proof.Body
+				reply.Frame = proof.CanonicalFrame
 				reply.State = replyReady
 				replyErr = receiver.appendReplyLocked(reply)
 				readyRecord = reply

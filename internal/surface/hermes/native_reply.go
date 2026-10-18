@@ -322,38 +322,6 @@ func replyHistoryBody(updates []historyUpdate, nativePrompt string) (string, err
 	return body, nil
 }
 
-func replyLiveBody(updates []historyUpdate, nativePrompt string) (string, error) {
-	assistants := 0
-	users := 0
-	body := ""
-	started := false
-	for _, update := range updates {
-		switch update.Kind {
-		case "user_message_chunk":
-			users++
-			if users != 1 || started || update.Text != nativePrompt {
-				return "", errors.New("native reply live updates contain a second user turn")
-			}
-		case "agent_thought_chunk":
-		case "agent_message_chunk":
-			started = true
-			assistants++
-			body += update.Text
-		case "tool_call", "tool_call_update", "plan":
-			started = false
-			assistants = 0
-			body = ""
-		case "usage_update", "session_info_update", "available_commands_update":
-		default:
-			return "", fmt.Errorf("native reply live updates contain unsupported update %q", update.Kind)
-		}
-	}
-	if assistants == 0 || len(body) == 0 {
-		return "", errors.New("native reply live updates lack an assistant reply")
-	}
-	return body, nil
-}
-
 func liveReplyFrame(updates []historyUpdate) string {
 	var builder strings.Builder
 	for _, update := range updates {
@@ -367,30 +335,145 @@ func liveReplyFrame(updates []historyUpdate) string {
 	return builder.String()
 }
 
-func proveNativeReply(record receipt, pre, live, post []historyUpdate, stopReason string, permissionCount, unsupportedCount uint64) (string, error) {
+type proofStage string
+
+const (
+	proofStageStopReason    proofStage = "stop_reason"
+	proofStagePermission    proofStage = "permission"
+	proofStageUnsupported   proofStage = "unsupported"
+	proofStagePreHistory    proofStage = "pre_history"
+	proofStagePostHistory   proofStage = "post_history"
+	proofStageLiveHistory   proofStage = "live_history"
+	proofStageHistoryPrefix proofStage = "history_prefix"
+	proofStageInputCount    proofStage = "input_count"
+	proofStageDurableBody   proofStage = "durable_body"
+	proofStageLiveBody      proofStage = "live_body"
+	proofStageFrame         proofStage = "frame"
+	proofStageComplete      proofStage = "complete"
+)
+
+type proofDiagnostics struct {
+	Stage              proofStage
+	PreUpdateCount     int
+	LiveUpdateCount    int
+	PostUpdateCount    int
+	DurableFrameBytes  int
+	DurableFrameSHA256 string
+	LiveFrameBytes     int
+	LiveFrameSHA256    string
+	FixedPrefixCount   int
+}
+
+type nativeReplyProofError struct {
+	Cause       error
+	Diagnostics proofDiagnostics
+}
+
+func (receiver *nativeReplyProofError) Error() string {
+	return receiver.Cause.Error()
+}
+
+func (receiver *nativeReplyProofError) Unwrap() error {
+	return receiver.Cause
+}
+
+type nativeReplyProof struct {
+	Body           string
+	CanonicalFrame string
+	Diagnostics    proofDiagnostics
+}
+
+type liveReplyEvidence struct {
+	Body             string
+	FollowsToolEvent bool
+}
+
+func replyLiveEvidence(updates []historyUpdate, nativePrompt string) (liveReplyEvidence, error) {
+	assistants := 0
+	users := 0
+	body := ""
+	started := false
+	followsTool := false
+	for _, update := range updates {
+		switch update.Kind {
+		case "user_message_chunk":
+			users++
+			if users != 1 || started || update.Text != nativePrompt {
+				return liveReplyEvidence{}, errors.New("native reply live updates contain a second user turn")
+			}
+		case "agent_thought_chunk":
+		case "agent_message_chunk":
+			started = true
+			assistants++
+			body += update.Text
+		case "tool_call", "tool_call_update":
+			started = false
+			assistants = 0
+			body = ""
+			followsTool = true
+		case "plan":
+			started = false
+			assistants = 0
+			body = ""
+		case "usage_update", "session_info_update", "available_commands_update":
+		default:
+			return liveReplyEvidence{}, fmt.Errorf("native reply live updates contain unsupported update %q", update.Kind)
+		}
+	}
+	if assistants == 0 || len(body) == 0 {
+		return liveReplyEvidence{}, errors.New("native reply live updates lack an assistant reply")
+	}
+	return liveReplyEvidence{Body: body, FollowsToolEvent: followsTool}, nil
+}
+
+func leadingNewlineCount(value string) int {
+	count := 0
+	for count < len(value) && value[count] == '\n' {
+		count++
+	}
+	return count
+}
+
+func canonicalNativeReplyFrame(live, durable string, followsTool bool) (string, int, error) {
+	if live == durable {
+		return durable, 0, nil
+	}
+	if followsTool && strings.HasPrefix(live, "\n\n") && strings.TrimPrefix(live, "\n\n") == durable {
+		return durable, 2, nil
+	}
+	return "", leadingNewlineCount(live), errors.New("native reply live and durable assistant text disagree")
+}
+
+func proofFailure(diagnostics proofDiagnostics, stage proofStage, cause error) error {
+	diagnostics.Stage = stage
+	return &nativeReplyProofError{Cause: cause, Diagnostics: diagnostics}
+}
+
+func proveNativeReplyEvidence(record receipt, pre, live, post []historyUpdate, stopReason string, permissionCount, unsupportedCount uint64) (nativeReplyProof, error) {
+	diagnostics := proofDiagnostics{PreUpdateCount: len(pre), LiveUpdateCount: len(live), PostUpdateCount: len(post)}
 	if stopReason != "end_turn" {
-		return "", fmt.Errorf("native reply stop reason %q is not complete", stopReason)
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageStopReason, fmt.Errorf("native reply stop reason %q is not complete", stopReason))
 	}
 	if permissionCount != 0 {
-		return "", errors.New("native reply turn requested permission")
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStagePermission, errors.New("native reply turn requested permission"))
 	}
 	if unsupportedCount != 0 {
-		return "", errors.New("native reply turn requested an unsupported client operation")
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageUnsupported, errors.New("native reply turn requested an unsupported client operation"))
 	}
 	relevantPre, err := replyHistoryUpdates(pre, record.SessionID)
 	if err != nil {
-		return "", err
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStagePreHistory, err)
 	}
 	relevantPost, err := replyHistoryUpdates(post, record.SessionID)
 	if err != nil {
-		return "", err
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStagePostHistory, err)
 	}
 	relevantLive, err := replyHistoryUpdates(live, record.SessionID)
 	if err != nil {
-		return "", err
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageLiveHistory, err)
 	}
 	if !historyPrefix(relevantPre, relevantPost) {
-		return "", errors.New("native reply durable history changed before the turn")
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageHistoryPrefix, errors.New("native reply durable history changed before the turn"))
 	}
 	matchingUsers := 0
 	for _, update := range relevantPost {
@@ -399,20 +482,42 @@ func proveNativeReply(record receipt, pre, live, post []historyUpdate, stopReaso
 		}
 	}
 	if matchingUsers != 1 {
-		return "", errors.New("native reply durable history has an ambiguous input turn")
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageInputCount, errors.New("native reply durable history has an ambiguous input turn"))
 	}
 	durable, err := replyHistoryBody(relevantPost[len(relevantPre):], record.NativePrompt)
 	if err != nil {
-		return "", err
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageDurableBody, err)
 	}
-	liveBody, err := replyLiveBody(relevantLive, record.NativePrompt)
+	diagnostics.DurableFrameBytes = len(durable)
+	diagnostics.DurableFrameSHA256 = digest(durable)
+	if _, err := parseNativeReplyFrame(durable, record.ID); err != nil {
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageFrame, err)
+	}
+	liveEvidence, err := replyLiveEvidence(relevantLive, record.NativePrompt)
+	if err != nil {
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageLiveBody, err)
+	}
+	diagnostics.LiveFrameBytes = len(liveEvidence.Body)
+	diagnostics.LiveFrameSHA256 = digest(liveEvidence.Body)
+	canonicalFrame, fixedPrefixCount, err := canonicalNativeReplyFrame(liveEvidence.Body, durable, liveEvidence.FollowsToolEvent)
+	diagnostics.FixedPrefixCount = fixedPrefixCount
+	if err != nil {
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageLiveBody, err)
+	}
+	body, err := parseNativeReplyFrame(canonicalFrame, record.ID)
+	if err != nil {
+		return nativeReplyProof{}, proofFailure(diagnostics, proofStageFrame, err)
+	}
+	diagnostics.Stage = proofStageComplete
+	return nativeReplyProof{Body: body, CanonicalFrame: canonicalFrame, Diagnostics: diagnostics}, nil
+}
+
+func proveNativeReply(record receipt, pre, live, post []historyUpdate, stopReason string, permissionCount, unsupportedCount uint64) (string, error) {
+	proof, err := proveNativeReplyEvidence(record, pre, live, post, stopReason, permissionCount, unsupportedCount)
 	if err != nil {
 		return "", err
 	}
-	if liveBody != durable {
-		return "", errors.New("native reply live and durable assistant text disagree")
-	}
-	return parseNativeReplyFrame(liveBody, record.ID)
+	return proof.Body, nil
 }
 
 func (receiver *supervisor) markReplyUnknownLocked(id, reason string) error {
