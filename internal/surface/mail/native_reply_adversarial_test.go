@@ -383,6 +383,5 @@ func TestQueuedNativeReplyRejectsReplacedOriginBeforeAdapter(test *testing.T) {
 }
 
 func messagePointer(message Message) *Message {
-	copy := message
-	return &copy
+	return &message
 }

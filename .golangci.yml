@@ -37,6 +37,24 @@ linters:
     # which is the escape-hatch discipline this repo already follows for
     # `//nolint` elsewhere.
     - gosec
+  exclusions:
+    rules:
+      - path: ^internal/surface/mail/native_reply_test\.go$
+        linters: [gosec]
+        text: '^G302:'
+        source: 'os\.Chmod\(dir, 0o700\)'
+      - path: ^internal/surface/hermes/supervisor_test\.go$
+        linters: [gosec]
+        text: '^G703:'
+        source: 'os\.WriteFile\(marker, \[\]byte\("prompt-called\\n"\), 0o600\)'
+      - path: ^internal/surface/mail/native_reply_adversarial_test\.go$
+        linters: [gosec]
+        text: '^G302:'
+        source: 'os\.Chmod\((service\.Box\.Dir, 0o755|path, 0o644)\)'
+      - path: ^internal/surface/mail/native_reply_adversarial_test\.go$
+        linters: [gosec]
+        text: '^G306:'
+        source: 'os\.WriteFile\(path, nil, 0o644\)'
 
 issues:
   # Report findings introduced relative to the default branch. Set to the empty

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 var (
@@ -512,8 +514,11 @@ func nativeMessageDigest(message Message) string {
 		ReplySessionID    string    `json:"reply_session_id"`
 		ReplySourceDigest string    `json:"reply_source_digest"`
 	}{message.V, message.ID, message.From, message.To, message.FromRunID, message.ToRunID, message.Body, message.Priority, message.CreatedAt, message.ReplyBinary, message.ReplyTo, message.ReplySessionID, message.ReplySourceDigest}
-	data, _ := json.Marshal(value)
-	sum := sha256.Sum256(data)
+	var data bytes.Buffer
+	if err := termsafe.JSONEncoder(&data).Encode(value); err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(bytes.TrimSuffix(data.Bytes(), []byte{'\n'}))
 	return hex.EncodeToString(sum[:])
 }
 

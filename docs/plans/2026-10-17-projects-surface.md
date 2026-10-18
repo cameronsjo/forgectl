@@ -1,7 +1,7 @@
 # Persistent projects on existing surfaces
 
-Status: P1/P2/P3/P4 implemented and verified; R1/R2/R3 message-only Hermes replies implemented and locally verified; final native acceptance remains open
-Next action: run pinned lint and clean-build native acceptance in fresh OpenAI-only sessions. Do not retry or reroute the previously denied command.
+Status: P1/P2/P3/P4 implemented and verified; R1/R2/R3 message-only Hermes replies pass local tests and lint; final native acceptance and the requested Agents overview remain open
+Next action: build clean committed source and run native acceptance in fresh OpenAI-only sessions. Resolve the Agents overview surface with Cameron before its implementation. Do not retry or reroute the previously denied command.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -186,7 +186,13 @@ Independent review corrected malformed native notifications, exact session/conte
 
 Codex's final local checks passed against the current source: `go test ./internal/surface/hermes -count=1` (1.491s), the same package with `-race` (16.290s), full mail unit/race tests (7.834s/13.333s), focused Hermes CLI tests (170.307s), and the explicit unconfirmed-publication CLI control (96.710s). Tests include parser and collector limits, malformed/private state, exact routing, denied/canceled/preexisting turns, interrupted and replacement recovery, exact-once publication, no blind redelivery, and a real filesystem intent-write failure followed by safe same-ID retry. Unused production test hooks were removed; the filesystem control itself fails on the old receipt-first ordering. Windows cross-compilation of Hermes, mail, and CLI packages also passed. The updated Hermes verifier syntax and contract suite passed with real local socket fixtures. Sandbox-only socket binding failures were rerun with host socket access, not recorded as product failures.
 
-Pinned lint, the clean committed executable, and fresh full native Projects acceptance remain required by R4/P5/P6. These local checks do not replace native authorship, rendered UI, policy, cleanup, or remote delivery evidence.
+The repository JSON-emitter guard found three raw serializers in the new private journal and digest paths. Codex replaced them with value-preserving `termsafe.JSONEncoder`, retaining the digest's existing no-trailing-newline boundary. Pinned lint also found deliberate test-fixture operations: a 0700 private directory, public modes used to prove refusal, and the test helper's prompt marker. Exact path/linter/diagnostic/source exclusions preserve those controls without suppressing production findings. Removing the 0700 setup was tested and failed because this environment's `testing.T.TempDir` produced 0755; the required setup was restored rather than weakening the private-mode check.
+
+After the last source edit, full Hermes/mail unit tests passed (1.569s/4.712s) and race tests passed (24.200s/15.530s). `go test ./internal/cli -run 'TestJSONStderr_NoUnwrappedErrorSites|TestJSONEmittersUseTermsafeEncoder' -count=1` passed (72.497s). Golangci-lint v2.13.1 configuration verification and the final affected Hermes/mail scan passed with zero issues; the preceding broader scan included CLI and reported only the subsequently resolved fixture finding. An independent read-only review of the exact serialization/configuration delta found no supported regression. The clean committed executable and fresh full native Projects acceptance remain required by R4/P5/P6. Local checks do not replace native authorship, rendered UI, policy, cleanup, or remote delivery evidence.
+
+### Requested Agents overview
+
+Cameron supplied a visual reference and requested a view like it: an agent list with harness/model subtitles, a shared time axis, labeled horizontal activity spans, and running state. The current Desk-backed project view shows evidence as a list/flow, not this multi-thread activity overview. Codex recommended a terminal-native overview inside herdr while retaining its sidebar/tabs, and asked whether Cameron instead wants a browser dashboard for closer visual fidelity. That surface choice is pending; no new overview implementation is authorized by an inferred answer. Actual task durations require observed start/end evidence, not timestamps invented from mailbox delivery or enrollment.
 
 ## Local acceptance commands
 

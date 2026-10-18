@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 const (
@@ -61,11 +63,11 @@ func metadataDigest(raw []byte) string {
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return digest(string(raw))
 	}
-	canonical, err := json.Marshal(value)
-	if err != nil {
+	var canonical bytes.Buffer
+	if err := termsafe.JSONEncoder(&canonical).Encode(value); err != nil {
 		return digest(string(raw))
 	}
-	return digest(string(canonical))
+	return digest(string(bytes.TrimSuffix(canonical.Bytes(), []byte{'\n'})))
 }
 
 func (receiver *supervisor) prepareNativeReply(ctx context.Context, record receipt) (ReplyPreparation, error) {
@@ -222,7 +224,7 @@ func strictJSONString(raw []byte) (string, error) {
 
 func parseHex16(value []byte) (uint16, error) {
 	if len(value) != 4 {
-		return 0, errors.New("Unicode escape has the wrong length")
+		return 0, errors.New("unicode escape has the wrong length")
 	}
 	var result uint16
 	for _, character := range value {
@@ -235,7 +237,7 @@ func parseHex16(value []byte) (uint16, error) {
 		case character >= 'A' && character <= 'F':
 			result += uint16(character-'A') + 10
 		default:
-			return 0, errors.New("Unicode escape is not hexadecimal")
+			return 0, errors.New("unicode escape is not hexadecimal")
 		}
 	}
 	return result, nil
@@ -355,9 +357,10 @@ func replyLiveBody(updates []historyUpdate, nativePrompt string) (string, error)
 func liveReplyFrame(updates []historyUpdate) string {
 	var builder strings.Builder
 	for _, update := range updates {
-		if update.Kind == "tool_call" || update.Kind == "tool_call_update" || update.Kind == "plan" {
+		switch update.Kind {
+		case "tool_call", "tool_call_update", "plan":
 			builder.Reset()
-		} else if update.Kind == "agent_message_chunk" {
+		case "agent_message_chunk":
 			builder.WriteString(update.Text)
 		}
 	}
@@ -513,11 +516,7 @@ func (receiver *supervisor) appendReplyLocked(record replyRecord) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(append(data, '\n')); err != nil {
+	if err := termsafe.JSONEncoder(file).Encode(record); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {
