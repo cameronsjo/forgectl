@@ -39,7 +39,7 @@ func TestRenderProjectAgentsKnownAndMissingGeometry(test *testing.T) {
 	for _, ascii := range []bool{false, true} {
 		out := RenderProjectAgents(snapshot, 100, 10, "thread-1", 30*time.Minute, now, ascii, theme.Default())
 		plain := ansi.Strip(out)
-		if !strings.Contains(plain, "build") || !strings.Contains(plain, "native activity") || !strings.Contains(plain, "pi / openai / gpt-5") {
+		if !strings.Contains(plain, "build") || !strings.Contains(plain, "native activity") || !strings.Contains(plain, "pi / gpt-5") {
 			test.Fatalf("renderer omitted row metadata (ascii=%v): %q", ascii, plain)
 		}
 		if ascii && !strings.Contains(plain, "=") {
@@ -53,6 +53,32 @@ func TestRenderProjectAgentsKnownAndMissingGeometry(test *testing.T) {
 				test.Fatalf("line overflow: %d: %q", ansi.StringWidth(line), line)
 			}
 		}
+	}
+}
+
+func TestRenderProjectAgentsKeepsNativeModelsVisible(test *testing.T) {
+	now := time.Now().UTC()
+	for _, harness := range []string{"codex", "pi", "hermes"} {
+		row := projectview.AgentRow{ThreadID: "thread", Name: "worker", Harness: harness, Provider: "openai-codex", Model: "gpt-5.6-sol", State: "idle", ObservedAt: now, Coverage: activity.CoverageCurrentProcess}
+		for _, width := range []int{80, 132} {
+			plain := ansi.Strip(RenderProjectAgents(projectview.AgentsSnapshot{ProjectName: "project", Rows: []projectview.AgentRow{row}}, width, 10, row.ThreadID, 30*time.Minute, now, false, theme.Default()))
+			if !strings.Contains(plain, harness+" / gpt-5.6-sol") {
+				test.Fatalf("native model clipped at width %d: %q", width, plain)
+			}
+		}
+	}
+}
+
+func TestProjectAgentsActivityLabelsDeduplicateNativeStates(test *testing.T) {
+	now := time.Now().UTC()
+	row := projectview.AgentRow{ObservedAt: now, Coverage: activity.CoverageCurrentProcess, Spans: []projectview.AgentSpan{
+		{Source: activity.SourcePi, Span: activity.Span{State: activity.Finished}},
+		{Source: activity.SourcePi, Span: activity.Span{State: activity.Finished}},
+		{Source: activity.SourceCodex, Span: activity.Span{State: activity.Finished}},
+	}}
+	label := projectAgentsActivityLabels(row, now, false)
+	if label != "native activity: pi/finished, codex/finished" {
+		test.Fatalf("unexpected labels: %s", label)
 	}
 }
 

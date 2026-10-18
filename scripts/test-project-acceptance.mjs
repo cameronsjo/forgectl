@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { assertBoundRun, assertNativeEvidence } from "./project-acceptance.mjs";
-import { assertAgentsSnapshot, codexViewSnapshot, ProjectPresentationAcceptance } from "./project-presentation-acceptance.mjs";
+import { assertAgentsModelLabels, assertAgentsSnapshot, codexViewSnapshot, ProjectPresentationAcceptance } from "./project-presentation-acceptance.mjs";
 
 const member = { name: "worker", run_id: "run-1", harness: "pi", thread_id: "native-1", worktree: "/private/task/worker", socket: "/private/task/pi.sock" };
 const binding = { member: member.name, run_id: member.run_id, harness: member.harness, native_session_id: member.thread_id, worktree: member.worktree, socket: member.socket };
@@ -51,6 +51,10 @@ assert.equal(assertAgentsSnapshot(unknownAgents, "project-1", [unknownBinding]),
 assert.throws(() => assertAgentsSnapshot(unknownAgents, "project-1", [agentsBinding]));
 assert.throws(() => assertAgentsSnapshot(unknownAgents, "project-1", [{ ...unknownBinding, current: { ...unknownBinding.current, turnId: "different-turn" } }]));
 assert.throws(() => assertAgentsSnapshot(agentsSnapshot, "project-1", [unknownBinding]));
+const modelSnapshot = { rows: [{ harness: "pi", model: "gpt-5.6-sol" }, { harness: "codex", model: "gpt-6-astra" }] };
+assert.deepEqual(assertAgentsModelLabels("pi / gpt-5.6-sol\ncodex / gpt-6-astra", modelSnapshot), ["pi / gpt-5.6-sol", "codex / gpt-6-astra"]);
+assert.throws(() => assertAgentsModelLabels("pi / openai-codex / gp\ncodex / gpt-6-astra", modelSnapshot));
+assert.throws(() => assertAgentsModelLabels("pi / gpt-5.6-sol", modelSnapshot));
 
 const report = {
   project_id: "project-1", thread_id: "thread-1", run_id: "run-1", process_liveness: "unknown",

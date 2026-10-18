@@ -110,6 +110,15 @@ export function assertAgentsSnapshot(snapshot, projectId, expectedBindings) {
   return snapshot;
 }
 
+export function assertAgentsModelLabels(screen, snapshot) {
+  return snapshot.rows.map((row) => {
+    assert(row.harness && row.model, "native Agents row lacks selected model metadata");
+    const label = `${row.harness} / ${row.model}`;
+    assert(screen.includes(label), `Agents render clipped its native model label: ${label}`);
+    return label;
+  });
+}
+
 export function codexViewSnapshot(response, binding, model, acceptanceRoot) {
   assert(acceptanceRoot?.startsWith("/"));
   assert.equal(response.thread.id, binding.native_session_id);
@@ -319,7 +328,8 @@ export class ProjectPresentationAcceptance {
     assert(screen.includes("Agents"), "Agents render omitted its title");
     assert(screen.includes("30m"), "Agents render omitted the 30m axis label");
     assert(screen.includes(shown.thread.name), "Agents render omitted the worker row");
-    this.evidence.add("project-agents-rendered", { projectId: this.projects.project.id, workerThread: shown.thread.id, receipt, contentMarker: "Agents", rowMarker: shown.thread.name, axisMarker: "30m", centralContent: true });
+    const modelLabels = assertAgentsModelLabels(screen, snapshot);
+    this.evidence.add("project-agents-rendered", { projectId: this.projects.project.id, workerThread: shown.thread.id, receipt, contentMarker: "Agents", rowMarker: shown.thread.name, axisMarker: "30m", modelLabels, centralContent: true });
     const negativeOutput = join(this.root, `agents-render-negative-${this.renders}`);
     const wrongContent = `absent-agents-${randomUUID()}`;
     const negative = await this.projects.runCommand(this.evidence, "/usr/bin/python3", [probe, "--herdr", this.herdr, "--session", this.session, "--output", negativeOutput, "--expect-project", this.projects.project.name, "--expect-content", wrongContent], { env: this.env, cwd: this.projects.worktree, timeout: 120_000 });

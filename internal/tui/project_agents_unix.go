@@ -743,11 +743,7 @@ func projectAgentsSpanIdentifier(span activity.Span) string {
 
 func projectAgentsSubtitle(row projectview.AgentRow) string {
 	harness := safeProjectAgents(row.Harness, 24)
-	provider := safeProjectAgents(row.Provider, 24)
 	model := safeProjectAgents(row.Model, 40)
-	if provider != "" && model != "" {
-		return capProjectAgentsText(harness+" / "+provider+" / "+model, 68)
-	}
 	if model != "" {
 		return capProjectAgentsText(harness+" / "+model, 68)
 	}
@@ -759,6 +755,7 @@ func projectAgentsSubtitle(row projectview.AgentRow) string {
 
 func projectAgentsActivityLabels(row projectview.AgentRow, now time.Time, sourceError bool) string {
 	labels := make([]string, 0, 4)
+	seen := make(map[string]bool)
 	for _, item := range row.Spans {
 		state := item.Span.State
 		if state == activity.Running && !projectAgentsRowFresh(row, now, sourceError) {
@@ -768,6 +765,10 @@ func projectAgentsActivityLabels(row projectview.AgentRow, now time.Time, source
 		if label == "" {
 			label = "native activity"
 		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
 		labels = append(labels, safeProjectAgents(label, 40))
 		if len(labels) == 4 {
 			break
@@ -780,9 +781,6 @@ func projectAgentsActivityLabels(row projectview.AgentRow, now time.Time, source
 			}
 			labels = append(labels, safeProjectAgents(projectAgentsSourceName(point.Source)+"/point/"+string(point.State), 40))
 		}
-	}
-	if row.Coverage != "" {
-		labels = append(labels, safeProjectAgents(string(row.Coverage), 40))
 	}
 	if row.Partial {
 		labels = append(labels, "partial")

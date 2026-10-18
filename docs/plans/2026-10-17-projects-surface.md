@@ -253,6 +253,8 @@ The clean `3745095a` binary (SHA-256 `971c74625e4451b33e7712c35ef9ae26bf503c66c7
 
 Codex/Pi run `/private/tmp/fcagents-pair2.qP2H9S` completed coordinator/receiver replacement and rendered the real Agents overview (`ui/agents-render-7/render.txt`, 41,998 captured bytes). The wrong-content control captured 35,279 bytes and correctly failed. The final Enter-focus gate stopped because the verifier tried to parse successful, empty `herdr pane send-keys` stdout as JSON. The corrected helper asserts its exit code and still requires the actual exact-tab focus, unchanged tab count, and unchanged surface-operation journal. A contract test distinguishes empty success from a refused command. Both runs cleaned up and remain unaccepted; their partial receipts do not close R4/P5/V4.
 
+Codex's visual inspection of that captured screen found provider text crowding the model out of the fixed subtitle column. Subtitles now prioritize harness/model (`pi / gpt-5.6-sol`); full provider metadata remains in the printed/JSON observation. Repeated source/outcome labels are deduplicated and coverage is not repeated. Tests preserve the complete native model at 80/132 columns; the complete TUI suite (18.070s), Agents race suite (2.590s), and pinned all-lines Hermes/TUI lint pass. Live rendering now asserts each observed harness/model label and rejects the previously clipped form; fresh native acceptance remains required.
+
 Run from this feature worktree. These are machine-local evidence paths, not installations or portable credential provisioning. Each live run makes model requests and requires a fresh owner-private root. The Hermes preflight must still pass; it refuses expiring access-only credentials and does not import or refresh credentials.
 
 ```sh
