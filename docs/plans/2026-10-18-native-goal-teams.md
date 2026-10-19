@@ -4,8 +4,8 @@ status: done
 
 # First-class native teams for repository goals
 
-Status: implemented and verified; existing process-group cleanup first, stronger containerized tool execution second
-Next action: finish Cameron's requested branch stabilization, operator runbooks and session closeout. No PR, merge, deployment or global installation is included without separate authorization.
+Status: implemented, stabilized and verified; operator and recovery runbooks published on the feature branch
+Next action: Cameron decides whether to open a PR for the stabilized feature branch. No PR, feature merge, deployment or global installation is included without separate authorization.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -261,12 +261,12 @@ for stabilization. That authorization does not merge the feature into main or
 open a PR. The refreshed integration target is
 `82fff4ade7a352cf1121ad9c65d9c128646678b4`.
 
-- [ ] Independently review the net branch changes and disposition supported findings.
-- [ ] Publish source-accurate setup, operation, recovery and evidence-review runbooks.
-- [ ] Run the full local suite and branch script checks; distinguish baseline or environment failures from regressions.
-- [ ] Merge the authorized main revision into the feature branch and verify the combined result.
-- [ ] Verify docs, lint, final build provenance and exact feature-branch remote equality.
-- [ ] Reconcile remaining work and record the durable handoff.
+- [x] Independently review the net branch changes and disposition supported findings.
+- [x] Publish source-accurate setup, operation, recovery and evidence-review runbooks.
+- [x] Run the full local suite and branch script checks; distinguish baseline or environment failures from regressions.
+- [x] Merge the authorized main revision into the feature branch and verify the combined result.
+- [x] Verify docs, lint, final build provenance and exact feature-branch remote equality.
+- [x] Reconcile remaining work and record the durable handoff.
 
 ### Stabilization findings and dispositions
 
@@ -332,6 +332,57 @@ disabled.
   stub; independent security review inspected the host-Git profile change.
   Both returned no remaining supported findings. Root Codex separately reran
   the affected Git, goal, backend, CLI and shared-keymap regressions.
+
+### Stabilization closeout evidence
+
+The stabilized source is `8fd505b504027eb7fe79c25fc4f862f78ffb8c66`, following
+the authorized merge of main at `82fff4ade7a352cf1121ad9c65d9c128646678b4`.
+Root Codex pushed that source commit and verified exact remote equality with
+`git ls-remote --heads origin refs/heads/codex/cross-harness-loop`. The closing
+handoff changes only this plan and the runbook's build-provenance guidance.
+
+- **Whole tree:** Go 1.26.8 `go test -p=2 -count=1 ./...` passed all 90 tested
+  packages; six packages have no tests. The earlier CLI, typed architecture,
+  Git-profile and suspend-filter failures all pass on the final source.
+- **Static checks:** repository-pinned golangci-lint 2.13.1 `run ./...` reports
+  zero issues. Go 1.26.8 `go vet -p=2 ./...` passes for Darwin, Windows,
+  FreeBSD and Linux. Formatting and `git diff --check` pass; the Release Please
+  changelog-owner check confirms no feature-owned changelog change.
+- **Scripts:** all six Node contract/behavior suites and both Python terminal
+  probe contract suites pass. One independent inbox run exceeded its bounded
+  startup deadline while compilation was concurrent; the unchanged script
+  subsequently passed after those compiler jobs finished. No protocol deadline
+  was widened to obtain that pass. The retained failed invocation is not
+  counted as success.
+- **Build and UI:** a build in the nested worktree embedded the primary
+  checkout's revision and was rejected by the provenance assertion. A clean
+  detached clone reports the exact stabilized source SHA and
+  `vcs.modified=false`. That compiled binary passes all ten retained-detail
+  assertions at both 50x16 and 100x24: patch, every check, JSON, scrolling,
+  identity and process cleanup. It starts no new native goal.
+- **Native evidence:** the current binary independently re-audits
+  `goal-b9868c32b582afd9aad83bbb`: the original frozen patch digest is unchanged,
+  all three native identities and guardian receipts match, both approved
+  checks match, and all 43 owned containers remain removed. The source checkout
+  and retained artifact bytes remain unchanged. Real container boundary,
+  lease-failure, cancellation and owner-death probes, plus the real no-model
+  native execution-host probe, also passed against the merged helper sources;
+  the later stabilization edits do not alter those Unix boundary/helper files.
+- **Documentation:** the two operator runbooks and their command/README/plan
+  cross-links pass the compiled docs checker with all seven requested roots
+  checked and none skipped. Native-model process-group limits, trusted host-Git
+  configuration, experimental status and the no-replay recovery boundary are
+  explicit rather than implied to be stronger isolation.
+
+Local command logs are retained under `/private/tmp/forgectl-stabilize.709Px8/`:
+`go-test-final.log`, `lint-final-fixed.log`, `vet-final-*.log`,
+`vet-fixed-freebsd.log`, `vet-fixed-linux.log` and `serial-test-*`.
+The clean source, binary provenance, UI captures and fresh retained-result audit
+are under the original checkout's
+`.claude/worktrees/native-stabilized.3IDdwS/`, principally `final-source/` and
+`delivery/`. Original native acceptance artifacts remain in place. No global
+binary, credentials, shared service or primary checkout was changed. These are
+local results, not a claim of hosted CI, release, deployment or human acceptance.
 
 ### Deferred outside this delivery
 

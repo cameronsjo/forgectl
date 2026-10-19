@@ -19,7 +19,10 @@ go version -m ./forgectl           # inspect vcs.revision and vcs.modified
 
 Use the resulting absolute executable path when another `forgectl` may be on
 `PATH`; a clean committed build reports the intended `vcs.revision` and
-`vcs.modified=false`. The operator needs a terminal, Git, and a locally authenticated native
+`vcs.modified=false`. If those values do not match, stop: build from a clean
+standalone clone checked out at the recorded commit and inspect provenance
+again. Another checkout's revision is not evidence for the intended build.
+The operator needs a terminal, Git, and a locally authenticated native
 harness for every selected role. Confirm native logins with each harness's
 normal local status flow; never put credentials, auth files, or secret values
 in the goal JSON, command arguments, or diagnostic output. A native team is
