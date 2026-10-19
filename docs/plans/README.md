@@ -23,6 +23,7 @@ Being built now.
 - [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
 - [atelier P2: queue and drain (forgectl T8)](2026-10-06-atelier-p2-queue-and-drain.md)
 - [atelier P3: intake from GitHub labels (forgectl T9)](2026-10-09-atelier-p3-github-intake.md)
+- [First-class native teams for repository goals](2026-10-18-native-goal-teams.md)
 
 ## Proposed
 
