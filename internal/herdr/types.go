@@ -35,11 +35,14 @@ type AgentSession struct {
 // Agent, AgentSession, and the cwd fields are empty for a pane that has none
 // (herdr reports them as null).
 type Pane struct {
-	PaneID                string        `json:"pane_id"`
-	TabID                 string        `json:"tab_id"`
-	WorkspaceID           string        `json:"workspace_id"`
-	TerminalID            string        `json:"terminal_id"`
-	Agent                 string        `json:"agent"`
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	TerminalID  string `json:"terminal_id"`
+	Agent       string `json:"agent"`
+	// Name is the agent's herdr name (`herdr agent rename`); empty when it has
+	// none. Untrusted text, like every herdr field.
+	Name                  string        `json:"name"`
 	AgentSession          *AgentSession `json:"agent_session"`
 	AgentStatus           string        `json:"agent_status"`
 	CWD                   string        `json:"cwd"`
@@ -55,6 +58,22 @@ type Pane struct {
 type Agent struct {
 	Pane
 	StateChangeSeq int64 `json:"state_change_seq"`
+	// Tokens is nil when herdr reports none.
+	Tokens *AgentTokens `json:"tokens"`
+}
+
+// AgentTokens are the display tokens `herdr agent list` reports for an
+// agent's pane. CWD is the agent's own working directory and Worktree the
+// git worktree it is in; the pane's CWD is where the pane started, which can
+// be a parent of both. Session is the agent's session id as a reporter put it
+// in the pane's `session` token (the herdr-bridge mod does, for Claude Code).
+// herdr keeps one token map per pane, not one per reporter, so any program
+// that sets display tokens can set `session` too. Untrusted text, like every
+// herdr field.
+type AgentTokens struct {
+	CWD      string `json:"cwd"`
+	Worktree string `json:"worktree"`
+	Session  string `json:"session"`
 }
 
 // ReadSource selects which text `herdr pane read` returns.

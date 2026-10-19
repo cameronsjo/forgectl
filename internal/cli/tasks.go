@@ -4,12 +4,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,7 +39,18 @@ const (
 	exitTasksUnreachable  = 2
 	exitTasksUnauthorized = 3
 	exitTasksHostRefused  = 4
+	// exitTasksStale (7) is a cache past tasksStaleCeiling that the caller did
+	// not opt into with --allow-stale. 5 and 6 stay reserved (ADR-0015).
+	exitTasksStale = 7
 )
+
+// tasksStaleCeiling is the oldest cache a read verb serves without
+// --allow-stale. A constant: forgectl has no [tasks] knob for it (#1289).
+const tasksStaleCeiling = 72 * time.Hour
+
+// tasksNow is the clock enforceStaleCeiling reads, a seam so a test can pin
+// the boundary exactly.
+var tasksNow = time.Now
 
 // tasksModule declares the tasks extension (ADR-0005): a credentialed Vikunja
 // client, a local cache, three read verbs (ls/show/ready), one write verb
@@ -106,7 +120,10 @@ is a plain hostname: no port, user, path, or IP address.
 
 A revoked token fails loudly; it never falls back to stale cache data. On the
 read verbs a network failure MAY fall back to cache, and states the cache's
-age when it does. ` + "`done`" + ` never reads or writes the cache.`,
+age when it does. A cache older than 72h is refused: ls, show and ready print
+the STALE DATA notice and "refusing data older than 72h; pass --allow-stale to
+use it" to stderr, write nothing to stdout, and exit 7. --allow-stale serves
+that cache anyway, with the notice. ` + "`done`" + ` never reads or writes the cache.`,
 		// The validator and the help runner are the root's own. Without them a
 		// parent with subcommands answers an unknown verb with its help and
 		// exit 0, which a script reads as success.
@@ -160,6 +177,7 @@ func snapshotToLsJSON(snap tasks.Snapshot, includeDone bool) []tasksLsJSON {
 
 func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Command {
 	var asJSON bool
+	var allowStale bool
 	cmd := &cobra.Command{
 		Use:           "ls",
 		Short:         "List open tasks",
@@ -167,11 +185,13 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			if err := enforceStaleCeiling(cmd.ErrOrStderr(), *host, cacheCause, snap, allowStale); err != nil {
+				return err
+			}
 			if asJSON {
 				rows := snapshotToLsJSON(snap, false)
 				if rows == nil {
@@ -185,6 +205,7 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable list to stdout")
+	addAllowStaleFlag(cmd, &allowStale)
 	return cmd
 }
 
@@ -204,6 +225,7 @@ func printTasksList(out io.Writer, snap tasks.Snapshot, includeDone bool) error 
 
 func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Command {
 	var asJSON bool
+	var allowStale bool
 	cmd := &cobra.Command{
 		Use:           "show <id>",
 		Short:         "Show one task, its detail and its relations",
@@ -215,11 +237,13 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if err != nil {
 				return withJSONUsageCode(WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), classExit(classFailed)))
 			}
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			if err := enforceStaleCeiling(cmd.ErrOrStderr(), *host, cacheCause, snap, allowStale); err != nil {
+				return err
+			}
 
 			task, ok := findTask(snap.Tasks, id)
 			if !ok {
@@ -228,12 +252,13 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if asJSON {
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
-				return enc.Encode(task)
+				return enc.Encode(tasksShowJSON{Task: task, Stale: staleFor(cacheCause, snap)})
 			}
 			return printTaskDetail(deps.Theme.Writer(cmd.OutOrStdout(), nil), task)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the task as machine-readable JSON")
+	addAllowStaleFlag(cmd, &allowStale)
 	return cmd
 }
 
@@ -327,6 +352,7 @@ func lastDescriptionLine(description string) string {
 
 func newTasksReadyCmd(deps module.Deps, host, keychainService *string) *cobra.Command {
 	var asJSON bool
+	var allowStale bool
 	cmd := &cobra.Command{
 		Use:   "ready",
 		Short: `Open tasks with no active "blocked" relation, ranked by position`,
@@ -338,11 +364,13 @@ dependency store.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, cacheCause, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
+			if err := enforceStaleCeiling(cmd.ErrOrStderr(), *host, cacheCause, snap, allowStale); err != nil {
+				return err
+			}
 
 			readySnap := tasks.Snapshot{Tasks: tasks.Ready(snap.Tasks)}
 			if asJSON {
@@ -361,6 +389,7 @@ dependency store.`,
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable list to stdout")
+	addAllowStaleFlag(cmd, &allowStale)
 	return cmd
 }
 
@@ -453,29 +482,29 @@ func loadTasksSnapshot(
 	runner exec.Runner,
 	host, keychainService string,
 	allowedHosts []string,
-) (tasks.Snapshot, bool, error) {
+) (snap tasks.Snapshot, cacheCause error, err error) {
 	ctx := cmd.Context()
 	token, err := readTasksKeychainToken(cmd, runner, tasksKeychainFlag, keychainService, host, allowedHosts)
 	if err != nil {
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
 	client, err := newTasksClient(ctx, runner, host, token)
 	if err != nil {
 		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
-	snap, err := client.FetchAll(ctx)
+	snap, err = client.FetchAll(ctx)
 	if err != nil {
 		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
-		return tasks.Snapshot{}, false, err
+		return tasks.Snapshot{}, nil, err
 	}
 	snap.FetchedAt = time.Now().UTC()
 	cacheSnapshot(ctx, cmd.ErrOrStderr(), snap)
-	return snap, false, nil
+	return snap, nil, nil
 }
 
 // cacheSnapshot writes the fetched snapshot to the local cache. A cache
@@ -529,29 +558,74 @@ func mayServeCache(err error) bool {
 // cachedTasksSnapshot loads the local cache after a network failure. If no
 // cache exists either, the original network error is returned so the
 // caller's exit code still reflects "unreachable", not a generic failure.
-func cachedTasksSnapshot(cause error) (tasks.Snapshot, bool, error) {
+func cachedTasksSnapshot(cause error) (snap tasks.Snapshot, cacheCause error, err error) {
 	path, err := config.TasksCachePath()
 	if err != nil {
-		return tasks.Snapshot{}, false, cause
+		return tasks.Snapshot{}, nil, cause
 	}
-	snap, err := tasks.LoadCache(path)
+	snap, err = tasks.LoadCache(path)
 	if err != nil {
-		return tasks.Snapshot{}, false, cause
+		return tasks.Snapshot{}, nil, cause
 	}
-	return snap, true, nil
+	return snap, cause, nil
+}
+
+func addAllowStaleFlag(cmd *cobra.Command, v *bool) {
+	cmd.Flags().BoolVar(v, "allow-stale", false,
+		"serve a cache older than "+strconv.Itoa(int(tasksStaleCeiling.Hours()))+"h instead of refusing (exit 7)")
+}
+
+// enforceStaleCeiling prints the cache-fallback notice and, when the cache is
+// older than tasksStaleCeiling and the caller did not pass --allow-stale,
+// refuses with exit 7. The caller returns before writing anything to stdout.
+func enforceStaleCeiling(stderr io.Writer, host string, cause error, snap tasks.Snapshot, allowStale bool) error {
+	reportCacheFallback(stderr, host, cause, snap)
+	if cause == nil || allowStale || tasksNow().Sub(snap.FetchedAt) <= tasksStaleCeiling {
+		return nil
+	}
+	return WithExitCode(fmt.Errorf("tasks: refusing data older than %dh; pass --allow-stale to use it",
+		int(tasksStaleCeiling.Hours())), exitTasksStale)
 }
 
 // reportCacheFallback names the host that actually failed, not the default
 // one: under --host the operator is otherwise told a different instance is
 // down than the one they asked for, during exactly the incident this notice
 // exists to explain.
-func reportCacheFallback(stderr io.Writer, host string, fromCache bool, snap tasks.Snapshot) {
-	if !fromCache {
+func reportCacheFallback(stderr io.Writer, host string, cause error, snap tasks.Snapshot) {
+	if cause == nil {
 		return
 	}
 	age := time.Since(snap.FetchedAt).Round(time.Second)
-	fmt.Fprintf(stderr, "forgectl: %s unreachable — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
-		safeTitle(host), age)
+	fmt.Fprintf(stderr, "forgectl: STALE DATA: %s unreachable (%s) — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
+		safeTitle(host), safeText(cause.Error()), age)
+	// "no route to host" from a dial that curl does not share is typically
+	// macOS Local Network privacy denying this process or its parent app (a
+	// sandboxed parent process can cause the same refusal) (#1289). The
+	// client folds dial errors into text, so match the text as well as the
+	// errno.
+	if runtime.GOOS == "darwin" && (errors.Is(cause, syscall.EHOSTUNREACH) || strings.Contains(cause.Error(), "no route to host")) {
+		fmt.Fprintln(stderr, "forgectl: hint: if curl reaches the host, this is typically macOS Local Network privacy or a sandboxed parent process; allow your terminal app under System Settings > Privacy & Security > Local Network") //nolint:errcheck // best-effort stderr notice
+	}
+}
+
+// tasksStale is the additive "stale" object `tasks show --json` carries on a
+// cache fallback only; a live read omits it. ls and ready emit bare arrays,
+// whose shape stays unchanged.
+type tasksStale struct {
+	Cause      string `json:"cause"`
+	AgeSeconds int64  `json:"age_seconds"`
+}
+
+type tasksShowJSON struct {
+	tasks.Task
+	Stale *tasksStale `json:"stale,omitempty"`
+}
+
+func staleFor(cause error, snap tasks.Snapshot) *tasksStale {
+	if cause == nil {
+		return nil
+	}
+	return &tasksStale{Cause: safeText(cause.Error()), AgeSeconds: int64(time.Since(snap.FetchedAt).Seconds())}
 }
 
 // tasksExitError maps a tasks package sentinel to its distinct exit code

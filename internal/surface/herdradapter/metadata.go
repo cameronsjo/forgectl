@@ -14,14 +14,21 @@ import (
 )
 
 // MetadataSource is the --source forgectl reports herdr metadata under. herdr
-// keeps each source's tokens apart, so a token forgectl sets never replaces
-// one another reporter set.
+// keeps one token map per terminal (a pane's) or workspace, keyed by token
+// name alone, and uses the source only to order each reporter's sequence
+// numbers. A token forgectl sets therefore replaces a same-named token another
+// reporter set, and a token forgectl clears is cleared for every reporter.
 const MetadataSource = "forgectl-surface"
 
-// WorkerNameToken is the workspace token that carries a worker's name. A
+// WorkerNameKey is the workspace token that carries a worker's name. A
 // herdr sidebar shows it where the operator's [ui.sidebar.spaces] rows name
-// "$worker" (forgectl#1047). The workspace label stays the ownership marker.
-const WorkerNameToken = "worker"
+// "$forgectl_worker" (forgectl#1047). The workspace label stays the ownership
+// marker. The name carries forgectl's prefix because the token map is shared:
+// a bare "worker" could overwrite, or be overwritten by, another reporter's
+// token (forgectl#1287). It was "worker" before forgectl#1287; nothing in
+// forgectl reads it back, so only a sidebar row needs the new name. A key
+// the caller picks for TagPane is the caller's own and stays unprefixed.
+const WorkerNameKey = "forgectl_worker"
 
 // herdr's own limits on a metadata report (src/app/api_helpers.rs). A key
 // outside them is refused by herdr; checking here gives the refusal before
@@ -88,7 +95,7 @@ func CheckTokenValue(key, value string) error {
 // the ownership check every write makes. It is cosmetic: the caller treats a
 // failure as a note, never as a failed launch.
 func (a *Adapter) ShowWorkerName(ctx context.Context, ref backend.Ref, name string) error {
-	if err := CheckTokenValue(WorkerNameToken, name); err != nil {
+	if err := CheckTokenValue(WorkerNameKey, name); err != nil {
 		return err
 	}
 	_, ws, err := a.ownedPane(ctx, ref)
@@ -102,7 +109,7 @@ func (a *Adapter) ShowWorkerName(ctx context.Context, ref backend.Ref, name stri
 		exec.MustFixed("--source"),
 		exec.MustFixed(MetadataSource),
 		exec.MustFixed("--token"),
-		exec.Opaque(WorkerNameToken+"="+name),
+		exec.Opaque(WorkerNameKey+"="+name),
 	))
 	if runErr != nil {
 		return fmt.Errorf("%w: workspace report-metadata: %v", ErrMetadataFailed, a.classifyRunError(runErr, res))

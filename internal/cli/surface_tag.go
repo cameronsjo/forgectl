@@ -46,7 +46,9 @@ func newSurfaceTagCmd(deps module.Deps) *cobra.Command {
 		Short: "Set or clear display tokens on a worker's herdr pane",
 		Long: `tag sets or clears display tokens on a launched worker's root pane in herdr
 (herdr pane report-metadata, source forgectl-surface). A herdr sidebar row
-shows a token named k as $k, for example $task or $issue. Tokens are display
+shows a token named k as $k, for example $task or $issue. Keys share herdr's
+token map with every other reporter, and herdr's own keys (session, cwd,
+worktree, branch) are taken, so pick one nothing else sets. Tokens are display
 only: they change no agent state, wait or notification.
 
 --token k=v sets a token and --clear-token k clears one; each repeats, up to
