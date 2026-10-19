@@ -838,7 +838,11 @@ func filterDriverNames(out string) ([]string, error) {
 // that needs the command itself (its own timeout and wait delay) rather than
 // a Runner. The caller sets Dir, WaitDelay and the output streams.
 func Command(ctx context.Context, p Profile, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, Bin, append(Args(p), args...)...) //nolint:gosec // G204: git, with the profile's fixed options ahead of the caller's arguments
+	return CommandBin(ctx, Bin, p, args...)
+}
+
+func CommandBin(ctx context.Context, bin string, p Profile, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, append(Args(p), args...)...)
 	cmd.Env = Env(p, os.Environ())
 	return cmd
 }

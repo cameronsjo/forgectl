@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,9 @@ var builtBinPath string
 // TestMain builds the forgectl binary once for the package's integration
 // tests, rather than paying a `go build` per test case.
 func TestMain(m *testing.M) {
+	if os.Getenv("FORGECTL_DESK_CLI_HELPER") != "" && slices.Contains(os.Args[1:], "-test.run=^TestDeskCLIHelperProcess$") {
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "forgectl-integration-*")
 	if err != nil {
 		panic("create temp bin dir: " + err.Error())

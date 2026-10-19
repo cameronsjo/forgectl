@@ -303,9 +303,39 @@ disabled.
   fail-closed durable-turn check remains unchanged. New raw-schema tests cover
   live multi-chunk replies with one durable final message and reject duplicate
   durable frames, both with and without tools.
+- The combined suite also exposed Windows compilation gaps, the goal screen's
+  duplicated suspend filter, and a host-Git call outside the shared profile.
+  Non-Unix JSON-process stubs fail closed; Unix-only adapter fixtures are
+  correctly tagged. The goal screen uses the shared suspend options. Host Git
+  retains its absolute binary, environment scrub, output caps and process-group
+  timeout while adopting the shared Local profile. The only new Git-literal
+  allowances are counted TUI verification recipes, not execution exceptions.
+  Pinned lint confirmed G204 on the shared explicit-binary constructor; its
+  exact file/rule/source exclusion replaces the previous constructor's inline
+  allowance. Production callers supply `git` or the fixed `/usr/bin/git`, not
+  goal-controlled executable input, and profile arguments remain first.
+- The closed-pipe test's child rebuilt the entire CLI inside its 20-second
+  deadline. The current branch failed that startup twice while clean main
+  passed; Codex did not attribute it to a baseline failure or widen the bound.
+  The exact desk-helper subprocess now enters its existing test directly;
+  normal integration tests still build the CLI through TestMain.
+- The recovery runbook now distinguishes legacy goals' three model-control
+  directories from explicit native teams' additional execution-host controls.
+  Root Codex checked the actual dispatch paths and an independent reviewer
+  confirmed the correction.
+- The inbox script could spend its socket-readiness budget loading the child
+  and TypeScript extension. An explicit bounded child-ready handshake now
+  separates startup from protocol checks without widening receipt deadlines.
+  Child failure includes exit status and drained stderr; an early-exit negative
+  control proves that startup failure is not mistaken for readiness.
+- Independent correctness review inspected the final source diff and platform
+  stub; independent security review inspected the host-Git profile change.
+  Both returned no remaining supported findings. Root Codex separately reran
+  the affected Git, goal, backend, CLI and shared-keymap regressions.
 
 ### Deferred outside this delivery
 
 - Hermes remains unsupported as a self-service native team member; the attended pilot is not advertised as parity. A future native adapter needs its own exact protocol, identity and boundary acceptance.
 - All-descendant containment for the native model harness processes themselves remains separate work. The new container guarantee covers tool/file/check execution, not a hostile daemon/kernel or other same-user process.
+- Host-Git filter/configured-hook hardening is separate from tool containment. The current helper retains the existing trusted-repository boundary, rather than claiming that the shared Local profile blocks every repository-configured executable. The operator runbook explicitly requires trusted Git configuration and attributes; extending the bounded, byte-preserving Git seam to the stronger filter/hook helpers needs its own acceptance controls.
 - Opening a PR, merging the feature into main, releasing or installing it remain separate operator decisions. No hosted-CI result is claimed for a feature-branch push without a PR.

@@ -169,10 +169,12 @@ without network access.
 
 ### Process-group receipts
 
-In the retained run directory, process-group mode keeps one control directory
-per native model role at `native-control/<role>/` and one execution-host
-directory at `native-control/<role>-execution/`. A clean native shutdown
-requires:
+In the retained run directory, legacy goals without an explicit `team` keep
+one control directory per native Codex role at `native-control/<role>/`.
+Explicit native teams in process-group mode also keep an execution-host
+directory at `native-control/<role>-execution/`. Do not require that extra
+directory for a legacy Codex-trio run. Each native control directory that the
+selected mode creates requires this pair for a clean shutdown:
 
 - `guardian-startup.json` with `status: "started"`, valid `native_pid`,
   `process_group`, `socket`, and `started_at`.

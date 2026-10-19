@@ -39,7 +39,9 @@ var gitConstantAllowlist = map[string]struct {
 	uses   int
 	reason string
 }{
-	"internal/cli/status.go:var": {1, "statusSectionLabels: the status report's section label, printed by both human views, never run"},
+	"internal/cli/status.go:var":                                   {1, "statusSectionLabels: the status report's section label, printed by both human views, never run"},
+	"internal/tui/project_goal_presets_unix.go:projectGoalPresets": {3, "serialized verification argv presets, displayed for explicit operator approval and never executed by the TUI"},
+	"internal/tui/project_goals_unix.go:newProjectGoalsModel":      {1, "serialized default verification argv, displayed for explicit operator approval and never executed by the TUI"},
 }
 
 // transportAllowlist is every function that may run git under

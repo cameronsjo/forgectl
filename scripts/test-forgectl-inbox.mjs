@@ -11,6 +11,8 @@ const scriptPath = fileURLToPath(import.meta.url);
 const extensionPath = join(dirname(scriptPath), "..", "internal", "surface", "mail", "assets", "forgectl-inbox.ts");
 
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const childReadyTimeout = 10_000;
+const childReadyBySocket = new Map();
 
 const pathExists = async (path) => {
   try {
@@ -100,7 +102,35 @@ const spawnHarness = (directory, socketName, mode, identity = { worker: `pi-${mo
   });
   let buffer = "";
   let errors = "";
+  let childError;
+  let readyResolve;
+  let readyReject;
+  let readySettled = false;
+  const ready = new Promise((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  ready.catch(() => undefined);
+  const diagnostic = (reason) => new Error(`${reason}; child stderr: ${errors.trim() || "(empty)"}`);
+  const failChild = (reason) => {
+    if (childError) return childError;
+    childError = reason instanceof Error ? diagnostic(reason.message) : diagnostic(reason);
+    if (!readySettled) {
+      readySettled = true;
+      clearTimeout(readyTimer);
+      readyReject(childError);
+    }
+    while (waiters.length > 0) waiters.shift().reject(childError);
+    return childError;
+  };
+  const resolveReady = () => {
+    if (readySettled) return;
+    readySettled = true;
+    clearTimeout(readyTimer);
+    readyResolve();
+  };
   const waiters = [];
+  const readyTimer = setTimeout(() => failChild(`child did not become ready within ${childReadyTimeout}ms`), childReadyTimeout);
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
@@ -109,24 +139,53 @@ const spawnHarness = (directory, socketName, mode, identity = { worker: `pi-${mo
       if (newline < 0) break;
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
+      let response;
+      try {
+        response = JSON.parse(line);
+      } catch (error) {
+        failChild(new Error(`child emitted invalid JSON: ${error.message}`));
+        return;
+      }
+      if (response?.type === "ready") {
+        resolveReady();
+        continue;
+      }
       const waiter = waiters.shift();
-      if (waiter) waiter(JSON.parse(line));
+      if (!waiter) {
+        failChild("child emitted a response before a request");
+        return;
+      }
+      waiter.resolve(response);
     }
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
     errors += chunk;
   });
-  const command = (request) => new Promise((resolve, reject) => {
-    if (child.exitCode !== null) {
-      reject(new Error(`harness exited with ${child.exitCode}`));
-      return;
-    }
-    waiters.push(resolve);
-    child.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
-      if (error) reject(error);
-    });
+  child.once("error", (error) => failChild(error));
+  let childExitReason;
+  child.once("exit", (code, signal) => {
+    childExitReason = code === null ? `harness exited by ${signal}` : `harness exited with ${code}`;
   });
+  child.once("close", () => failChild(childExitReason ?? "harness stdio closed before exit"));
+  childReadyBySocket.set(socketPath, { ready, errors: () => errors });
+  const command = async (request) => {
+    await ready;
+    if (childError) throw childError;
+    if (child.exitCode !== null) {
+      throw childError ?? diagnostic(`harness exited with ${child.exitCode}`);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      waiters.push(waiter);
+      child.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
+        if (!error) return;
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(error);
+      });
+    });
+  };
   const stop = async (signal = "SIGTERM") => {
     if (child.exitCode === null) child.kill(signal);
     if (child.exitCode === null) await once(child, "exit");
@@ -135,7 +194,7 @@ const spawnHarness = (directory, socketName, mode, identity = { worker: `pi-${mo
     ? { ...request, v: 2, run_id: identity.runId, session_id: request.session_id ?? (mode.startsWith("wrong-") ? "session-2" : "session-1") }
     : request;
   const exchangeForHarness = (request, timeout) => exchange(socketPath, exchangeRequest(request), timeout);
-  return { child, command, errors: () => errors, receiptPath, socketPath, stop, exchange: exchangeForHarness };
+  return { child, command, errors: () => errors, ready, receiptPath, socketPath, stop, exchange: exchangeForHarness };
 };
 
 const testCoordinatorIdentityActivates = async (directory) => {
@@ -502,6 +561,8 @@ const testInvalidCoordinatorIdentitiesStayInert = async (directory) => {
 };
 
 const waitForSocket = async (socketPath) => {
+  const child = childReadyBySocket.get(socketPath);
+  if (child) await child.ready;
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       await exchange(socketPath, { v: 1, type: "state", id: "ready" }, 250);
@@ -510,7 +571,8 @@ const waitForSocket = async (socketPath) => {
       await pause(25);
     }
   }
-  throw new Error(`socket did not become ready: ${socketPath}`);
+  const stderr = child?.errors().trim() || "(empty)";
+  throw new Error(`socket did not become ready: ${socketPath}; child stderr: ${stderr}`);
 };
 
 const assertSocketUnavailable = async (socketPath) => {
@@ -539,6 +601,11 @@ const waitForPendingReceipt = async (socketPath, id) => {
 };
 
 const childMain = async (mode) => {
+  if (mode === "early-exit") {
+    console.error("intentional child startup failure");
+    process.exitCode = 42;
+    return;
+  }
   const calls = [];
   const handlers = new Map();
   let currentSession = mode === "missing-session" ? undefined : mode.startsWith("wrong-") ? "session-2" : "session-1";
@@ -618,6 +685,16 @@ const childMain = async (mode) => {
     }
   });
   process.stdin.resume();
+  process.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+};
+
+const testChildStartupFailureIncludesStderr = async (directory) => {
+  const harness = spawnHarness(directory, "early-exit.sock", "early-exit");
+  try {
+    await assert.rejects(harness.ready, /harness exited with 42; child stderr: intentional child startup failure/);
+  } finally {
+    await harness.stop();
+  }
 };
 
 const testVoidSendStaysPending = async (directory) => {
@@ -900,6 +977,7 @@ const main = async () => {
     await testRejectedReceiptIdentityRebinding(directory);
     await testWorkerDrainIdentityActivates(directory);
     await testInvalidCoordinatorIdentitiesStayInert(directory);
+    await testChildStartupFailureIncludesStderr(directory);
     await testVoidSendStaysPending(directory);
     await testAsyncRuntimeFailureStaysPending(directory);
     await testNativeMessageStartAcceptance(directory);

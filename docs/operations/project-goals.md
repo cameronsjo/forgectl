@@ -25,6 +25,13 @@ normal local status flow; never put credentials, auth files, or secret values
 in the goal JSON, command arguments, or diagnostic output. A native team is
 experimental: inspect its retained review, checks, and cleanup evidence.
 
+Use only a repository whose Git configuration and attributes you trust.
+Preparation and source snapshots use host Git, outside the tool container.
+The local Git profile disables transports, prompts, fsmonitor and standard
+hook directories, but it does not disable every repository filter driver or
+newer configured hook. Container isolation is not a sandbox for that host
+Git preparation.
+
 Keep the source checkout separate from the owner-private goal registry. With
 no `--root`, the registry is `$XDG_STATE_HOME/forgectl/projects`, falling back
 to `$HOME/.local/state/forgectl/projects`;

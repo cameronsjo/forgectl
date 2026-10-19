@@ -2,6 +2,7 @@ package gitenv
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -130,6 +131,24 @@ func TestCommandCarriesTheProfile(t *testing.T) {
 	}
 	if slices.Contains(cmd.Env, "GIT_DIR=/other/.git") || cmd.Env[len(cmd.Env)-1] != "GIT_ALLOW_PROTOCOL=" {
 		t.Errorf("env was not Local's: %v", cmd.Env)
+	}
+}
+
+func TestCommandBinPreservesAbsoluteBinaryAndLocalProfile(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("GIT_DIR", "/other/.git")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:ssh")
+	binary := filepath.Join(t.TempDir(), "git")
+	command := CommandBin(t.Context(), binary, Local, "rev-parse")
+	if command.Path != binary || command.Err != nil {
+		t.Fatalf("command path = %q, lookup error = %v", command.Path, command.Err)
+	}
+	wantArguments := append([]string{binary}, append(Args(Local), "rev-parse")...)
+	if !slices.Equal(command.Args, wantArguments) {
+		t.Fatalf("arguments = %q, want %q", command.Args, wantArguments)
+	}
+	if !slices.Equal(command.Env, Env(Local, os.Environ())) {
+		t.Fatal("explicit binary command does not preserve the Local environment")
 	}
 }
 

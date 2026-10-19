@@ -19,6 +19,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/surface/goal"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -199,22 +200,15 @@ func RunProjectGoals(ctx context.Context, opts ProjectGoalsOptions) error {
 		ctx = context.Background()
 	}
 	model := newProjectGoalsModel(ctx, opts)
-	programOptions := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFilter(projectGoalsSuspendFilter)}
+	var programOptions []tea.ProgramOption
 	if opts.Input != nil {
 		programOptions = append(programOptions, tea.WithInput(opts.Input))
 	}
 	if opts.Output != nil {
 		programOptions = append(programOptions, tea.WithOutput(opts.Output))
 	}
-	_, err := tea.NewProgram(model, programOptions...).Run()
+	_, err := tea.NewProgram(model, append(keymap.ProgramOptions(ctx), programOptions...)...).Run()
 	return err
-}
-
-func projectGoalsSuspendFilter(_ tea.Model, msg tea.Msg) tea.Msg {
-	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+z" {
-		return tea.SuspendMsg{}
-	}
-	return msg
 }
 
 func newProjectGoalsModel(ctx context.Context, opts ProjectGoalsOptions) *projectGoalsModel {

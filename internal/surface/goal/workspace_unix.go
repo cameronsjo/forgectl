@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"github.com/cameronsjo/forgectl/internal/surface/goalcontainer"
 )
@@ -59,10 +60,10 @@ func cleanEnvironment(environment []string) []string {
 func gitCommand(ctx context.Context, directory string, arguments ...string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	argv := []string{"--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.quotePath=false", "-C", directory}
+	argv := []string{"--no-pager", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=false", "-C", directory}
 	argv = append(argv, arguments...)
-	command := exec.CommandContext(ctx, "/usr/bin/git", argv...) //nolint:gosec // G204: fixed Git executable and typed arguments, hooks and protocols disabled.
-	command.Env = append(cleanEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	command := gitenv.CommandBin(ctx, "/usr/bin/git", gitenv.Local, argv...)
+	command.Env = append(gitenv.Env(gitenv.Local, cleanEnvironment(os.Environ())), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {

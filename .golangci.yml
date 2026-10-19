@@ -39,6 +39,10 @@ linters:
     - gosec
   exclusions:
     rules:
+      - path: ^internal/gitenv/gitenv\.go$
+        linters: [gosec]
+        text: '^G204:'
+        source: '^\s*cmd := exec\.CommandContext\(ctx, bin, append\(Args\(p\), args\.\.\.\)\.\.\.\)$'
       - path: ^internal/surface/goal/goal_test_helpers_unix_test\.go$
         linters: [gosec]
         text: '^G703:'
