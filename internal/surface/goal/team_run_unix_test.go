@@ -21,7 +21,7 @@ func TestExplicitTeamContractUsesBrokerToolsForEveryHarness(t *testing.T) {
 	fixture := newGoalFixture(t, "src")
 	engine := newNativeTeamTestExecution(fixture)
 	contract := engine.contract()
-	for _, required := range []string{"Every role, including Codex, Pi and Claude", "goal_read/goal_write/goal_exec/goal_mail/goal_inbox", "goal_mail queues {to,body}", "never call the surface CLI through goal_exec"} {
+	for _, required := range []string{"Every role, including Codex, Pi and Claude", "goal_read/goal_write/goal_exec/goal_mail/goal_inbox", "goal_mail queues {to,body}", "never call the surface CLI through goal_exec", "preliminary live source/diff review", "result.patch does not exist yet", "separate direct native review", "exact frozen patch digest", "Mail never constitutes final approval"} {
 		if !strings.Contains(contract, required) {
 			t.Errorf("explicit team contract omitted %q", required)
 		}

@@ -321,10 +321,9 @@ stopped and removal is confirmed. `unknown` means cleanup is unconfirmed,
 poisons that execution host and blocks a clean ready/canceled result; never
 recreate an uncertain operation.
 
-This documents the implemented boundary and its prerequisites, not final native
-container acceptance. Unit tests and a successful preflight do not establish a
-completed mixed-team container goal; inspect the retained native responses,
-checks, source snapshot, patch and container receipts before accepting one.
+Unit tests and a successful preflight do not establish a completed mixed-team
+container goal. Inspect the retained native responses, checks, source snapshot,
+patch and container receipts before accepting a result.
 
 With no `--root`, goals use the owner-private platform state directory
 `$XDG_STATE_HOME/forgectl/projects`, falling back to
@@ -353,6 +352,44 @@ different—it queues a request to the owning supervisor. Treat it as complete
 only when status is `canceled` and `cleanup_complete` is true; this confirms the
 owned native process groups stopped, not that arbitrary daemonized descendants
 are gone. State and any worktree or evidence already created are still retained.
+
+### Diagnosing container startup failures
+
+- **`prepare` failure:** this is metadata-only inspection, not a helper test.
+  Check the explicit socket and that engine's API v1.51, Linux/cgroup v2,
+  memory/PID limits and built-in seccomp. Against that same socket, use
+  `docker --host unix:///absolute/docker.sock image inspect sha256:<approved-id>`
+  to compare the exact local image ID, engine/image architecture, declared
+  volumes (none) and environment defaults (only PATH, HOME, LANG, LC_ALL, TZ).
+  Do not diagnose against a tag or an ambient Docker context.
+- **Start helper failure:** read the cause after `container helper prerequisite:`.
+  This step already uses the role's full mounts and runtime cwd as the caller's
+  nonzero UID/GID; it can fail before the boundary probe. A `container create
+  failed`/HTTP error or mount-directory/`.git` error calls for the path checks
+  below, not just image inspection. `did not execute its required Linux goal
+  helper` can mean a missing/non-executable helper OR a runtime cwd inaccessible
+  to that UID. Compare the exact image's trusted local build inputs with
+  `Dockerfile.goal-tools` for Linux `/usr/local/bin/forgectl` and its required
+  container-init protocol. `did not prove non-root, capability-free,
+  no-new-privileges and seccomp execution` instead indicates failed identity/
+  policy proof, including UID/GID, supplementary groups and capabilities.
+- **Mount/UID checks (helper or probe):** inspect the failing role's absolute
+  worktree, runtime cwd and Git paths against the VM's existing shared
+  directories; check canonical paths, ownership and access for the requested
+  UID/GID without changing permissions. Host existence alone is insufficient.
+  Include the result-patch path for later mount failures. The probe error
+  `container mount/UID boundary did not engage; verify runtime file sharing
+  before model work` means its runtime write, read-only readable Git metadata
+  or absent control-state checks failed. For coordinator/reviewer, `container
+  model role received writable implementation access` means the read-only
+  worktree check failed. Preserve errors and receipts; do not restart the
+  VM/engine or change global sharing/permissions as a diagnostic shortcut.
+- **Uncertain operation/cleanup:** inspect the matching nonce, immutable image
+  and full container ID in `native-control/<role>-execution/` receipts (see
+  below). `unknown` is not proof of absence: execution may have occurred and
+  descendants may remain. Never replay that operation, erase its state or use
+  a host-command fallback; an unavailable host must stay unavailable pending
+  operator investigation, not a weaker isolation mode or provider substitution.
 
 ### Reading cleanup receipts
 
