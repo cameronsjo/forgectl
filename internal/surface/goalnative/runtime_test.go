@@ -218,6 +218,11 @@ func TestGoalNativeRealCodexBoundaryIntegration(t *testing.T) {
 }
 
 func TestGoalNativeRealCodexAbruptSupervisorDeath(t *testing.T) {
+	testRealCodexAbruptSupervisorDeath(t, false)
+}
+
+func testRealCodexAbruptSupervisorDeath(t *testing.T, executionOnly bool) {
+	t.Helper()
 	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
 		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 to run the real Codex integration")
 	}
@@ -252,6 +257,10 @@ func TestGoalNativeRealCodexAbruptSupervisorDeath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mode := "model"
+	if executionOnly {
+		mode = "execution"
+	}
 	helper := exec.CommandContext(t.Context(), binary, "-test.run=TestGoalNativeAbruptSupervisorHelper", "--") //nolint:gosec // test launches only its own resolved executable
 	helper.Env = append(filteredHelperEnvironment(os.Environ()),
 		"GOALNATIVE_ABRUPT_HELPER=1",
@@ -262,6 +271,8 @@ func TestGoalNativeRealCodexAbruptSupervisorDeath(t *testing.T) {
 		"GOALNATIVE_ABRUPT_PID_PATH="+pidPath,
 		"GOALNATIVE_ABRUPT_STATE="+statePath,
 		"GOALNATIVE_ABRUPT_WORKTREE="+worktree,
+		"GOALNATIVE_ABRUPT_MODE="+mode,
+		"GOALNATIVE_ABRUPT_SUPERVISOR="+writeHelper(t, "supervisor", "GOALNATIVE_HOST_HELPER=1"),
 	)
 	helper.Stdout = os.Stderr
 	helper.Stderr = os.Stderr
@@ -349,16 +360,23 @@ func runAbruptSupervisorHelper() error {
 		return err
 	}
 	environment := append(filteredHelperEnvironment(os.Environ()), "CODEX_HOME="+configHome, "GOALNATIVE_HOST_HELPER=1")
-	supervisor, err := filepath.Abs(os.Args[0])
+	supervisor, err := abruptHelperEnv("GOALNATIVE_ABRUPT_SUPERVISOR")
 	if err != nil {
 		return err
 	}
-	session, err := Start(context.Background(), Config{Binary: native, SupervisorBinary: supervisor, ControlDir: control, Cwd: worktree, Socket: filepath.Join(control, "app.sock"), Model: model, Environment: environment, WritableRoots: []string{worktree}})
+	executionOnly := os.Getenv("GOALNATIVE_ABRUPT_MODE") == "execution"
+	if executionOnly {
+		model = ""
+	}
+	session, err := Start(context.Background(), Config{Binary: native, SupervisorBinary: supervisor, ControlDir: control, Cwd: worktree, Socket: filepath.Join(control, "app.sock"), Model: model, Environment: environment, WritableRoots: []string{worktree}, ExecutionOnly: executionOnly})
 	if err != nil {
 		_ = writePrivateJSON(statePath, abruptSupervisorState{Error: err.Error(), SupervisorPID: os.Getpid()})
 		return err
 	}
 	defer func() { _ = session.Close(context.Background()) }()
+	if executionOnly && (session.ThreadID != "" || session.Model != "" || session.Provider != "") {
+		return writeAbruptHelperError(statePath, errors.New("execution host created a model session"))
+	}
 	started, err := readGuardianReceipt(startupReceiptPath(control))
 	if err != nil {
 		return writeAbruptHelperError(statePath, err)

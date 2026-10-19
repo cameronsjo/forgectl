@@ -17,6 +17,28 @@ type fakeNativeSession struct {
 	closed   bool
 }
 
+func TestExplicitTeamContractUsesBrokerToolsForEveryHarness(t *testing.T) {
+	fixture := newGoalFixture(t, "src")
+	engine := newNativeTeamTestExecution(fixture)
+	contract := engine.contract()
+	for _, required := range []string{"Every role, including Codex, Pi and Claude", "goal_read/goal_write/goal_exec/goal_mail/goal_inbox", "goal_mail queues {to,body}", "never call the surface CLI through goal_exec"} {
+		if !strings.Contains(contract, required) {
+			t.Errorf("explicit team contract omitted %q", required)
+		}
+	}
+	for _, obsolete := range []string{"native apply_patch", "surface send", "surface inbox", "Queued/exit75"} {
+		if strings.Contains(contract, obsolete) {
+			t.Errorf("explicit team contract retained unavailable native command %q", obsolete)
+		}
+	}
+	legacy := newGoalTestExecution(fixture).contract()
+	for _, required := range []string{"native apply_patch", "surface send", "surface inbox"} {
+		if !strings.Contains(legacy, required) {
+			t.Errorf("legacy contract lost %q", required)
+		}
+	}
+}
+
 func (session *fakeNativeSession) Identity() goalnative.NativeIdentity { return session.identity }
 func (session *fakeNativeSession) Submit(context.Context, goalnative.NativePrompt) error {
 	return nil

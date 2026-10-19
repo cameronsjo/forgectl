@@ -214,12 +214,13 @@ implementation and Claude Code to independent review. **Custom team** exposes
 each role in Advanced as `harness,provider,model`; complete values also appear in
 approval. Changing a role, model, provider or team invalidates preparation.
 
-Native teams are experimental and are **not yet verified end to end**. Current
-macOS startup refuses their tool-execution boundary: the additional process
-containment profile cannot be composed with Codex's existing Seatbelt sandbox.
-The refusal occurs before model work. This is not an authentication failure;
-do not disable isolation, change global permissions or substitute another
-provider to bypass it. The legacy Codex trio remains a separate execution path.
+Native teams are experimental and are **not yet verified end to end**. They use
+the existing Codex filesystem/network sandbox and owned-process-group cleanup.
+Preparation explicitly warns that daemonized children may survive cancellation;
+this is not stronger VM/container isolation. An unavailable tool sandbox refuses
+the run before model work; do not disable isolation, change global permissions
+or substitute another provider to bypass it. The legacy Codex trio remains a
+separate execution path.
 
 With no `--root`, goals use the owner-private platform state directory
 `$XDG_STATE_HOME/forgectl/projects`, falling back to
@@ -245,8 +246,9 @@ choices, and Escape leaves the answer editor without losing its draft.
 
 Detaching only leaves the screen: the supervisor continues. Cancellation is
 different—it queues a request to the owning supervisor. Treat it as complete
-only when status is `canceled` and `cleanup_complete` is true; state and any
-worktree or evidence already created are still retained.
+only when status is `canceled` and `cleanup_complete` is true; this confirms the
+owned native process groups stopped, not that arbitrary daemonized descendants
+are gone. State and any worktree or evidence already created are still retained.
 
 ### Scripted CLI walkthrough
 
@@ -382,9 +384,11 @@ File helpers reject unsafe paths and disallowed writes. Arbitrary commands
 retain a workspace-level kernel write boundary and a post-execution allowed-path
 result gate, not a per-file OS allowlist. Process-group cleanup proves only the
 owned groups disappeared: a daemonized child can leave its original group.
-The real negative control reproduced that existing limitation. Stronger process
-containment and complete mixed-team result acceptance remain unresolved; neither
-successful native reply probes nor passing unit tests establish those properties.
+The real negative control reproduced that existing limitation. The current
+cleanup contract retains and discloses it; stronger VM/container isolation is
+separate follow-up work, not an implicit guarantee. Complete mixed-team result
+acceptance remains unverified; neither successful native reply probes nor
+passing unit tests establish it.
 
 `ready` means the frozen patch passed independent native review, every approved
 check passed, the patch stayed unchanged and the source checkout stayed

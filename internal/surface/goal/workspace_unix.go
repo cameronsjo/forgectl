@@ -154,9 +154,9 @@ func Prepare(ctx context.Context, spec Spec) (Prepared, error) {
 	if spec.Team != nil {
 		transport = "Tool and verification network access is disabled; each approved native model provider remains enabled without fallback."
 	}
-	warnings := []string{transport, "No commit, push, merge, deployment, installation or permission expansion is included.", "Maximum runtime is not a token or dollar spending cap."}
+	warnings := []string{transport, "Cleanup confirms only owned native process groups; daemonized children may survive cancellation.", "No commit, push, merge, deployment, installation or permission expansion is included.", "Maximum runtime is not a token or dollar spending cap."}
 	if spec.Team != nil {
-		warnings = append(warnings, "Native teams require Codex as a separate, credential-free execution host, plus every selected harness and its native credentials.", "An unavailable tool or process boundary refuses the run before model work; native team execution is not yet verified end to end.")
+		warnings = append(warnings, "Native teams require Codex as a separate, credential-free execution host, plus every selected harness and its native credentials.", "An unavailable tool sandbox refuses the run before model work; native team execution is not yet verified end to end.")
 	}
 	if len(status) > 0 {
 		warnings = append(warnings, "Source checkout is dirty: only committed HEAD is copied; local edits and untracked files are excluded.")

@@ -425,8 +425,13 @@ func (session *Session) Exec(ctx context.Context, argv []string, cwd string, roo
 }
 
 func (session *Session) exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration, environment map[string]string) (CommandResult, error) {
-	if len(argv) == 0 || argv[0] == "" {
+	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" {
 		return CommandResult{}, errors.New("native command is empty")
+	}
+	for _, argument := range argv {
+		if strings.ContainsRune(argument, 0) {
+			return CommandResult{}, errors.New("native command contains a NUL byte")
+		}
 	}
 	if !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd {
 		return CommandResult{}, errors.New("native command cwd must be absolute and clean")

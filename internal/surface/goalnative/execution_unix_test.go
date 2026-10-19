@@ -52,6 +52,11 @@ func TestExecutionHostNeverCreatesModelSession(t *testing.T) {
 			t.Fatalf("execution-only RPC %s was not refused before transport: %v", method, err)
 		}
 	}
+	for _, argv := range [][]string{nil, {}, {""}, {" "}, {"printf", "bad\x00argument"}} {
+		if _, err := host.Exec(t.Context(), argv, work, []string{work}, time.Second); err == nil {
+			t.Fatalf("invalid execution argv accepted: %#v", argv)
+		}
+	}
 	result, err := host.Exec(t.Context(), []string{"printf", "ok"}, work, []string{work}, time.Second)
 	if err != nil || result.Stdout != "out" {
 		t.Fatalf("approved command did not use the live transport: %#v, %v", result, err)
@@ -165,8 +170,26 @@ func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err = host.Exec(t.Context(), []string{node, "-e", `const net=require("net"); const channel=net.createConnection(process.argv[1]); channel.on("connect",()=>process.exit(0)); channel.on("error",error=>{ console.error(error.message); process.exit(1) })`, probeSocket}, work, []string{work}, 10*time.Second)
-	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "Operation not permitted") {
+	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "connect EPERM "+probeSocket) {
 		t.Fatalf("sandboxed tools reached the private role socket: %#v, %v", result, err)
+	}
+	network, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = network.Close() })
+	connection, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", network.Addr().String())
+	if err != nil {
+		t.Fatalf("TCP positive control failed: %v", err)
+	}
+	_ = connection.Close()
+	_, port, err := net.SplitHostPort(network.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = host.Exec(t.Context(), []string{node, "-e", `const net=require("net"); const channel=net.createConnection({host:"127.0.0.1",port:Number(process.argv[1])}); channel.on("connect",()=>process.exit(0)); channel.on("error",error=>{ console.error(error.message); process.exit(1) })`, port}, work, []string{work}, 10*time.Second)
+	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "connect EPERM 127.0.0.1:"+port) {
+		t.Fatalf("sandboxed tools reached the TCP listener: %#v, %v", result, err)
 	}
 	if err := host.Close(t.Context()); err != nil {
 		t.Fatal(err)
@@ -182,7 +205,7 @@ func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 	}
 }
 
-func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
+func TestExecutionHostRealProcessGroupCleanupDoesNotCoverEscapedChildren(t *testing.T) {
 	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
 		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for the escaped-child negative control")
 	}
@@ -232,8 +255,8 @@ func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
 		t.Fatal("unconfined self-expiring child outlived its bounded deadline")
 	}
 
-	pidPath := filepath.Join(work, "confined.pid")
-	statePath := filepath.Join(work, "confined.state")
+	pidPath := filepath.Join(work, "sandboxed.pid")
+	statePath := filepath.Join(work, "sandboxed.state")
 	commandCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
@@ -245,11 +268,16 @@ func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if !waitForProcessGone(childPID, 10*time.Second) {
+			t.Error("self-expiring escaped-child probe exceeded its deadline")
+		}
+	})
 	if !processAlive(childPID) {
-		t.Fatal("confined child was not alive before cancellation")
+		t.Fatal("sandboxed child was not alive before cancellation")
 	}
-	if data, err := os.ReadFile(statePath); err != nil || strings.TrimSpace(string(data)) != "blocked" { //nolint:gosec // Test-owned process-control output.
-		t.Fatalf("confined process state = %q, %v; want setsid blocked", data, err)
+	if data, err := os.ReadFile(statePath); err != nil || strings.TrimSpace(string(data)) != "escaped" { //nolint:gosec // Test-owned process-control output.
+		t.Fatalf("sandboxed process state = %q, %v; want escaped negative control", data, err)
 	}
 	cancel()
 	select {
@@ -261,12 +289,13 @@ func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
 		t.Fatal("command cancellation did not settle")
 	}
 	closeErr := host.Close(t.Context())
-	if !waitForProcessGone(childPID, 5*time.Second) {
-		t.Fatalf("confined native-tool descendant survived cancellation; clean receipt=%v", closeErr)
-	}
 	if closeErr != nil {
 		t.Fatalf("host cleanup: %v", closeErr)
 	}
+	if !processAlive(childPID) {
+		t.Fatal("escaped-child negative control did not survive group cleanup; re-evaluate the documented cleanup boundary")
+	}
+	t.Log("owned process-group cleanup succeeded while the self-expiring escaped child remained alive; this is not all-descendant containment")
 }
 
 const escapedChildProbeSource = `#include <errno.h>
@@ -318,71 +347,5 @@ func buildEscapedChildProbe(t *testing.T) string {
 }
 
 func TestExecutionHostRealSupervisorDeathCleansActiveCommandAndChild(t *testing.T) {
-	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
-		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for the real supervisor-death cleanup boundary")
-	}
-	native, err := exec.LookPath("codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := os.MkdirTemp("/tmp", "gn-supervisor-death-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	work := filepath.Join(root, "work")
-	if err := os.Mkdir(work, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	controlDir := filepath.Join(root, "control")
-	host, err := StartCommandHost(t.Context(), Config{Binary: native, SupervisorBinary: writeHelper(t, "supervisor", "GOALNATIVE_HOST_HELPER=1"), ControlDir: controlDir, Cwd: work, Socket: filepath.Join(root, "exec.sock"), WritableRoots: []string{work}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	commandDone := make(chan error, 1)
-	shellPIDPath, childPIDPath := filepath.Join(work, "shell.pid"), filepath.Join(work, "child.pid")
-	go func() {
-		_, err := host.Exec(context.Background(), []string{"/bin/sh", "-c", `printf '%s' "$$" > "$1"; sleep 60 & child=$!; printf '%s' "$child" > "$2"; wait "$child"`, "goal-supervisor-death", shellPIDPath, childPIDPath}, work, []string{work}, time.Minute)
-		commandDone <- err
-	}()
-	shellPID, err := waitForPIDFile(shellPIDPath, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	childPID, err := waitForPIDFile(childPIDPath, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !processAlive(shellPID) || !processAlive(childPID) {
-		t.Fatal("active command and child were not alive before supervisor death")
-	}
-	if err := host.session.child.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-commandDone:
-		if err == nil {
-			t.Fatal("active command completed successfully after supervisor death")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("active command did not settle after supervisor death")
-	}
-	closeErr := host.Close(context.Background())
-	if closeErr != nil {
-		t.Fatalf("graceful close after supervisor death: %v", closeErr)
-	}
-	if !waitForProcessGone(shellPID, 5*time.Second) || !waitForProcessGone(childPID, 5*time.Second) {
-		t.Fatal("active command or child survived supervisor death cleanup")
-	}
-	receipt, err := waitForGuardianReceipt(startupReceiptPath(controlDir), 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Status != "stopped" || !receipt.GroupGone || !receipt.SocketGone || receipt.Error != "" {
-		t.Fatalf("supervisor-death guardian receipt = %#v", receipt)
-	}
+	testRealCodexAbruptSupervisorDeath(t, true)
 }

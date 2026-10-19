@@ -22,10 +22,6 @@ func StartCommandHost(ctx context.Context, config Config) (*CommandHost, error) 
 }
 
 func (host *CommandHost) Exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration) (CommandResult, error) {
-	confined, err := confinedCommand(argv)
-	if err != nil {
-		return CommandResult{}, err
-	}
 	for _, root := range roots {
 		if pathWithin(root, host.session.config.ControlDir) || pathWithin(host.session.config.ControlDir, root) {
 			return CommandResult{}, errors.New("execution roots overlap private host state")
@@ -55,7 +51,7 @@ func (host *CommandHost) Exec(ctx context.Context, argv []string, cwd string, ro
 		environment["TMPDIR"], environment["GOCACHE"] = temporary, cache
 		break
 	}
-	return host.session.exec(ctx, confined, cwd, roots, timeout, environment)
+	return host.session.exec(ctx, argv, cwd, roots, timeout, environment)
 }
 
 func (host *CommandHost) Close(ctx context.Context) error { return host.session.Close(ctx) }

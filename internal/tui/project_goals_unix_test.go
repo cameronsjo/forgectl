@@ -508,7 +508,7 @@ func TestSupervisorLabelDoesNotInferStoppedFromMissingLease(t *testing.T) {
 	}
 	state.CleanupComplete = true
 	state.CancelRequested = true
-	if got := supervisorLabel(state); got != "stopped; cleanup confirmed" {
+	if got := supervisorLabel(state); got != "stopped; owned process groups cleaned" {
 		t.Fatalf("cleanup-confirmed supervisor label = %q", got)
 	}
 }

@@ -195,6 +195,31 @@ func TestBrokerRejectsMalformedOversizeUnknownPropertiesAndOperations(t *testing
 	}
 }
 
+func TestBrokerCloseRemovesOwnedSocket(t *testing.T) {
+	socketRoot, controlRoot := privateTestDir(t), privateTestDir(t)
+	socket, capabilityFile := filepath.Join(socketRoot, "tools.sock"), filepath.Join(controlRoot, "capability")
+	server, err := Start(t.Context(), socket, capabilityFile, func(context.Context, string, json.RawMessage) (any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close(context.Background()) })
+	if _, err := os.Lstat(socket); err != nil {
+		t.Fatalf("owned socket was not created: %v", err)
+	}
+	if err := server.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatalf("owned socket survived close: %v", err)
+	}
+	if err := os.Remove(socketRoot); err != nil {
+		t.Fatalf("closed broker left its socket directory nonempty: %v", err)
+	}
+	assertPrivateRegularFile(t, capabilityFile, 0o600)
+}
+
 func TestBrokerCloseCancelsAndDrainsHandler(t *testing.T) {
 	root := privateTestDir(t)
 	socket := filepath.Join(root, "tools.sock")

@@ -118,7 +118,7 @@ func TestPrepareNativeTeamDisclosesProvidersAndExecutionDependency(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"each approved native model provider", "credential-free execution host", "before model work", "not yet verified end to end"} {
+	for _, required := range []string{"each approved native model provider", "credential-free execution host", "before model work", "not yet verified end to end", "only owned native process groups", "daemonized children may survive cancellation"} {
 		if !containsString(prepared.Warnings, required) {
 			t.Errorf("native team warning missing %q: %q", required, prepared.Warnings)
 		}

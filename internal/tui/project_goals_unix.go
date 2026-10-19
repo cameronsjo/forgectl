@@ -2176,7 +2176,7 @@ func goalPhaseLabel(phase goal.Phase) string { return string(phase) }
 
 func supervisorLabel(state goal.State) string {
 	if state.CleanupComplete {
-		return "stopped; cleanup confirmed"
+		return "stopped; owned process groups cleaned"
 	}
 	if state.CancelRequested {
 		return "canceling"
