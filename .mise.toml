@@ -1,3 +1,3 @@
 [tools]
-# No go pin: go.mod's go line picks the toolchain (GOTOOLCHAIN=auto). See #1277.
+# No go pin: use any go at least as new as go.mod's go line. See #1277.
 goreleaser = "2"
