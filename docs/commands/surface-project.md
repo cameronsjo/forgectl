@@ -231,7 +231,8 @@ does not expose Node, filesystem/network APIs or native shell tools. Disabling
 the dispatcher is not a substitute for disabling I/O tools: a code-mode-only
 model cannot call the approved tools without it.
 
-Native teams are experimental and are **not yet verified end to end**. They use
+Native teams remain experimental. Inspect retained review, checks and cleanup
+evidence before accepting a result. They use
 the existing Codex filesystem/network sandbox and owned-process-group cleanup.
 Preparation explicitly warns that daemonized children may survive cancellation;
 this is not stronger VM/container isolation. An unavailable tool sandbox refuses
@@ -266,6 +267,35 @@ different—it queues a request to the owning supervisor. Treat it as complete
 only when status is `canceled` and `cleanup_complete` is true; this confirms the
 owned native process groups stopped, not that arbitrary daemonized descendants
 are gone. State and any worktree or evidence already created are still retained.
+
+### Reading cleanup receipts
+
+In the retained run directory, each role's `native-control/<role>/` keeps
+`guardian-startup.json` and a final `guardian-receipt.json` after cleanup. Failed
+native startup can also produce a receipt, with status `failed`. Native teams
+retain a separate pair for each credential-free execution host in
+`native-control/<role>-execution/`. Startup status `started` identifies the owned
+native child: `native_pid`, `process_group`, `socket` and `started_at` must match
+in the final receipt to pair the same process incarnation. Validation requires
+a final status of `stopped`, no receipt errors and both cleanup booleans true;
+missing or mismatched receipts are not evidence of a clean shutdown.
+
+`group_gone` records that the owned process group was absent when checked;
+validation checks its absence again. `socket_gone` records that the socket path
+was absent or its socket was removed, not that every process using it exited.
+Goal-state `cleanup_complete` means the supervisor's cleanup returned no error
+(including closing started roles and their execution hosts); it is not a task
+correctness or all-descendant containment claim. Daemonized descendants that
+leave the owned process group may survive even when these values are true.
+
+Loss of the logical supervisor closes its lease pipe: a surviving guardian
+responds by stopping the owned native process group, removing its socket and
+writing the final receipt. Killing the guardian itself is different: it can
+prevent that cleanup and receipt publication, leaving the native child alive.
+Neither supervisor death nor a startup receipt alone proves cleanup, and an
+abrupt supervisor death need not update goal-state `cleanup_complete`. Retained
+PIDs are historical evidence, not a later kill list: PID/process-group IDs can
+be reused, so do not use stored PIDs to kill processes later.
 
 ### Scripted CLI walkthrough
 

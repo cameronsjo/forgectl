@@ -5,7 +5,7 @@ status: in-flight
 # First-class native teams for repository goals
 
 Status: in flight; Cameron authorized both cleanup stages, existing process-group cleanup first
-Next action: verify a real mixed-team result and cancellation using the restored role-scoped execution path, then implement and verify stronger VM/container isolation.
+Next action: design, implement and verify stronger VM/container isolation; the first-stage mixed-team result, frozen review, checks and UI cancellation are verified.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -84,15 +84,15 @@ R11. Codex MUST complete the existing-cleanup stage before implementing the stro
 
 - [x] Verify current native protocols, observed model selection and tool-disabling mechanisms.
 - [x] Resolve the process-containment decision: Cameron authorized existing cleanup first, then stronger VM/container isolation.
-- [ ] Complete the existing-cleanup stage with explicit limits and real native acceptance.
+- [x] Complete the existing-cleanup stage with explicit limits and real native acceptance.
 - [ ] Design, implement and verify stronger VM/container isolation after the first stage.
 - [x] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
 - [x] Implement the non-model execution host, role-bound goal tools and guardian-owned native process transport; stronger containment remains unavailable, not silently bypassed.
 - [x] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
 - [x] Integrate team-aware mailbox delivery, native evidence, independent review and checks into the existing supervisor.
 - [x] Add team selection, per-role approval/progress and actionable preflight to the one-form UI and JSON CLI.
-- [ ] Verify adversarial boundaries, lifecycle failures and the wide/narrow terminal journey.
-- [ ] Run a real mixed-team repository goal, independently verify its result and preserve prior evidence.
+- [x] Verify first-stage adversarial boundaries, logical-owner failure and the wide/narrow terminal journey; stronger descendant and guardian-failure guarantees remain in stage two.
+- [x] Run a real mixed-team repository goal, independently verify its result and preserve prior evidence.
 - [ ] Complete docs, clean-build provenance, feature-branch push and requirement-by-requirement audit.
 
 ## Ownership and review
@@ -103,7 +103,7 @@ The Pi and Claude reviewers completed independent read-only plan/security review
 
 ## Completion evidence
 
-Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Normal goal/native/tool-channel/UI tests and the affected CLI tests pass; real execution-boundary tests now pass after the staged corrections recorded below. The actual mixed-team result and UI cancellation remain unverified. The menu-inventory test `TestMenuJSON_LiveTree` fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
+The existing-cleanup stage is verified; the two-stage objective is not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Normal goal/native/tool-channel/UI tests and the affected CLI tests pass; real execution-boundary tests pass after the staged corrections recorded below. The actual mixed-team result, frozen native review, approved checks, source preservation and wide/narrow UI cancellation now have direct evidence. Stronger VM/container isolation and the final combined audit remain outstanding. The menu-inventory test `TestMenuJSON_LiveTree` fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
 
 ### Verified checkpoint
 
@@ -159,3 +159,13 @@ The clean `6354e038` build subsequently passed both two-turn native probes. Root
 The compiled 100x24 UI successfully prepared and started a real mixed goal, observed all three native identities, and reached its requested operator question. The cancellation probe then exposed an actual UI defect: after manual scrolling, opening cancellation reset the offset but left manual-scroll mode enabled, hiding the confirmation below the overview. The probe also used the wrong confirm label (`Cancel goal` rather than `Request cancellation`). Its recovery queued CLI cancellation; the retained run `goal-a34f7f873a8f043154a54e94` under `/private/tmp/forgectl-native-stage1-private.k8P6Gw/ui-registry-100x24` reached canceled with inactive supervision and owned-group cleanup. That recovery is not UI-cancellation acceptance.
 
 Opening cancellation now restores automatic focus scrolling, and its warning/buttons wrap on narrow terminals. A regression reproduces the prior invisible controls at both 100x24 and 50x16, then requires both choices, the selected focus, pinned goal identity and bounded line width. Focused project-goal UI tests and pinned lint pass. Fresh actual UI cancellation remains required.
+
+### First-stage acceptance
+
+- A real useful JSON-CLI goal, `goal-ef521e2bf81e09761be68195`, completed on clean public source `6354e038` with observed Codex/OpenAI coordination, Pi/OpenAI-Codex implementation and Claude/Anthropic review. The retained root is `/private/tmp/forgectl-native-stage1-private.k8P6Gw/registry`. The only result file is `docs/commands/surface-project.md`.
+- Root Codex independently verified the exact frozen patch `b7c0f295934a5e0668d04f649586e0d0f0f2b65de8cf2f7eed19bd7d17e957d1`, the directly correlated native reviewer response, both approved argv/output digests, unchanged post-check patch, original source snapshot and six paired guardian receipts. Read-only process inventory confirms those owned groups are absent; implementation model and execution-host receipts precede patch freezing. The CLI artifact bytes match disk. This remains group-only cleanup, not all-descendant containment.
+- The reviewer correctly distinguished the preliminary abbreviated Git diff digest from the final full-index patch digest. Only the latter direct native review counted. Root Codex inspected the actual patch and implementation, then incorporated the useful documentation with one explicit correction: failed native startup can also publish a failed receipt. The original retained patch and review remain untouched; that small documentation clarification is root Codex's change, not falsely attributed to the frozen review.
+- Fresh compiled UI `e0902123`, independently built with `vcs.modified=false`, started and canceled real mixed teams at 50x16 (`goal-be9a3d67ffcefc9a76c998b6`) and 100x24 (`goal-c706a05894fc14c94d214ccd`). Each first confirmed Keep running leaves the run active, then used the explicit Request cancellation button; all six paired receipts, unchanged retained spec and clean source were verified. Fresh retained-run views also visibly show canceled state, each role and owned-process-group cleanup. Evidence is under `/private/tmp/forgectl-native-stage1-ui.Kw10cB`.
+- The completed result's Diff, every check output and JSON are visible at both terminal sizes with stable goal identity. The first narrow probe incorrectly rejected a 238-character stderr line split across page boundaries by pinned headers. Its regression-tested fix scans check output one row at a time; the actual unchanged UI now passes every assertion. The deliberate visible-Status negative control exits 1 with the expected error at both sizes. Reports: `ready-inspection-fixed/1792427502738358000-33294/report.json` and `ready-inspection-negative/1792427551517096000-41150/report.json` under the UI evidence root.
+
+Both approved first-stage paths are real, not fixtures: JSON-CLI completion and compiled UI Start/cancellation. Native teams remain experimental; preparation now asks for retained review/check/cleanup inspection rather than claiming the tested path has never run. The second stage starts from these retained results without rewriting them or weakening their limits.

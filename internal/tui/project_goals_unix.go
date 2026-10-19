@@ -1507,7 +1507,7 @@ func (model projectGoalsModel) render() string {
 }
 
 func (model projectGoalsModel) renderDashboard(width int) []string {
-	lines := []string{model.styles.Meta.Render("Start a bounded native Codex goal; leaving this screen detaches.")}
+	lines := []string{model.styles.Meta.Render("Start a bounded native-team goal; leaving this screen detaches.")}
 	if model.opts.Root != "" {
 		lines = appendGoalField(lines, "Registry", model.opts.Root, width)
 	}

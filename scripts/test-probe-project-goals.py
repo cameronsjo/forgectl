@@ -84,6 +84,27 @@ def test_scan_detects_movement_even_when_start_and_finish_match() -> None:
     assert PROBE._scan(Session(False))[1] is False
 
 
+def test_check_scan_preserves_lines_across_page_boundaries() -> None:
+    class Session:
+        def __init__(self):
+            self.position = 0
+            self.lines = ['before'] * 2 + ['complete wrapped', 'receipt line', 'with tail'] + ['after'] * 8
+
+        def send(self, data):
+            movement = {b'\x1b[5~': -8, b'\x1b[6~': 8, b'\x1b[B': 1}[data]
+            self.position = min(max(self.position + movement, 0), len(self.lines) - 4)
+
+        def drain(self, duration):
+            return 'Pinned header\n' + '\n'.join(self.lines[self.position:self.position + 4]) + '\nFooter'
+
+    expected = 'complete wrapped receipt line with tail'
+    paged, _ = PROBE._scan(Session())
+    assert not PROBE._visible_wrapped(paged, expected)
+    linewise, changed = PROBE._scan(Session(), linewise=True)
+    assert changed and PROBE._visible_wrapped(linewise, expected)
+    assert not PROBE._visible_wrapped(linewise.replace('with tail', 'without tail'), expected)
+
+
 if __name__ == "__main__":
     test_selected_dashboard_id_is_display_width_bounded()
     test_detail_must_match_selected_goal()
@@ -91,4 +112,5 @@ if __name__ == "__main__":
     test_multiline_typing_uses_ordinary_enter()
     test_wrapped_commands_keep_every_non_whitespace_character()
     test_scan_detects_movement_even_when_start_and_finish_match()
+    test_check_scan_preserves_lines_across_page_boundaries()
     print("Projects goal probe contract tests passed")

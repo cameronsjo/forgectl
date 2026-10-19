@@ -48,7 +48,7 @@ func newProjectGoalsCmd(deps module.Deps, root *string) *cobra.Command {
 	var modelOverride string
 	command := &cobra.Command{
 		Use:          "goals",
-		Short:        "Prepare and supervise an isolated native Codex project goal",
+		Short:        "Prepare and supervise an isolated native-team project goal",
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 	}
@@ -145,7 +145,7 @@ func newProjectGoalsCmd(deps module.Deps, root *string) *cobra.Command {
 func newProjectGoalCmd(deps module.Deps, root *string) *cobra.Command {
 	command := &cobra.Command{
 		Use:          "goal",
-		Short:        "Prepare, start, and inspect isolated native Codex goals",
+		Short:        "Prepare, start, and inspect isolated native-team goals",
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE:         func(command *cobra.Command, _ []string) error { return command.Help() },

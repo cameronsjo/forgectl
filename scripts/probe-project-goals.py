@@ -273,13 +273,13 @@ def _fill(session: PTYSession, label: str, value: str) -> None:
     session.send(b"\t")
 
 
-def _scan(session: PTYSession) -> tuple[str, bool]:
+def _scan(session: PTYSession, linewise: bool = False) -> tuple[str, bool]:
     screens = [session.drain(0.08)]
     for _ in range(16):
         session.send(b"\x1b[5~")
         screens.append(session.drain(0.025))
-    for _ in range(32):
-        session.send(b"\x1b[6~")
+    for _ in range(256 if linewise else 32):
+        session.send(b"\x1b[B" if linewise else b"\x1b[6~")
         screens.append(session.drain(0.025))
     return "\n".join(screens), len(set(screens)) > 1
 
@@ -419,7 +419,7 @@ def _run_inspect(executable: pathlib.Path, root: pathlib.Path, repository: pathl
                 loaded = session.wait_for(lambda text: "diff --git" in text, "loaded diff content")
                 session.send(b"\x1b[B")
                 arrow_scrolled = session.drain(0.1) != loaded
-            scanned, _ = _scan(session)
+            scanned, _ = _scan(session, linewise=label == "check")
             artifacts[label] = screen + "\n" + scanned
         process = session.close()
         assertions = {
