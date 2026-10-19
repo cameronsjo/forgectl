@@ -66,6 +66,7 @@ type projectGoalsSetupField uint8
 const (
 	projectGoalsFieldRepository projectGoalsSetupField = iota
 	projectGoalsFieldPreset
+	projectGoalsFieldTeam
 	projectGoalsFieldGoal
 	projectGoalsFieldAdvanced
 	projectGoalsFieldTitle
@@ -74,6 +75,9 @@ const (
 	projectGoalsFieldChecks
 	projectGoalsFieldModel
 	projectGoalsFieldDuration
+	projectGoalsFieldCoordinator
+	projectGoalsFieldImplementation
+	projectGoalsFieldReviewer
 	projectGoalsFieldPrepare
 	projectGoalsFieldEdit
 	projectGoalsFieldStart
@@ -117,6 +121,7 @@ type projectGoalsModel struct {
 	setupFocus      int
 	presetID        string
 	titleExplicit   bool
+	teamID          string
 	runTab          int
 	runFocus        int
 	prepareDigest   string
@@ -221,6 +226,7 @@ func newProjectGoalsModel(ctx context.Context, opts ProjectGoalsOptions) *projec
 			Model:        opts.Model,
 			LimitMinutes: 10,
 		},
+		teamID: "codex",
 	}
 	model.applyPreset("bugfix", false)
 	return model
@@ -512,6 +518,17 @@ func (model *projectGoalsModel) updateSetup(name, text string) (tea.Model, tea.C
 			return model, nil
 		}
 	}
+	if field == projectGoalsFieldTeam {
+		switch name {
+		case "left", "up":
+			model.selectTeam(-1)
+			return model, nil
+		case "right", "down", "space":
+			model.selectTeam(1)
+			return model, nil
+		}
+		return model, nil
+	}
 	if field == projectGoalsFieldAdvanced {
 		if name == "enter" || name == "space" {
 			model.setupAdvanced = !model.setupAdvanced
@@ -522,7 +539,7 @@ func (model *projectGoalsModel) updateSetup(name, text string) (tea.Model, tea.C
 		return model, nil
 	}
 	if field == projectGoalsFieldPrepare || field == projectGoalsFieldStart || field == projectGoalsFieldEdit {
-		if name == "enter" || name == "space" || (name == "s" && field == projectGoalsFieldStart) {
+		if name == "enter" || name == "space" {
 			return model.activateSetupButton(field)
 		}
 		return model, nil
@@ -581,13 +598,14 @@ func setupFieldMultiline(field projectGoalsSetupField) bool {
 }
 
 func setupFieldText(field projectGoalsSetupField) bool {
-	return field == projectGoalsFieldRepository || field == projectGoalsFieldGoal || field == projectGoalsFieldTitle || field == projectGoalsFieldScope || field == projectGoalsFieldAcceptance || field == projectGoalsFieldChecks || field == projectGoalsFieldModel || field == projectGoalsFieldDuration
+	return field == projectGoalsFieldRepository || field == projectGoalsFieldGoal || field == projectGoalsFieldTitle || field == projectGoalsFieldScope || field == projectGoalsFieldAcceptance || field == projectGoalsFieldChecks || field == projectGoalsFieldModel || field == projectGoalsFieldDuration || field == projectGoalsFieldCoordinator || field == projectGoalsFieldImplementation || field == projectGoalsFieldReviewer
 }
 
 func (model projectGoalsModel) setupFields() []projectGoalsSetupField {
 	fields := []projectGoalsSetupField{
 		projectGoalsFieldRepository,
 		projectGoalsFieldPreset,
+		projectGoalsFieldTeam,
 		projectGoalsFieldGoal,
 		projectGoalsFieldAdvanced,
 	}
@@ -599,6 +617,9 @@ func (model projectGoalsModel) setupFields() []projectGoalsSetupField {
 			projectGoalsFieldChecks,
 			projectGoalsFieldModel,
 			projectGoalsFieldDuration,
+			projectGoalsFieldCoordinator,
+			projectGoalsFieldImplementation,
+			projectGoalsFieldReviewer,
 		)
 	}
 	if model.prepared == nil {
@@ -669,6 +690,11 @@ func (model projectGoalsModel) setupFieldValue(field projectGoalsSetupField) str
 		return model.draft.Repository
 	case projectGoalsFieldGoal:
 		return model.draft.Objective
+	case projectGoalsFieldTeam:
+		if preset := model.selectedTeamPreset(); preset != nil {
+			return preset.Name
+		}
+		return "Custom team"
 	case projectGoalsFieldTitle:
 		return model.draft.Title
 	case projectGoalsFieldScope:
@@ -676,12 +702,16 @@ func (model projectGoalsModel) setupFieldValue(field projectGoalsSetupField) str
 	case projectGoalsFieldAcceptance:
 		return strings.Join(model.draft.Acceptance, "\n")
 	case projectGoalsFieldChecks:
-		encoded, _ := json.Marshal(model.draft.Checks)
-		return string(encoded)
+		return projectGoalJSON(model.draft.Checks, false)
 	case projectGoalsFieldModel:
 		return model.draft.Model
 	case projectGoalsFieldDuration:
 		return strconv.Itoa(model.draft.LimitMinutes)
+	case projectGoalsFieldCoordinator, projectGoalsFieldImplementation, projectGoalsFieldReviewer:
+		team := model.draft.EffectiveTeam()
+		role := teamRoleForField(field)
+		selection, _ := team.Role(role)
+		return projectGoalTeamSelectionText(selection)
 	}
 	return ""
 }
@@ -753,6 +783,24 @@ func (model *projectGoalsModel) commitSetupEdit() error {
 			model.draft.LimitMinutes = minutes
 			model.invalidatePrepared()
 		}
+	case projectGoalsFieldCoordinator, projectGoalsFieldImplementation, projectGoalsFieldReviewer:
+		selection, err := parseProjectGoalTeamSelection(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", setupFieldLabel(field), err)
+		}
+		team := model.draft.EffectiveTeam()
+		role := teamRoleForField(field)
+		switch role {
+		case "coordinator":
+			team.Coordinator = selection
+		case "implementation":
+			team.Implementation = selection
+		case "reviewer":
+			team.Reviewer = selection
+		}
+		model.draft.Team = cloneProjectGoalTeam(team)
+		model.teamID = "custom"
+		model.invalidatePrepared()
 	}
 	return nil
 }
@@ -780,6 +828,44 @@ func (model *projectGoalsModel) selectPreset(delta int) {
 	}
 	current = (current + delta + len(presets)) % len(presets)
 	model.applyPreset(presets[current].ID, true)
+}
+
+func (model *projectGoalsModel) selectTeam(delta int) {
+	presets := projectGoalTeamPresets(model.draft.Model)
+	if len(presets) == 0 {
+		return
+	}
+	current := 0
+	for index, preset := range presets {
+		if preset.ID == model.teamID {
+			current = index
+			break
+		}
+	}
+	current = (current + delta + len(presets)) % len(presets)
+	model.applyTeamPreset(presets[current].ID, true)
+}
+
+func (model *projectGoalsModel) applyTeamPreset(id string, invalidate bool) {
+	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
+		if preset.ID != id {
+			continue
+		}
+		model.teamID = id
+		if preset.ID == "custom" {
+			team := model.draft.EffectiveTeam()
+			model.draft.Team = cloneProjectGoalTeam(team)
+		} else if preset.Team == nil {
+			model.draft.Team = nil
+		} else {
+			model.draft.Team = cloneProjectGoalTeam(*preset.Team)
+		}
+		if invalidate {
+			model.invalidatePrepared()
+		}
+		model.beginSetupEdit()
+		return
+	}
 }
 
 func (model *projectGoalsModel) applyPreset(id string, invalidate bool) {
@@ -1086,6 +1172,8 @@ func (model *projectGoalsModel) startSetup() {
 	model.setupAdvanced = false
 	model.setupFocus = 0
 	model.titleExplicit = false
+	model.teamID = "codex"
+	model.draft.Team = nil
 	model.errText = ""
 	model.scroll = 0
 	model.editorManualScroll = false
@@ -1155,6 +1243,7 @@ func (model *projectGoalsModel) prepareGoal() tea.Cmd {
 	}
 	model.actionBusy = true
 	spec := model.draft
+	// termsafe:allow-raw-json internal approval identity digest, never terminal output
 	encoded, _ := json.Marshal(spec)
 	digest := goal.Digest(encoded)
 	model.prepareSeq++
@@ -1480,6 +1569,16 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 					lines = append(lines, model.styles.Meta.Render("  "+line))
 				}
 			}
+		case projectGoalsFieldTeam:
+			preset := model.selectedTeamPreset()
+			name, hint := "Custom team", "edit each role explicitly in Advanced"
+			if preset != nil {
+				name, hint = preset.Name, preset.Hint
+			}
+			lines = append(lines, marker+"Team: ["+name+"]")
+			for _, line := range goalWrap("  "+hint, width-4) {
+				lines = append(lines, model.styles.Meta.Render(line))
+			}
 		case projectGoalsFieldGoal:
 			lines = append(lines, marker+"Goal:")
 			value := model.setupFieldValue(field)
@@ -1498,6 +1597,16 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 				label = "Advanced: expanded"
 			}
 			lines = append(lines, marker+"[ "+label+" ]")
+		case projectGoalsFieldCoordinator, projectGoalsFieldImplementation, projectGoalsFieldReviewer:
+			label := setupFieldLabel(field)
+			lines = append(lines, marker+label+":")
+			value := model.setupFieldValue(field)
+			if focused {
+				value = goalCursorText(model.edit, model.cursor)
+			}
+			for _, line := range goalLiteralWrap(value, goalMax(width-4, 1)) {
+				lines = append(lines, "    "+line)
+			}
 		case projectGoalsFieldTitle, projectGoalsFieldScope, projectGoalsFieldAcceptance, projectGoalsFieldChecks, projectGoalsFieldModel, projectGoalsFieldDuration:
 			label := setupFieldLabel(field)
 			value := model.setupValueForRender(field, width-lipgloss.Width(label)-4)
@@ -1541,6 +1650,18 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 					}
 					lines = appendGoalField(lines, "Commands", formatGoalChecks(prepared.Spec.Checks), width)
 					lines = appendGoalField(lines, "Model", prepared.Spec.Model, width)
+					lines = append(lines, model.styles.Header.Render("Team"))
+					effectiveTeam := prepared.Spec.EffectiveTeam()
+					for _, role := range []struct {
+						name  string
+						value goal.ModelSelection
+					}{
+						{name: "Coordinator", value: effectiveTeam.Coordinator},
+						{name: "Implementation", value: effectiveTeam.Implementation},
+						{name: "Reviewer", value: effectiveTeam.Reviewer},
+					} {
+						lines = appendGoalField(lines, role.name, projectGoalTeamLabel(role.value), width)
+					}
 					lines = appendGoalField(lines, "Duration", fmt.Sprintf("%d minutes", prepared.Spec.LimitMinutes), width)
 					for _, line := range goalWrap("Execution: isolated private worktree; source checkout remains unchanged; Start is the approval boundary.", width) {
 						lines = append(lines, model.styles.Meta.Render(line))
@@ -1595,20 +1716,37 @@ func setupFieldLabel(field projectGoalsSetupField) string {
 		return "OpenAI model"
 	case projectGoalsFieldDuration:
 		return "Duration (minutes)"
+	case projectGoalsFieldCoordinator:
+		return "Coordinator (harness,provider,model)"
+	case projectGoalsFieldImplementation:
+		return "Implementation (harness,provider,model)"
+	case projectGoalsFieldReviewer:
+		return "Reviewer (harness,provider,model)"
 	default:
 		return ""
 	}
 }
 
+func isProjectGoalTeamRoleField(field projectGoalsSetupField) bool {
+	return field == projectGoalsFieldCoordinator || field == projectGoalsFieldImplementation || field == projectGoalsFieldReviewer
+}
+
+func projectGoalJSON(value any, indented bool) string {
+	var output strings.Builder
+	encoder := termsafe.JSONEncoder(&output)
+	if indented {
+		encoder.SetIndent("", "  ")
+	}
+	if err := encoder.Encode(value); err != nil {
+		return "null"
+	}
+	return strings.TrimSuffix(output.String(), "\n")
+}
+
 func formatGoalChecks(checks [][]string) string {
 	parts := make([]string, len(checks))
 	for index, check := range checks {
-		encoded, err := json.Marshal(check)
-		if err != nil {
-			parts[index] = "[]"
-		} else {
-			parts[index] = string(encoded)
-		}
+		parts[index] = projectGoalJSON(check, false)
 	}
 	return strings.Join(parts, "; ")
 }
@@ -1621,6 +1759,59 @@ func (model projectGoalsModel) selectedPreset() *GoalPreset {
 		}
 	}
 	return nil
+}
+
+func (model projectGoalsModel) selectedTeamPreset() *projectGoalTeamPreset {
+	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
+		if preset.ID == model.teamID {
+			if preset.ID == "codex" && model.draft.Team != nil {
+				continue
+			}
+			selected := preset
+			return &selected
+		}
+	}
+	if model.draft.Team == nil {
+		for _, preset := range projectGoalTeamPresets(model.draft.Model) {
+			if preset.ID == "codex" {
+				selected := preset
+				return &selected
+			}
+		}
+	}
+	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
+		if preset.Team != nil && *preset.Team == *model.draft.Team {
+			selected := preset
+			return &selected
+		}
+	}
+	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
+		if preset.ID == "custom" {
+			selected := preset
+			return &selected
+		}
+	}
+	return nil
+}
+
+func (model projectGoalsModel) selectedTeamHint() string {
+	if preset := model.selectedTeamPreset(); preset != nil {
+		return preset.Hint
+	}
+	return "edit each role explicitly in Advanced"
+}
+
+func teamRoleForField(field projectGoalsSetupField) string {
+	switch field {
+	case projectGoalsFieldCoordinator:
+		return "coordinator"
+	case projectGoalsFieldImplementation:
+		return "implementation"
+	case projectGoalsFieldReviewer:
+		return "reviewer"
+	default:
+		return ""
+	}
 }
 
 func (model projectGoalsModel) renderRunWorkspace(width int) []string {
@@ -1659,8 +1850,7 @@ func (model projectGoalsModel) renderRunWorkspace(width int) []string {
 			}
 		}
 	case 3:
-		encoded, _ := json.MarshalIndent(state, "", "  ")
-		lines = append(lines, goalLiteralWrap(string(encoded), width)...)
+		lines = append(lines, goalLiteralWrap(projectGoalJSON(state, true), width)...)
 	default:
 		lines = append(lines, model.styles.Header.Render("Progress"))
 		lines = appendGoalField(lines, "Status", goalPhaseLabel(state.Phase), width)
@@ -1672,7 +1862,11 @@ func (model projectGoalsModel) renderRunWorkspace(width int) []string {
 		if len(state.Roles) > 0 {
 			lines = append(lines, model.styles.Header.Render("Roles"))
 			for _, role := range state.Roles {
-				lines = append(lines, safeGoalField(fmt.Sprintf("%s · %s · %s", role.Name, role.Provider, role.Model), width))
+				harness := role.Harness
+				if harness == "" {
+					harness = "codex"
+				}
+				lines = append(lines, safeGoalField(fmt.Sprintf("%s · %s/%s · %s", role.Name, harness, role.Provider, role.Model), width))
 			}
 		}
 	}
@@ -1780,6 +1974,9 @@ func (model projectGoalsModel) setupEditorCursorLine(width int) int {
 			if field == projectGoalsFieldGoal || field == projectGoalsFieldAcceptance {
 				return line + goalCursorLine(model.edit, model.cursor, goalMax(width-4, 1))
 			}
+			if isProjectGoalTeamRoleField(field) {
+				return line + 1 + goalCursorLine(model.edit, model.cursor, goalMax(width-4, 1))
+			}
 			if field == projectGoalsFieldEdit {
 				return line + model.approvalLineCount(width)
 			}
@@ -1794,6 +1991,8 @@ func (model projectGoalsModel) setupEditorCursorLine(width int) int {
 				line++
 			}
 			line += model.presetCheckNoteLineCount(width)
+		case projectGoalsFieldTeam:
+			line += 1 + goalMax(len(goalWrap("  "+model.selectedTeamHint(), goalMax(width-4, 1))), 1)
 		case projectGoalsFieldGoal:
 			line += 1 + goalMax(len(goalWrap(model.draft.Objective, goalMax(width-4, 1))), 1)
 		case projectGoalsFieldAdvanced:
@@ -1802,6 +2001,8 @@ func (model projectGoalsModel) setupEditorCursorLine(width int) int {
 			line += model.approvalLineCount(width) + 1
 		case projectGoalsFieldAcceptance:
 			line += 1 + goalMax(len(goalWrap(strings.Join(model.draft.Acceptance, "\n"), goalMax(width-4, 1))), 1)
+		case projectGoalsFieldCoordinator, projectGoalsFieldImplementation, projectGoalsFieldReviewer:
+			line += 1 + goalMax(len(goalLiteralWrap(model.setupFieldValue(field), goalMax(width-4, 1))), 1)
 		default:
 			line++
 		}
@@ -1833,6 +2034,18 @@ func (model projectGoalsModel) approvalLineCount(width int) int {
 	}
 	count += goalFieldLineCount("Commands", formatGoalChecks(prepared.Spec.Checks), width)
 	count += goalFieldLineCount("Model", prepared.Spec.Model, width)
+	count++
+	effectiveTeam := prepared.Spec.EffectiveTeam()
+	for _, role := range []struct {
+		name  string
+		value goal.ModelSelection
+	}{
+		{name: "Coordinator", value: effectiveTeam.Coordinator},
+		{name: "Implementation", value: effectiveTeam.Implementation},
+		{name: "Reviewer", value: effectiveTeam.Reviewer},
+	} {
+		count += goalFieldLineCount(role.name, projectGoalTeamLabel(role.value), width)
+	}
 	count += goalFieldLineCount("Duration", fmt.Sprintf("%d minutes", prepared.Spec.LimitMinutes), width)
 	count += goalMax(len(goalWrap("Execution: isolated private worktree; source checkout remains unchanged; Start is the approval boundary.", width)), 1)
 	if prepared.SourceDirty {

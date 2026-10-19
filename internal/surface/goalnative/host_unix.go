@@ -88,7 +88,7 @@ func RunHost(ctx context.Context, specPath string, lease io.Reader, stderr io.Wr
 		if err != nil {
 			return err
 		}
-		defer bridge.Close()
+		defer func() { _ = bridge.Close() }()
 	}
 	if err := command.Start(); err != nil {
 		receiptErr := writeGuardianReceipt(spec.Receipt, guardianReceipt{Status: "failed", Socket: spec.Socket, FinishedAt: time.Now().UTC(), Error: err.Error()})
@@ -171,6 +171,12 @@ func nativeServerArguments(spec hostSpec, environment []string) ([]string, error
 		"--config", `web_search="disabled"`,
 		"--config", "notify=[]",
 		"--config", "apps._default.enabled=false",
+	}
+	if spec.BrokerTools {
+		for _, feature := range brokerDisabledFeatures {
+			arguments = append(arguments, "--disable", feature)
+		}
+		arguments = append(arguments, "--config", "project_doc_max_bytes=0")
 	}
 	for _, section := range []string{"apps", "mcp_servers", "plugins"} {
 		var entries []nativeConfigName

@@ -31,17 +31,19 @@ const (
 var ErrCleanupUnconfirmed = errors.New("native cleanup unconfirmed")
 
 type Config struct {
-	Binary           string
-	SupervisorBinary string
-	ControlDir       string
-	Cwd              string
-	Socket           string
-	Model            string
-	Environment      []string
-	WritableRoots    []string
-	OnEvent          func(json.RawMessage)
-	ExecutionOnly    bool
-	OnPromptAccepted func(string, string)
+	Binary             string
+	SupervisorBinary   string
+	ControlDir         string
+	Cwd                string
+	Socket             string
+	Model              string
+	Environment        []string
+	WritableRoots      []string
+	OnEvent            func(json.RawMessage)
+	ExecutionOnly      bool
+	OnPromptAccepted   func(string, string)
+	ToolSocket         string
+	ToolCapabilityFile string
 }
 
 type TurnResult struct {
@@ -88,6 +90,8 @@ type Session struct {
 	turnFinalText map[string]string
 	readErr       error
 	receipt       string
+	toolCalls     map[string]struct{}
+	toolSlots     chan struct{}
 }
 
 type rpcReply struct {
@@ -115,6 +119,7 @@ type hostSpec struct {
 	ExecutionOnly bool     `json:"execution_only,omitempty"`
 	Protocol      string   `json:"protocol,omitempty"`
 	Arguments     []string `json:"arguments,omitempty"`
+	BrokerTools   bool     `json:"broker_tools,omitempty"`
 }
 
 func Start(ctx context.Context, config Config) (*Session, error) {
@@ -143,7 +148,7 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 		return nil, err
 	}
 	receipt := filepath.Join(config.ControlDir, "guardian-receipt.json")
-	spec := hostSpec{Binary: config.Binary, ControlDir: config.ControlDir, Cwd: config.Cwd, Socket: config.Socket, Model: config.Model, WritableRoots: append([]string(nil), config.WritableRoots...), Receipt: receipt, ExecutionOnly: config.ExecutionOnly}
+	spec := hostSpec{Binary: config.Binary, ControlDir: config.ControlDir, Cwd: config.Cwd, Socket: config.Socket, Model: config.Model, WritableRoots: append([]string(nil), config.WritableRoots...), Receipt: receipt, ExecutionOnly: config.ExecutionOnly, BrokerTools: config.ToolSocket != ""}
 	specPath := filepath.Join(config.ControlDir, fmt.Sprintf("host-spec-%d.json", time.Now().UnixNano()))
 	if err := writePrivateJSON(specPath, spec); err != nil {
 		return nil, err
@@ -163,6 +168,7 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 	_ = leaseReader.Close()
 	childDone := make(chan struct{})
 	session := &Session{config: config, lease: leaseWriter, child: cmd, childDone: childDone, done: make(chan struct{}), pending: make(map[int64]chan rpcReply), turnIdle: make(chan struct{}), nativeBusy: make(map[string]struct{}), turnText: make(map[string]string), turnFinalText: make(map[string]string), receipt: receipt}
+	session.toolCalls, session.toolSlots = make(map[string]struct{}), make(chan struct{}, 8)
 	go func() {
 		state, waitErr := cmd.Wait()
 		if waitErr == nil && (state == nil || !state.Success()) {
@@ -187,7 +193,7 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 	}
 	session.conn = conn
 	go session.readLoop(context.WithoutCancel(ctx))
-	if _, err := session.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "forgectl-goal", "version": "dev"}, "capabilities": map[string]any{"experimentalApi": false}}); err != nil {
+	if _, err := session.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "forgectl-goal", "version": "dev"}, "capabilities": map[string]any{"experimentalApi": config.ToolSocket != ""}}); err != nil {
 		return nil, startupFailure(session, err)
 	}
 	if err := session.notify(ctx, "initialized", map[string]any{}); err != nil {
@@ -209,7 +215,15 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 	if config.ExecutionOnly {
 		return session, nil
 	}
-	thread, err := session.Call(ctx, "thread/start", map[string]any{"cwd": config.Cwd, "model": config.Model, "modelProvider": "openai", "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": "read-only", "ephemeral": false, "threadSource": "startup"})
+	threadParams := map[string]any{"cwd": config.Cwd, "model": config.Model, "modelProvider": "openai", "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": "read-only", "ephemeral": false, "threadSource": "startup"}
+	if config.ToolSocket != "" {
+		if err := assertBrokerTools(configResult); err != nil {
+			return nil, startupFailure(session, err)
+		}
+		threadParams["dynamicTools"] = dynamicGoalTools()
+		threadParams["allowProviderModelFallback"] = false
+	}
+	thread, err := session.Call(ctx, "thread/start", threadParams)
 	if err != nil {
 		return nil, startupFailure(session, err)
 	}
@@ -559,6 +573,10 @@ func (session *Session) readLoop(ctx context.Context) {
 			session.observeTurn(event)
 		}
 		if event.Method != "" && len(event.ID) > 0 && len(event.Result) == 0 && len(event.Error) == 0 {
+			if event.Method == "item/tool/call" && session.config.ToolSocket != "" {
+				session.handleGoalTool(ctx, event)
+				continue
+			}
 			_ = session.send(ctx, rpcEnvelope{JSONRPC: protocolVersion, ID: event.ID, Result: mustJSON(map[string]string{"decision": "decline"})})
 			continue
 		}

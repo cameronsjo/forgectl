@@ -37,15 +37,15 @@ func (selection ModelSelection) Validate() error {
 	switch selection.Harness {
 	case "codex":
 		if selection.Provider != "openai" {
-			return errors.New("Codex requires the direct OpenAI provider")
+			return errors.New("codex requires the direct OpenAI provider")
 		}
 	case "pi":
 		if selection.Provider != "openai" && selection.Provider != "openai-codex" {
-			return errors.New("Pi requires an explicit direct OpenAI provider")
+			return errors.New("pi requires an explicit direct OpenAI provider")
 		}
 	case "claude":
 		if selection.Provider != "anthropic" || !strings.HasPrefix(selection.Model, "claude-") {
-			return errors.New("Claude Code requires native Anthropic and an exact claude- model ID, not an alias")
+			return errors.New("claude requires native Anthropic and an exact claude- model ID, not an alias")
 		}
 	default:
 		return errors.New("supported goal harnesses are codex, pi and claude")

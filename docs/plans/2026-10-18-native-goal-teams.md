@@ -4,8 +4,8 @@ status: in-flight
 
 # First-class native teams for repository goals
 
-Status: implementation authorized; reviewed contracts being implemented and probed
-Next action: finish native adapter attestation and integrated role tools; resolve the observed daemonized-child cleanup gap before enabling the mixed-team acceptance run.
+Status: implementation checkpoint; native adapters and team setup verified, mixed-goal execution blocked on the process-boundary decision
+Next action: Cameron must choose the disclosed existing process-group cleanup contract or authorize a stronger isolated runtime; then complete real mixed-goal acceptance without weakening that chosen boundary.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -71,24 +71,40 @@ R10. Delivery MUST include focused unit/adversarial tests, native boundary/proce
 
 ## Work
 
-- [ ] Verify current native protocols, model selection and tool-disabling mechanisms; resolve design/security findings.
+- [x] Verify current native protocols, observed model selection and tool-disabling mechanisms.
+- [ ] Resolve the process-containment decision and verify its integrated execution boundary.
 - [x] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
-- [ ] Implement the non-model execution boundary, role-bound goal tools and guardian-owned native process transport.
-- [ ] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
-- [ ] Integrate team-aware mailbox delivery, native evidence, independent review and checks into the existing supervisor.
-- [ ] Add team selection, per-role approval/progress and actionable preflight to the one-form UI and JSON CLI.
+- [x] Implement the non-model execution host, role-bound goal tools and guardian-owned native process transport; stronger containment remains unavailable, not silently bypassed.
+- [x] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
+- [x] Integrate team-aware mailbox delivery, native evidence, independent review and checks into the existing supervisor.
+- [x] Add team selection, per-role approval/progress and actionable preflight to the one-form UI and JSON CLI.
 - [ ] Verify adversarial boundaries, lifecycle failures and the wide/narrow terminal journey.
 - [ ] Run a real mixed-team repository goal, independently verify its result and preserve prior evidence.
 - [ ] Complete docs, clean-build provenance, feature-branch push and requirement-by-requirement audit.
 
 ## Ownership and review
 
-Root Codex owns the integrated contract, plan and delivery. The existing Pi and Claude research subagents have read-only assignments; neither commits or modifies source. An independent plan/security review will examine the role-tool boundary before it is enabled. Implementation ownership will be partitioned explicitly after the reviewed interfaces are stable. Root Codex independently verifies returned work and native artifacts.
+Root Codex owns the integrated contract, plan and delivery. The existing Pi and Claude research subagents subsequently received bounded adapter, UI, test and file-helper implementation assignments. Neither commits. Root Codex independently inspects their changes and runs the focused tests, native probes and compiled UI journey. The separate process-control research and final boundary review remained read-only.
 
 The Pi and Claude reviewers completed independent read-only plan/security reviews against baseline `e3ff7e8c` and this plan. Root Codex independently confirmed the concrete Codex-only seams, Pi tool-flag distinction, the default environment's credential exposure, the guardian's process-group-only proof, and the recorded Claude control frames. Supported findings are incorporated into the contracts above and their tests. The claim that the existing reviewer cannot read the frozen patch confused writable roots with readable roots; it is not an existing failure, but the new bounded file helper must deliberately expose that read-only artifact. Neither same-user socket identity nor a digest echoed in model prose is cryptographic authentication. These reviews do not establish runtime safety; the native probes and mixed-team acceptance remain required.
 
 ## Completion evidence
 
-Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Focused goal/native/tool-channel/UI tests pass against the working tree. The real credential-free execution host starts without a model thread, permits the allowed write, refuses a protected write, and refuses a private Unix-socket connection whose unconfined positive control succeeds.
+Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Normal goal/native/tool-channel/UI tests and the affected CLI tests pass; opt-in real execution-boundary tests are separate and currently fail. The menu-inventory test `TestMenuJSON_LiveTree` also fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
 
-The real escaped-child negative control found an existing limitation that must not be hidden: a forked Python child calling setsid survives command/exec termination and native process-group cleanup until its own eight-second deadline, while the old guardian receipt reports clean process-group shutdown. Codex has asked Cameron whether to require additional restrictive process controls or explicitly retain the existing narrower cleanup contract. No mixed-team model work or claim of all-descendant cleanup is authorized by the passing filesystem checks. A disposable macOS syscall-filter probe can refuse setsid, but also refusing posix_spawn can reject programs that use it merely as a launcher; this compatibility consequence still needs resolution and complete positive/negative controls. Native adapter integration and real result acceptance remain unproven.
+### Verified checkpoint
+
+- Native Codex startup and the actual outbound model tool inventory pass `FORGECTL_GOALNATIVE_INTEGRATION=1 go test ./internal/surface/goalnative -run '^TestCodex' -v -count=1`. The inventory test uses a local, credential-free mock model endpoint, not a paid external model call. The actual inventory contains the five approved goal tools plus native request-user-input, which the supervisor denies.
+- Real Pi `openai-codex/gpt-6.1-sol` and Claude Code `anthropic/claude-opus-5-5` each completed one harmless `goal_inbox` request and an exact final reply. `FORGECTL_NATIVE_REPLY_INTEGRATION=1 FORGECTL_NATIVE_SUPERVISOR=/private/tmp/forgectl-native-teams-dev go test ./internal/surface/goalnative -run '^TestNativeRealReplyWithHarmlessBroker$' -v -count=1` passed. The probe broker refuses all filesystem/command tools. Independent inspection confirmed matching accepted/consumed/completed identities, final native IDs, and paired guardian receipts with the owned group and socket gone. Artifacts: `/private/tmp/fg-native-reply-61760395` and `/private/tmp/fg-native-reply-2970942894`.
+- The embedded Pi extension executes all five shared tool schemas against the actual private broker in a Node-backed contract test. Claude's exact MCP allowlist is tested and observed. Completion observers now finish before successful wait/idle returns; regressions block the observer to exercise the red path.
+- Client cancellation reaches the broker handler, and broker close drains outstanding requests before patch freezing. Capability reads bind to the checked private directory and file. The file helper runs through the same sandbox executor, pins parent descriptors, refuses links, atomically replaces content and preserves existing executable modes. Direct compiled-helper positive/negative evidence is retained at `/private/tmp/forgectl-file-helper-current.jTrnU4`.
+- Compiled PTY journeys at 100x24 and 50x16 verify team selection, exact role edits, full role values in approval, invalidation after edits, and no launch from ordinary text keys. The narrow role-triple clipping found by the first probe is fixed. Root Codex reran `/private/tmp/probe-team-ui.py` and read every returned assertion; artifacts are in `/private/tmp/forgectl-ui-team-artifacts`. These are prepare-only journeys, not an actual mixed run or its cancellation.
+- The review's claim that a separate run/session string would authenticate the private tool channel is not adopted: each capability and endpoint is fresh and immutable for one role incarnation, and closing it invalidates stale clients. Mailbox delivery separately validates run, native session and harness. Public identity strings cannot strengthen a stolen same-user capability. Cross-role, stale-channel and wrong-incarnation negative controls cover the actual contract.
+
+### Unresolved execution boundary
+
+The real escaped-child negative control found an existing limitation: a child calling `setsid` survives command termination and native process-group cleanup until its self-expiry deadline. The guardian receipt establishes only process-group shutdown, not all-descendant cleanup. The original credential-free command host did pass allowed-write, denied-write and private-socket negative controls, but those earlier results do not establish the stronger process property.
+
+A deny-only macOS profile blocks `setsid`, `setpgid` and `posix_spawn` process-group bypasses, but it cannot be nested inside the existing native Seatbelt sandbox. The current integrated command host therefore refuses even its harmless allowed-command probe: `FORGECTL_GOALNATIVE_INTEGRATION=1 go test ./internal/surface/goalnative -run '^TestExecutionHostRealBoundaryAndNoModel$' -v -count=1` fails with exit 71 and `sandbox_apply: Operation not permitted`. Reversing the profile order also fails; the inspected installed app-server schema offers no supported additional syscall policy. No `dangerFullAccess`, external-sandbox substitution, custom filesystem profile or global change was made.
+
+Codex asked Cameron to choose between explicitly retaining/disclosing the existing process-group cleanup limitation and expanding scope to a stronger isolated runtime. No answer has arrived. Until that decision, mixed-team model execution remains fail-closed. The useful repository-change acceptance run, native run inspection/cancellation, complete lifecycle proof, final clean-build delivery and R1/R4/R6/R7/R9/R10 audit remain required. Harmless native replies and passing unit tests are not substitutes for them.

@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/goal"
 	"github.com/cameronsjo/forgectl/internal/surface/goalnative"
+	"github.com/cameronsjo/forgectl/internal/surface/goaltools"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -160,6 +161,8 @@ func newProjectGoalCmd(deps module.Deps, root *string) *cobra.Command {
 		newProjectGoalArtifactCmd(goalRoot),
 		newProjectGoalSuperviseCmd(goalRoot),
 		newProjectGoalHostCmd(),
+		newProjectGoalToolsCmd(),
+		newProjectGoalFileCmd(),
 	)
 	return command
 }
@@ -204,7 +207,7 @@ func projectGoalManager(store goal.Store, deps module.Deps) (goal.Manager, error
 	if err != nil {
 		return goal.Manager{}, err
 	}
-	return goal.Manager{Store: store, SelfBinary: self, CodexBinary: resolved.Path}, nil
+	return goal.Manager{Store: store, SelfBinary: self, CodexBinary: resolved.Path, NativeDefaults: deps.Cfg.Launch.Defaults}, nil
 }
 
 func projectGoalUsage(err error) error {
@@ -551,6 +554,45 @@ func newProjectGoalHostCmd() *cobra.Command {
 			return projectGoalUsage(errors.New("--spec is required"))
 		}
 		return goalnative.RunHost(command.Context(), specPath, command.InOrStdin(), command.ErrOrStderr())
+	}
+	return command
+}
+
+func newProjectGoalToolsCmd() *cobra.Command {
+	var socket, capabilityFile string
+	command := &cobra.Command{Use: "_tools", Short: "internal role-bound goal tools", Hidden: true, Args: cobra.NoArgs, SilenceUsage: true}
+	command.Flags().StringVar(&socket, "socket", "", "private supervisor tool socket")
+	command.Flags().StringVar(&capabilityFile, "capability-file", "", "private role capability file")
+	command.RunE = func(command *cobra.Command, _ []string) error {
+		if !filepath.IsAbs(socket) || !filepath.IsAbs(capabilityFile) || filepath.Clean(socket) != socket || filepath.Clean(capabilityFile) != capabilityFile {
+			return errors.New("goal tools require absolute clean control paths")
+		}
+		return goaltools.RunMCP(command.Context(), command.InOrStdin(), command.OutOrStdout(), socket, capabilityFile)
+	}
+	return command
+}
+
+func newProjectGoalFileCmd() *cobra.Command {
+	var root, path, content string
+	var write bool
+	command := &cobra.Command{Use: "_file", Short: "internal bounded role file helper", Hidden: true, Args: cobra.NoArgs, SilenceUsage: true}
+	command.Flags().StringVar(&root, "root", "", "fixed file root")
+	command.Flags().StringVar(&path, "path", "", "validated relative file path")
+	command.Flags().BoolVar(&write, "write", false, "atomically replace the file")
+	command.Flags().StringVar(&content, "content", "", "bounded UTF-8 file content")
+	command.RunE = func(command *cobra.Command, _ []string) error {
+		contentSet := command.Flags().Changed("content")
+		if write != contentSet {
+			return errors.New("goal _file requires --content only with --write")
+		}
+		result, err := goaltools.RunFile(root, path, write, content)
+		if err != nil {
+			return projectGoalRefused(err)
+		}
+		if !write {
+			_, err = io.WriteString(command.OutOrStdout(), result)
+		}
+		return err
 	}
 	return command
 }

@@ -98,6 +98,7 @@ func (process *JSONProcess) Write(ctx context.Context, value any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// termsafe:allow-raw-json supervisor-owned native protocol channel, never terminal output
 	data, err := json.Marshal(value)
 	if err != nil || len(data) > maxPayloadBytes {
 		return errors.New("native JSON input is invalid or exceeds its bound")

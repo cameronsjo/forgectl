@@ -189,7 +189,7 @@ detected, the form explicitly says that only a whitespace check is suggested.
 That is not a claim that behavior tests passed. Custom keeps explicit edits.
 
 **Advanced** expands on the same form for title, allowed paths, acceptance
-criteria, checks, OpenAI model and duration. The title otherwise comes from the
+criteria, checks, model, role assignments and duration. The title otherwise comes from the
 goal. Allowed paths are repository-relative literal files or directory prefixes,
 not globs; `.` opts in to repository-wide source changes while Git metadata,
 agent metadata and `.env` files remain excluded. Enter checks as JSON argument
@@ -207,6 +207,19 @@ exact base revision, source-dirty warning, model, scope, acceptance criteria and
 exact commands. Preparation does not start a model. Start is a separate,
 explicit confirmation; changing a field or preset invalidates the prepared
 approval instead of silently launching the old values.
+
+**Team** is separate from the task preset. **Codex trio** retains the original
+all-Codex workflow. **Mixed native team** assigns Codex to coordination, Pi to
+implementation and Claude Code to independent review. **Custom team** exposes
+each role in Advanced as `harness,provider,model`; complete values also appear in
+approval. Changing a role, model, provider or team invalidates preparation.
+
+Native teams are experimental and are **not yet verified end to end**. Current
+macOS startup refuses their tool-execution boundary: the additional process
+containment profile cannot be composed with Codex's existing Seatbelt sandbox.
+The refusal occurs before model work. This is not an authentication failure;
+do not disable isolation, change global permissions or substitute another
+provider to bypass it. The legacy Codex trio remains a separate execution path.
 
 With no `--root`, goals use the owner-private platform state directory
 `$XDG_STATE_HOME/forgectl/projects`, falling back to
@@ -257,6 +270,26 @@ without the TUI. Put the goal in a bounded regular, non-symlink JSON file:
 
 Replace the example model with the exact OpenAI model available to the local
 Codex installation.
+
+An optional `team` object records all three explicit assignments. For example,
+add the following property to the goal object, substituting exact models that
+the selected native installations support:
+
+```json
+"team": {
+  "coordinator": {"harness": "codex", "provider": "openai", "model": "gpt-6.1-sol"},
+  "implementation": {"harness": "pi", "provider": "openai-codex", "model": "gpt-6.1-sol"},
+  "reviewer": {"harness": "claude", "provider": "anthropic", "model": "claude-opus-5-5"}
+}
+```
+
+Leaving `team` absent preserves the existing version-one contract and all-Codex
+interpretation; retained specs are not rewritten. Every selected harness must
+be locally installed and natively authenticated. Pi accepts direct `openai` or
+`openai-codex`; Claude Code requires `anthropic` and a canonical `claude-` model,
+not an alias. No harness/provider fallback occurs. The configured launch binary
+paths and `FORGECTL_PI_BIN` / `FORGECTL_CLAUDE_BIN` overrides are honored. Executable
+entrypoint paths and their bytes are recorded and rechecked before supervision.
 
 First prepare and review the returned `prepared.spec.base_revision`. Then copy
 that full Git object ID into `--expect-head`; `start` refuses to launch unless
@@ -316,10 +349,11 @@ and it provides no automatic cleanup command.
 
 ### What the result means
 
-When a run reaches model execution, it uses exactly three native Codex sessions
-on the selected direct OpenAI model: a coordinator, an implementation worker
-and an independent reviewer. Task presets do not change that team; there are no
-Pi or Hermes team presets. A run may
+When a legacy Codex-trio run reaches model execution, it uses three native Codex
+sessions on the selected direct OpenAI model: a coordinator, an implementation
+worker and an independent reviewer. Task presets do not change that team. Explicit
+native teams retain the same roles with their approved harness/provider/model
+assignments; Hermes is not a supported self-service team member. A run may
 fail or be canceled during workspace preparation before those sessions start.
 On the model-execution path, the implementation worker is the only model role
 allowed to edit the isolated worktree. After it stops, the supervisor freezes a
@@ -327,12 +361,30 @@ patch, requires the reviewer to pass that exact digest, then executes each
 approved verification argv directly. A check must exit zero without changing
 the reviewed patch, and the original source checkout must remain unchanged.
 
-Native sessions run with approval policy `never`, owner-private control state
+Legacy Codex sessions run with approval policy `never`, owner-private control state
 and workspace-scoped writes. Apps, hooks, memories, multi-agent mode, plugins,
 configured MCP servers, notifications and web search are disabled. Tool and
 verification network access is disabled; only the direct OpenAI model transport
 remains enabled. A denied operation is a refusal, not a reason to weaken the
 boundary or select an external tool.
+
+Explicit native teams use Codex app-server, Pi RPC and Claude Code stream JSON,
+not a model-translation gateway. Their only model-callable tools are the
+role-bound `goal_exec`, `goal_read`, `goal_write`, `goal_mail` and `goal_inbox`
+bridge. A separate credential-free Codex execution host performs commands and
+checks without creating a model thread. It is an execution dependency, not a
+fourth model teammate. Built-in tools, ambient hooks, plugins and other MCP
+servers are disabled; authentication remains with each native harness.
+Accepted input, native consumption and settled completion are separate
+receipts. A successful mailbox write is never proof that a model finished.
+
+File helpers reject unsafe paths and disallowed writes. Arbitrary commands
+retain a workspace-level kernel write boundary and a post-execution allowed-path
+result gate, not a per-file OS allowlist. Process-group cleanup proves only the
+owned groups disappeared: a daemonized child can leave its original group.
+The real negative control reproduced that existing limitation. Stronger process
+containment and complete mixed-team result acceptance remain unresolved; neither
+successful native reply probes nor passing unit tests establish those properties.
 
 `ready` means the frozen patch passed independent native review, every approved
 check passed, the patch stayed unchanged and the source checkout stayed

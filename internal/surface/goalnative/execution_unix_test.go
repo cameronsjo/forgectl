@@ -10,9 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -144,7 +142,7 @@ func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "Operation not permitted") {
 		t.Fatalf("real denied write: %#v, %v", result, err)
 	}
-	data, err := os.ReadFile(allowed)
+	data, err := os.ReadFile(allowed) //nolint:gosec // Test-owned positive-control output.
 	if err != nil || string(data) != "allowed" {
 		t.Fatalf("allowed write did not work: %q, %v", data, err)
 	}
@@ -152,21 +150,21 @@ func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 		t.Fatalf("denied target was created: %v", err)
 	}
 	probeSocket := filepath.Join(root, "private.sock")
-	listener, err := net.Listen("unix", probeSocket)
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", probeSocket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	control, err := net.Dial("unix", probeSocket)
+	control, err := (&net.Dialer{}).DialContext(t.Context(), "unix", probeSocket)
 	if err != nil {
 		t.Fatalf("Unix socket positive control failed: %v", err)
 	}
 	_ = control.Close()
-	python, err := exec.LookPath("python3")
+	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err = host.Exec(t.Context(), []string{python, "-c", "import socket,sys; channel=socket.socket(socket.AF_UNIX); channel.connect(sys.argv[1])", probeSocket}, work, []string{work}, 10*time.Second)
+	result, err = host.Exec(t.Context(), []string{node, "-e", `const net=require("net"); const channel=net.createConnection(process.argv[1]); channel.on("connect",()=>process.exit(0)); channel.on("error",error=>{ console.error(error.message); process.exit(1) })`, probeSocket}, work, []string{work}, 10*time.Second)
 	if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "Operation not permitted") {
 		t.Fatalf("sandboxed tools reached the private role socket: %#v, %v", result, err)
 	}
@@ -192,14 +190,7 @@ func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	control := exec.CommandContext(t.Context(), python, "-c", "import os; os.setsid(); print('session-created')")
-	if output, err := control.CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "session-created" {
-		t.Fatalf("unconfined setsid control failed: %s, %v", output, err)
-	}
+	probe := buildEscapedChildProbe(t)
 	root, err := os.MkdirTemp("/tmp", "gn-escape-")
 	if err != nil {
 		t.Fatal(err)
@@ -218,47 +209,180 @@ func TestExecutionHostRealEscapedChildCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = host.Close(context.Background()) })
-	pidPath := filepath.Join(work, "escaped.pid")
+	unconfinedPIDPath := filepath.Join(root, "unconfined.pid")
+	unconfinedStatePath := filepath.Join(root, "unconfined.state")
+	control := exec.CommandContext(t.Context(), probe, unconfinedPIDPath, unconfinedStatePath) //nolint:gosec // test-local compiled probe.
+	if err := control.Start(); err != nil {
+		t.Fatal(err)
+	}
+	unconfinedPID, err := waitForPIDFile(unconfinedPIDPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processAlive(unconfinedPID) {
+		t.Fatal("unconfined escaped child was not alive before its deadline")
+	}
+	if err := control.Wait(); err != nil {
+		t.Fatalf("unconfined control: %v", err)
+	}
+	if data, err := os.ReadFile(unconfinedStatePath); err != nil || strings.TrimSpace(string(data)) != "escaped" {
+		t.Fatalf("unconfined control state = %q, %v; want escaped", data, err)
+	}
+	if processAlive(unconfinedPID) {
+		t.Fatal("unconfined self-expiring child outlived its bounded deadline")
+	}
+
+	pidPath := filepath.Join(work, "confined.pid")
+	statePath := filepath.Join(work, "confined.state")
 	commandCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := host.Exec(commandCtx, []string{python, "-c", "import os,sys,time\nchild=os.fork()\nif child==0:\n os.setsid()\n with open(sys.argv[1],'w') as output: output.write(str(os.getpid()))\n time.sleep(8)\n os._exit(0)\ntime.sleep(30)", pidPath}, work, []string{work}, 35*time.Second)
+		_, err := host.Exec(commandCtx, []string{probe, pidPath, statePath}, work, []string{work}, 20*time.Second)
 		done <- err
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	childPID := 0
-	for childPID == 0 && time.Now().Before(deadline) {
-		data, readErr := os.ReadFile(pidPath)
-		if readErr == nil {
-			childPID, _ = strconv.Atoi(string(data))
-		}
-		time.Sleep(20 * time.Millisecond)
+	childPID, err := waitForPIDFile(pidPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if childPID <= 1 {
-		t.Fatal("escaped-child negative control did not establish its live child")
+	if !processAlive(childPID) {
+		t.Fatal("confined child was not alive before cancellation")
 	}
-	if err := syscall.Kill(childPID, 0); err != nil {
-		t.Fatalf("negative-control child was not alive before cancellation: %v", err)
+	if data, err := os.ReadFile(statePath); err != nil || strings.TrimSpace(string(data)) != "blocked" { //nolint:gosec // Test-owned process-control output.
+		t.Fatalf("confined process state = %q, %v; want setsid blocked", data, err)
 	}
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
+		if err == nil || !errors.Is(err, context.Canceled) {
 			t.Errorf("canceled command did not report cancellation: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Error("command cancellation did not settle")
+		t.Fatal("command cancellation did not settle")
 	}
 	closeErr := host.Close(t.Context())
-	gone := waitForProcessGone(childPID, time.Second)
-	if !gone {
-		t.Errorf("escaped native-tool descendant survived cancellation; clean receipt=%v", closeErr)
-		if !waitForProcessGone(childPID, 10*time.Second) {
-			t.Error("bounded negative-control child did not exit at its own deadline")
-		}
+	if !waitForProcessGone(childPID, 5*time.Second) {
+		t.Fatalf("confined native-tool descendant survived cancellation; clean receipt=%v", closeErr)
 	}
 	if closeErr != nil {
 		t.Fatalf("host cleanup: %v", closeErr)
+	}
+}
+
+const escapedChildProbeSource = `#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc != 3) return 2;
+    pid_t child = fork();
+    if (child == -1) return 2;
+    if (child > 0) {
+        int status = 0;
+        waitpid(child, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+    FILE *pid = fopen(argv[1], "w");
+    if (pid == NULL) _exit(2);
+    fprintf(pid, "%d\n", (int)getpid());
+    fclose(pid);
+    FILE *state = fopen(argv[2], "w");
+    if (state == NULL) _exit(2);
+    if (setsid() == -1) fputs("blocked\n", state);
+    else fputs("escaped\n", state);
+    fclose(state);
+    sleep(8);
+    return 0;
+}`
+
+func buildEscapedChildProbe(t *testing.T) string {
+	t.Helper()
+	compiler, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler is unavailable")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "escaped_child_probe.c")
+	binary := filepath.Join(root, "escaped_child_probe")
+	if err := os.WriteFile(source, []byte("#include <sys/wait.h>\n"+escapedChildProbeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	compile := exec.CommandContext(ctx, compiler, source, "-o", binary) //nolint:gosec // compiler and source are test-local.
+	output, err := compile.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compile escaped-child probe: %v: %s", err, output)
+	}
+	return binary
+}
+
+func TestExecutionHostRealSupervisorDeathCleansActiveCommandAndChild(t *testing.T) {
+	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
+		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for the real supervisor-death cleanup boundary")
+	}
+	native, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp("/tmp", "gn-supervisor-death-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	controlDir := filepath.Join(root, "control")
+	host, err := StartCommandHost(t.Context(), Config{Binary: native, SupervisorBinary: writeHelper(t, "supervisor", "GOALNATIVE_HOST_HELPER=1"), ControlDir: controlDir, Cwd: work, Socket: filepath.Join(root, "exec.sock"), WritableRoots: []string{work}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandDone := make(chan error, 1)
+	shellPIDPath, childPIDPath := filepath.Join(work, "shell.pid"), filepath.Join(work, "child.pid")
+	go func() {
+		_, err := host.Exec(context.Background(), []string{"/bin/sh", "-c", `printf '%s' "$$" > "$1"; sleep 60 & child=$!; printf '%s' "$child" > "$2"; wait "$child"`, "goal-supervisor-death", shellPIDPath, childPIDPath}, work, []string{work}, time.Minute)
+		commandDone <- err
+	}()
+	shellPID, err := waitForPIDFile(shellPIDPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := waitForPIDFile(childPIDPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processAlive(shellPID) || !processAlive(childPID) {
+		t.Fatal("active command and child were not alive before supervisor death")
+	}
+	if err := host.session.child.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-commandDone:
+		if err == nil {
+			t.Fatal("active command completed successfully after supervisor death")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("active command did not settle after supervisor death")
+	}
+	closeErr := host.Close(context.Background())
+	if closeErr != nil {
+		t.Fatalf("graceful close after supervisor death: %v", closeErr)
+	}
+	if !waitForProcessGone(shellPID, 5*time.Second) || !waitForProcessGone(childPID, 5*time.Second) {
+		t.Fatal("active command or child survived supervisor death cleanup")
+	}
+	receipt, err := waitForGuardianReceipt(startupReceiptPath(controlDir), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != "stopped" || !receipt.GroupGone || !receipt.SocketGone || receipt.Error != "" {
+		t.Fatalf("supervisor-death guardian receipt = %#v", receipt)
 	}
 }

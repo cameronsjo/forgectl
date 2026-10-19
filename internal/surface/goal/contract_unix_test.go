@@ -108,6 +108,26 @@ func containsString(values []string, expected string) bool {
 	return false
 }
 
+func TestPrepareNativeTeamDisclosesProvidersAndExecutionDependency(t *testing.T) {
+	spec := goalSpec(newGoalRepository(t), "src")
+	team := spec.EffectiveTeam()
+	team.Implementation = ModelSelection{Harness: "pi", Provider: "openai-codex", Model: spec.Model}
+	team.Reviewer = ModelSelection{Harness: "claude", Provider: "anthropic", Model: "claude-opus-5-5"}
+	spec.Team = &team
+	prepared, err := Prepare(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"each approved native model provider", "credential-free execution host", "before model work", "not yet verified end to end"} {
+		if !containsString(prepared.Warnings, required) {
+			t.Errorf("native team warning missing %q: %q", required, prepared.Warnings)
+		}
+	}
+	if containsString(prepared.Warnings, "OpenAI model transport remains enabled") {
+		t.Fatalf("Anthropic team retained an OpenAI-only description: %q", prepared.Warnings)
+	}
+}
+
 func TestPrepareDoesNotMutateARepositoryThroughASymlinkedInput(t *testing.T) {
 	repository := newGoalRepository(t)
 	link := filepath.Join(t.TempDir(), "repository-link")

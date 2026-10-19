@@ -17,14 +17,25 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"golang.org/x/sys/unix"
 )
 
 type Manager struct {
-	Store       Store
-	SelfBinary  string
-	CodexBinary string
+	Store          Store
+	SelfBinary     string
+	CodexBinary    string
+	NativeDefaults config.LaunchDefaults
+}
+
+func resolveNativeBinary(harness string, defaults config.LaunchDefaults) (binaryReceipt, error) {
+	resolved, err := launch.ResolveBinary(harness, defaults)
+	if err != nil {
+		return binaryReceipt{}, err
+	}
+	return inspectBinary(resolved.Path)
 }
 
 type binaryReceipt struct {
@@ -33,10 +44,11 @@ type binaryReceipt struct {
 }
 
 type runtimeReceipt struct {
-	Version  int           `json:"version"`
-	GoalID   string        `json:"goal_id"`
-	Forgectl binaryReceipt `json:"forgectl"`
-	Codex    binaryReceipt `json:"codex"`
+	Version  int                      `json:"version"`
+	GoalID   string                   `json:"goal_id"`
+	Forgectl binaryReceipt            `json:"forgectl"`
+	Codex    binaryReceipt            `json:"codex"`
+	Native   map[string]binaryReceipt `json:"native,omitempty"`
 }
 
 type readyReceipt struct {
@@ -93,11 +105,27 @@ func (manager Manager) Start(ctx context.Context, approved Prepared) (State, err
 	if err != nil {
 		return State{}, fmt.Errorf("codex executable: %w", err)
 	}
+	native := make(map[string]binaryReceipt)
+	team := current.Spec.EffectiveTeam()
+	for _, name := range []string{"coordinator", "implementation", "reviewer"} {
+		selection, _ := team.Role(name)
+		if selection.Harness == "codex" {
+			continue
+		}
+		if _, present := native[selection.Harness]; present {
+			continue
+		}
+		binary, err := resolveNativeBinary(selection.Harness, manager.NativeDefaults)
+		if err != nil {
+			return State{}, fmt.Errorf("%s executable: %w", name, err)
+		}
+		native[selection.Harness] = binary
+	}
 	state, err := manager.Store.Create(ctx, current)
 	if err != nil {
 		return State{}, err
 	}
-	runtime := runtimeReceipt{Version: Version, GoalID: state.ID, Forgectl: self, Codex: codex}
+	runtime := runtimeReceipt{Version: Version, GoalID: state.ID, Forgectl: self, Codex: codex, Native: native}
 	// termsafe:allow-raw-json private runtime receipt, never terminal output
 	contents, err := json.Marshal(runtime)
 	if err != nil {
@@ -196,6 +224,15 @@ func readRuntime(store Store, id, codex, self string) (runtimeReceipt, error) {
 	}
 	if actualCodex != receipt.Codex || actualSelf != receipt.Forgectl {
 		return runtimeReceipt{}, errors.New("approved executable path or bytes changed")
+	}
+	for harness, expected := range receipt.Native {
+		if harness != "pi" && harness != "claude" {
+			return runtimeReceipt{}, errors.New("runtime receipt has an unsupported native harness")
+		}
+		actual, err := inspectBinary(expected.Path)
+		if err != nil || actual != expected {
+			return runtimeReceipt{}, fmt.Errorf("%s native executable path or bytes changed", harness)
+		}
 	}
 	return receipt, nil
 }
