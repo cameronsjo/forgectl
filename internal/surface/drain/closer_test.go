@@ -121,3 +121,19 @@ func TestChangeCostAndTimer(t *testing.T) {
 		t.Fatalf("cost %v; Apply must copy the value", r.CostUSD)
 	}
 }
+
+// MergedPR reads back exactly the reason the closer writes on a merge, with
+// or without the notes closeOne appends, and nothing else.
+func TestMergedPRReadsTheCloserReason(t *testing.T) {
+	why := DecideCloser(worker.QueueRow{State: worker.QueueReported}, PRRead{State: PRMerged, Number: 1234}, time.Now()).Why
+	for _, s := range []string{why, why + "; worktree kept: dirty"} {
+		if n, ok := MergedPR(s); !ok || n != 1234 {
+			t.Errorf("MergedPR(%q) = %d, %v; want 1234, true", s, n, ok)
+		}
+	}
+	for _, s := range []string{"", "PR #12 closed unmerged at 2026-10-01T00:00:00Z, 24h0m0s ago; the drain closed the worker", "x PR #12 merged; the drain closed the worker", "PR #0 merged; the drain closed the worker", "PR #12 merged; the drain closed the workers"} {
+		if n, ok := MergedPR(s); ok {
+			t.Errorf("MergedPR(%q) = %d, true; want false", s, n)
+		}
+	}
+}

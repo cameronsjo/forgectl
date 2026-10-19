@@ -29,6 +29,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 const drainTestSession = "s1"
@@ -812,6 +813,9 @@ func TestDrainStatusAndEvents(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &v); err != nil || v.Status != drain.StatusStopped || v.Counts["queued"] != 1 {
 		t.Fatalf("status with no drain.json: %q, %v", out, err)
 	}
+	if v.Work == nil || *v.Work != (workstate.Work{Status: workstate.Blocked, On: workstate.Operator, Reason: "drain stopped with rows waiting"}) {
+		t.Fatalf("a stopped drain with a row queued is blocked on the operator: %q", out)
+	}
 	lock, err := files.Lock()
 	if err != nil {
 		t.Fatal(err)
@@ -839,6 +843,9 @@ func TestDrainStatusAndEvents(t *testing.T) {
 	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
 	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.Status != drain.StatusStale {
 		t.Fatalf("status with an hour-old tick: %q, %v; want stale", out, err)
+	}
+	if v.Work == nil || v.Work.Status != workstate.Stalled {
+		t.Fatalf("a stale drain is stalled: %q", out)
 	}
 	out, err = runQueueCmd(t, newSurfaceDrainEventsCmd(), "--since", "2", "--json")
 	var ev drainEventsResult
@@ -1346,5 +1353,33 @@ func TestDrainStatusShowsHeldSlots(t *testing.T) {
 	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd())
 	if err != nil || !strings.Contains(out, "slots held: 1 (stuck)") {
 		t.Fatalf("status text: %q, %v", out, err)
+	}
+}
+
+// drainWork leaves the drain's work out when nothing waits, and gives each
+// attention row its shared status.
+func TestDrainWork(t *testing.T) {
+	v := drainStatusView{Status: drain.StatusStopped, Counts: map[string]int{"closed": 3}}
+	drainWork(&v, nil)
+	if v.Work != nil || v.Attention == nil || len(v.Attention) != 0 {
+		t.Fatalf("stopped and idle: work %+v, attention %+v", v.Work, v.Attention)
+	}
+	out, err := json.Marshal(v)
+	if err != nil || strings.Contains(string(out), `"work"`) || !strings.Contains(string(out), `"attention":[]`) {
+		t.Fatalf("stopped and idle json: %s, %v", out, err)
+	}
+	v = drainStatusView{Status: drain.StatusRunning, Counts: map[string]int{"needs-you": 1, "failed": 1}}
+	drainWork(&v, []drain.Attention{{Name: "a", State: "needs-you"}, {Name: "b", State: "failed", LastError: "launch failed"}})
+	if v.Work == nil || v.Work.Status != workstate.Working || len(v.Attention) != 2 {
+		t.Fatalf("running: %+v", v)
+	}
+	for _, a := range v.Attention {
+		if a.Work.Status != workstate.Blocked || a.Work.On != workstate.Operator {
+			t.Errorf("attention row %s: %+v, want blocked on the operator", a.Name, a.Work)
+		}
+	}
+	out, err = json.Marshal(v.Attention[1])
+	if err != nil || !strings.Contains(string(out), `"name":"b"`) || !strings.Contains(string(out), `"last_error":"launch failed"`) || !strings.Contains(string(out), `"work":{"status":"blocked","on":"operator","reason":"failed: retry or drop"}`) {
+		t.Fatalf("attention row json keeps its fields flat: %s, %v", out, err)
 	}
 }

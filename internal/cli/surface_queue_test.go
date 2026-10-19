@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // queueTestEnv points the queue at a fresh state directory and returns a git
@@ -151,6 +152,11 @@ func TestSurfaceDequeueAndQueue(t *testing.T) {
 	}
 	if strings.Contains(out, secret) || len(res.Rows) != 2 || res.Rows[0].LaunchID != "launch-1" || res.Rows[1].State != "queued" {
 		t.Fatalf("queue json:\n%s", out)
+	}
+	// The shared status rides beside the native state: claimed is working,
+	// queued is queued.
+	if res.Rows[0].Work != (workstate.Work{Status: workstate.Working}) || res.Rows[1].Work != (workstate.Work{Status: workstate.Queued}) {
+		t.Fatalf("queue json work:\n%s", out)
 	}
 
 	out, err = runQueueCmd(t, newSurfaceDequeueCmd(deps), "w2")
