@@ -1,11 +1,11 @@
 ---
-status: in-flight
+status: done
 ---
 
 # First-class native teams for repository goals
 
-Status: in flight; Cameron authorized both cleanup stages, existing process-group cleanup first
-Next action: verify the review-sequence clarification with a clean committed native run, then finish the requirement audit and delivery. Both isolation modes now have useful native results, independently audited cleanup and compiled wide/narrow UI Start/cancellation evidence.
+Status: implemented and verified; existing process-group cleanup first, stronger containerized tool execution second
+Next action: Cameron may review the feature branch or request installation separately. No PR, merge, deployment or global installation is included.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -115,7 +115,7 @@ R11. Codex MUST complete the existing-cleanup stage before implementing the stro
 - [x] Add team selection, per-role approval/progress and actionable preflight to the one-form UI and JSON CLI.
 - [x] Verify both stages' adversarial boundaries, logical-owner failure and the wide/narrow terminal journey; preserve the native-model guardian limitation separately from containerized tool containment.
 - [x] Run a real mixed-team repository goal, independently verify its result and preserve prior evidence.
-- [ ] Complete docs, clean-build provenance, feature-branch push and requirement-by-requirement audit.
+- [x] Complete docs, clean-build provenance, feature-branch push and requirement-by-requirement audit.
 
 ## Ownership and review
 
@@ -125,7 +125,7 @@ The Pi and Claude reviewers completed independent read-only plan/security review
 
 ## Completion evidence
 
-Both cleanup stages have independently verified native and UI evidence. The additive team and isolation contracts preserve exact retained version-one JSON bytes and invalidate approval on explicit boundary changes. Normal goal/native/tool-channel/container/UI tests and the affected CLI tests pass; real execution-boundary tests pass after the staged corrections recorded below. The final review-sequence clarification and combined delivery audit remain outstanding. The menu-inventory test `TestMenuJSON_LiveTree` fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
+Both cleanup stages and the final review-sequence correction have independently verified native and UI evidence. The additive team and isolation contracts preserve exact retained version-one JSON bytes and invalidate approval on explicit boundary changes. Normal goal/native/tool-channel/container/UI tests and the affected CLI tests pass; real execution-boundary tests pass after the staged corrections recorded below. The chronological checkpoints retain earlier failures and outstanding-work statements as history; the final requirement audit records the completed state. The menu-inventory test `TestMenuJSON_LiveTree` fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
 
 ### Verified checkpoint
 
@@ -219,3 +219,37 @@ Root Codex inspected the useful diagnostic patch against the actual metadata/hel
 Compiled clean-build UI Start/cancellation passes at 50x16 (`goal-935419eee4eb9d0662c1240d`) and 100x24 (`goal-485bb356cd0369431ae874b3`). Each uses the explicit Linux-container selection, exact socket/image and three native assignments; ordinary text keys do not start, Keep running does not request cancellation, and Request cancellation reaches canceled with inactive supervision. Each run retains three native guardian pairs and eight removed container sequences; fresh runtime absence, source/spec preservation and private receipt modes are verified. Retained canceled views show the boundary and cleanup scope at both sizes. The completed result's Diff, every check output and JSON also pass all assertions at both sizes. Evidence is retained under the acceptance root's `ui-cancel-*`, `ui-canceled-*` and `ready-inspection/1792431825942312000-79392` directories.
 
 The clean container binary also re-audits the first-stage result without changing its original source, spec, patch or receipts: six native/execution guardian pairs, the original `b7c0f295...` patch and exact native review/check evidence remain valid. The stronger runtime does not retroactively relabel older group-only cleanup.
+
+### Final native acceptance and delivery
+
+Clean committed source `21fcaf44811ddf0c86178fadfe83c9b812686f74` produced a matching `vcs.modified=false` host binary. The helper image remains the explicitly approved `c7e5f19e...` image: its helper/container source is unchanged by the review-contract correction. The current-source real container suite passed again against that exact image, including all three roles, observed escaped descendants, cancellation, EOF, stalled lease, PID-1 death and logical-owner death. Current-source native boundary/code-mode/role/owner-death probes also pass, including the honest group-cleanup limitation probe.
+
+The final useful goal `goal-b9868c32b582afd9aad83bbb` started at 17:49:26Z and reached ready at 17:56:22Z, with no questions or operator intervention. Its frozen patch is `e30a37c8fcf933d622a2f2c90c918391fcb70195d437559383455d9a2f490870`. Root Codex independently verified all three observed native identities, the direct reviewer response, both exact approved checks and output hashes, the unchanged frozen patch/source, implementation shutdown before freeze, three guardian pairs and all 43 owned container sequences with fresh runtime 404 responses. Private auditor negative controls reject missing cleanup, wrong review/argv/spec identity, a missing native role and a still-present container. The original approved Python check's next-heading delimiter could include the following level-two section; a separate strict heading-boundary assertion confirms every required term is actually inside the intended new subsection. No approved check or retained artifact was changed.
+
+The final frozen review honestly limited its source inspection to the documentation and brief. Root Codex separately inspected `coordinate` and `verify`, then incorporated the exact 17-line documentation hunk. Root Codex also corrected older result-section claims that still called container isolation future work and incorrectly described every mode as using a Codex command host. Those corrections are separate from the native-reviewed patch. The retained result stays unchanged and `human_accepted` remains false.
+
+Final compiled UI inspection passes every assertion at 100x24 and 50x16: stable goal identity, real patch content, all check headings/outputs, scrolling and JSON. Its report is `ready-inspection/1792432621996094000-97739/report.json` under the ignored sibling `native-container-final.jBzskG`. The earlier visible-Status negative control correctly exits 1 with only `negative_absent` false at both sizes; its retained report is `ready-inspection-negative/1792431947458427000-87459/report.json` under `native-container-acceptance.onqFuO`.
+
+The current binary also verifies the original version-one all-Codex goal `goal-e0f2b16b582fdecd0ae9b546`, not just the newer explicit-team run: absent team/isolation fields, original spec bytes and digest, patch `a4591283fd543c0a4b0b008fbaf9fbea549703e2fef0ae1778435de26ca635a2`, directly correlated original reviewer event, both check artifacts/commands, unchanged source and all three absent owned groups. Its new separate receipt is `legacy-codex-audit.json` under the final evidence root; the original evidence was not rewritten.
+
+Current-source validation is retained in `final-package-tests.log` (full goalcontainer, goalnative, goaltools, goal and TUI packages), `final-cli-tests.log` (project-goal CLI tests), `final-native-boundary-tests.log`, `final-container-tests.log`, `final-lint.log` and `final-linux-lint.log`. Both pinned golangci-lint 2.13.1 runs report zero issues. An initial sandbox attempt failed at Unix socket/PTY creation and the host-level rerun passed; a separate mistaken `./cli` package path was corrected to the actual `./internal/cli`. Neither environmental/verifier failure was treated as product success. The final docs/index closure changes no runtime code; a separate clean delivery clone and exact remote-branch check preserve the original acceptance source snapshots.
+
+### Final requirement audit
+
+- **R1 — real self-service mixed team:** the first-stage useful result and final `goal-b9868c32b582afd9aad83bbb` complete with observed native Codex/Pi/Claude coordination, implementation and independent review. Compiled UI Start/cancellation exercises the same explicit mixed team in both modes at both terminal sizes.
+- **R2 — independent, frozen selection:** task/team/isolation controls and per-role edits are covered by the committed TUI tests and actual approval journeys. Boundary edits invalidate approval; ordinary text does not start work. Retained specs name every harness/provider/model and the exact image/socket.
+- **R3 — observed identity and refusal:** final normalized events match all three actual native session/provider/model identities. Native identity, unsupported tool configuration, capability, provider and stale-incarnation negative tests pass; no fallback route was added.
+- **R4 — real tool boundary:** current real native and container probes prove allowed writes, role ceilings, existing protected Git/control/source boundaries, absent private sockets and denied network. Actual Codex code-mode dispatch exposes only the broker bridge. Broker and file-helper tests reject cross-role/stale capabilities, links, malformed requests and forbidden writes.
+- **R5 — transport honesty:** current native adapter and broker tests cover accepted/consumed/settled correlation, bounded framing, errors/aborts, duplicate/uncertain delivery, client cancellation and draining. Native completions and final text, not writable mail counts, establish results.
+- **R6 — independent frozen verification:** the final audit matches the exact native reviewer turn/text/digest, approved argv/output hashes, unchanged before/after patch and original source. Implementation's native guardian and every container operation finish before the freeze event.
+- **R7 — lifecycle and ownership:** real owner-death, cancellation, lease-failure and escaped-descendant probes pass. Actual UI cancellations have paired owned receipts and runtime absence. Uncertain-create/start, inconsistent exit state, canceled-but-unknown cleanup and receipt-write failures refuse success and prevent replay; missing final receipts remain missing rather than fabricated.
+- **R8 — compatibility and no shared changes:** exact additive-spec tests pass. Current-binary audits preserve both the original no-team all-Codex result and the explicit group-mode result. Source snapshots remain clean; no primary checkout, global configuration, credentials, installed binary, existing service or retained run was changed.
+- **R9 — ordinary usable UI:** compiled 100x24/50x16 journeys verify editing, full approval, explicit Start, live native roles, Keep running, Request cancellation, retained canceled state and all ready-result evidence. The deliberate visible-label negative control rejects the same rendering path.
+- **R10 — tested durable delivery:** clean committed builds, actual native goals, independent artifact/runtime audits, current documentation and pinned lint supplement the focused Go tests. Feature-branch pushes are verified by exact `git ls-remote` equality; no PR, merge or installation is claimed.
+- **R11 — both stages in order:** first-stage acceptance lands in `2f5227fc`, followed by the persisted container design in `05b6c9eb` and implementation in `c76423bc`. Actual container cancellation and logical-owner death terminate observed daemonized tool descendants; unavailable isolation refuses execution. Native model processes retain the explicitly disclosed group-only scope.
+
+### Deferred outside this delivery
+
+- Hermes remains unsupported as a self-service native team member; the attended pilot is not advertised as parity. A future native adapter needs its own exact protocol, identity and boundary acceptance.
+- All-descendant containment for the native model harness processes themselves remains separate work. The new container guarantee covers tool/file/check execution, not a hostile daemon/kernel or other same-user process.
+- The unchanged baseline `TestMenuJSON_LiveTree` inventory mismatch remains recorded here for a separate menu-test repair; focused project-goal CLI coverage passes. No full-repository or hosted-CI green is claimed.

@@ -349,9 +349,11 @@ choices, and Escape leaves the answer editor without losing its draft.
 
 Detaching only leaves the screen: the supervisor continues. Cancellation is
 different—it queues a request to the owning supervisor. Treat it as complete
-only when status is `canceled` and `cleanup_complete` is true; this confirms the
-owned native process groups stopped, not that arbitrary daemonized descendants
-are gone. State and any worktree or evidence already created are still retained.
+only when status is `canceled` and `cleanup_complete` is true. In either mode,
+this confirms the owned native process groups stopped. Container mode also
+requires confirmed stop/removal of every owned tool container, covering its tool
+descendants; it does not cover daemonized native-model descendants. State and
+any worktree or evidence already created are still retained.
 
 ### Diagnosing container startup failures
 
@@ -395,9 +397,9 @@ are gone. State and any worktree or evidence already created are still retained.
 
 In the retained run directory, each role's `native-control/<role>/` keeps
 `guardian-startup.json` and a final `guardian-receipt.json` after cleanup. Failed
-native startup can also produce a receipt, with status `failed`. Native teams
-retain a separate pair for each credential-free execution host in
-`native-control/<role>-execution/`. Startup status `started` identifies the owned
+native startup can also produce a receipt, with status `failed`. In process-group
+mode, native teams retain a separate pair for each credential-free execution
+host in `native-control/<role>-execution/`. Startup status `started` identifies the owned
 native child: `native_pid`, `process_group`, `socket` and `started_at` must match
 in the final receipt to pair the same process incarnation. Validation requires
 a final status of `stopped`, no receipt errors and both cleanup booleans true;
@@ -415,14 +417,18 @@ ended safely; treat the host as unavailable rather than retrying the command.
 validation checks its absence again. `socket_gone` records that the socket path
 was absent or its socket was removed, not that every process using it exited.
 Goal-state `cleanup_complete` means the supervisor's cleanup returned no error
-(including closing started roles and their execution hosts); it is not a task
-correctness or all-descendant containment claim. Daemonized descendants that
-leave the owned process group may survive even when these values are true.
+(including closing started roles and their execution hosts). This is cleanup
+evidence, not task correctness. In container mode it includes confirmed
+stop/removal of the owned tool containers and their descendants. Native model
+processes always retain group-only cleanup; in process-group mode that limitation
+also applies to tool execution. Daemonized processes that leave those owned
+groups may survive even when these values are true.
 
-Loss of the logical supervisor closes its lease pipe: a surviving guardian
-responds by stopping the owned native process group, removing its socket and
-writing the final receipt. Killing the guardian itself is different: it can
-prevent that cleanup and receipt publication, leaving the native child alive.
+For native process-group guardians, loss of the logical supervisor closes its
+lease pipe: a surviving guardian responds by stopping the owned native process
+group, removing its socket and writing the final receipt. Killing the guardian
+itself is different: it can prevent that cleanup and receipt publication,
+leaving the native child alive.
 Neither supervisor death nor a startup receipt alone proves cleanup, and an
 abrupt supervisor death need not update goal-state `cleanup_complete`. Retained
 PIDs are historical evidence, not a later kill list: PID/process-group IDs can
@@ -572,22 +578,26 @@ boundary or select an external tool.
 Explicit native teams use Codex app-server, Pi RPC and Claude Code stream JSON,
 not a model-translation gateway. Their only model-callable tools are the
 role-bound `goal_exec`, `goal_read`, `goal_write`, `goal_mail` and `goal_inbox`
-bridge. A separate credential-free Codex execution host performs commands and
-checks without creating a model thread. It is an execution dependency, not a
-fourth model teammate. Built-in tools, ambient hooks, plugins and other MCP
-servers are disabled; authentication remains with each native harness.
+bridge. Without container isolation, a separate credential-free Codex execution
+host performs commands and checks without creating a model thread. With
+`isolation.mode: "container"`, the approved Linux helper runs each operation in
+its own leased container instead. Neither execution host is a fourth model
+teammate. Built-in tools, ambient hooks, plugins and other MCP servers are
+disabled; authentication remains with each native harness.
 Accepted input, native consumption and settled completion are separate
 receipts. A successful mailbox write is never proof that a model finished.
 
 File helpers reject unsafe paths and disallowed writes. Arbitrary commands
 retain a workspace-level kernel write boundary and a post-execution allowed-path
-result gate, not a per-file OS allowlist. Process-group cleanup proves only the
-owned groups disappeared: a daemonized child can leave its original group.
-The real negative control reproduced that existing limitation. The current
-cleanup contract retains and discloses it; stronger VM/container isolation is
-separate follow-up work, not an implicit guarantee. Complete mixed-team result
-acceptance remains unverified; neither successful native reply probes nor
-passing unit tests establish it.
+result gate, not a per-file OS allowlist. In process-group mode, cleanup proves
+only the owned groups disappeared: a daemonized child can leave its original
+group. Optional Linux container isolation additionally contains all tool/check
+descendants, including daemonized children, for that operation's lifetime.
+Native model processes still have separate process-group cleanup in either mode;
+the stronger tool boundary does not cover daemonized native-model descendants.
+Neither successful reply probes nor passing unit tests establish an individual
+result: inspect its retained native review, approved checks, source snapshot and
+cleanup evidence.
 
 `ready` means the frozen patch passed independent native review, every approved
 check passed, the patch stayed unchanged and the source checkout stayed
@@ -603,6 +613,23 @@ the process is dead or safe to restart. Status, list and artifact reads never
 restart or replay work, and respond/cancel refuse an unresponsive goal. Inspect
 the retained state and supervisor log, plus guardian and native receipts when
 present; there is no blind replay or promise of arbitrary crash recovery.
+
+### Understanding the two review stages
+
+For explicit native teams, the coordinator's `REVIEW` request and reviewer's mail
+`REVIEW_PASS` are a preliminary review of the live source/diff. `result.patch`
+is not available yet: the supervisor has not frozen it. Mail is cooperative task
+data and transport evidence, never final approval or frozen-patch acceptance.
+After the coordinator consumes that pass and all roles become idle, the supervisor
+stops implementation (tools, native process and execution host) before freezing
+`result.patch`. The operator need not manufacture a frozen artifact.
+
+The supervisor then requests a separate direct native reviewer response bound to
+the exact frozen patch digest. Only that later review, supervisor-run approved
+checks, an unchanged reviewed patch and preservation of the original source
+snapshot can establish a verified `ready` result. As above, `ready` is not human
+acceptance and does not mean committed, merged or deployed; neither stage
+replaces the approved checks.
 
 ## Attended repository-goal pilot
 
