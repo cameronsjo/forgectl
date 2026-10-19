@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/goalnative"
+	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
 
 type recordingGoalExecutor struct {
@@ -57,6 +58,7 @@ func TestToolHandlerBindsExecutionToRoleCwdAndRoots(t *testing.T) {
 	}
 	executor := &recordingGoalExecutor{result: goalnative.CommandResult{ExitCode: 0, Stdout: "ok"}}
 	role := &nativeRole{Name: "implementation", Directory: roleDirectory, Executor: executor}
+	role.Member.Worktree = fixture.state.Worktree
 	engine := newGoalTestExecution(fixture)
 	engine.self = "/private/bin/forgectl"
 	handler := engine.toolHandler(role, []string{roleDirectory, fixture.state.Worktree})
@@ -88,6 +90,38 @@ func TestToolHandlerBindsExecutionToRoleCwdAndRoots(t *testing.T) {
 	}
 	if call.limit != 7*time.Second {
 		t.Fatalf("timeout = %s, want 7s", call.limit)
+	}
+}
+
+func TestReadOnlyRoleToolsKeepTheirOwnExecutionCwd(t *testing.T) {
+	fixture := newGoalFixture(t, "src")
+	if err := os.MkdirAll(fixture.state.Worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeGoalFile(t, filepath.Join(fixture.state.Worktree, "readable.txt"), "public source")
+	for _, name := range []string{"coordinator", "reviewer"} {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			executor := &recordingGoalExecutor{}
+			role := &nativeRole{Name: name, Directory: directory, Member: mail.Worker{Worktree: directory}, Executor: executor}
+			engine := newGoalTestExecution(fixture)
+			engine.self = "/private/bin/forgectl"
+			handler := engine.toolHandler(role, []string{directory})
+			if _, err := callGoalTool(t, handler, "goal_exec", map[string]any{"argv": []string{"/usr/bin/true"}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := callGoalTool(t, handler, "goal_read", map[string]any{"path": "readable.txt"}); err != nil {
+				t.Fatal(err)
+			}
+			if len(executor.calls) != 2 {
+				t.Fatalf("expected two real executor calls, got %#v", executor.calls)
+			}
+			for _, call := range executor.calls {
+				if call.cwd != directory || !reflect.DeepEqual(call.roots, []string{directory}) {
+					t.Fatalf("read-only role tool inherited source write authority: %#v", call)
+				}
+			}
+		})
 	}
 }
 

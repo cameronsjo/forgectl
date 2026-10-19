@@ -5,7 +5,7 @@ status: in-flight
 # First-class native teams for repository goals
 
 Status: in flight; Cameron authorized both cleanup stages, existing process-group cleanup first
-Next action: restore the existing sandboxed execution path with explicit cleanup limits, verify a real mixed-team result and cancellation, then implement and verify stronger VM/container isolation.
+Next action: verify a real mixed-team result and cancellation using the restored role-scoped execution path, then implement and verify stronger VM/container isolation.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -103,7 +103,7 @@ The Pi and Claude reviewers completed independent read-only plan/security review
 
 ## Completion evidence
 
-Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Normal goal/native/tool-channel/UI tests and the affected CLI tests pass; opt-in real execution-boundary tests are separate and currently fail. The menu-inventory test `TestMenuJSON_LiveTree` also fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
+Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Normal goal/native/tool-channel/UI tests and the affected CLI tests pass; real execution-boundary tests now pass after the staged corrections recorded below. The actual mixed-team result and UI cancellation remain unverified. The menu-inventory test `TestMenuJSON_LiveTree` fails on an unchanged archive of baseline `e3ff7e8c` for the same two pre-existing project-list rows; this task does not change those commands.
 
 ### Verified checkpoint
 
@@ -133,3 +133,9 @@ Codex removed the incompatible nested policy and its experimental helpers, prese
 The independent read-only cleanup review's claimed broker-socket leak was not adopted: Go's owned Unix listener unlinks on close, and the capability file is retained separately under native-control, not in the socket directory. Root Codex verified the installed standard-library implementation and added a passing actual listener/close/socket-absence/empty-directory-removal test. Killing the guardian itself is distinct from killing the logical supervisor: an earlier misnamed test targeted the guardian and did not establish owner-death cleanup. The corrected owner-death test uses the real parent/helper lease path; guardian failure and stronger all-descendant containment remain separate concerns, not hidden green claims.
 
 All affected goaltools/native/goal/TUI package tests pass, and repository-pinned golangci-lint 2.13.1 reports zero new findings against baseline `e3ff7e8c`. After the model-prompt correction, the affected goal package and lint were rerun successfully. A useful real mixed-team goal, actual UI cancellation, artifact/source verification and the second isolation stage remain outstanding.
+
+### Role-scoped execution correction
+
+The first actual mixed-team goal at clean public revision `5b9e91a9` refused before model work: the coordinator boundary probe could write the implementation worktree. The native execution sandbox implicitly included its startup working directory despite narrower per-command roots. This was a real isolation defect in the shared-host wiring, not a credential/provider failure. The failed goal and its receipts remain retained at `/private/tmp/forgectl-native-stage1.ygFzB6/registry/goals/goal-486f781ebbcfb7a88bfb25b5`; its source clone remains clean.
+
+Codex replaced the shared command host with one credential-free host per role, bound both startup and command working directories to approved roots, and kept coordinator/reviewer tool commands in their private runtime directories. The reviewer host's wider check ceiling is available only to the supervisor's approved-check path. The implementation execution host now also closes before patch freezing. A regression failed against the earlier permissive host; the real no-model role matrix proves each role can write its own directory, cannot write another role's directory, and the reviewer can write the implementation directory only with explicit supervisor check roots. Full affected package tests, the real boundary/owner-death suite and pinned lint pass. After changing the test's file reads to scoped directory handles, the affected real-role test and lint were rerun successfully. The actual mixed-team result and UI cancellation are still required.

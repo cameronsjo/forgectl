@@ -45,7 +45,7 @@ func (engine *execution) toolHandler(role *nativeRole, roots []string) goaltools
 			if input.Timeout == 0 {
 				input.Timeout = 60
 			}
-			return role.Executor.Exec(ctx, input.Argv, state.Worktree, approvedRoots, time.Duration(input.Timeout)*time.Second)
+			return role.Executor.Exec(ctx, input.Argv, role.Member.Worktree, approvedRoots, time.Duration(input.Timeout)*time.Second)
 		case "goal_read", "goal_write":
 			var input struct {
 				Path    string  `json:"path"`
@@ -78,7 +78,7 @@ func (engine *execution) toolHandler(role *nativeRole, roots []string) goaltools
 				}
 				argv = append(argv, "--write", "--content", *input.Content)
 			}
-			result, err := role.Executor.Exec(ctx, argv, state.Worktree, approvedRoots, 15*time.Second)
+			result, err := role.Executor.Exec(ctx, argv, role.Member.Worktree, approvedRoots, 15*time.Second)
 			if err != nil {
 				return nil, err
 			}

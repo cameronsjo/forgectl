@@ -12,6 +12,9 @@ import (
 type CommandHost struct{ session *Session }
 
 func StartCommandHost(ctx context.Context, config Config) (*CommandHost, error) {
+	if err := validateExecutionCwd(config.Cwd, config.WritableRoots); err != nil {
+		return nil, err
+	}
 	config.ExecutionOnly = true
 	config.Model = ""
 	session, err := Start(ctx, config)
@@ -22,6 +25,11 @@ func StartCommandHost(ctx context.Context, config Config) (*CommandHost, error) 
 }
 
 func (host *CommandHost) Exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration) (CommandResult, error) {
+	for _, directory := range []string{host.session.config.Cwd, cwd} {
+		if err := validateExecutionCwd(directory, roots); err != nil {
+			return CommandResult{}, err
+		}
+	}
 	for _, root := range roots {
 		if pathWithin(root, host.session.config.ControlDir) || pathWithin(host.session.config.ControlDir, root) {
 			return CommandResult{}, errors.New("execution roots overlap private host state")
@@ -55,6 +63,15 @@ func (host *CommandHost) Exec(ctx context.Context, argv []string, cwd string, ro
 }
 
 func (host *CommandHost) Close(ctx context.Context) error { return host.session.Close(ctx) }
+
+func validateExecutionCwd(cwd string, roots []string) error {
+	for _, root := range roots {
+		if pathWithin(cwd, root) {
+			return nil
+		}
+	}
+	return errors.New("execution cwd exceeds the requested writable roots")
+}
 
 func executionMethod(method string) bool {
 	switch method {

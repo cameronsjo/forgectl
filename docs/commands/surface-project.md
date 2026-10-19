@@ -214,6 +214,14 @@ implementation and Claude Code to independent review. **Custom team** exposes
 each role in Advanced as `harness,provider,model`; complete values also appear in
 approval. Changing a role, model, provider or team invalidates preparation.
 
+Each native role has its own credential-free execution host. Implementation
+commands start in the isolated worktree; coordinator and reviewer commands start
+in their private runtime directories and can inspect source using absolute paths.
+File-tool paths remain worktree-relative. The supervisor separately grants the
+reviewer execution host the exact approved check scope after frozen-patch review;
+model tool calls never receive that wider scope. Implementation tools, its native
+model process and its execution host stop before the patch is frozen.
+
 Native teams are experimental and are **not yet verified end to end**. They use
 the existing Codex filesystem/network sandbox and owned-process-group cleanup.
 Preparation explicitly warns that daemonized children may survive cancellation;

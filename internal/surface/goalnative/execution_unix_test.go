@@ -39,6 +39,9 @@ func TestExecutionHostNeverCreatesModelSession(t *testing.T) {
 	if err := os.Mkdir(work, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := StartCommandHost(t.Context(), Config{Cwd: root, WritableRoots: []string{work}}); err == nil || !strings.Contains(err.Error(), "cwd") {
+		t.Fatalf("startup accepted a cwd outside its ceiling: %v", err)
+	}
 	host, err := StartCommandHost(t.Context(), Config{Binary: writeHelper(t, "native", "GOALNATIVE_NATIVE_HELPER=1"), SupervisorBinary: writeHelper(t, "supervisor", "GOALNATIVE_HOST_HELPER=1"), ControlDir: control, Cwd: work, Socket: filepath.Join(root, "exec.sock"), WritableRoots: []string{work}})
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +66,16 @@ func TestExecutionHostNeverCreatesModelSession(t *testing.T) {
 	}
 	if _, err := host.Exec(t.Context(), []string{"printf", "bad"}, work, []string{root}, time.Second); err == nil {
 		t.Fatal("command widened the host's writable roots")
+	}
+	narrow := filepath.Join(work, "narrow")
+	if err := os.Mkdir(narrow, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Exec(t.Context(), []string{"printf", "bad"}, narrow, []string{narrow}, time.Second); err == nil {
+		t.Fatal("command omitted the native host's implicitly writable startup cwd")
+	}
+	if _, err := host.Exec(t.Context(), []string{"printf", "bad"}, root, []string{work}, time.Second); err == nil {
+		t.Fatal("command cwd widened the approved writable roots")
 	}
 	if err := host.Close(t.Context()); err != nil {
 		t.Fatal(err)
@@ -202,6 +215,90 @@ func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 		if entry.Name() == "sessions" || entry.Name() == "auth.json" {
 			t.Fatalf("execution-only host created %s", entry.Name())
 		}
+	}
+}
+
+func TestExecutionHostRealRoleScopedCommands(t *testing.T) {
+	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
+		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for real role-scoped command hosts")
+	}
+	native, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp("/tmp", "gn-roles-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	directories := make(map[string]string)
+	for _, name := range []string{"coordinator", "implementation", "reviewer"} {
+		directories[name] = filepath.Join(root, name)
+		if err := os.Mkdir(directories[name], 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"coordinator", "implementation", "reviewer"} {
+		t.Run(name, func(t *testing.T) {
+			directory := directories[name]
+			ceiling := []string{directory}
+			if name == "reviewer" {
+				ceiling = append(ceiling, directories["implementation"])
+			}
+			host, err := StartCommandHost(t.Context(), Config{Binary: native, SupervisorBinary: writeHelper(t, "supervisor", "GOALNATIVE_HOST_HELPER=1"), ControlDir: filepath.Join(root, name+"-control"), Cwd: directory, Socket: filepath.Join(root, name+".sock"), WritableRoots: ceiling})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = host.Close(context.Background()) })
+			allowed := filepath.Join(directory, "allowed")
+			result, err := host.Exec(t.Context(), []string{"/bin/sh", "-c", `printf allowed > "$1"`, "probe", allowed}, directory, []string{directory}, 10*time.Second)
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("role positive control: %#v, %v", result, err)
+			}
+			roleRoot, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = roleRoot.Close() })
+			if data, err := roleRoot.ReadFile("allowed"); err != nil || string(data) != "allowed" {
+				t.Fatalf("role allowed write missing: %q, %v", data, err)
+			}
+			for other, otherDirectory := range directories {
+				if other == name {
+					continue
+				}
+				target := filepath.Join(otherDirectory, "denied-from-"+name)
+				result, err := host.Exec(t.Context(), []string{"/bin/sh", "-c", `printf denied > "$1"`, "probe", target}, directory, []string{directory}, 10*time.Second)
+				if err != nil || result.ExitCode == 0 || !strings.Contains(result.Stderr, "Operation not permitted") {
+					t.Fatalf("%s wrote into %s: %#v, %v", name, other, result, err)
+				}
+				if _, err := os.Stat(target); !os.IsNotExist(err) {
+					t.Fatalf("cross-role target exists: %v", err)
+				}
+			}
+			if name == "reviewer" {
+				target := filepath.Join(directories["implementation"], "approved-check")
+				result, err := host.Exec(t.Context(), []string{"/bin/sh", "-c", `printf check > "$1"`, "probe", target}, directories["implementation"], ceiling, 10*time.Second)
+				if err != nil || result.ExitCode != 0 {
+					t.Fatalf("explicit supervisor check scope failed: %#v, %v", result, err)
+				}
+				checkRoot, err := os.OpenRoot(directories["implementation"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = checkRoot.Close() })
+				if data, err := checkRoot.ReadFile("approved-check"); err != nil || string(data) != "check" {
+					t.Fatalf("approved check write missing: %q, %v", data, err)
+				}
+			}
+			if err := host.Close(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

@@ -50,7 +50,6 @@ func (engine *execution) startNativeTeam(ctx context.Context) error {
 		}
 		threads[name] = thread.ID
 	}
-	allRoots := []string{state.Worktree}
 	team := state.Spec.EffectiveTeam()
 	for _, name := range []string{"coordinator", "implementation", "reviewer"} {
 		directory := filepath.Join(state.RunDir, "agents", name)
@@ -59,7 +58,6 @@ func (engine *execution) startNativeTeam(ctx context.Context) error {
 				return err
 			}
 		}
-		allRoots = append(allRoots, directory)
 		selection, _ := team.Role(name)
 		cwd := directory
 		if name == "implementation" {
@@ -71,20 +69,23 @@ func (engine *execution) startNativeTeam(ctx context.Context) error {
 		}
 		engine.roles[name] = &nativeRole{Name: name, Directory: directory, Member: member}
 	}
-	host, err := goalnative.StartCommandHost(ctx, goalnative.Config{Binary: engine.codex, SupervisorBinary: engine.self, ControlDir: filepath.Join(state.RunDir, "native-control", "execution"), Cwd: state.Worktree, Socket: filepath.Join(engine.socketRoot, "exec.sock"), WritableRoots: allRoots})
-	if err != nil {
-		return fmt.Errorf("non-model execution boundary: %w", err)
-	}
-	engine.commandHost = host
 	adapter := &nativeMailboxAdapter{engine: engine, context: ctx}
 	engine.service = &mail.Service{Box: mail.Mailbox{Dir: ledger, Private: true}, Roster: mail.FileRoster{Dir: ledger}, Adapters: map[mail.Harness]mail.Adapter{mail.HarnessCodex: adapter, mail.HarnessPi: adapter, mail.HarnessClaude: adapter}, Policy: mail.DefaultPolicy(), ReplyBinary: engine.self}
 	for _, name := range []string{"coordinator", "implementation", "reviewer"} {
 		role := engine.roles[name]
-		role.Executor = host
 		roots := []string{role.Directory}
 		if name == "implementation" {
 			roots = append(roots, state.Worktree)
 		}
+		ceiling := append([]string(nil), roots...)
+		if name == "reviewer" {
+			ceiling = append(ceiling, state.Worktree)
+		}
+		host, err := goalnative.StartCommandHost(ctx, goalnative.Config{Binary: engine.codex, SupervisorBinary: engine.self, ControlDir: filepath.Join(state.RunDir, "native-control", name+"-execution"), Cwd: role.Member.Worktree, Socket: filepath.Join(engine.socketRoot, name+"-exec.sock"), WritableRoots: ceiling})
+		if err != nil {
+			return fmt.Errorf("%s non-model execution boundary: %w", name, err)
+		}
+		role.Host, role.Executor = host, host
 		if err := engine.probeBoundary(ctx, role, roots); err != nil {
 			return err
 		}
