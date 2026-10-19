@@ -63,6 +63,19 @@ const (
 
 type projectGoalsSetupField uint8
 
+type projectGoalIsolationPreset struct {
+	ID   string
+	Name string
+	Hint string
+}
+
+func projectGoalIsolationPresets() []projectGoalIsolationPreset {
+	return []projectGoalIsolationPreset{
+		{ID: "process-group", Name: "Process-group cleanup", Hint: "existing compatibility mode; native model cleanup is group-only and daemonized descendants may survive"},
+		{ID: "container", Name: "Linux container", Hint: "tool/check descendants are contained with no network; native model cleanup remains group-only"},
+	}
+}
+
 const (
 	projectGoalsFieldRepository projectGoalsSetupField = iota
 	projectGoalsFieldPreset
@@ -81,6 +94,9 @@ const (
 	projectGoalsFieldPrepare
 	projectGoalsFieldEdit
 	projectGoalsFieldStart
+	projectGoalsFieldIsolation
+	projectGoalsFieldIsolationSocket
+	projectGoalsFieldIsolationImage
 )
 
 type projectGoalsModel struct {
@@ -122,6 +138,7 @@ type projectGoalsModel struct {
 	presetID        string
 	titleExplicit   bool
 	teamID          string
+	isolationID     string
 	runTab          int
 	runFocus        int
 	prepareDigest   string
@@ -226,7 +243,8 @@ func newProjectGoalsModel(ctx context.Context, opts ProjectGoalsOptions) *projec
 			Model:        opts.Model,
 			LimitMinutes: 10,
 		},
-		teamID: "codex",
+		teamID:      "codex",
+		isolationID: "process-group",
 	}
 	model.applyPreset("bugfix", false)
 	return model
@@ -297,6 +315,7 @@ func (model *projectGoalsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prepared := message.prepared
 		model.prepared = &prepared
 		model.draft = prepared.Spec
+		model.isolationID = projectGoalIsolationID(prepared.Spec)
 		model.errText = ""
 		model.screen = projectGoalsSetup
 		model.scroll = 0
@@ -529,6 +548,17 @@ func (model *projectGoalsModel) updateSetup(name, text string) (tea.Model, tea.C
 		}
 		return model, nil
 	}
+	if field == projectGoalsFieldIsolation {
+		switch name {
+		case "left", "up":
+			model.selectIsolation(-1)
+			return model, nil
+		case "right", "down", "space":
+			model.selectIsolation(1)
+			return model, nil
+		}
+		return model, nil
+	}
 	if field == projectGoalsFieldAdvanced {
 		if name == "enter" || name == "space" {
 			model.setupAdvanced = !model.setupAdvanced
@@ -598,7 +628,7 @@ func setupFieldMultiline(field projectGoalsSetupField) bool {
 }
 
 func setupFieldText(field projectGoalsSetupField) bool {
-	return field == projectGoalsFieldRepository || field == projectGoalsFieldGoal || field == projectGoalsFieldTitle || field == projectGoalsFieldScope || field == projectGoalsFieldAcceptance || field == projectGoalsFieldChecks || field == projectGoalsFieldModel || field == projectGoalsFieldDuration || field == projectGoalsFieldCoordinator || field == projectGoalsFieldImplementation || field == projectGoalsFieldReviewer
+	return field == projectGoalsFieldRepository || field == projectGoalsFieldGoal || field == projectGoalsFieldTitle || field == projectGoalsFieldScope || field == projectGoalsFieldAcceptance || field == projectGoalsFieldChecks || field == projectGoalsFieldModel || field == projectGoalsFieldDuration || field == projectGoalsFieldCoordinator || field == projectGoalsFieldImplementation || field == projectGoalsFieldReviewer || field == projectGoalsFieldIsolationSocket || field == projectGoalsFieldIsolationImage
 }
 
 func (model projectGoalsModel) setupFields() []projectGoalsSetupField {
@@ -621,6 +651,10 @@ func (model projectGoalsModel) setupFields() []projectGoalsSetupField {
 			projectGoalsFieldImplementation,
 			projectGoalsFieldReviewer,
 		)
+	}
+	fields = append(fields, projectGoalsFieldIsolation)
+	if model.setupAdvanced && model.isContainerIsolation() {
+		fields = append(fields, projectGoalsFieldIsolationSocket, projectGoalsFieldIsolationImage)
 	}
 	if model.prepared == nil {
 		fields = append(fields, projectGoalsFieldPrepare)
@@ -695,6 +729,11 @@ func (model projectGoalsModel) setupFieldValue(field projectGoalsSetupField) str
 			return preset.Name
 		}
 		return "Custom team"
+	case projectGoalsFieldIsolation:
+		if preset := model.selectedIsolationPreset(); preset != nil {
+			return preset.Name
+		}
+		return "Process-group cleanup"
 	case projectGoalsFieldTitle:
 		return model.draft.Title
 	case projectGoalsFieldScope:
@@ -712,13 +751,21 @@ func (model projectGoalsModel) setupFieldValue(field projectGoalsSetupField) str
 		role := teamRoleForField(field)
 		selection, _ := team.Role(role)
 		return projectGoalTeamSelectionText(selection)
+	case projectGoalsFieldIsolationSocket:
+		if model.draft.Isolation != nil {
+			return model.draft.Isolation.Socket
+		}
+	case projectGoalsFieldIsolationImage:
+		if model.draft.Isolation != nil {
+			return model.draft.Isolation.Image
+		}
 	}
 	return ""
 }
 
 func (model *projectGoalsModel) commitSetupEdit() error {
 	field := model.setupField()
-	if field == projectGoalsFieldPreset || field == projectGoalsFieldAdvanced || field >= projectGoalsFieldPrepare {
+	if field == projectGoalsFieldPreset || field == projectGoalsFieldAdvanced || field == projectGoalsFieldIsolation || isProjectGoalsSetupButton(field) {
 		return nil
 	}
 	value := strings.TrimSpace(string(model.edit))
@@ -772,6 +819,11 @@ func (model *projectGoalsModel) commitSetupEdit() error {
 	case projectGoalsFieldModel:
 		if value != model.draft.Model {
 			model.draft.Model = value
+			if model.isContainerIsolation() && model.draft.Team != nil && projectGoalIsExplicitCodexTeam(*model.draft.Team) {
+				selection := goal.ModelSelection{Harness: "codex", Provider: "openai", Model: value}
+				model.draft.Team = &goal.TeamSpec{Coordinator: selection, Implementation: selection, Reviewer: selection}
+				model.teamID = "codex"
+			}
 			model.invalidatePrepared()
 		}
 	case projectGoalsFieldDuration:
@@ -801,8 +853,25 @@ func (model *projectGoalsModel) commitSetupEdit() error {
 		model.draft.Team = cloneProjectGoalTeam(team)
 		model.teamID = "custom"
 		model.invalidatePrepared()
+	case projectGoalsFieldIsolationSocket, projectGoalsFieldIsolationImage:
+		if !model.isContainerIsolation() || model.draft.Isolation == nil {
+			return errors.New("container isolation must be selected before editing its setup")
+		}
+		if field == projectGoalsFieldIsolationSocket {
+			if value != model.draft.Isolation.Socket {
+				model.draft.Isolation.Socket = value
+				model.invalidatePrepared()
+			}
+		} else if value != model.draft.Isolation.Image {
+			model.draft.Isolation.Image = value
+			model.invalidatePrepared()
+		}
 	}
 	return nil
+}
+
+func isProjectGoalsSetupButton(field projectGoalsSetupField) bool {
+	return field == projectGoalsFieldPrepare || field == projectGoalsFieldEdit || field == projectGoalsFieldStart
 }
 
 func (model *projectGoalsModel) invalidatePrepared() {
@@ -846,6 +915,76 @@ func (model *projectGoalsModel) selectTeam(delta int) {
 	model.applyTeamPreset(presets[current].ID, true)
 }
 
+func (model projectGoalsModel) isContainerIsolation() bool {
+	return model.draft.Isolation != nil && model.draft.Isolation.Mode == "container"
+}
+
+func projectGoalIsolationID(spec goal.Spec) string {
+	if spec.Isolation != nil && spec.Isolation.Mode == "container" {
+		return "container"
+	}
+	return "process-group"
+}
+
+func (model projectGoalsModel) selectedIsolationPreset() *projectGoalIsolationPreset {
+	for _, preset := range projectGoalIsolationPresets() {
+		if preset.ID == model.isolationID {
+			selected := preset
+			return &selected
+		}
+	}
+	for _, preset := range projectGoalIsolationPresets() {
+		if preset.ID == projectGoalIsolationID(model.draft) {
+			selected := preset
+			return &selected
+		}
+	}
+	return nil
+}
+
+func (model *projectGoalsModel) selectIsolation(delta int) {
+	presets := projectGoalIsolationPresets()
+	if len(presets) == 0 {
+		return
+	}
+	current := 0
+	for index, preset := range presets {
+		if preset.ID == model.isolationID {
+			current = index
+			break
+		}
+	}
+	current = (current + delta + len(presets)) % len(presets)
+	model.applyIsolationPreset(presets[current].ID, true)
+}
+
+func (model *projectGoalsModel) applyIsolationPreset(id string, invalidate bool) {
+	for _, preset := range projectGoalIsolationPresets() {
+		if preset.ID != id {
+			continue
+		}
+		model.isolationID = id
+		if id == "container" {
+			if model.draft.Isolation == nil {
+				model.draft.Isolation = &goal.IsolationSpec{Mode: "container"}
+			} else {
+				model.draft.Isolation.Mode = "container"
+			}
+			if model.draft.Team == nil {
+				team := model.draft.EffectiveTeam()
+				model.draft.Team = cloneProjectGoalTeam(team)
+			}
+		} else {
+			model.draft.Isolation = nil
+		}
+		if invalidate {
+			model.invalidatePrepared()
+		}
+		model.beginSetupEdit()
+		return
+	}
+}
+
 func (model *projectGoalsModel) applyTeamPreset(id string, invalidate bool) {
 	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
 		if preset.ID != id {
@@ -856,7 +995,12 @@ func (model *projectGoalsModel) applyTeamPreset(id string, invalidate bool) {
 			team := model.draft.EffectiveTeam()
 			model.draft.Team = cloneProjectGoalTeam(team)
 		} else if preset.Team == nil {
-			model.draft.Team = nil
+			if model.isContainerIsolation() {
+				selection := goal.ModelSelection{Harness: "codex", Provider: "openai", Model: model.draft.Model}
+				model.draft.Team = &goal.TeamSpec{Coordinator: selection, Implementation: selection, Reviewer: selection}
+			} else {
+				model.draft.Team = nil
+			}
 		} else {
 			model.draft.Team = cloneProjectGoalTeam(*preset.Team)
 		}
@@ -1174,7 +1318,9 @@ func (model *projectGoalsModel) startSetup() {
 	model.setupFocus = 0
 	model.titleExplicit = false
 	model.teamID = "codex"
+	model.isolationID = "process-group"
 	model.draft.Team = nil
+	model.draft.Isolation = nil
 	model.errText = ""
 	model.scroll = 0
 	model.editorManualScroll = false
@@ -1238,6 +1384,10 @@ func (model *projectGoalsModel) prepareGoal() tea.Cmd {
 		return nil
 	}
 	model.draft.Version = goal.Version
+	if err := validateProjectGoalIsolation(model.draft); err != nil {
+		model.errText = termsafe.SafeLineMax(err.Error(), 180)
+		return nil
+	}
 	if err := model.draft.Validate(); err != nil {
 		model.errText = termsafe.SafeLineMax(err.Error(), 180)
 		return nil
@@ -1254,6 +1404,36 @@ func (model *projectGoalsModel) prepareGoal() tea.Cmd {
 		prepared, err := model.opts.Prepare(model.ctx, spec)
 		return projectGoalsPreparedMsg{prepared: prepared, digest: digest, sequence: sequence, err: err}
 	}
+}
+
+func validateProjectGoalIsolation(spec goal.Spec) error {
+	if spec.Isolation == nil {
+		return nil
+	}
+	if spec.Isolation.Mode != "container" {
+		return fmt.Errorf("unsupported isolation mode %q; choose Process-group cleanup or Linux container", spec.Isolation.Mode)
+	}
+	if spec.Team == nil {
+		return errors.New("linux container isolation requires an explicit team; choose the all-Codex team or edit the roles")
+	}
+	if spec.Isolation.Socket == "" {
+		return errors.New("linux container isolation needs an approved local Unix socket in Advanced → Container socket")
+	}
+	if !filepath.IsAbs(spec.Isolation.Socket) || filepath.Clean(spec.Isolation.Socket) != spec.Isolation.Socket {
+		return errors.New("container socket must be an absolute clean local Unix socket path")
+	}
+	if spec.Isolation.Image == "" {
+		return errors.New("linux container isolation needs an immutable sha256 image in Advanced → Container image")
+	}
+	if len(spec.Isolation.Image) != len("sha256:")+64 || !strings.HasPrefix(spec.Isolation.Image, "sha256:") {
+		return errors.New("container image must be an immutable sha256: digest")
+	}
+	for _, char := range spec.Isolation.Image[len("sha256:"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return errors.New("container image must be an immutable sha256: digest")
+		}
+	}
+	return nil
 }
 
 func (model *projectGoalsModel) loadSelected() tea.Cmd {
@@ -1580,6 +1760,21 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 			for _, line := range goalWrap("  "+hint, width-4) {
 				lines = append(lines, model.styles.Meta.Render(line))
 			}
+		case projectGoalsFieldIsolation:
+			preset := model.selectedIsolationPreset()
+			name, hint := "Process-group cleanup", "existing compatibility mode; native model cleanup is group-only"
+			if preset != nil {
+				name, hint = preset.Name, preset.Hint
+			}
+			lines = append(lines, marker+"Isolation: ["+name+"]")
+			for _, line := range goalWrap("  "+hint, width-4) {
+				lines = append(lines, model.styles.Meta.Render(line))
+			}
+			if model.isContainerIsolation() && !model.setupAdvanced {
+				for _, line := range goalWrap("  Container setup required: expand Advanced to provide the approved local Unix socket and immutable sha256 image; forgectl will not infer, download, or start Docker.", width-4) {
+					lines = append(lines, model.styles.Warn.Render(line))
+				}
+			}
 		case projectGoalsFieldGoal:
 			lines = append(lines, marker+"Goal:")
 			value := model.setupFieldValue(field)
@@ -1608,7 +1803,7 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 			for _, line := range goalLiteralWrap(value, goalMax(width-4, 1)) {
 				lines = append(lines, "    "+line)
 			}
-		case projectGoalsFieldTitle, projectGoalsFieldScope, projectGoalsFieldAcceptance, projectGoalsFieldChecks, projectGoalsFieldModel, projectGoalsFieldDuration:
+		case projectGoalsFieldTitle, projectGoalsFieldScope, projectGoalsFieldAcceptance, projectGoalsFieldChecks, projectGoalsFieldModel, projectGoalsFieldDuration, projectGoalsFieldIsolationSocket, projectGoalsFieldIsolationImage:
 			label := setupFieldLabel(field)
 			value := model.setupValueForRender(field, width-lipgloss.Width(label)-4)
 			if field == projectGoalsFieldAcceptance {
@@ -1638,6 +1833,7 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 					lines = appendGoalField(lines, "Title", prepared.Spec.Title, width)
 					lines = appendGoalField(lines, "Base revision", prepared.Spec.BaseRevision, width)
 					lines = appendGoalField(lines, "Scope", strings.Join(prepared.Spec.AllowedPaths, ", "), width)
+					lines = model.appendBoundaryDetails(lines, prepared.Spec, width)
 					lines = appendGoalField(lines, "Goal", prepared.Spec.Objective, width)
 					lines = append(lines, model.styles.Header.Render("Acceptance"))
 					for _, criterion := range prepared.Spec.Acceptance {
@@ -1694,13 +1890,34 @@ func (model projectGoalsModel) renderSetup(width int) []string {
 
 func (model projectGoalsModel) setupValueForRender(field projectGoalsSetupField, width int) string {
 	value := model.setupFieldValue(field)
-	if field == model.setupField() && field != projectGoalsFieldPreset && field < projectGoalsFieldPrepare {
+	if field == model.setupField() && setupFieldText(field) {
 		return goalEditorViewport(model.edit, model.cursor, width)
 	}
 	if width < 1 {
 		width = 1
 	}
 	return safeGoalField(value, width)
+}
+
+func (model projectGoalsModel) appendBoundaryDetails(lines []string, spec goal.Spec, width int) []string {
+	lines = append(lines, model.styles.Header.Render("Isolation"))
+	if spec.Isolation != nil && spec.Isolation.Mode == "container" {
+		lines = appendGoalField(lines, "Effective boundary", "Linux container; tool/check all-descendant cleanup", width)
+		lines = appendGoalField(lines, "Container image", spec.Isolation.Image, width)
+		lines = appendGoalField(lines, "Container socket", spec.Isolation.Socket, width)
+		for _, line := range goalWrap("Linux semantics: private PID namespace, read-only root, bounded private /tmp, no network, and no host-control mounts. Tool/check descendants end with the owned container.", width) {
+			lines = append(lines, model.styles.Meta.Render(line))
+		}
+		for _, line := range goalWrap("Native model processes remain process-group only; daemonized native descendants are not covered by the container boundary.", width) {
+			lines = append(lines, model.styles.Warn.Render(line))
+		}
+		return lines
+	}
+	lines = appendGoalField(lines, "Effective boundary", "existing process-group cleanup", width)
+	for _, line := range goalWrap("Native model processes and tool/check execution use process-group cleanup only; daemonized descendants may survive cancellation. No all-descendant guarantee.", width) {
+		lines = append(lines, model.styles.Warn.Render(line))
+	}
+	return lines
 }
 
 func setupFieldLabel(field projectGoalsSetupField) string {
@@ -1723,6 +1940,10 @@ func setupFieldLabel(field projectGoalsSetupField) string {
 		return "Implementation (harness,provider,model)"
 	case projectGoalsFieldReviewer:
 		return "Reviewer (harness,provider,model)"
+	case projectGoalsFieldIsolationSocket:
+		return "Container socket"
+	case projectGoalsFieldIsolationImage:
+		return "Container image"
 	default:
 		return ""
 	}
@@ -1766,6 +1987,10 @@ func (model projectGoalsModel) selectedTeamPreset() *projectGoalTeamPreset {
 	for _, preset := range projectGoalTeamPresets(model.draft.Model) {
 		if preset.ID == model.teamID {
 			if preset.ID == "codex" && model.draft.Team != nil {
+				if model.isContainerIsolation() && projectGoalIsExplicitCodexTeam(*model.draft.Team) {
+					selected := preset
+					return &selected
+				}
 				continue
 			}
 			selected := preset
@@ -1795,11 +2020,25 @@ func (model projectGoalsModel) selectedTeamPreset() *projectGoalTeamPreset {
 	return nil
 }
 
+func projectGoalIsExplicitCodexTeam(team goal.TeamSpec) bool {
+	if team.Coordinator.Harness != "codex" || team.Coordinator.Provider != "openai" {
+		return false
+	}
+	return team.Implementation == team.Coordinator && team.Reviewer == team.Coordinator
+}
+
 func (model projectGoalsModel) selectedTeamHint() string {
 	if preset := model.selectedTeamPreset(); preset != nil {
 		return preset.Hint
 	}
 	return "edit each role explicitly in Advanced"
+}
+
+func (model projectGoalsModel) selectedIsolationHint() string {
+	if preset := model.selectedIsolationPreset(); preset != nil {
+		return preset.Hint
+	}
+	return "existing compatibility mode; native model cleanup is group-only"
 }
 
 func teamRoleForField(field projectGoalsSetupField) string {
@@ -1859,6 +2098,7 @@ func (model projectGoalsModel) renderRunWorkspace(width int) []string {
 		lines = appendGoalField(lines, "Repository", state.Spec.Repository, width)
 		lines = appendGoalField(lines, "Worktree", state.Worktree, width)
 		lines = appendGoalField(lines, "Supervisor", supervisorLabel(state), width)
+		lines = model.appendBoundaryDetails(lines, state.Spec, width)
 		lines = appendGoalField(lines, "Objective", state.Spec.Objective, width)
 		if len(state.Roles) > 0 {
 			lines = append(lines, model.styles.Header.Render("Roles"))
@@ -1893,7 +2133,11 @@ func (model projectGoalsModel) renderRunWorkspace(width int) []string {
 	}
 	if model.cancelConfirm {
 		lines = append(lines, "")
-		for _, line := range goalWrap("Cancel goal? The default is to keep it running.", width) {
+		cancelText := "Cancel goal? The default is to keep it running. Existing process-group cleanup does not guarantee daemonized descendants are gone."
+		if state.Spec.Isolation != nil && state.Spec.Isolation.Mode == "container" {
+			cancelText = "Cancel goal? The default is to keep it running. The owned container stops tool/check descendants; native model cleanup remains process-group scoped."
+		}
+		for _, line := range goalWrap(cancelText, width) {
 			lines = append(lines, model.styles.Warn.Render(line))
 		}
 		keepMarker, cancelMarker := "  ", "  "
@@ -1997,6 +2241,11 @@ func (model projectGoalsModel) setupEditorCursorLine(width int) int {
 			line += model.presetCheckNoteLineCount(width)
 		case projectGoalsFieldTeam:
 			line += 1 + goalMax(len(goalWrap("  "+model.selectedTeamHint(), goalMax(width-4, 1))), 1)
+		case projectGoalsFieldIsolation:
+			line += 1 + goalMax(len(goalWrap("  "+model.selectedIsolationHint(), goalMax(width-4, 1))), 1)
+			if model.isContainerIsolation() && !model.setupAdvanced {
+				line += goalMax(len(goalWrap("  Container setup required: expand Advanced to provide the approved local Unix socket and immutable sha256 image; forgectl will not infer, download, or start Docker.", goalMax(width-4, 1))), 1)
+			}
 		case projectGoalsFieldGoal:
 			line += 1 + goalMax(len(goalWrap(model.draft.Objective, goalMax(width-4, 1))), 1)
 		case projectGoalsFieldAdvanced:
@@ -2038,6 +2287,7 @@ func (model projectGoalsModel) approvalLineCount(width int) int {
 	}
 	count += goalFieldLineCount("Commands", formatGoalChecks(prepared.Spec.Checks), width)
 	count += goalFieldLineCount("Model", prepared.Spec.Model, width)
+	count += projectGoalBoundaryLineCount(prepared.Spec, width)
 	count++
 	effectiveTeam := prepared.Spec.EffectiveTeam()
 	for _, role := range []struct {
@@ -2058,6 +2308,21 @@ func (model projectGoalsModel) approvalLineCount(width int) int {
 	for _, warning := range prepared.Warnings {
 		count += goalMax(len(goalWrap("! "+warning, width)), 1)
 	}
+	return count
+}
+
+func projectGoalBoundaryLineCount(spec goal.Spec, width int) int {
+	count := 1
+	if spec.Isolation != nil && spec.Isolation.Mode == "container" {
+		count += goalFieldLineCount("Effective boundary", "Linux container; tool/check all-descendant cleanup", width)
+		count += goalFieldLineCount("Container image", spec.Isolation.Image, width)
+		count += goalFieldLineCount("Container socket", spec.Isolation.Socket, width)
+		count += goalMax(len(goalWrap("Linux semantics: private PID namespace, read-only root, bounded private /tmp, no network, and no host-control mounts. Tool/check descendants end with the owned container.", width)), 1)
+		count += goalMax(len(goalWrap("Native model processes remain process-group only; daemonized native descendants are not covered by the container boundary.", width)), 1)
+		return count
+	}
+	count += goalFieldLineCount("Effective boundary", "existing process-group cleanup", width)
+	count += goalMax(len(goalWrap("Native model processes and tool/check execution use process-group cleanup only; daemonized descendants may survive cancellation. No all-descendant guarantee.", width)), 1)
 	return count
 }
 
@@ -2180,6 +2445,9 @@ func goalPhaseLabel(phase goal.Phase) string { return string(phase) }
 
 func supervisorLabel(state goal.State) string {
 	if state.CleanupComplete {
+		if state.Spec.Isolation != nil && state.Spec.Isolation.Mode == "container" {
+			return "stopped; owned container and tool descendants cleaned"
+		}
 		return "stopped; owned process groups cleaned"
 	}
 	if state.CancelRequested {

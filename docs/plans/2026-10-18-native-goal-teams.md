@@ -5,7 +5,7 @@ status: in-flight
 # First-class native teams for repository goals
 
 Status: in flight; Cameron authorized both cleanup stages, existing process-group cleanup first
-Next action: review the concrete container design, prove its lease and descendant lifecycle against the existing local runtime, then implement and verify it. The first-stage mixed-team result, frozen review, checks and UI cancellation are verified.
+Next action: build the reviewed container implementation from a clean commit, then verify a real mixed-team container result and compiled wide/narrow UI Start/cancellation. The first-stage native result and the second-stage real boundary, lease, descendant and owner-death tests are verified separately.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -106,7 +106,8 @@ R11. Codex MUST complete the existing-cleanup stage before implementing the stro
 - [x] Verify current native protocols, observed model selection and tool-disabling mechanisms.
 - [x] Resolve the process-containment decision: Cameron authorized existing cleanup first, then stronger VM/container isolation.
 - [x] Complete the existing-cleanup stage with explicit limits and real native acceptance.
-- [ ] Design, implement and verify stronger VM/container isolation after the first stage.
+- [x] Design and implement stronger VM/container isolation after the first stage, including actual runtime boundary and descendant-lifecycle tests.
+- [ ] Verify the stronger mode with clean-build provenance, a useful native mixed-team result and compiled UI acceptance.
 - [x] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
 - [x] Implement the non-model execution host, role-bound goal tools and guardian-owned native process transport; stronger containment remains unavailable, not silently bypassed.
 - [x] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
@@ -190,3 +191,17 @@ Opening cancellation now restores automatic focus scrolling, and its warning/but
 - The completed result's Diff, every check output and JSON are visible at both terminal sizes with stable goal identity. The first narrow probe incorrectly rejected a 238-character stderr line split across page boundaries by pinned headers. Its regression-tested fix scans check output one row at a time; the actual unchanged UI now passes every assertion. The deliberate visible-Status negative control exits 1 with the expected error at both sizes. Reports: `ready-inspection-fixed/1792427502738358000-33294/report.json` and `ready-inspection-negative/1792427551517096000-41150/report.json` under the UI evidence root.
 
 Both approved first-stage paths are real, not fixtures: JSON-CLI completion and compiled UI Start/cancellation. Native teams remain experimental; preparation now asks for retained review/check/cleanup inspection rather than claiming the tested path has never run. The second stage starts from these retained results without rewriting them or weakening their limits.
+
+### Second-stage implementation checkpoint
+
+Codex implemented the optional immutable-image/local-socket contract, typed Linux file helper, per-role execution-host selection, bounded Docker API client, one-operation container policy, private immutable receipt sequence and root-init/non-root-workload lease. The native harnesses, providers, credential handling, broker authorization and frozen-result checks remain unchanged. The simple UI exposes isolation separately from task/team presets, makes an all-Codex container team explicit, invalidates approval on boundary edits, and renders the exact image/socket plus separate native-model cleanup scope. Documentation includes the image recipe and distinguishes metadata-only preparation from actual helper/mount preflight after Start.
+
+Actual product tests used the existing local Colima socket and explicitly built development image `sha256:9023bdfa7dcd29ac8b0ca5690cd26228cdbebef6e166d9cf7ff2439ea5aa1b34`. They prove file-helper read/write, non-root UID/GID with empty groups, inaccessible init stdin, workload `/dev/null` stdin, denied init SIGSTOP, denied existing Git metadata/root writes, absent control/socket mounts, denied network, paired removed receipts and actual runtime absence. A live double-forked, reparented `setsid` daemon was observed before each cancellation/fault. Cancellation, EOF, held-open stalled heartbeat, forced PID-1 death and abrupt logical-owner SIGKILL all terminate its namespace and heartbeat; the stalled case takes approximately 3.36 seconds, including the final 300 ms stable-heartbeat observation. The abrupt-owner test deliberately retains the missing final production receipt and records a separate observed stopped state instead of fabricating clean terminal evidence.
+
+`FORGECTL_CONTAINER_INTEGRATION=1 go test -p=2 ./internal/surface/goalcontainer ./internal/surface/goal -run '^TestContainer' -v -count=1 -timeout=3m` passes with the explicit socket/image/shared-test-root environment. Latest retained evidence is under the ignored `.claude/worktrees/container-lease-probe` directory: container proofs `21782694`, `162303216`, `637174311`, `3677031325`, `1283094095`, `4232168421`, and three-role goal preflight `goal-boundary-proof-4188190077`. This tests the development artifact, not the still-required clean committed native acceptance image.
+
+Independent read-only review found two real state bugs. A cancellation combined with unknown cleanup originally allowed a second create; the regression observed two creates for both cancellation and deadline errors. Any cleanup error now poisons the host irrespective of cancellation. Post-stream inspection originally accepted `created`, empty or inconsistent non-running state; it now requires an observed `exited` state with consistent terminal flags. The reviewer inspected the corrections and independently reran normal container/goal tests without finding another concrete blocker.
+
+Root Codex also reproduced a receipt-write failure preventing the owned stop request (`kill=0`, workload still running). Cleanup now continues verified-owned termination, confirms stopped state, preserves the container when evidence cannot be recorded, and returns unconfirmed rather than claiming success. Each immutable receipt syncs its file and parent directory. The actual three-role startup probe initially failed because shell redirections attempted the protected file before opening stderr, and a special builtin could terminate the shell. Its corrected ordinary `printf` opens stderr first; actual coordinator/implementation/reviewer probes now pass. Typed file-operation tests prove failed container helpers do not fall back to a host command or rewrite arbitrary model argv. The two narrow G204 lint exceptions cover only the fixed Linux init's intentionally dynamic, privilege-dropped workload launch and the test's own executable child; they do not exempt general command execution.
+
+Final clean-build provenance, native mixed-team execution, source/frozen-review/check/container-receipt verification and compiled UI acceptance remain outstanding. No shared runtime was restarted, no global tool/provider configuration changed, and no existing container or retained run was removed.

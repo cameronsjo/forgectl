@@ -232,13 +232,99 @@ the dispatcher is not a substitute for disabling I/O tools: a code-mode-only
 model cannot call the approved tools without it.
 
 Native teams remain experimental. Inspect retained review, checks and cleanup
-evidence before accepting a result. They use
-the existing Codex filesystem/network sandbox and owned-process-group cleanup.
-Preparation explicitly warns that daemonized children may survive cancellation;
-this is not stronger VM/container isolation. An unavailable tool sandbox refuses
-the run before model work; do not disable isolation, change global permissions
-or substitute another provider to bypass it. The legacy Codex trio remains a
-separate execution path.
+evidence before accepting a result. With the default process-group isolation,
+they use the existing Codex filesystem/network sandbox and owned-process-group
+cleanup. Preparation explicitly warns that daemonized children may survive
+cancellation; this is not all-descendant VM/container isolation. An unavailable
+tool sandbox refuses the run before model work; do not disable isolation, change
+global permissions or substitute another provider to bypass it. The legacy
+Codex trio remains a separate execution path.
+
+### Optional Linux container tool isolation
+
+The `isolation` field is an opt-in boundary for tool and verification execution;
+it does not replace native model-process cleanup. Select **Linux container** in
+the setup form's Isolation field, then expand **Advanced** and provide the
+exact **Container socket** and **Container image** values. Container mode
+requires an explicit native team, even when every role is Codex, so no legacy
+tool path can bypass the boundary. The default **Process-group cleanup** choice
+preserves old goal specs and their JSON bytes.
+
+The JSON shape is:
+
+```json
+"isolation": {
+  "mode": "container",
+  "socket": "/path/to/docker.sock",
+  "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+The socket must be an absolute, clean local Unix socket path of at most 103
+bytes. The image must be an existing local Linux image identified by its exact
+64-character lowercase SHA-256 ID; replace the example digest with the value
+from the trusted local engine. The engine must already be a trusted local Linux
+Docker Engine exposing API v1.51 with cgroup v2, memory/PID limits and built-in
+seccomp. Preparation inspects the engine, image architecture and image defaults
+before reading source HEAD; it does not execute the helper or prove mount/UID
+access. Start creates each role's execution host, runs the fixed
+`/usr/local/bin/forgectl` helper and performs the mount/UID boundary probe before
+starting that role's native model. A failed helper or probe refuses model work.
+The flow never pulls or builds an image, starts a VM or daemon, or falls back to
+host commands.
+
+The repository includes a minimal helper image recipe. From its checkout, an
+operator may build a local candidate and inspect its immutable ID:
+
+```sh
+docker build -f Dockerfile.goal-tools -t forgectl-goal-tools:local .
+docker image inspect --format '{{.Id}}' forgectl-goal-tools:local
+```
+
+The recipe supplies Linux `forgectl`, Git, Python 3 and a POSIX shell. Checks
+that need another toolchain require a separately trusted image build; the host
+toolchain is never substituted. On macOS with Colima, every absolute worktree,
+role-runtime and Git path must be in a directory shared with the Linux VM. Do
+not assume `/tmp` (often `/private/tmp`) is shared; a host `stat` succeeding is
+not enough, because the Start-time helper and boundary probe must prove the
+engine can read and write the approved paths as the requested non-root UID/GID.
+
+Each tool, file helper and approved check gets one fresh leased container. The
+container preserves approved host absolute paths so Linux argv and Git worktree
+semantics remain meaningful. It mounts only the role's worktree (read-only
+unless that operation is explicitly writable), its private runtime directory,
+the exact Git directories and worktree `.git` entry read-only, and the separate
+`result.patch` read-only when present. The source checkout, credentials,
+control/receipt directory, broker sockets and Docker socket are not mounted.
+Mounts are private and non-recursive; overlapping, symlinked or unsupported
+paths refuse the operation.
+
+The effective policy is Linux-only, no network, read-only root filesystem, a
+bounded private `/tmp`, private PID/cgroup/IPC namespaces, no published ports or
+devices, no-new-privileges, default seccomp, dropped capabilities and bounded
+CPU, memory and PID counts. A fixed privileged init only changes the workload to
+the caller's nonzero UID/GID with no supplementary groups; the actual workload
+is non-root and capability-free. Linux PID-namespace teardown covers every tool
+descendant, including double-forked or `setsid` processes. Native model
+processes remain outside this container and retain separate process-group
+cleanup, so daemonized native descendants are not covered by this stronger tool
+boundary.
+
+The host keeps an attached stdin lease with bounded heartbeats. EOF, a stalled
+heartbeat, cancellation, deadline or supervisor loss stops the fixed init and
+therefore the whole tool container; a failed lease is not replayed. Every
+operation records a fresh nonce, requested/effective policy, image and full
+container ID under `native-control/<role>-execution/`, with `creating`,
+`created`, `starting`, `running`, `stopping`, `stopped`, `removed` or `unknown`
+receipts. Cleanup is successful only after the verified owned container is
+stopped and removal is confirmed. `unknown` means cleanup is unconfirmed,
+poisons that execution host and blocks a clean ready/canceled result; never
+recreate an uncertain operation.
+
+This documents the implemented boundary and its prerequisites, not final native
+container acceptance. Unit tests and a successful preflight do not establish a
+completed mixed-team container goal; inspect the retained native responses,
+checks, source snapshot, patch and container receipts before accepting one.
 
 With no `--root`, goals use the owner-private platform state directory
 `$XDG_STATE_HOME/forgectl/projects`, falling back to
@@ -279,6 +365,14 @@ native child: `native_pid`, `process_group`, `socket` and `started_at` must matc
 in the final receipt to pair the same process incarnation. Validation requires
 a final status of `stopped`, no receipt errors and both cleanup booleans true;
 missing or mismatched receipts are not evidence of a clean shutdown.
+
+In container isolation, `native-control/<role>-execution/` is the container
+execution host's private control directory. It contains one receipt sequence per
+short-lived container operation instead of guardian startup/final receipts. A
+final `removed` receipt must carry the matching image and full container
+identity, a stopped state with PID zero, and confirmed runtime absence. A
+missing, mismatched or `unknown` sequence is not evidence that descendants
+ended safely; treat the host as unavailable rather than retrying the command.
 
 `group_gone` records that the owned process group was absent when checked;
 validation checks its absence again. `socket_gone` records that the socket path
@@ -331,6 +425,27 @@ the selected native installations support:
   "reviewer": {"harness": "claude", "provider": "anthropic", "model": "claude-opus-5-5"}
 }
 ```
+
+To opt this explicit team into Linux container tool isolation, add this sibling
+property and replace the example digest with the ID from the already prepared
+local image:
+
+```json
+"isolation": {
+  "mode": "container",
+  "socket": "/path/to/docker.sock",
+  "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+`prepare` checks local engine metadata, image identity/architecture and image
+defaults before source HEAD. It does not run the helper or mount/UID boundary
+probe. `start` performs that helper and path probe for each role before native
+model work; a failure refuses the run. It does not pull/build the image, start
+Colima or another VM, or use a host-command fallback. Container mode uses Linux
+binaries and argv semantics; make the approved worktree, role-runtime, Git
+metadata and result-patch paths visible to the engine. Leaving `isolation` absent
+retains the existing process-group cleanup behavior.
 
 Leaving `team` absent preserves the existing version-one contract and all-Codex
 interpretation; retained specs are not rewritten. Every selected harness must

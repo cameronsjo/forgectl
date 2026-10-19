@@ -36,7 +36,11 @@ func runFixtureGit(t testing.TB, directory string, arguments ...string) string {
 
 func newGoalRepository(t testing.TB) string {
 	t.Helper()
-	parent := t.TempDir()
+	return newGoalRepositoryAt(t, t.TempDir())
+}
+
+func newGoalRepositoryAt(t testing.TB, parent string) string {
+	t.Helper()
 	repository := filepath.Join(parent, "source")
 	if err := os.Mkdir(repository, 0o700); err != nil {
 		t.Fatal(err)

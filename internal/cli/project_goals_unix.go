@@ -19,6 +19,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/goal"
+	"github.com/cameronsjo/forgectl/internal/surface/goalcontainer"
 	"github.com/cameronsjo/forgectl/internal/surface/goalnative"
 	"github.com/cameronsjo/forgectl/internal/surface/goaltools"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -163,6 +164,7 @@ func newProjectGoalCmd(deps module.Deps, root *string) *cobra.Command {
 		newProjectGoalHostCmd(),
 		newProjectGoalToolsCmd(),
 		newProjectGoalFileCmd(),
+		newProjectGoalContainerInitCmd(),
 	)
 	return command
 }
@@ -593,6 +595,18 @@ func newProjectGoalFileCmd() *cobra.Command {
 			_, err = io.WriteString(command.OutOrStdout(), result)
 		}
 		return err
+	}
+	return command
+}
+
+func newProjectGoalContainerInitCmd() *cobra.Command {
+	command := &cobra.Command{Use: "_container-init", Short: "internal leased Linux container init", Hidden: true, DisableFlagParsing: true, SilenceUsage: true}
+	command.RunE = func(command *cobra.Command, arguments []string) error {
+		code := goalcontainer.RunInit(command.Context(), arguments, command.InOrStdin(), command.OutOrStdout(), command.ErrOrStderr())
+		if code != 0 {
+			return newSilentCodedError(code)
+		}
+		return nil
 	}
 	return command
 }

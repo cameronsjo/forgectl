@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +17,165 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/goal"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
+
+func TestProjectGoalsIsolationDefaultPreservesLegacySpecJSON(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	if model.draft.Isolation != nil {
+		t.Fatal("default setup changed the legacy nil isolation mode")
+	}
+	encoded, err := json.Marshal(model.draft)
+	if err != nil {
+		t.Fatalf("marshal default spec: %v", err)
+	}
+	if strings.Contains(string(encoded), `"isolation"`) {
+		t.Fatalf("legacy spec unexpectedly serialized isolation: %s", encoded)
+	}
+	var decoded goal.Spec
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal default spec: %v", err)
+	}
+	if decoded.Isolation != nil {
+		t.Fatal("legacy JSON decoded with an isolation mode")
+	}
+}
+
+func TestProjectGoalsContainerSelectionMakesAllCodexTeamExplicit(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	model.applyIsolationPreset("container", false)
+	if model.draft.Isolation == nil || model.draft.Isolation.Mode != "container" {
+		t.Fatalf("container selection = %#v", model.draft.Isolation)
+	}
+	if model.draft.Team == nil || !projectGoalIsExplicitCodexTeam(*model.draft.Team) {
+		t.Fatalf("container selection did not materialize all-Codex team: %#v", model.draft.Team)
+	}
+	if preset := model.selectedTeamPreset(); preset == nil || preset.ID != "codex" {
+		t.Fatalf("explicit all-Codex team selected as %#v", preset)
+	}
+}
+
+func TestProjectGoalsContainerCodexPresetReplacesMixedRoles(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	model.applyTeamPreset("mixed", false)
+	model.applyIsolationPreset("container", false)
+	model.applyTeamPreset("codex", false)
+	team := model.draft.EffectiveTeam()
+	for _, selection := range []goal.ModelSelection{team.Coordinator, team.Implementation, team.Reviewer} {
+		if selection != (goal.ModelSelection{Harness: "codex", Provider: "openai", Model: "gpt-6.1-sol"}) {
+			t.Fatalf("container Codex preset retained a non-Codex role: %#v", team)
+		}
+	}
+	if preset := model.selectedTeamPreset(); preset == nil || preset.ID != "codex" {
+		t.Fatalf("container Codex preset selected as %#v", preset)
+	}
+}
+
+func TestProjectGoalsContainerCodexModelEditUpdatesExplicitRoles(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	model.applyIsolationPreset("container", false)
+	model.setupAdvanced = true
+	model.setupFocus = model.setupButtonIndex(projectGoalsFieldModel)
+	model.beginSetupEdit()
+	model.edit = []rune("gpt-6.2-sol")
+	model.cursor = len(model.edit)
+	if err := model.commitSetupEdit(); err != nil {
+		t.Fatalf("commit Codex model: %v", err)
+	}
+	team := model.draft.EffectiveTeam()
+	for _, selection := range []goal.ModelSelection{team.Coordinator, team.Implementation, team.Reviewer} {
+		if selection != (goal.ModelSelection{Harness: "codex", Provider: "openai", Model: "gpt-6.2-sol"}) {
+			t.Fatalf("Codex model edit left a stale role: %#v", team)
+		}
+	}
+	if model.teamID != "codex" {
+		t.Fatalf("Codex model edit routed team to %q", model.teamID)
+	}
+}
+
+func TestProjectGoalsIsolationEditInvalidatesApproval(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	model.applyIsolationPreset("container", false)
+	model.draft.Isolation.Socket = "/run/docker.sock"
+	model.draft.Isolation.Image = "sha256:" + strings.Repeat("a", 64)
+	prepared := projectGoalsPreparedFixture()
+	prepared.Spec = model.draft
+	model.prepared = &prepared
+	model.setupAdvanced = true
+	model.setupFocus = model.setupButtonIndex(projectGoalsFieldIsolationSocket)
+	model.beginSetupEdit()
+	model.edit = []rune("/run/other.sock")
+	model.cursor = len(model.edit)
+	if err := model.commitSetupEdit(); err != nil {
+		t.Fatalf("commit isolation socket: %v", err)
+	}
+	if model.prepared != nil {
+		t.Fatal("editing container socket kept stale approval")
+	}
+	if got := model.draft.Isolation.Socket; got != "/run/other.sock" {
+		t.Fatalf("socket after edit = %q", got)
+	}
+}
+
+func TestProjectGoalsIsolationBoundaryVisibleWideAndNarrow(t *testing.T) {
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default(), Model: "gpt-6.1-sol"})
+	model.applyIsolationPreset("container", false)
+	model.draft.Isolation.Socket = "/run/user/501/docker.sock"
+	model.draft.Isolation.Image = "sha256:" + strings.Repeat("b", 64)
+	prepared := projectGoalsPreparedFixture()
+	prepared.Spec = model.draft
+	model.prepared = &prepared
+	model.screen = projectGoalsSetup
+	for _, width := range []int{100, 50} {
+		output := strings.Join(model.renderSetup(width), "\n")
+		compact := strings.NewReplacer("\n", "", " ", "").Replace(ansi.Strip(output))
+		for _, want := range []string{"Effective boundary", "Linux container", "no network", "Native model processes remain process-group only"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("width %d approval omitted %q: %s", width, want, output)
+			}
+		}
+		for _, want := range []string{"sha256:" + strings.Repeat("b", 64), "/run/user/501/docker.sock"} {
+			if !strings.Contains(compact, want) {
+				t.Fatalf("width %d approval omitted exact %q: %s", width, want, output)
+			}
+		}
+	}
+	state := projectGoalsStateFixture()
+	state.Spec = model.draft
+	model.states = []goal.State{state}
+	model.selectedID = state.ID
+	model.screen = projectGoalsRun
+	output := strings.Join(model.renderRunWorkspace(50), "\n")
+	compact := strings.NewReplacer("\n", "", " ", "").Replace(ansi.Strip(output))
+	for _, want := range []string{"Effective boundary", "Linux container", "no network", "Native model processes remain process-group only"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("run details omitted %q: %s", want, output)
+		}
+	}
+	for _, want := range []string{"sha256:" + strings.Repeat("b", 64), "/run/user/501/docker.sock"} {
+		if !strings.Contains(compact, want) {
+			t.Fatalf("run details omitted exact %q: %s", want, output)
+		}
+	}
+}
+
+func TestProjectGoalsCancellationNamesEffectiveBoundary(t *testing.T) {
+	state := projectGoalsStateFixture()
+	model := newProjectGoalsModel(t.Context(), ProjectGoalsOptions{Theme: theme.Default()})
+	model.states = []goal.State{state}
+	model.selectedID = state.ID
+	model.screen = projectGoalsRun
+	model.cancelConfirm = true
+	model.runFocus = 1
+	processGroupOutput := strings.Join(model.renderRunWorkspace(50), "\n")
+	if !strings.Contains(processGroupOutput, "Existing process-group cleanup does not guarantee") {
+		t.Fatalf("process-group cancellation warning missing: %s", processGroupOutput)
+	}
+	state.Spec.Isolation = &goal.IsolationSpec{Mode: "container", Socket: "/run/docker.sock", Image: "sha256:" + strings.Repeat("c", 64)}
+	model.states[0] = state
+	containerOutput := strings.Join(model.renderRunWorkspace(50), "\n")
+	if !strings.Contains(containerOutput, "native model cleanup remains") || !strings.Contains(containerOutput, "process-group scoped") {
+		t.Fatalf("container cancellation scope missing: %s", containerOutput)
+	}
+}
 
 func projectGoalsPreparedFixture() goal.Prepared {
 	return goal.Prepared{

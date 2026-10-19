@@ -39,6 +39,14 @@ linters:
     - gosec
   exclusions:
     rules:
+      - path: ^internal/surface/goalcontainer/integration_unix_test\.go$
+        linters: [gosec]
+        text: '^G204:'
+        source: 'owner := exec\.CommandContext\(t\.Context\(\), executable,'
+      - path: ^internal/surface/goalcontainer/init_linux\.go$
+        linters: [gosec]
+        text: '^G204:'
+        source: 'command := exec\.CommandContext\(commandContext, arguments\[4\], arguments\[5:\]\.\.\.\)'
       - path: ^internal/surface/mail/native_reply_test\.go$
         linters: [gosec]
         text: '^G302:'

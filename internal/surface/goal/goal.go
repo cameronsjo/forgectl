@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/surface/goalcontainer"
 )
 
 const Version = 1
@@ -38,18 +39,21 @@ const (
 )
 
 type Spec struct {
-	Version      int        `json:"version"`
-	Title        string     `json:"title"`
-	Objective    string     `json:"objective"`
-	Repository   string     `json:"repository"`
-	BaseRevision string     `json:"base_revision"`
-	AllowedPaths []string   `json:"allowed_paths"`
-	Acceptance   []string   `json:"acceptance"`
-	Checks       [][]string `json:"checks"`
-	Model        string     `json:"model"`
-	LimitMinutes int        `json:"limit_minutes"`
-	Team         *TeamSpec  `json:"team,omitempty"`
+	Version      int            `json:"version"`
+	Title        string         `json:"title"`
+	Objective    string         `json:"objective"`
+	Repository   string         `json:"repository"`
+	BaseRevision string         `json:"base_revision"`
+	AllowedPaths []string       `json:"allowed_paths"`
+	Acceptance   []string       `json:"acceptance"`
+	Checks       [][]string     `json:"checks"`
+	Model        string         `json:"model"`
+	LimitMinutes int            `json:"limit_minutes"`
+	Team         *TeamSpec      `json:"team,omitempty"`
+	Isolation    *IsolationSpec `json:"isolation,omitempty"`
 }
+
+type IsolationSpec = goalcontainer.Spec
 
 type Prepared struct {
 	Spec         Spec     `json:"spec"`
@@ -184,6 +188,14 @@ func (spec Spec) Validate() error {
 		}
 		if spec.Model != "" && config.CheckModelName(spec.Model) != nil {
 			return errors.New("legacy model must be empty or a plain model ID")
+		}
+	}
+	if spec.Isolation != nil {
+		if spec.Team == nil {
+			return errors.New("container isolation requires an explicit native team so every tool uses the approved boundary")
+		}
+		if err := spec.Isolation.Validate(); err != nil {
+			return err
 		}
 	}
 	if spec.LimitMinutes < 1 || spec.LimitMinutes > 30 {

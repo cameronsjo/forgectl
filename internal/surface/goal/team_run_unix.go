@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/surface/goalcontainer"
 	"github.com/cameronsjo/forgectl/internal/surface/goalnative"
 	"github.com/cameronsjo/forgectl/internal/surface/goaltools"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
@@ -81,7 +83,7 @@ func (engine *execution) startNativeTeam(ctx context.Context) error {
 		if name == "reviewer" {
 			ceiling = append(ceiling, state.Worktree)
 		}
-		host, err := goalnative.StartCommandHost(ctx, goalnative.Config{Binary: engine.codex, SupervisorBinary: engine.self, ControlDir: filepath.Join(state.RunDir, "native-control", name+"-execution"), Cwd: role.Member.Worktree, Socket: filepath.Join(engine.socketRoot, name+"-exec.sock"), WritableRoots: ceiling})
+		host, err := engine.startExecutionHost(ctx, role, ceiling)
 		if err != nil {
 			return fmt.Errorf("%s non-model execution boundary: %w", name, err)
 		}
@@ -149,6 +151,23 @@ func (engine *execution) startNativeTeam(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (engine *execution) startExecutionHost(ctx context.Context, role *nativeRole, ceiling []string) (executionHost, error) {
+	state := engine.snapshot()
+	control := filepath.Join(state.RunDir, "native-control", role.Name+"-execution")
+	if state.Spec.Isolation == nil {
+		return goalnative.StartCommandHost(ctx, goalnative.Config{Binary: engine.codex, SupervisorBinary: engine.self, ControlDir: control, Cwd: role.Member.Worktree, Socket: filepath.Join(engine.socketRoot, role.Name+"-exec.sock"), WritableRoots: ceiling})
+	}
+	metadata, err := git(ctx, state.Worktree, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+	if err != nil {
+		return nil, err
+	}
+	directories := strings.Split(strings.TrimSpace(string(metadata)), "\n")
+	if len(directories) != 2 {
+		return nil, errors.New("could not identify exact worktree Git metadata for container mounts")
+	}
+	return goalcontainer.New(ctx, goalcontainer.Config{Isolation: *state.Spec.Isolation, Role: role.Name, Directory: role.Directory, Worktree: state.Worktree, GitDirectories: directories, ControlDir: control, PatchPath: filepath.Join(state.RunDir, "result.patch"), WritableRoots: ceiling})
 }
 
 func (engine *execution) normalizedEvent(role string, event goalnative.NativeEvent) {

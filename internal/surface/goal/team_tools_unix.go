@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cameronsjo/forgectl/internal/surface/goalnative"
 	"github.com/cameronsjo/forgectl/internal/surface/goaltools"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
@@ -78,7 +79,16 @@ func (engine *execution) toolHandler(role *nativeRole, roots []string) goaltools
 				}
 				argv = append(argv, "--write", "--content", *input.Content)
 			}
-			result, err := role.Executor.Exec(ctx, argv, role.Member.Worktree, approvedRoots, 15*time.Second)
+			var result goalnative.CommandResult
+			if executor, ok := role.Executor.(fileExecutor); ok {
+				content := ""
+				if input.Content != nil {
+					content = *input.Content
+				}
+				result, err = executor.File(ctx, helperRoot, helperPath, write, content, role.Member.Worktree, approvedRoots)
+			} else {
+				result, err = role.Executor.Exec(ctx, argv, role.Member.Worktree, approvedRoots, 15*time.Second)
+			}
 			if err != nil {
 				return nil, err
 			}

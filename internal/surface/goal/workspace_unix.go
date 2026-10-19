@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/cameronsjo/forgectl/internal/privdir"
+	"github.com/cameronsjo/forgectl/internal/surface/goalcontainer"
 )
 
 type cappedBuffer struct {
@@ -126,6 +127,11 @@ func Prepare(ctx context.Context, spec Spec) (Prepared, error) {
 	if err := spec.Validate(); err != nil {
 		return Prepared{}, err
 	}
+	if spec.Isolation != nil {
+		if _, err := goalcontainer.Inspect(ctx, *spec.Isolation); err != nil {
+			return Prepared{}, fmt.Errorf("container isolation prerequisite: %w", err)
+		}
+	}
 	head, err := git(ctx, spec.Repository, "rev-parse", "HEAD")
 	if err != nil {
 		return Prepared{}, err
@@ -155,8 +161,15 @@ func Prepare(ctx context.Context, spec Spec) (Prepared, error) {
 		transport = "Tool and verification network access is disabled; each approved native model provider remains enabled without fallback."
 	}
 	warnings := []string{transport, "Cleanup confirms only owned native process groups; daemonized children may survive cancellation.", "No commit, push, merge, deployment, installation or permission expansion is included.", "Maximum runtime is not a token or dollar spending cap."}
+	if spec.Isolation != nil {
+		warnings[1] = "Tools and checks use leased Linux containers: cleanup covers every tool descendant. Native model processes retain separate process-group cleanup."
+		warnings = append(warnings, "Linux tool/check semantics; no host-command fallback. Runtime socket: "+spec.Isolation.Socket, "Approved local container image: "+spec.Isolation.Image, "Start verifies the image helper, shared mount paths and non-root access before model work; missing tools or a failed boundary refuse execution.")
+	}
 	if spec.Team != nil {
-		warnings = append(warnings, "Native teams require Codex as a separate, credential-free execution host, plus every selected harness and its native credentials.", "An unavailable tool sandbox refuses the run before model work. Native teams remain experimental; inspect retained review, checks and cleanup evidence before accepting a result.")
+		if spec.Isolation == nil {
+			warnings = append(warnings, "Native teams require Codex as a separate, credential-free execution host, plus every selected harness and its native credentials.")
+		}
+		warnings = append(warnings, "An unavailable tool sandbox refuses the run before model work. Native teams remain experimental; inspect retained review, checks and cleanup evidence before accepting a result.")
 	}
 	if len(status) > 0 {
 		warnings = append(warnings, "Source checkout is dirty: only committed HEAD is copied; local edits and untracked files are excluded.")
