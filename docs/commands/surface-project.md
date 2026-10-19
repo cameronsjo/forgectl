@@ -170,6 +170,11 @@ cd /path/to/repository
 forgectl projects goals
 ```
 
+For setup and an end-to-end first run, use the
+[operator runbook](../operations/project-goals.md). For failed startup, retained
+evidence or cancellation, use the
+[recovery runbook](../operations/project-goals-recovery.md).
+
 This is separate from both the persistent project-identity commands above and
 the attended pilot below. It creates its own retained project, mailbox, native
 sessions, branch and linked worktree; it does not reuse a project merely because

@@ -33,6 +33,13 @@ Two things `status` needs that `init` does not set:
 - **Your projects folder.** `status`, `projects`, `audit` and `clean` look for repos under `~/Projects`. If yours live elsewhere, set `PROJECTS_DIR` in your shell profile (`export PROJECTS_DIR=~/code`).
 - **gh signed in.** The PR sections read GitHub through `gh`. Run `gh auth login` once; `doctor` says when it is missing.
 
+For experimental, bounded repository changes, `forgectl projects goals` opens
+the native-team dashboard. The [operator runbook](docs/operations/project-goals.md)
+covers source-build setup, approval and optional Linux tool isolation; the
+[recovery runbook](docs/operations/project-goals-recovery.md) covers retained
+evidence, cancellation and failures. A ready result still needs human review;
+the workflow does not merge it.
+
 ## Command groups
 
 The command groups at a glance. `forgectl --help` lists them from the binary

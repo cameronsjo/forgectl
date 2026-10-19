@@ -29,9 +29,12 @@ forgectl review mark owner/repo#42       # mark an item reviewed
 
 `projects goals` runs the compiled self-service repository-goal workflow: a
 single setup form with task presets, explicit confirmation, an isolated worktree,
-three native Codex roles, and one run workspace for questions and patch/check
-evidence. It is
-different from the attended Codex/Pi/Codex pilot. See the practical
+an all-Codex or explicitly selected native team, and one run workspace for
+questions and patch/check evidence. Optional Linux containers isolate tool and
+check execution, not the native model processes. It is different from the
+attended Codex/Pi/Codex pilot. Start with the
+[operator runbook](../operations/project-goals.md) and
+[recovery runbook](../operations/project-goals-recovery.md). See the practical
 [self-service repository goals guide](surface-project.md#self-service-repository-goals)
 for the TUI and `prepare`/`start`/`status`/`respond`/`cancel`/`artifact` CLI.
 

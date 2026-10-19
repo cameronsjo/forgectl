@@ -27,7 +27,10 @@ operated.
   audience/README review). A point-in-time snapshot, not a living document.
 - **[`operations/`](operations/)** — live runbooks for operating forgectl
   itself day to day. Unlike `adr/` and `discovery/`, these are meant to be
-  kept current.
+  kept current. Start and inspect repository goals with the
+  [project-goals runbook](operations/project-goals.md); diagnose startup,
+  cancellation and uncertain cleanup with the
+  [recovery runbook](operations/project-goals-recovery.md).
 - **[`plans/`](plans/)** — planning documents for features and refactors as
   they were built. Read a *feature* plan as history, not as a spec still in
   force — the shipped behavior and its ADR are the current truth. The
