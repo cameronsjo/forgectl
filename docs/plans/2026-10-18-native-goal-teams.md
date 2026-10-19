@@ -5,7 +5,7 @@ status: done
 # First-class native teams for repository goals
 
 Status: implemented and verified; existing process-group cleanup first, stronger containerized tool execution second
-Next action: Cameron may review the feature branch or request installation separately. No PR, merge, deployment or global installation is included.
+Next action: finish Cameron's requested branch stabilization, operator runbooks and session closeout. No PR, merge, deployment or global installation is included without separate authorization.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -248,8 +248,64 @@ Current-source validation is retained in `final-package-tests.log` (full goalcon
 - **R10 — tested durable delivery:** clean committed builds, actual native goals, independent artifact/runtime audits, current documentation and pinned lint supplement the focused Go tests. Feature-branch pushes are verified by exact `git ls-remote` equality; no PR, merge or installation is claimed.
 - **R11 — both stages in order:** first-stage acceptance lands in `2f5227fc`, followed by the persisted container design in `05b6c9eb` and implementation in `c76423bc`. Actual container cancellation and logical-owner death terminate observed daemonized tool descendants; unavailable isolation refuses execution. Native model processes retain the explicitly disclosed group-only scope.
 
+## Stabilization and operator handoff
+
+Cameron requested branch stabilization, runbooks and session closeout after the
+two cleanup stages passed acceptance. Codex retains the existing feature branch
+and original acceptance artifacts. This follow-up does not authorize a PR,
+merging the feature, global installation, deployment, or deletion of retained
+runs. The generated changelog remains owned by Release Please.
+
+Cameron subsequently authorized merging `origin/main` into this feature branch
+for stabilization. That authorization does not merge the feature into main or
+open a PR. The refreshed integration target is
+`82fff4ade7a352cf1121ad9c65d9c128646678b4`.
+
+- [ ] Independently review the net branch changes and disposition supported findings.
+- [ ] Publish source-accurate setup, operation, recovery and evidence-review runbooks.
+- [ ] Run the full local suite and branch script checks; distinguish baseline or environment failures from regressions.
+- [ ] Merge the authorized main revision into the feature branch and verify the combined result.
+- [ ] Verify docs, lint, final build provenance and exact feature-branch remote equality.
+- [ ] Reconcile remaining work and record the durable handoff.
+
+### Stabilization findings and dispositions
+
+The first full Go 1.26.8 suite exposed branch-wide contracts that the earlier
+focused acceptance did not exercise. Codex reproduced their red paths before
+correcting the source; no architecture, JSON, or capped-output guard was
+disabled.
+
+- Container HTTP bodies, digest inputs and private receipts now have the
+  existing one-call raw-JSON guard annotations; their exact encoding is
+  unchanged. The helper's ASCII/numeric protocol probe uses the terminal-safe,
+  value-preserving encoder.
+- The hidden container-init command handles a standalone help request without
+  executing the helper. A workload's later `--help` remains an argument.
+- Project registry flag validation moves out of positional `Args` into the
+  guarded `RunE`, so the menu no longer falsely requests positional arguments.
+  An independently tested intermediate `PreRunE` version bypassed JSON error
+  wrapping and was rejected. The existing root refusal and no-state-creation
+  checks remain intact. The two menu rows were a branch defect, not a proven
+  default-branch failure; the earlier baseline attribution is corrected here.
+- Native executable resolution stays in the CLI, injected into the goal
+  manager. The manager still canonicalizes and hashes the selected binary and
+  refuses a missing resolver before creating state. The unchanged adapter
+  dependency barrier no longer sees `internal/launch` through `goal`.
+- Project presentation names and Agents display text use fixed capped helpers
+  before applying the destination's display-width bound.
+- The pinned whole-branch linter found two path-taint false positives: creating
+  the fixed `source` child of a test-owned fixture directory, and the read-only
+  `Lstat` in the private-directory checker. Exact file/rule/source exclusions
+  cover only those calls; production path validation and symlink refusal are
+  unchanged.
+- Review's proposed Hermes streaming defect conflated live fragments with
+  durable message replay. It was not supported by runtime evidence, so the
+  fail-closed durable-turn check remains unchanged. New raw-schema tests cover
+  live multi-chunk replies with one durable final message and reject duplicate
+  durable frames, both with and without tools.
+
 ### Deferred outside this delivery
 
 - Hermes remains unsupported as a self-service native team member; the attended pilot is not advertised as parity. A future native adapter needs its own exact protocol, identity and boundary acceptance.
 - All-descendant containment for the native model harness processes themselves remains separate work. The new container guarantee covers tool/file/check execution, not a hostile daemon/kernel or other same-user process.
-- The unchanged baseline `TestMenuJSON_LiveTree` inventory mismatch remains recorded here for a separate menu-test repair; focused project-goal CLI coverage passes. No full-repository or hosted-CI green is claimed.
+- Opening a PR, merging the feature into main, releasing or installing it remain separate operator decisions. No hosted-CI result is claimed for a feature-branch push without a PR.

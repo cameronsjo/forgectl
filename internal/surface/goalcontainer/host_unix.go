@@ -117,10 +117,12 @@ func (host *Host) Exec(ctx context.Context, argv []string, cwd string, roots []s
 	if err != nil {
 		return result, err
 	}
+	// termsafe:allow-raw-json exact container configuration digest input, never terminal output
 	configuration, err := json.Marshal(request)
 	if err != nil {
 		return result, err
 	}
+	// termsafe:allow-raw-json exact approved argv digest input, never terminal output
 	command, err := json.Marshal(argv)
 	if err != nil {
 		return result, err
@@ -319,6 +321,7 @@ func (current *operation) record(phase string, cause error) error {
 	if cause != nil {
 		current.receipt.Error = cause.Error()
 	}
+	// termsafe:allow-raw-json immutable private container receipt, never terminal output
 	data, err := json.Marshal(current.receipt)
 	if err != nil {
 		return err

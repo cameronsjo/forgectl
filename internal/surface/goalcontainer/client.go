@@ -41,6 +41,7 @@ func newClient(socket string) *client {
 func (api *client) request(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
+		// termsafe:allow-raw-json private Docker HTTP request body, never terminal output
 		encoded, err := json.Marshal(input)
 		if err != nil {
 			return err

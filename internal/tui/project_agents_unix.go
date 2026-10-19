@@ -981,7 +981,7 @@ func projectAgentsWindowLabel(window time.Duration) string {
 }
 
 func safeProjectAgents(value string, limit int) string {
-	return termsafe.SafeLineMax(strings.TrimSpace(value), limit)
+	return capProjectAgentsText(termsafe.SafeLineMax(strings.TrimSpace(value), 256), limit)
 }
 
 func fitProjectAgentsText(value string, width int) string {

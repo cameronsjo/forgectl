@@ -17,25 +17,26 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"golang.org/x/sys/unix"
 )
 
 type Manager struct {
-	Store          Store
-	SelfBinary     string
-	CodexBinary    string
-	NativeDefaults config.LaunchDefaults
+	Store               Store
+	SelfBinary          string
+	CodexBinary         string
+	ResolveNativeBinary func(string) (string, error)
 }
 
-func resolveNativeBinary(harness string, defaults config.LaunchDefaults) (binaryReceipt, error) {
-	resolved, err := launch.ResolveBinary(harness, defaults)
+func (manager Manager) resolveNativeBinary(harness string) (binaryReceipt, error) {
+	if manager.ResolveNativeBinary == nil {
+		return binaryReceipt{}, errors.New("native binary resolver is unavailable")
+	}
+	resolved, err := manager.ResolveNativeBinary(harness)
 	if err != nil {
 		return binaryReceipt{}, err
 	}
-	return inspectBinary(resolved.Path)
+	return inspectBinary(resolved)
 }
 
 type binaryReceipt struct {
@@ -115,7 +116,7 @@ func (manager Manager) Start(ctx context.Context, approved Prepared) (State, err
 		if _, present := native[selection.Harness]; present {
 			continue
 		}
-		binary, err := resolveNativeBinary(selection.Harness, manager.NativeDefaults)
+		binary, err := manager.resolveNativeBinary(selection.Harness)
 		if err != nil {
 			return State{}, fmt.Errorf("%s executable: %w", name, err)
 		}

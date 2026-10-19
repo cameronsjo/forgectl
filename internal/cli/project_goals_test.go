@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"github.com/cameronsjo/forgectl/internal/surface/goal"
@@ -28,6 +29,52 @@ func TestProjectGoalCommandRegistration(t *testing.T) {
 		if _, _, err := command.Find([]string{name}); err != nil {
 			t.Errorf("missing goal subcommand %q: %v", name, err)
 		}
+	}
+}
+
+func TestProjectGoalManagerResolvesNativeBinaryOverrides(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", executable)
+	t.Setenv("FORGECTL_PI_BIN", "")
+	t.Setenv("FORGECTL_CLAUDE_BIN", executable)
+	var configuration config.Config
+	configuration.Launch.Defaults.PiBinaryPath = executable
+	configuration.Launch.Defaults.BinaryPath = filepath.Join(t.TempDir(), "absent-claude")
+	manager, err := projectGoalManager(goal.Store{}, module.Deps{Cfg: configuration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, harness := range []string{"pi", "claude"} {
+		resolved, err := manager.ResolveNativeBinary(harness)
+		if err != nil || resolved != executable {
+			t.Fatalf("resolve %s = %q, %v; want configured/overridden executable %q", harness, resolved, err, executable)
+		}
+	}
+	if _, err := manager.ResolveNativeBinary("unsupported"); err == nil {
+		t.Fatal("unsupported harness acquired a native binary")
+	}
+}
+
+func TestProjectGoalContainerInitHelpIsNotAWorkloadFlag(t *testing.T) {
+	for _, arguments := range [][]string{{"--help"}, {"-h"}, {"--protocol", "--help"}} {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			command := newProjectGoalContainerInitCmd()
+			var output bytes.Buffer
+			command.SetOut(&output)
+			command.SetErr(&output)
+			command.SetArgs(arguments)
+			err := command.ExecuteContext(t.Context())
+			if len(arguments) == 1 {
+				if err != nil || !strings.Contains(output.String(), "internal leased Linux container init") {
+					t.Fatalf("help error=%v output=%q", err, output.String())
+				}
+			} else if err == nil || strings.Contains(output.String(), "Usage:") {
+				t.Fatalf("workload arguments were consumed as help: error=%v output=%q", err, output.String())
+			}
+		})
 	}
 }
 

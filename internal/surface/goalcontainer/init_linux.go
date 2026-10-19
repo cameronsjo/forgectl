@@ -3,7 +3,6 @@ package goalcontainer
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,12 +12,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 func RunInit(ctx context.Context, arguments []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(arguments) == 1 && arguments[0] == "--protocol" {
 		identity, err := processProbe()
-		if err != nil || json.NewEncoder(stdout).Encode(identity) != nil {
+		if err != nil || termsafe.JSONEncoder(stdout).Encode(identity) != nil {
 			return 125
 		}
 		return 0

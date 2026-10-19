@@ -153,9 +153,9 @@ func projectThreadMetadataWarning(presentation projectPresentation, ctx context.
 
 func projectMetadataName(name string) string {
 	name = strings.TrimSpace(name)
-	safe := termsafe.SafeLine(name)
+	safe := safeTitle(name)
 	if utf8.RuneCountInString(safe) > herdradapter.MaxTokenValueLen {
-		safe = termsafe.SafeLineMax(name, herdradapter.MaxTokenValueLen-utf8.RuneCountInString(termsafe.TruncatedMarker))
+		safe = safeLabel(name)
 	}
 	return safe
 }

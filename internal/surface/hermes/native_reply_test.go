@@ -11,6 +11,44 @@ import (
 	"testing"
 )
 
+func nativeTextUpdateForTest(test *testing.T, kind, text string) string {
+	test.Helper()
+	update := struct {
+		SessionUpdate string `json:"sessionUpdate"`
+		Content       struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}{SessionUpdate: kind}
+	update.Content.Type = "text"
+	update.Content.Text = text
+	encoded, err := json.Marshal(update)
+	if err != nil {
+		test.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func nativeHistoryUpdatesForTest(test *testing.T, sessionID string, rawUpdates ...string) []historyUpdate {
+	test.Helper()
+	client := &nativeClient{}
+	updates := make([]historyUpdate, 0, len(rawUpdates))
+	for _, rawUpdate := range rawUpdates {
+		params, err := json.Marshal(struct {
+			SessionID string          `json:"sessionId"`
+			Update    json.RawMessage `json:"update"`
+		}{SessionID: sessionID, Update: json.RawMessage(rawUpdate)})
+		if err != nil {
+			test.Fatal(err)
+		}
+		message := nativeMessage{envelope: nativeEnvelope{Method: "session/update", Params: params}}
+		if _, _, err := client.processMessage(message, 1, "session/prompt", &updates); err != nil {
+			test.Fatalf("persisted Hermes update rejected: %v", err)
+		}
+	}
+	return updates
+}
+
 func TestNativeHistoryNotificationsFailClosed(test *testing.T) {
 	client := &nativeClient{}
 	for name, message := range map[string]nativeMessage{
@@ -161,6 +199,61 @@ func TestProveNativeReplyRequiresLiveAndDurableAgreement(test *testing.T) {
 				test.Fatal("invalid native reply proof accepted")
 			}
 		})
+	}
+}
+
+func TestProveNativeReplyAcceptsStreamedNoToolChunks(test *testing.T) {
+	record := receipt{ID: "input-1", SessionID: "session-1", NativePrompt: "prompt"}
+	frame := replyFrameForTest(test, record.ID, "streamed native reply")
+	firstChunk := frame[:len(frame)/2]
+	secondChunk := frame[len(frame)/2:]
+	userUpdate := nativeTextUpdateForTest(test, "user_message_chunk", record.NativePrompt)
+	firstAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", firstChunk)
+	secondAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", secondChunk)
+	coalescedAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", frame)
+	post := nativeHistoryUpdatesForTest(test, record.SessionID, userUpdate, coalescedAssistantUpdate)
+	live := nativeHistoryUpdatesForTest(test, record.SessionID, firstAssistantUpdate, secondAssistantUpdate)
+
+	body, err := proveNativeReply(record, nil, live, post, "end_turn", 0, 0)
+	if err != nil {
+		test.Fatalf("streamed no-tool reply rejected: %v", err)
+	}
+	if body != "streamed native reply" {
+		test.Fatalf("streamed no-tool body = %q", body)
+	}
+
+	duplicatePost := nativeHistoryUpdatesForTest(test, record.SessionID, userUpdate, coalescedAssistantUpdate, coalescedAssistantUpdate)
+	if _, err := proveNativeReply(record, nil, live, duplicatePost, "end_turn", 0, 0); err == nil {
+		test.Fatal("duplicate durable assistant frames were accepted")
+	}
+}
+
+func TestProveNativeReplyAcceptsStreamedPostToolChunks(test *testing.T) {
+	record := receipt{ID: "input-1", SessionID: "session-1", NativePrompt: "prompt"}
+	frame := replyFrameForTest(test, record.ID, "streamed post-tool reply")
+	firstChunk := frame[:len(frame)/2]
+	secondChunk := frame[len(frame)/2:]
+	userUpdate := nativeTextUpdateForTest(test, "user_message_chunk", record.NativePrompt)
+	preToolAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", "I will inspect the requested input.")
+	firstAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", firstChunk)
+	secondAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", secondChunk)
+	toolUpdate := `{"sessionUpdate":"tool_call","kind":"read","title":"read: mailbox-fixture.jsonl","toolCallId":"call-1"}`
+	toolUpdateResult := `{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Read mailbox-fixture.jsonl"}}]}`
+	coalescedAssistantUpdate := nativeTextUpdateForTest(test, "agent_message_chunk", frame)
+	post := nativeHistoryUpdatesForTest(test, record.SessionID, userUpdate, toolUpdate, toolUpdateResult, coalescedAssistantUpdate)
+	live := nativeHistoryUpdatesForTest(test, record.SessionID, preToolAssistantUpdate, toolUpdate, toolUpdateResult, firstAssistantUpdate, secondAssistantUpdate)
+
+	body, err := proveNativeReply(record, nil, live, post, "end_turn", 0, 0)
+	if err != nil {
+		test.Fatalf("streamed post-tool reply rejected: %v", err)
+	}
+	if body != "streamed post-tool reply" {
+		test.Fatalf("streamed post-tool body = %q", body)
+	}
+
+	duplicatePost := nativeHistoryUpdatesForTest(test, record.SessionID, userUpdate, toolUpdate, toolUpdateResult, coalescedAssistantUpdate, coalescedAssistantUpdate)
+	if _, err := proveNativeReply(record, nil, live, duplicatePost, "end_turn", 0, 0); err == nil {
+		test.Fatal("duplicate post-tool durable assistant frames were accepted")
 	}
 }
 

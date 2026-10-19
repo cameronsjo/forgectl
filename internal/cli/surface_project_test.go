@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/project"
 )
@@ -125,6 +127,30 @@ func TestSurfaceProjectRefusesInvalidCommandInputs(test *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		test.Fatalf("invalid input created registry: %v", err)
+	}
+}
+
+func TestSurfaceProjectRootValidationKeepsPositionalContract(test *testing.T) {
+	for _, root := range []string{"", "relative", "/", filepath.Join(test.TempDir(), "registry")} {
+		test.Run(root, func(test *testing.T) {
+			hookCalled := false
+			command := withProjectRoot(&root, &cobra.Command{
+				Use:  "list",
+				Args: cobra.NoArgs,
+				RunE: func(*cobra.Command, []string) error {
+					hookCalled = true
+					return nil
+				},
+			})
+			if err := command.Args(command, nil); err != nil || menuNeedsArgs(command) {
+				test.Fatalf("flag validation changed the positional contract: %v", err)
+			}
+			err := command.RunE(command, nil)
+			valid := filepath.IsAbs(root) && root != "/"
+			if valid != (err == nil) || hookCalled != valid {
+				test.Fatalf("valid=%t hook_called=%t error=%v", valid, hookCalled, err)
+			}
+		})
 	}
 }
 

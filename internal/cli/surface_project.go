@@ -64,15 +64,13 @@ func projectUsage(err error) error {
 }
 
 func withProjectRoot(root *string, command *cobra.Command) *cobra.Command {
-	previous := command.Args
-	command.Args = func(command *cobra.Command, arguments []string) error {
-		if previous != nil {
-			if err := previous(command, arguments); err != nil {
-				return err
-			}
-		}
+	previous := command.RunE
+	command.RunE = func(command *cobra.Command, arguments []string) error {
 		if !filepath.IsAbs(*root) || filepath.Clean(*root) == string(filepath.Separator) {
 			return projectUsage(errors.New("--root must name an absolute private registry directory, not the filesystem root"))
+		}
+		if previous != nil {
+			return previous(command, arguments)
 		}
 		return nil
 	}

@@ -39,6 +39,14 @@ linters:
     - gosec
   exclusions:
     rules:
+      - path: ^internal/surface/goal/goal_test_helpers_unix_test\.go$
+        linters: [gosec]
+        text: '^G703:'
+        source: 'os\.Mkdir\(repository, 0o700\)'
+      - path: ^internal/surface/goalnative/host_unix\.go$
+        linters: [gosec]
+        text: '^G703:'
+        source: 'info, err := os\.Lstat\(path\)'
       - path: ^internal/surface/goalcontainer/integration_unix_test\.go$
         linters: [gosec]
         text: '^G204:'

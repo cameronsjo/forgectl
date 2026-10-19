@@ -205,11 +205,15 @@ func projectGoalManager(store goal.Store, deps module.Deps) (goal.Manager, error
 	if err != nil {
 		return goal.Manager{}, fmt.Errorf("resolve this forgectl executable: %w", err)
 	}
-	resolved, err := launch.ResolveBinary("codex", deps.Cfg.Launch.Defaults)
+	resolveNative := func(harness string) (string, error) {
+		resolved, err := launch.ResolveBinary(harness, deps.Cfg.Launch.Defaults)
+		return resolved.Path, err
+	}
+	resolved, err := resolveNative("codex")
 	if err != nil {
 		return goal.Manager{}, err
 	}
-	return goal.Manager{Store: store, SelfBinary: self, CodexBinary: resolved.Path, NativeDefaults: deps.Cfg.Launch.Defaults}, nil
+	return goal.Manager{Store: store, SelfBinary: self, CodexBinary: resolved, ResolveNativeBinary: resolveNative}, nil
 }
 
 func projectGoalUsage(err error) error {
@@ -602,6 +606,9 @@ func newProjectGoalFileCmd() *cobra.Command {
 func newProjectGoalContainerInitCmd() *cobra.Command {
 	command := &cobra.Command{Use: "_container-init", Short: "internal leased Linux container init", Hidden: true, DisableFlagParsing: true, SilenceUsage: true}
 	command.RunE = func(command *cobra.Command, arguments []string) error {
+		if len(arguments) == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
+			return command.Help()
+		}
 		code := goalcontainer.RunInit(command.Context(), arguments, command.InOrStdin(), command.OutOrStdout(), command.ErrOrStderr())
 		if code != 0 {
 			return newSilentCodedError(code)
