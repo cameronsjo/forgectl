@@ -853,6 +853,37 @@ func TestProjectGoalsInlineActionsShowFocus(t *testing.T) {
 	}
 }
 
+func TestProjectGoalsCancelRemainsVisibleAfterScrolling(t *testing.T) {
+	for _, size := range [][2]int{{100, 24}, {50, 16}} {
+		t.Run(strconv.Itoa(size[0])+"x"+strconv.Itoa(size[1]), func(t *testing.T) {
+			state := projectGoalsStateFixture()
+			state.Spec.Objective = strings.Repeat("Long goal details. ", 40)
+			state.Question = &goal.Question{ID: "question-1", Text: "Which cleanup failure mode?"}
+			model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
+			model.screen = projectGoalsRun
+			model.states = []goal.State{state}
+			model.selectedID = state.ID
+			model.width, model.height = size[0], size[1]
+			model.Update(projectGoalsKey("pgdown"))
+			model.Update(projectGoalsKey("c"))
+			for _, focus := range []string{"> [ Keep running ]", "> [ Request cancellation ]"} {
+				out := ansi.Strip(model.View().Content)
+				for _, expected := range []string{"Goal: " + state.ID, "Cancel goal?", "[ Keep running ]", "[ Request cancellation ]", focus} {
+					if !strings.Contains(out, expected) {
+						t.Fatalf("cancel view hides %q: %s", expected, out)
+					}
+				}
+				for _, line := range strings.Split(out, "\n") {
+					if ansi.StringWidth(line) > size[0] {
+						t.Fatalf("cancel view exceeds terminal width: %q", line)
+					}
+				}
+				model.Update(projectGoalsKey("tab"))
+			}
+		})
+	}
+}
+
 func TestProjectGoalsSingleLineEditorKeepsCaretAndTailVisible(t *testing.T) {
 	model := newProjectGoalsModel(context.Background(), ProjectGoalsOptions{Theme: theme.Default()})
 	model.screen = projectGoalsSetup

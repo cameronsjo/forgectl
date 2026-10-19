@@ -973,6 +973,7 @@ func (model *projectGoalsModel) updateDetail(name, text string) (tea.Model, tea.
 				model.scroll = 0
 				model.runFocus = 0
 				model.cancelConfirm = true
+				model.editorManualScroll = false
 			}
 		}
 	case "d":
@@ -1891,14 +1892,17 @@ func (model projectGoalsModel) renderRunWorkspace(width int) []string {
 		}
 	}
 	if model.cancelConfirm {
-		lines = append(lines, "", model.styles.Warn.Render("Cancel goal? The default is to keep it running."))
+		lines = append(lines, "")
+		for _, line := range goalWrap("Cancel goal? The default is to keep it running.", width) {
+			lines = append(lines, model.styles.Warn.Render(line))
+		}
 		keepMarker, cancelMarker := "  ", "  "
 		if model.runFocus == 0 {
 			keepMarker = "> "
 		} else {
 			cancelMarker = "> "
 		}
-		lines = append(lines, keepMarker+"[ Keep running ]  "+cancelMarker+"[ Request cancellation ]")
+		lines = append(lines, keepMarker+"[ Keep running ]", cancelMarker+"[ Request cancellation ]")
 	}
 	if model.errText != "" {
 		lines = append(lines, "", model.styles.Danger.Render("! "+model.errText))
