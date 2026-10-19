@@ -4,8 +4,8 @@ status: in-flight
 
 # First-class native teams for repository goals
 
-Status: implementation checkpoint; native adapters and team setup verified, mixed-goal execution blocked on the process-boundary decision
-Next action: Cameron must choose the disclosed existing process-group cleanup contract or authorize a stronger isolated runtime; then complete real mixed-goal acceptance without weakening that chosen boundary.
+Status: in flight; Cameron authorized both cleanup stages, existing process-group cleanup first
+Next action: restore the existing sandboxed execution path with explicit cleanup limits, verify a real mixed-team result and cancellation, then implement and verify stronger VM/container isolation.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -13,6 +13,8 @@ Branch: `codex/cross-harness-loop`
 Cameron asked Codex to choose one ambitious improvement and make it excellent. Codex chose first-class mixed-harness teams in the self-service repository-goal flow. Cameron explicitly requires Pi and Claude Code, and explicitly authorizes Claude Code's native Anthropic route. Codex and Pi retain explicit OpenAI routes; a missing credential, unsupported model or failed harness never authorizes a provider fallback.
 
 This is one product capability: choose a real team, understand its exact execution boundary, start it without assembling pilot flags, follow its native work, and inspect an independently verified result. A selector without an actual native execution path is not completion. The earlier source-build, worktree and shared-state boundaries remain: commit and push this feature branch; no PR, merge, installation, deployment, global configuration/authentication changes, shared-service restart or third-party source edit. Existing runs and their exact retained bytes remain readable and unchanged.
+
+Cameron subsequently authorized both previously offered paths: "Do both of those .. Do the cleanup stuff first." The referenced first path was retaining the existing cleanup limitation, not deleting session files or retained results. Codex will complete and verify that path first, then add stronger VM/container isolation. This authorizes the staged implementation, not a global installation, shared-service restart, destructive cleanup, or silent fallback from a stronger boundary.
 
 ## Current evidence
 
@@ -34,7 +36,14 @@ This is one product capability: choose a real team, understand its exact executi
 8. Authentication remains native. Do not copy credential files, put secrets in argv/evidence, silently select a different account/provider, install a translation gateway or alter global settings. Preflight and Start must make missing prerequisites actionable. Metadata discovery must not start a paid model turn.
 9. Hermes remains a desirable member of the same native-session boundary, not a separate orchestrator. Pi and Claude are the required acceptance path; do not present Hermes as available merely because an older attended transport exists. Record its exact supported state rather than claiming parity without evidence.
 
-The alternative of launching each harness with its default tools is rejected because Pi has no native sandbox and permission labels are not a filesystem/network boundary. A new bespoke OS sandbox or container platform is also rejected while the existing verified execution host can supply the required boundary. Review must establish that native tool disabling and the explicit goal-tool path actually close the loop, not just look correct in generated settings.
+The alternative of launching each harness with its default tools is rejected because Pi has no native sandbox and permission labels are not a filesystem/network boundary. The original no-new-runtime decision is superseded by Cameron's explicit authorization of a second, stronger VM/container stage. Review must establish that native tool disabling and the explicit goal-tool path actually close the loop, not just look correct in generated settings.
+
+### Approved cleanup stages
+
+1. **Existing cleanup first.** Remove only the incompatible nested process-policy wrapper; keep the native Codex filesystem/network sandbox, credential-free execution host, role-bound tools, and owned-process-group guardian. Preparation and approval must disclose that daemonized children can leave those groups and survive cancellation. Cleanup receipts and terminal status must describe group cleanup, not all-descendant containment. Keep the escaped-child probe as an honest, self-expiring limitation test. Verify real allowed/denied operations, ordinary-child cleanup, native mixed-team execution, frozen review, approved checks, and explicit cancellation before moving to the next stage.
+2. **Stronger isolation second.** Inspect available local isolation capabilities and existing Estate components, then persist the selected VM/container design before implementing it. The stronger boundary must own tool/check execution and all of its descendants, with no provider credentials, host-control writes, network access, or silent fallback. Verify escaped-child and supervisor-death negative controls against the actual isolated runtime, not merely a process-group receipt. Native model identity, exact worktree/patch/check semantics, and the first-stage results must remain verifiable. Installing or restarting shared infrastructure remains a separate authorization boundary.
+
+The first stage is useful progress, not completion of the newly authorized two-stage objective. If a future runtime is unavailable, report that stage as unavailable rather than claiming its stronger guarantee for the existing cleanup path.
 
 ### Native and tool contracts
 
@@ -69,10 +78,14 @@ R9. The compiled UI MUST make prerequisites, effective team, per-role progress/e
 
 R10. Delivery MUST include focused unit/adversarial tests, native boundary/process probes, a real mixed-team goal, independent artifact verification, current documentation, and a clean committed build with exact feature-branch remote equality. Passing stubs or a selector screenshot alone is not success.
 
+R11. Codex MUST complete the existing-cleanup stage before implementing the stronger VM/container stage. The final stronger mode MUST demonstrate bounded termination of daemonized tool descendants on cancellation and supervisor death, preserve R1–R10, expose its effective boundary before approval, and refuse execution rather than fall back when that boundary is unavailable. First-stage group-only cleanup MUST NOT be described as satisfying this stronger requirement.
+
 ## Work
 
 - [x] Verify current native protocols, observed model selection and tool-disabling mechanisms.
-- [ ] Resolve the process-containment decision and verify its integrated execution boundary.
+- [x] Resolve the process-containment decision: Cameron authorized existing cleanup first, then stronger VM/container isolation.
+- [ ] Complete the existing-cleanup stage with explicit limits and real native acceptance.
+- [ ] Design, implement and verify stronger VM/container isolation after the first stage.
 - [x] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
 - [x] Implement the non-model execution host, role-bound goal tools and guardian-owned native process transport; stronger containment remains unavailable, not silently bypassed.
 - [x] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
@@ -107,4 +120,4 @@ The real escaped-child negative control found an existing limitation: a child ca
 
 A deny-only macOS profile blocks `setsid`, `setpgid` and `posix_spawn` process-group bypasses, but it cannot be nested inside the existing native Seatbelt sandbox. The current integrated command host therefore refuses even its harmless allowed-command probe: `FORGECTL_GOALNATIVE_INTEGRATION=1 go test ./internal/surface/goalnative -run '^TestExecutionHostRealBoundaryAndNoModel$' -v -count=1` fails with exit 71 and `sandbox_apply: Operation not permitted`. Reversing the profile order also fails; the inspected installed app-server schema offers no supported additional syscall policy. No `dangerFullAccess`, external-sandbox substitution, custom filesystem profile or global change was made.
 
-Codex asked Cameron to choose between explicitly retaining/disclosing the existing process-group cleanup limitation and expanding scope to a stronger isolated runtime. No answer has arrived. Until that decision, mixed-team model execution remains fail-closed. The useful repository-change acceptance run, native run inspection/cancellation, complete lifecycle proof, final clean-build delivery and R1/R4/R6/R7/R9/R10 audit remain required. Harmless native replies and passing unit tests are not substitutes for them.
+The earlier decision wait is resolved: Cameron authorized both paths, existing cleanup first. The failed nested-policy experiment remains evidence, not the selected first-stage implementation. The useful repository-change acceptance run, native run inspection/cancellation, complete lifecycle proof, final clean-build delivery and R1/R4/R6/R7/R9/R10/R11 audit remain required. Harmless native replies and passing unit tests are not substitutes for them.
