@@ -48,6 +48,7 @@ type Spec struct {
 	Checks       [][]string `json:"checks"`
 	Model        string     `json:"model"`
 	LimitMinutes int        `json:"limit_minutes"`
+	Team         *TeamSpec  `json:"team,omitempty"`
 }
 
 type Prepared struct {
@@ -65,6 +66,7 @@ type Role struct {
 	Socket          string `json:"socket"`
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`
+	Harness         string `json:"harness,omitempty"`
 }
 
 type Question struct {
@@ -173,8 +175,16 @@ func (spec Spec) Validate() error {
 	if spec.BaseRevision != "" && !revisionPattern.MatchString(spec.BaseRevision) {
 		return errors.New("base_revision must be an exact Git object ID")
 	}
-	if config.CheckModelName(spec.Model) != nil {
+	if spec.Team == nil && config.CheckModelName(spec.Model) != nil {
 		return errors.New("an exact OpenAI model ID is required")
+	}
+	if spec.Team != nil {
+		if err := spec.Team.Validate(); err != nil {
+			return err
+		}
+		if spec.Model != "" && config.CheckModelName(spec.Model) != nil {
+			return errors.New("legacy model must be empty or a plain model ID")
+		}
 	}
 	if spec.LimitMinutes < 1 || spec.LimitMinutes > 30 {
 		return errors.New("limit_minutes must be between 1 and 30 (not a spending cap)")

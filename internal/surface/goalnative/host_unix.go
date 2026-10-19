@@ -70,9 +70,12 @@ func RunHost(ctx context.Context, specPath string, lease io.Reader, stderr io.Wr
 		return err
 	}
 	environment := os.Environ()
-	arguments, err := nativeServerArguments(spec, environment)
-	if err != nil {
-		return err
+	arguments := spec.Arguments
+	if spec.Protocol == "" {
+		arguments, err = nativeServerArguments(spec, environment)
+		if err != nil {
+			return err
+		}
 	}
 	command := exec.Command(spec.Binary, arguments...) //nolint:gosec,noctx // native binary and socket are validated host-owned paths
 	command.Dir = spec.Cwd
@@ -80,6 +83,13 @@ func RunHost(ctx context.Context, specPath string, lease io.Reader, stderr io.Wr
 	command.Stdout = stderr
 	command.Stderr = stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if spec.Protocol == "json-lines" {
+		bridge, err := bridgeProcess(spec.Socket, command)
+		if err != nil {
+			return err
+		}
+		defer bridge.Close()
+	}
 	if err := command.Start(); err != nil {
 		receiptErr := writeGuardianReceipt(spec.Receipt, guardianReceipt{Status: "failed", Socket: spec.Socket, FinishedAt: time.Now().UTC(), Error: err.Error()})
 		return errors.Join(fmt.Errorf("start native app-server: %w", err), receiptErr)
@@ -407,7 +417,19 @@ func validateHostSpec(spec hostSpec) error {
 			return fmt.Errorf("host spec %s must be absolute and clean", name)
 		}
 	}
-	if spec.Model == "" || !safeToken(spec.Model) {
+	if spec.Protocol != "" && spec.Protocol != "json-lines" {
+		return errors.New("host protocol is unsupported")
+	}
+	if spec.Protocol == "json-lines" {
+		if spec.ExecutionOnly || spec.Model != "" || len(spec.Arguments) > 128 {
+			return errors.New("JSON process must not select an app-server mode")
+		}
+		for _, argument := range spec.Arguments {
+			if len(argument) > 32*1024 || strings.ContainsRune(argument, 0) {
+				return errors.New("JSON process argument is invalid")
+			}
+		}
+	} else if (!spec.ExecutionOnly && (spec.Model == "" || !safeToken(spec.Model))) || (spec.ExecutionOnly && spec.Model != "") {
 		return errors.New("host spec model is invalid")
 	}
 	if err := ensurePrivateDir(spec.ControlDir); err != nil {

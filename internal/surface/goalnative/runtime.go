@@ -40,6 +40,8 @@ type Config struct {
 	Environment      []string
 	WritableRoots    []string
 	OnEvent          func(json.RawMessage)
+	ExecutionOnly    bool
+	OnPromptAccepted func(string, string)
 }
 
 type TurnResult struct {
@@ -110,14 +112,19 @@ type hostSpec struct {
 	Model         string   `json:"model"`
 	WritableRoots []string `json:"writable_roots"`
 	Receipt       string   `json:"receipt"`
+	ExecutionOnly bool     `json:"execution_only,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	Arguments     []string `json:"arguments,omitempty"`
 }
 
 func Start(ctx context.Context, config Config) (*Session, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAIEnvironment(config.Environment); err != nil {
-		return nil, err
+	if !config.ExecutionOnly {
+		if err := validateOpenAIEnvironment(config.Environment); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(config.ControlDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create goal control directory: %w", err)
@@ -125,11 +132,18 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 	if err := ensurePrivateDir(config.ControlDir); err != nil {
 		return nil, err
 	}
+	if config.ExecutionOnly {
+		environment, err := prepareExecutionEnvironment(config)
+		if err != nil {
+			return nil, err
+		}
+		config.Environment = environment
+	}
 	if err := validateSocketDestination(config.Socket); err != nil {
 		return nil, err
 	}
 	receipt := filepath.Join(config.ControlDir, "guardian-receipt.json")
-	spec := hostSpec{Binary: config.Binary, ControlDir: config.ControlDir, Cwd: config.Cwd, Socket: config.Socket, Model: config.Model, WritableRoots: append([]string(nil), config.WritableRoots...), Receipt: receipt}
+	spec := hostSpec{Binary: config.Binary, ControlDir: config.ControlDir, Cwd: config.Cwd, Socket: config.Socket, Model: config.Model, WritableRoots: append([]string(nil), config.WritableRoots...), Receipt: receipt, ExecutionOnly: config.ExecutionOnly}
 	specPath := filepath.Join(config.ControlDir, fmt.Sprintf("host-spec-%d.json", time.Now().UnixNano()))
 	if err := writePrivateJSON(specPath, spec); err != nil {
 		return nil, err
@@ -192,6 +206,9 @@ func Start(ctx context.Context, config Config) (*Session, error) {
 	if err := assertNativeIsolation(configResult); err != nil {
 		return nil, startupFailure(session, err)
 	}
+	if config.ExecutionOnly {
+		return session, nil
+	}
 	thread, err := session.Call(ctx, "thread/start", map[string]any{"cwd": config.Cwd, "model": config.Model, "modelProvider": "openai", "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": "read-only", "ephemeral": false, "threadSource": "startup"})
 	if err != nil {
 		return nil, startupFailure(session, err)
@@ -231,6 +248,9 @@ func startupFailure(session *Session, cause error) error {
 func (session *Session) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if method == "" || !safeToken(method) {
 		return nil, errors.New("invalid native method")
+	}
+	if session.config.ExecutionOnly && !executionMethod(method) {
+		return nil, errors.New("execution-only host rejects model, authentication and arbitrary RPC")
 	}
 	id := atomic.AddInt64(&session.nextID, 1)
 	wait := make(chan rpcReply, 1)
@@ -343,6 +363,9 @@ func (session *Session) Turn(ctx context.Context, prompt string) (TurnResult, er
 	if turnID == "" {
 		return TurnResult{}, errors.New("native turn has no identity")
 	}
+	if session.config.OnPromptAccepted != nil {
+		session.config.OnPromptAccepted(turnID, prompt)
+	}
 	event, err := session.waitEvent(ctx, func(event rpcEnvelope) bool {
 		return event.Method == "turn/completed" && eventHasTurn(event.Params, session.ThreadID, turnID)
 	})
@@ -384,6 +407,10 @@ func nativeTurnFailure(status string, raw json.RawMessage) error {
 }
 
 func (session *Session) Exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration) (CommandResult, error) {
+	return session.exec(ctx, argv, cwd, roots, timeout, nil)
+}
+
+func (session *Session) exec(ctx context.Context, argv []string, cwd string, roots []string, timeout time.Duration, environment map[string]string) (CommandResult, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return CommandResult{}, errors.New("native command is empty")
 	}
@@ -402,8 +429,22 @@ func (session *Session) Exec(ctx context.Context, argv []string, cwd string, roo
 	if timeoutMS < 1 {
 		timeoutMS = 1
 	}
-	raw, err := session.Call(callCtx, "command/exec", map[string]any{"command": argv, "cwd": cwd, "sandboxPolicy": workspacePolicy(roots), "timeoutMs": timeoutMS})
+	request, err := NewPrompt("command execution")
 	if err != nil {
+		return CommandResult{}, err
+	}
+	params := map[string]any{"command": argv, "cwd": cwd, "sandboxPolicy": workspacePolicy(roots), "timeoutMs": timeoutMS, "processId": request.ID, "outputBytesCap": 128 * 1024}
+	if len(environment) > 0 {
+		params["env"] = environment
+	}
+	raw, err := session.Call(callCtx, "command/exec", params)
+	if err != nil {
+		cleanup, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		_, terminateErr := session.Call(cleanup, "command/exec/terminate", map[string]string{"processId": request.ID})
+		stop()
+		if terminateErr != nil {
+			return CommandResult{}, errors.Join(err, fmt.Errorf("command termination unconfirmed: %w", terminateErr))
+		}
 		return CommandResult{}, err
 	}
 	var response struct {
@@ -709,7 +750,10 @@ func (session *Session) removePending(id int64) {
 }
 
 func validateConfig(config Config) error {
-	for name, value := range map[string]string{"binary": config.Binary, "supervisor binary": config.SupervisorBinary, "control directory": config.ControlDir, "cwd": config.Cwd, "socket": config.Socket, "model": config.Model} {
+	if (!config.ExecutionOnly && config.Model == "") || (config.ExecutionOnly && config.Model != "") {
+		return errors.New("model is required only for a model session")
+	}
+	for name, value := range map[string]string{"binary": config.Binary, "supervisor binary": config.SupervisorBinary, "control directory": config.ControlDir, "cwd": config.Cwd, "socket": config.Socket} {
 		if value == "" {
 			return fmt.Errorf("%s is required", name)
 		}

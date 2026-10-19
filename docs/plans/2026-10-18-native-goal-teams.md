@@ -5,7 +5,7 @@ status: in-flight
 # First-class native teams for repository goals
 
 Status: implementation authorized; reviewed contracts being implemented and probed
-Next action: implement the additive team/native contracts and a credential-free execution-only host, then verify the role-tool boundary.
+Next action: finish native adapter attestation and integrated role tools; resolve the observed daemonized-child cleanup gap before enabling the mixed-team acceptance run.
 Branch: `codex/cross-harness-loop`
 
 ## Goal and authority
@@ -72,7 +72,7 @@ R10. Delivery MUST include focused unit/adversarial tests, native boundary/proce
 ## Work
 
 - [ ] Verify current native protocols, model selection and tool-disabling mechanisms; resolve design/security findings.
-- [ ] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
+- [x] Add validated additive team contracts and native-session/event interfaces with compatibility and negative tests.
 - [ ] Implement the non-model execution boundary, role-bound goal tools and guardian-owned native process transport.
 - [ ] Implement and verify real Pi and Claude adapters without ambient tools, fallback providers or copied credentials.
 - [ ] Integrate team-aware mailbox delivery, native evidence, independent review and checks into the existing supervisor.
@@ -89,4 +89,6 @@ The Pi and Claude reviewers completed independent read-only plan/security review
 
 ## Completion evidence
 
-Not complete. Research has found the concrete Codex-only seams and established Claude's no-model control channel; it has not yet established mixed-team execution, tool isolation or result acceptance. The goal remains active until every requirement above is proven against the final artifact.
+Not complete. The additive team contract preserves exact retained version-one JSON bytes and invalidates approval on explicit team changes. Focused goal/native/tool-channel/UI tests pass against the working tree. The real credential-free execution host starts without a model thread, permits the allowed write, refuses a protected write, and refuses a private Unix-socket connection whose unconfined positive control succeeds.
+
+The real escaped-child negative control found an existing limitation that must not be hidden: a forked Python child calling setsid survives command/exec termination and native process-group cleanup until its own eight-second deadline, while the old guardian receipt reports clean process-group shutdown. Codex has asked Cameron whether to require additional restrictive process controls or explicitly retain the existing narrower cleanup contract. No mixed-team model work or claim of all-descendant cleanup is authorized by the passing filesystem checks. A disposable macOS syscall-filter probe can refuse setsid, but also refusing posix_spawn can reject programs that use it merely as a launcher; this compatibility consequence still needs resolution and complete positive/negative controls. Native adapter integration and real result acceptance remain unproven.
