@@ -79,32 +79,34 @@ func TestNativeRealReplyWithHarmlessBroker(t *testing.T) {
 					t.Errorf("native reply cleanup: %v", err)
 				}
 			}()
-			prompt, err := NewPrompt("This is a harmless native protocol acceptance probe. Call goal_inbox exactly once with {}. Do not call any other tool. After its successful response, reply with exactly FORGECTL_NATIVE_REPLY_PROBE_OK.")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := session.Submit(ctx, prompt); err != nil {
-				t.Fatal(err)
-			}
-			result, replyErr := session.Wait(ctx, prompt.ID)
-			eventMutex.Lock()
-			captured := append([]NativeEvent(nil), events...)
-			eventMutex.Unlock()
-			if err := writePrivateJSON(filepath.Join(root, "normalized.json"), captured); err != nil {
-				t.Fatal(err)
-			}
-			if replyErr != nil || result.Status != "completed" || result.ID == "" || strings.TrimSpace(result.Text) != "FORGECTL_NATIVE_REPLY_PROBE_OK" || calls.Load() != 1 {
-				t.Fatalf("native reply = %#v, calls=%d, error=%v", result, calls.Load(), replyErr)
-			}
-			seen := make(map[string]bool)
-			for _, event := range captured {
-				if event.RequestID == prompt.ID && event.Identity == session.Identity() {
-					seen[event.Status] = true
+			for index, expected := range []string{"FORGECTL_NATIVE_REPLY_PROBE_OK", "FORGECTL_NATIVE_SECOND_REPLY_OK"} {
+				prompt, err := NewPrompt("This is a harmless native protocol acceptance probe. Call goal_inbox exactly once with {}. Do not call any other tool. After its successful response, reply with exactly " + expected + ".")
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			for _, required := range []string{"accepted", "consumed", "completed"} {
-				if !seen[required] {
-					t.Errorf("native reply omitted %s evidence", required)
+				if err := session.Submit(ctx, prompt); err != nil {
+					t.Fatal(err)
+				}
+				result, replyErr := session.Wait(ctx, prompt.ID)
+				eventMutex.Lock()
+				captured := append([]NativeEvent(nil), events...)
+				eventMutex.Unlock()
+				if err := writePrivateJSON(filepath.Join(root, "normalized.json"), captured); err != nil {
+					t.Fatal(err)
+				}
+				if replyErr != nil || result.Status != "completed" || result.ID == "" || strings.TrimSpace(result.Text) != expected || int(calls.Load()) != index+1 {
+					t.Fatalf("native reply = %#v, calls=%d, error=%v", result, calls.Load(), replyErr)
+				}
+				seen := make(map[string]bool)
+				for _, event := range captured {
+					if event.RequestID == prompt.ID && event.Identity == session.Identity() {
+						seen[event.Status] = true
+					}
+				}
+				for _, required := range []string{"accepted", "consumed", "completed"} {
+					if !seen[required] {
+						t.Errorf("native reply omitted %s evidence", required)
+					}
 				}
 			}
 		})

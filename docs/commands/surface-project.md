@@ -221,6 +221,9 @@ File-tool paths remain worktree-relative. The supervisor separately grants the
 reviewer execution host the exact approved check scope after frozen-patch review;
 model tool calls never receive that wider scope. Implementation tools, its native
 model process and its execution host stop before the patch is frozen.
+Each dedicated guardian sets an owner-private file-creation mask before starting
+its native child, including lazily created Pi transcripts; the caller's mask and
+existing retained files are not changed.
 
 Codex models that require code-mode tool calling use the installed native
 code-mode host as a JavaScript dispatcher for those same five goal tools. It

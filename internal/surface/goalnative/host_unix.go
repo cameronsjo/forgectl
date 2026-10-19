@@ -69,6 +69,7 @@ func RunHost(ctx context.Context, specPath string, lease io.Reader, stderr io.Wr
 	if err := validateHostSpec(spec); err != nil {
 		return err
 	}
+	syscall.Umask(0o077)
 	environment := os.Environ()
 	arguments := spec.Arguments
 	if spec.Protocol == "" {

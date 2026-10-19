@@ -140,6 +140,46 @@ func TestExecutionHostChildRejectsCwdOutsideItsCeiling(t *testing.T) {
 	}
 }
 
+func TestJSONGuardianCreatesPrivateNativeFiles(t *testing.T) {
+	root := piIntegrationDir(t)
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := writeHelper(t, "permissive-supervisor", `GOALNATIVE_HOST_HELPER=1 /bin/sh -c 'umask 022; exec "$@"' guardian`)
+	events := make(chan json.RawMessage, 1)
+	process, err := StartJSONProcess(t.Context(), ProcessConfig{
+		Binary: "/bin/sh", SupervisorBinary: supervisor, ControlDir: filepath.Join(root, "control"),
+		Cwd: work, Socket: filepath.Join(root, "native.sock"),
+		Arguments: []string{"-c", `printf private > session.jsonl; mkdir native-state; exec /bin/cat`},
+		OnMessage: func(raw json.RawMessage) { events <- raw },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Close(context.Background()) })
+	if err := process.Write(t.Context(), map[string]string{"probe": "private native files"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("native process did not acknowledge its file creation")
+	}
+	for name, expected := range map[string]os.FileMode{"session.jsonl": 0o600, "native-state": 0o700} {
+		info, err := os.Lstat(filepath.Join(work, name))
+		if err != nil || info.Mode().Perm() != expected {
+			t.Fatalf("native %s permissions: %v, %v; want %o", name, info, err, expected)
+		}
+	}
+	if err := validatePiSessionFile(filepath.Join(work, "session.jsonl"), work); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
 		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for the real no-model execution boundary")
