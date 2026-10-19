@@ -176,7 +176,7 @@ func nativeServerArguments(spec hostSpec, environment []string) ([]string, error
 		for _, feature := range brokerDisabledFeatures {
 			arguments = append(arguments, "--disable", feature)
 		}
-		arguments = append(arguments, "--config", "project_doc_max_bytes=0")
+		arguments = append(arguments, "--enable", "code_mode_host", "--config", "project_doc_max_bytes=0")
 	}
 	for _, section := range []string{"apps", "mcp_servers", "plugins"} {
 		var entries []nativeConfigName
@@ -459,6 +459,11 @@ func validateHostSpec(spec hostSpec) error {
 		}
 		if pathWithin(root, spec.ControlDir) || pathWithin(spec.ControlDir, root) || pathWithin(spec.Socket, root) || pathWithin(spec.Receipt, root) {
 			return errors.New("host control paths overlap writable roots")
+		}
+	}
+	if spec.ExecutionOnly {
+		if err := validateExecutionCwd(spec.Cwd, spec.WritableRoots); err != nil {
+			return fmt.Errorf("host spec: %w", err)
 		}
 	}
 	return nil

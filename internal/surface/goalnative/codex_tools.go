@@ -10,7 +10,7 @@ import (
 )
 
 var brokerDisabledFeatures = []string{
-	"shell_tool", "unified_exec", "shell_snapshot", "code_mode", "code_mode_host",
+	"shell_tool", "unified_exec", "shell_snapshot", "code_mode",
 	"computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
 	"image_generation", "view_image", "in_app_browser", "in_app_local_automation",
 	"skill_search", "skill_mcp_dependency_install", "workspace_dependencies", "remote_plugin",
@@ -34,6 +34,10 @@ func assertBrokerTools(raw json.RawMessage) error {
 	}
 	if json.Unmarshal(raw, &response) != nil {
 		return errors.New("native goal-tool configuration is malformed")
+	}
+	var dispatcher bool
+	if json.Unmarshal(response.Config.Features["code_mode_host"], &dispatcher) != nil || !dispatcher {
+		return errors.New("native goal-tool code-mode dispatcher is unavailable")
 	}
 	for _, feature := range brokerDisabledFeatures {
 		if !nativeConfigFalse(response.Config.Features[feature]) {

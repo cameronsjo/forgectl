@@ -222,6 +222,12 @@ reviewer execution host the exact approved check scope after frozen-patch review
 model tool calls never receive that wider scope. Implementation tools, its native
 model process and its execution host stop before the patch is frozen.
 
+Codex models that require code-mode tool calling use the installed native
+code-mode host as a JavaScript dispatcher for those same five goal tools. It
+does not expose Node, filesystem/network APIs or native shell tools. Disabling
+the dispatcher is not a substitute for disabling I/O tools: a code-mode-only
+model cannot call the approved tools without it.
+
 Native teams are experimental and are **not yet verified end to end**. They use
 the existing Codex filesystem/network sandbox and owned-process-group cleanup.
 Preparation explicitly warns that daemonized children may survive cancellation;

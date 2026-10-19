@@ -26,10 +26,20 @@ func TestCodexBrokerRequiresObservedDisabledFeatures(t *testing.T) {
 	for _, feature := range brokerDisabledFeatures {
 		features[feature] = false
 	}
+	features["code_mode_host"] = true
 	configuration := map[string]any{"config": map[string]any{"features": features, "tools": map[string]bool{"view_image": false}}}
 	if err := assertBrokerTools(mustJSON(configuration)); err != nil {
 		t.Fatal(err)
 	}
+	features["code_mode_host"] = false
+	if err := assertBrokerTools(mustJSON(configuration)); err == nil {
+		t.Fatal("disabled code-mode dispatcher was accepted")
+	}
+	delete(features, "code_mode_host")
+	if err := assertBrokerTools(mustJSON(configuration)); err == nil {
+		t.Fatal("missing code-mode dispatcher observation was accepted")
+	}
+	features["code_mode_host"] = true
 	for _, feature := range brokerDisabledFeatures {
 		features[feature] = true
 		if err := assertBrokerTools(mustJSON(configuration)); err == nil {

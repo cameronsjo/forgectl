@@ -122,6 +122,24 @@ func TestJSONProcessUsesOwnedGuardianAndBoundedFrames(t *testing.T) {
 	}
 }
 
+func TestExecutionHostChildRejectsCwdOutsideItsCeiling(t *testing.T) {
+	root := t.TempDir()
+	work, control := filepath.Join(root, "work"), filepath.Join(root, "control")
+	for _, directory := range []string{work, control} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := hostSpec{Binary: "/usr/bin/true", ControlDir: control, Cwd: work, Socket: filepath.Join(control, "native.sock"), Receipt: filepath.Join(control, "guardian-receipt.json"), WritableRoots: []string{work}, ExecutionOnly: true}
+	if err := validateHostSpec(spec); err != nil {
+		t.Fatalf("valid execution child spec refused: %v", err)
+	}
+	spec.Cwd = root
+	if err := validateHostSpec(spec); err == nil || !strings.Contains(err.Error(), "cwd") {
+		t.Fatalf("execution child accepted cwd outside its ceiling: %v", err)
+	}
+}
+
 func TestExecutionHostRealBoundaryAndNoModel(t *testing.T) {
 	if os.Getenv("FORGECTL_GOALNATIVE_INTEGRATION") != "1" {
 		t.Skip("set FORGECTL_GOALNATIVE_INTEGRATION=1 for the real no-model execution boundary")
