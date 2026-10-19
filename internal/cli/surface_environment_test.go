@@ -167,6 +167,8 @@ func TestSurfaceLaunchEnvironment_StripsTmuxAndCmuxPanes(t *testing.T) {
 		"CMUX_WORKSPACE_ID=0F1E2D3C-0000-0000-0000-000000000001",
 		"CMUX_SURFACE_ID=0F1E2D3C-0000-0000-0000-000000000002",
 		"CMUX_TAB_ID=0F1E2D3C-0000-0000-0000-000000000003",
+		"CMUX_PANEL_ID=0F1E2D3C-0000-0000-0000-000000000004",
+		"CMUX_TERMINAL_LIFECYCLE_ID=0F1E2D3C-0000-0000-0000-000000000005",
 	}
 	want := []string{"PATH=/bin", "TMUX=/tmp/tmux-501/default,123,0", "CMUX_SOCKET_PATH=/tmp/cmux.sock"}
 	if got := surfaceLaunchEnvironment(base); !slices.Equal(got, want) {
@@ -179,18 +181,20 @@ func TestSurfaceLaunchEnvironment_StripsTmuxAndCmuxPanes(t *testing.T) {
 // the cmux ids of the server's starter, and those must not cross.
 func TestPaneIdentityEnv_PerBackend(t *testing.T) {
 	own := map[string]string{
-		"TMUX_PANE":          "%7",
-		"CMUX_WORKSPACE_ID":  "ws-1",
-		"CMUX_SURFACE_ID":    "sf-2",
-		"CMUX_TAB_ID":        "tb-3",
-		"HERDR_PANE_ID":      "w1:p1",
-		"HERDR_TAB_ID":       "w1:t1",
-		"HERDR_WORKSPACE_ID": "w1",
+		"TMUX_PANE":                  "%7",
+		"CMUX_WORKSPACE_ID":          "ws-1",
+		"CMUX_SURFACE_ID":            "sf-2",
+		"CMUX_TAB_ID":                "tb-3",
+		"CMUX_PANEL_ID":              "pn-4",
+		"CMUX_TERMINAL_LIFECYCLE_ID": "lc-5",
+		"HERDR_PANE_ID":              "w1:p1",
+		"HERDR_TAB_ID":               "w1:t1",
+		"HERDR_WORKSPACE_ID":         "w1",
 	}
 	getenv := func(k string) string { return own[k] }
 	cases := map[string][]string{
 		"tmux":  {"PATH=/bin", "TMUX_PANE=%7"},
-		"cmux":  {"PATH=/bin", "CMUX_WORKSPACE_ID=ws-1", "CMUX_SURFACE_ID=sf-2", "CMUX_TAB_ID=tb-3"},
+		"cmux":  {"PATH=/bin", "CMUX_WORKSPACE_ID=ws-1", "CMUX_SURFACE_ID=sf-2", "CMUX_TAB_ID=tb-3", "CMUX_PANEL_ID=pn-4", "CMUX_TERMINAL_LIFECYCLE_ID=lc-5"},
 		"herdr": {"PATH=/bin", "HERDR_PANE_ID=w1:p1", "HERDR_TAB_ID=w1:t1", "HERDR_WORKSPACE_ID=w1"},
 		"other": {"PATH=/bin"},
 	}

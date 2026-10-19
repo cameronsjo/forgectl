@@ -426,15 +426,14 @@ var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORK
 // HERDR_SOCKET_PATH, are shared by the launcher and the new pane.
 //
 // tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
-// come from forgectl's own cmux integration plan, which recorded them in a
-// workspace it created ("Workspace-command processes receive
-// CMUX_SURFACE_ID, CMUX_WORKSPACE_ID, CMUX_TAB_ID (and more)",
-// docs/plans/2026-07-10-cmux-integration.md); this change was not re-verified
-// against a live cmux, so a cmux id variable not named there is not stripped.
+// were captured from a live cmux pane on 2026-10-19: besides the workspace,
+// surface and tab ids, cmux sets CMUX_PANEL_ID (the pane's panel UUID) and
+// CMUX_TERMINAL_LIFECYCLE_ID (a UUID per terminal session). The rest of the
+// CMUX_ set names the app, its shims, its socket or a port range, not a pane.
 var paneIdentityEnvByBackend = map[string][]string{
 	"herdr": herdrPaneIdentityEnv,
 	"tmux":  {"TMUX_PANE"},
-	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID"},
+	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
 }
 
 // isPaneIdentityKey reports whether key names a pane under any manager.
