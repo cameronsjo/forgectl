@@ -106,6 +106,9 @@ versioned changelog entry from it. See `AGENTS.md` for the full contract.
 
 ## Verify a release build locally
 
+mise installs `goreleaser` but not Go: you need a `go` on `PATH` at least as
+new as `go.mod`'s `go` line (`brew install go` works).
+
 ```bash
 mise exec -- goreleaser check
 mise exec -- goreleaser release --snapshot --clean --skip=publish
