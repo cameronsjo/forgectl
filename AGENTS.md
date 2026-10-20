@@ -26,6 +26,10 @@ forgectl plans work with [OpenSpec](https://github.com/Fission-AI/OpenSpec) (#13
 - Run the CLI only through `scripts/openspec.sh`, which installs the pinned
   version from `scripts/openspec/package-lock.json`. CI runs
   `scripts/openspec.sh validate --all --strict --no-interactive`.
+- The wrapper refuses `feedback`, `completion`, `config`, `workset` and
+  `context --code-workspace`, which reach outside the repo (`feedback` files
+  an issue upstream with your `gh` login), unless `OPENSPEC_ALLOW_OUTSIDE=1`
+  is set.
 - The `openspec-*` skills and `/opsx` commands are generated. After
   `scripts/openspec.sh update`, run `scripts/openspec-localize.sh` so they
   call the pinned wrapper; `TestOpenSpecSkillsUsePinnedCLI` fails until you do.
