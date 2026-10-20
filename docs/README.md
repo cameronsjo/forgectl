@@ -28,9 +28,14 @@ operated.
 - **[`operations/`](operations/)** — live runbooks for operating forgectl
   itself day to day. Unlike `adr/` and `discovery/`, these are meant to be
   kept current.
+- **[`../openspec/`](../openspec/)** — the specs and the change proposals.
+  `openspec/specs/` says what each command group does today; new work is
+  proposed under `openspec/changes/` and archived when it ships. See
+  AGENTS.md for the workflow.
 - **[`plans/`](plans/)** — planning documents for features and refactors as
-  they were built. Read a *feature* plan as history, not as a spec still in
-  force — the shipped behavior and its ADR are the current truth. The
+  they were built, up to the OpenSpec move on 2026-10-20; no new plans land
+  here. Read a *feature* plan as history, not as a spec still in force — the
+  shipped behavior, its spec and its ADR are the current truth. The
   exception is a file named `*-roadmap.md`: those are forward-looking and
   current until a later one supersedes them, which the superseded file says
   at its top.

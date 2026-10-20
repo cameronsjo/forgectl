@@ -29,6 +29,12 @@ var planStatuses = []struct{ status, heading, blurb string }{
 	{"superseded", "Superseded", "Replaced by a later plan, which the file names at its top."},
 }
 
+// plansFrozenAfter is the last date a new plan may carry. forgectl moved to
+// OpenSpec on that day (#1305): new work is an openspec/changes/<id>/
+// proposal, and the plans already here finish in place. A plan's file name
+// starts with its YYYY-MM-DD date, so a later date is a new plan.
+const plansFrozenAfter = "2026-10-20"
+
 type planEntry struct{ file, title, status string }
 
 func readPlan(t *testing.T, dir, name string) planEntry {
@@ -76,7 +82,8 @@ func renderPlansIndex(entries []planEntry) string {
 		}
 		fmt.Fprintf(&b, "`%s`", s.status)
 	}
-	b.WriteString(". This page is generated from them.\n")
+	b.WriteString(". This page is generated from them.\n\n")
+	fmt.Fprintf(&b, "No new plans land here after %s. New work is proposed as an OpenSpec change under [`openspec/changes/`](../../openspec/changes/), and the current behavior lives in [`openspec/specs/`](../../openspec/specs/). The plans below finish where they are.\n", plansFrozenAfter)
 	for _, s := range planStatuses {
 		var rows []planEntry
 		for _, e := range entries {
@@ -114,6 +121,9 @@ func TestPlansIndex(t *testing.T) {
 		name := filepath.Base(f)
 		if name == "README.md" {
 			continue
+		}
+		if len(name) >= len(plansFrozenAfter) && name[:len(plansFrozenAfter)] > plansFrozenAfter {
+			t.Errorf("%s: docs/plans/ takes no new plans after %s; propose the work as an OpenSpec change instead (openspec/changes/, see AGENTS.md)", name, plansFrozenAfter)
 		}
 		e := readPlan(t, dir, name)
 		switch {

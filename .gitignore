@@ -29,3 +29,6 @@ helper/forgectl-bless-helper/.build/
 
 # local probe builds
 /fgc
+
+# OpenSpec CLI pin install (scripts/openspec.sh)
+/scripts/openspec/node_modules/
