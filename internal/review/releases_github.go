@@ -30,7 +30,7 @@ type APIGetter interface {
 }
 
 // ErrAPINotFound marks a 404, which several reads treat as an answer
-// (a missing gate copy, a missing endpoint file) rather than a failure.
+// (a missing vendored copy, a missing endpoint file) rather than a failure.
 var ErrAPINotFound = errors.New("not found")
 
 // APIStatusError is a non-404 HTTP failure. It carries only the status code:
@@ -175,7 +175,8 @@ func collectRepo(ctx context.Context, api APIGetter, e RegistryEntry) RepoFacts 
 	if e.Class == ClassReleasePR {
 		c.releasePRs()
 		c.releaseWorkflowRuns()
-		c.gateCopy()
+		c.f.GateCopySHA256, c.f.GateCopyMissing = c.vendoredCopy("gate copy", GateCopyPath)
+		c.f.LintCopySHA256, c.f.LintCopyMissing = c.vendoredCopy("lint copy", LintCopyPath)
 	}
 	name := ToggleName(e.Class)
 	inferToggle := false
@@ -420,17 +421,18 @@ func (c *collector) releaseWorkflowRuns() {
 	sort.Slice(c.f.PendingReleaseRuns, func(i, j int) bool { return c.f.PendingReleaseRuns[i].ID < c.f.PendingReleaseRuns[j].ID })
 }
 
-// gateCopy hashes the vendored gate on the branch.
-func (c *collector) gateCopy() {
-	body, err := c.getFile(fmt.Sprintf("repos/%s/contents/.github/scripts/ship-gate.sh?ref=%s", c.slug, c.e.Branch))
+// vendoredCopy hashes one vendored release script on the branch. A 404 is
+// an answer (the copy is missing), not a failed read.
+func (c *collector) vendoredCopy(step, file string) (sha string, missing bool) {
+	body, err := c.getFile(fmt.Sprintf("repos/%s/contents/%s?ref=%s", c.slug, file, c.e.Branch))
 	switch {
 	case errors.Is(err, ErrAPINotFound):
-		c.f.GateCopyMissing = true
+		return "", true
 	case err != nil:
-		c.fail("gate copy", err)
-	default:
-		c.f.GateCopySHA256 = SHA256Hex(body)
+		c.fail(step, err)
+		return "", false
 	}
+	return SHA256Hex(body), false
 }
 
 // toggle reads the class's nightly toggle. An unset variable is an answer

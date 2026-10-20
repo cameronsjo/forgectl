@@ -7,10 +7,13 @@ package cli
 //       when a read fails (fail closed) and nil when every row is healthy
 //   [x] the table names the failed read on an `unknown` line
 //   [x] the registry path comes from --registry, else $FORGECTL_RELEASE_REGISTRY
+//   [x] the report carries both canonical hashes: the scripts beside the
+//       registry, or --gate-sha256 / --lint-sha256
 //
-// resolveCanonicalGate (Classification: config resolution)
-//   [x] flag beats env beats the file beside the registry; bad hex is refused;
-//       no source at all yields "" (rows then read unknown)
+// resolveCanonicalHash (Classification: config resolution)
+//   [x] for the gate and the lint: flag beats env beats the file beside the
+//       registry; bad hex is refused; no source at all yields "" (rows then
+//       read unknown)
 
 import (
 	"bytes"
@@ -123,34 +126,85 @@ func TestReviewReleases_RegistryFromEnv(t *testing.T) {
 	}
 }
 
-func TestResolveCanonicalGate(t *testing.T) {
-	dir := t.TempDir()
-	regPath := filepath.Join(dir, "docs", "release-rhythm.yaml")
-	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+func TestResolveCanonicalHash(t *testing.T) {
+	for _, c := range []struct{ name, env, rel, file string }{
+		{"gate", envGateSHA256, canonicalGateRel, "ship-gate.sh"},
+		{"lint", envLintSHA256, canonicalLintRel, "lint-release-env.sh"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			regPath := filepath.Join(dir, "docs", "release-rhythm.yaml")
+			a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+			resolve := func(flag string) (string, error) {
+				return resolveCanonicalHash(c.name, flag, c.env, c.rel, regPath)
+			}
 
+			t.Setenv(c.env, "")
+			if got, err := resolve(""); err != nil || got != "" {
+				t.Errorf("no source: %q, %v; want empty", got, err)
+			}
+			script := filepath.Join(dir, "scripts", "release", c.file)
+			if err := os.MkdirAll(filepath.Dir(script), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(script, []byte(c.name+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := resolve(""); got != review.SHA256Hex([]byte(c.name+"\n")) {
+				t.Errorf("file beside registry: %q", got)
+			}
+			t.Setenv(c.env, b)
+			if got, _ := resolve(""); got != b {
+				t.Errorf("env: %q, want %q", got, b)
+			}
+			if got, _ := resolve(strings.ToUpper(a)); got != a {
+				t.Errorf("flag: %q, want %q", got, a)
+			}
+			if _, err := resolve("xyz"); err == nil || !strings.Contains(err.Error(), "canonical "+c.name+" sha256") {
+				t.Errorf("bad hex: err = %v, want a refusal naming the %s", err, c.name)
+			}
+		})
+	}
+}
+
+// The command reads both canonical scripts beside the registry into the
+// report, and each flag replaces its file.
+func TestReviewReleases_CanonicalHashesInReport(t *testing.T) {
 	t.Setenv(envGateSHA256, "")
-	if got, err := resolveCanonicalGate("", regPath); err != nil || got != "" {
-		t.Errorf("no source: %q, %v; want empty", got, err)
+	t.Setenv(envLintSHA256, "")
+	dir := t.TempDir()
+	reg := filepath.Join(dir, "docs", "release-rhythm.yaml")
+	for p, body := range map[string]string{
+		reg: radarRegistry,
+		filepath.Join(dir, "scripts", "release", "ship-gate.sh"):        "gate\n",
+		filepath.Join(dir, "scripts", "release", "lint-release-env.sh"): "lint\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	gate := filepath.Join(dir, "scripts", "release", "ship-gate.sh")
-	if err := os.MkdirAll(filepath.Dir(gate), 0o750); err != nil {
-		t.Fatal(err)
+	report := func(args ...string) review.Report {
+		t.Helper()
+		out, err := runRadar(t, healthyRadarAPI(), append([]string{"--registry", reg, "--json"}, args...)...)
+		if err != nil {
+			t.Fatalf("radar: %v\n%s", err, out)
+		}
+		var rep review.Report
+		if err := json.Unmarshal([]byte(out), &rep); err != nil {
+			t.Fatalf("output is not a report: %v\n%s", err, out)
+		}
+		return rep
 	}
-	if err := os.WriteFile(gate, []byte("gate\n"), 0o600); err != nil {
-		t.Fatal(err)
+	rep := report()
+	if rep.CanonicalGate != review.SHA256Hex([]byte("gate\n")) || rep.CanonicalLint != review.SHA256Hex([]byte("lint\n")) {
+		t.Errorf("beside the registry: gate=%q lint=%q", rep.CanonicalGate, rep.CanonicalLint)
 	}
-	if got, _ := resolveCanonicalGate("", regPath); got != review.SHA256Hex([]byte("gate\n")) {
-		t.Errorf("file beside registry: %q", got)
-	}
-	t.Setenv(envGateSHA256, b)
-	if got, _ := resolveCanonicalGate("", regPath); got != b {
-		t.Errorf("env: %q, want %q", got, b)
-	}
-	if got, _ := resolveCanonicalGate(strings.ToUpper(a), regPath); got != a {
-		t.Errorf("flag: %q, want %q", got, a)
-	}
-	if _, err := resolveCanonicalGate("xyz", regPath); err == nil {
-		t.Errorf("bad hex accepted")
+	c := strings.Repeat("c", 64)
+	if rep := report("--lint-sha256", c); rep.CanonicalLint != c || rep.CanonicalGate != review.SHA256Hex([]byte("gate\n")) {
+		t.Errorf("--lint-sha256: gate=%q lint=%q, want the flag for the lint only", rep.CanonicalGate, rep.CanonicalLint)
 	}
 }
 
@@ -169,6 +223,7 @@ func TestRenderReleasesTable(t *testing.T) {
 			HumanGates: []string{},
 			Endpoints:  []review.EndpointStatus{{EndpointFact: review.EndpointFact{Kind: "scoop", Version: "0.18.0"}, Behind: true}},
 			GateCopy:   "drift",
+			LintCopy:   "missing",
 			Stalls:     []string{"gate copy drifted from the canonical ship-gate.sh"},
 			Errors:     []string{"runs: HTTP 403"},
 		}},
@@ -179,7 +234,7 @@ func TestRenderReleasesTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.String()
-	for _, want := range []string{"#752 (30h) +1", "30h ago success ci-red", "scoop 0.18.0 behind", "drift",
+	for _, want := range []string{"#752 (30h) +1", "30h ago success ci-red", "scoop 0.18.0 behind", "GATE COPY  LINT COPY", "missing",
 		"stall   forgectl: gate copy drifted", "unknown forgectl: runs: HTTP 403", "not tracked: cadence (continuous; milestone tag)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table lacks %q:\n%s", want, got)

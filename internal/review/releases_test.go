@@ -20,6 +20,7 @@ package review
 //   [x] half-shipped stalls even while paused
 //   [x] Endpoint behind > 24h stalls; behind < 24h is shown, not stalled
 //   [x] Gate copy drift and missing copy stall; no canonical hash is unknown
+//   [x] Lint copy (lint-release-env.sh) is judged the same way, beside the gate
 //   [x] Any read error makes the row unknown
 //   [x] Manual-cut: state manual, gate due clamps to the last cut
 //
@@ -248,7 +249,10 @@ var releasePR = RegistryEntry{
 	Endpoints: []Endpoint{{Kind: "homebrew-cask", Repo: "homebrew-tap", Path: "Casks/forgectl.rb"}},
 }
 
-const canon = "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0"
+var canon = Canonical{
+	Gate: "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0",
+	Lint: "5b1f0e2a8c3d4b6a9e7f1c2d3b4a5968778695a4b3c2d1e0f1a2b3c4d5e6f708",
+}
 
 // healthy returns facts under which releasePR is ok; each case bends one.
 func healthy(toggle string) RepoFacts {
@@ -262,7 +266,8 @@ func healthy(toggle string) RepoFacts {
 			{ID: 2, Event: "schedule", Status: "completed", Conclusion: "success", CreatedAt: hoursAgo(25), Reason: "go"},
 		},
 		Endpoints:      []EndpointFact{{Kind: "homebrew-cask", Repo: "homebrew-tap", Path: "Casks/forgectl.rb", Version: "0.19.0"}},
-		GateCopySHA256: canon,
+		GateCopySHA256: canon.Gate,
+		LintCopySHA256: canon.Lint,
 	}
 }
 
@@ -297,7 +302,7 @@ func TestDerive_Rules(t *testing.T) {
 	cases := []struct {
 		name      string
 		bend      func(*RepoFacts)
-		canonical string
+		canonical Canonical
 		state     string
 		stall     string // substring of the one expected stall, "" for none
 	}{
@@ -330,7 +335,10 @@ func TestDerive_Rules(t *testing.T) {
 		}, canon, StateOK, ""},
 		{"gate drift", func(f *RepoFacts) { f.GateCopySHA256 = strings.Repeat("0", 64) }, canon, StateStalled, "gate copy drifted"},
 		{"gate missing", func(f *RepoFacts) { f.GateCopySHA256, f.GateCopyMissing = "", true }, canon, StateStalled, "missing"},
-		{"no canonical hash", func(*RepoFacts) {}, "", StateUnknown, ""},
+		{"no canonical hash", func(*RepoFacts) {}, Canonical{}, StateUnknown, ""},
+		{"lint drift", func(f *RepoFacts) { f.LintCopySHA256 = strings.Repeat("0", 64) }, canon, StateStalled, "lint copy drifted from the canonical lint-release-env.sh"},
+		{"lint missing", func(f *RepoFacts) { f.LintCopySHA256, f.LintCopyMissing = "", true }, canon, StateStalled, "lint copy .github/scripts/lint-release-env.sh is missing"},
+		{"no canonical lint hash", func(*RepoFacts) {}, Canonical{Gate: canon.Gate}, StateUnknown, ""},
 		{"read error", func(f *RepoFacts) { f.Errors = []string{"runs: HTTP 403"} }, canon, StateUnknown, ""},
 		{"read error beats a stall", func(f *RepoFacts) {
 			f.Errors = []string{"variables: HTTP 403"}
@@ -355,6 +363,38 @@ func TestDerive_Rules(t *testing.T) {
 	}
 }
 
+// The lint copy has its own verdict beside the gate's: a lint copy that
+// drifted, is missing, or cannot be hashed is named as the lint, and a lint
+// copy holding the gate's bytes is still drift.
+func TestDerive_LintCopyVerdict(t *testing.T) {
+	cases := []struct {
+		name       string
+		bend       func(*RepoFacts)
+		canonical  Canonical
+		gate, lint string
+		err        string
+	}{
+		{"both match", func(*RepoFacts) {}, canon, "match", "match", ""},
+		{"lint holds the gate bytes", func(f *RepoFacts) { f.LintCopySHA256 = canon.Gate }, canon, "match", "drift", ""},
+		{"lint missing", func(f *RepoFacts) { f.LintCopySHA256, f.LintCopyMissing = "", true }, canon, "match", "missing", ""},
+		{"lint read failed", func(f *RepoFacts) { f.LintCopySHA256 = "" }, canon, "match", "", "lint copy: hash unavailable"},
+		{"no canonical lint hash", func(*RepoFacts) {}, Canonical{Gate: canon.Gate}, "match", "", "lint copy: hash unavailable"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := healthy("on")
+			c.bend(&f)
+			row := Derive(releasePR, f, c.canonical, t0)
+			if row.GateCopy != c.gate || row.LintCopy != c.lint {
+				t.Errorf("gate/lint copy = %q/%q, want %q/%q", row.GateCopy, row.LintCopy, c.gate, c.lint)
+			}
+			if got := strings.Join(row.Errors, ";"); got != c.err {
+				t.Errorf("errors = %q, want %q", got, c.err)
+			}
+		})
+	}
+}
+
 // Testflight reasons: uploaded and no-change are quiet, failed twice stalls.
 func TestDerive_TestflightRepeat(t *testing.T) {
 	e := RegistryEntry{Repo: "app", Branch: "main", Class: ClassTestflight, Entrypoint: ".github/workflows/testflight.yml", TagPattern: "none"}
@@ -373,7 +413,7 @@ func TestDerive_TestflightRepeat(t *testing.T) {
 		f := RepoFacts{Repo: "app", LastRelease: &ReleaseFact{Tag: "upload@abc", At: hoursAgo(2)},
 			Toggle: &ToggleFact{Name: "TESTFLIGHT_NIGHTLY", Value: "on", Set: true},
 			Runs:   []RunFact{run(2, 1, c.a), run(1, 25, c.b)}}
-		if row := Derive(e, f, "", t0); row.State != c.state {
+		if row := Derive(e, f, Canonical{}, t0); row.State != c.state {
 			t.Errorf("%s,%s: state = %s (stalls %q errors %q), want %s", c.a, c.b, row.State, row.Stalls, row.Errors, c.state)
 		}
 	}
@@ -400,7 +440,7 @@ func TestDerive_ManualCut(t *testing.T) {
 	older := hoursAgo(24 * 20) // merged after the cut, dated before it
 	f := RepoFacts{Repo: "herdr", LastRelease: &ReleaseFact{Tag: "v0.9.1-palette.1", At: cut},
 		Unreleased: intp(138), OldestUnreleasedAt: &older}
-	row := Derive(e, f, "", t0)
+	row := Derive(e, f, Canonical{}, t0)
 	if row.State != StateManual || len(row.Stalls) != 0 {
 		t.Fatalf("state=%s stalls=%q, want manual with no stalls", row.State, row.Stalls)
 	}
@@ -409,11 +449,11 @@ func TestDerive_ManualCut(t *testing.T) {
 	}
 	up := hoursAgo(24 * 2)
 	f = RepoFacts{Repo: "herdr", LastRelease: &ReleaseFact{Tag: "v0.9.1-palette.1", At: cut}, Unreleased: intp(0), UpstreamDueSince: &up}
-	if row := Derive(e, f, "", t0); row.HumanGateDueSince == nil || !row.HumanGateDueSince.Equal(up) {
+	if row := Derive(e, f, Canonical{}, t0); row.HumanGateDueSince == nil || !row.HumanGateDueSince.Equal(up) {
 		t.Errorf("due since = %v, want upstream %v", row.HumanGateDueSince, up)
 	}
 	f = RepoFacts{Repo: "herdr", LastRelease: &ReleaseFact{Tag: "v0.9.1-palette.1", At: cut}, Unreleased: intp(0)}
-	if row := Derive(e, f, "", t0); row.HumanGateDueSince != nil {
+	if row := Derive(e, f, Canonical{}, t0); row.HumanGateDueSince != nil {
 		t.Errorf("due since = %v, want nil when nothing waits", row.HumanGateDueSince)
 	}
 }

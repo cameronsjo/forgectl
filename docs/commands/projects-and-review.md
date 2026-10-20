@@ -220,6 +220,7 @@ forgectl review releases --json --fail-on-stall  # exit 1 on any stalled or unkn
 | human gates | count, and for `manual-cut` how long a cut has been due: the oldest uncut commit or upstream commit, never earlier than the last cut. App Store release has no age visible from GitHub |
 | endpoints | the `version` in each tap formula or cask, or Scoop manifest, against the last release |
 | gate copy | sha256 of `.github/scripts/ship-gate.sh` on the branch against the canonical copy |
+| lint copy | sha256 of `.github/scripts/lint-release-env.sh` on the branch against the canonical copy |
 
 A repo is **stalled** when:
 
@@ -229,7 +230,8 @@ A repo is **stalled** when:
   than `go`, `no-pr`, or `paused` (`uploaded` and `no-change` for testflight);
 - its last run reports `half-shipped`;
 - an endpoint still trails a release more than 24h old;
-- its gate copy is missing or its hash differs from the canonical one;
+- its gate copy or lint copy is missing or its hash differs from the
+  canonical one;
 - `no-release-pr` (`release-pr` repos, toggle on or off): the unreleased commits
   include a releasable one, no release PR is open, and the oldest releasable
   commit is more than 24h old; or
@@ -264,6 +266,9 @@ Inputs:
 - Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
   sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
   those, every `release-pr` row reads `unknown`.
+- Canonical lint hash: `--lint-sha256`, else `$FORGECTL_LINT_SHA256`, else the
+  sha256 of `../scripts/release/lint-release-env.sh` beside the registry. With
+  none of those, every `release-pr` row reads `unknown`.
 - Auth: gh's own (`GH_TOKEN`, `GITHUB_TOKEN`, or its stored login), pinned to
   `[github] host`. The token needs read access to contents, pull requests,
   actions, and checks (the gate's annotations) on every tracked repo, and to
