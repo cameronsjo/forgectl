@@ -1,10 +1,13 @@
 ---
 name: "OPSX: Apply"
 description: "Implement tasks from an OpenSpec change (Experimental)"
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 category: "Workflow"
 tags: ["workflow", "artifacts", "experimental"]
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Implement tasks from an OpenSpec change.
 

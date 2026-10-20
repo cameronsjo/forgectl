@@ -122,8 +122,8 @@ func TestPlansIndex(t *testing.T) {
 		if name == "README.md" {
 			continue
 		}
-		if len(name) >= len(plansFrozenAfter) && name[:len(plansFrozenAfter)] > plansFrozenAfter {
-			t.Errorf("%s: docs/plans/ takes no new plans after %s; propose the work as an OpenSpec change instead (openspec/changes/, see AGENTS.md)", name, plansFrozenAfter)
+		if len(name) < len(plansFrozenAfter) || name[:len(plansFrozenAfter)] > plansFrozenAfter {
+			t.Errorf("%s: docs/plans/ takes no new plans (every plan here is named YYYY-MM-DD-*, dated %s or earlier); propose the work as an OpenSpec change instead (openspec/changes/, see AGENTS.md)", name, plansFrozenAfter)
 		}
 		e := readPlan(t, dir, name)
 		switch {

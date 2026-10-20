@@ -1,7 +1,7 @@
 ---
 name: openspec-archive-change
 description: Archive a completed OpenSpec change in the experimental workflow. Use when the user wants to finalize and archive a change after implementation is complete. Also use when the user says "openspec archive" or "opsx archive".
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 license: MIT
 compatibility: Requires openspec CLI.
 metadata:
@@ -9,6 +9,9 @@ metadata:
   version: "1.0"
   generatedBy: "1.14.3"
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Archive a completed change in the experimental workflow.
 

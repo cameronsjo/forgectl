@@ -1,7 +1,7 @@
 ---
 name: openspec-update-change
 description: Update an OpenSpec change by revising its existing planning artifacts and keeping them coherent with one another. Use when the user wants to revise a change's plan, fold new decisions into it, or reconcile its artifacts after an edit. Also use when the user says "openspec update change" or "opsx update". If the user means the openspec update CLI command, which refreshes generated files, run that command instead. Never edits code.
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 license: MIT
 compatibility: Requires openspec CLI.
 metadata:
@@ -9,6 +9,9 @@ metadata:
   version: "1.0"
   generatedBy: "1.14.3"
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Revise a change's existing planning artifacts and keep them coherent. Never edit code.
 

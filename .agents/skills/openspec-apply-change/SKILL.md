@@ -1,7 +1,7 @@
 ---
 name: openspec-apply-change
 description: Implement tasks from an OpenSpec change. Use when the user wants to start implementing, continue implementation, or work through tasks. Also use when the user says "openspec apply", "opsx apply", or "openspec implement".
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 license: MIT
 compatibility: Requires openspec CLI.
 metadata:
@@ -9,6 +9,9 @@ metadata:
   version: "1.0"
   generatedBy: "1.14.3"
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Implement tasks from an OpenSpec change.
 

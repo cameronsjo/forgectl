@@ -1,10 +1,13 @@
 ---
 name: "OPSX: Update"
 description: "Update a change - revise existing planning artifacts and keep them coherent (Experimental)"
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 category: "Workflow"
 tags: ["workflow", "artifacts", "experimental"]
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Revise a change's existing planning artifacts and keep them coherent. Never edit code.
 

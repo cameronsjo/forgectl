@@ -1,10 +1,13 @@
 ---
 name: "OPSX: Sync"
 description: "Sync delta specs from a change to main specs"
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 category: "Workflow"
 tags: ["workflow", "specs", "experimental"]
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Sync delta specs from a change to main specs.
 

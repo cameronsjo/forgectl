@@ -25,7 +25,7 @@ Bare `forgectl` SHALL open the hub only when stdin and stdout are terminals. Off
 - **THEN** it exits 2 and the message points at `forgectl menu`
 
 ### Requirement: One exit-code table
-Every verb SHALL map its outcome to one table: 0 ok (including already done and an empty result), 1 failed, 2 usage (nothing attempted, fixable by the caller), 3 unauthorized, 4 refused by a safety rule. Codes 5 and 6 are reserved and MUST NOT be emitted. An error with no class MUST exit 1.
+Every verb SHALL map its outcome to one table: 0 ok (including already done and an empty result), 1 failed, 2 usage (nothing attempted, fixable by the caller), 3 unauthorized, 4 refused by a safety rule. Codes 5 and 6 are reserved and MUST NOT be emitted. An error with no class MUST exit 1. Only the codes in "Codes outside the table" MAY appear besides these.
 
 #### Scenario: Unknown flag
 - **WHEN** a verb outside the documented exceptions is run with an unknown flag or the wrong number of arguments
@@ -34,6 +34,17 @@ Every verb SHALL map its outcome to one table: 0 ok (including already done and 
 #### Scenario: Unknown verb
 - **WHEN** `forgectl zzbogus` is run
 - **THEN** it exits 2, including when `--help` is also passed
+
+### Requirement: Codes outside the table
+Beyond the table, a verb SHALL exit only with: 7 for a `tasks` cache older than 72h; 75 when `desk watch` hits its deadline or `surface send` queues a message; 130 when interrupted or a pick is cancelled; 141 when stdout closes; or a child's code from a pass-through verb (`launch`, `surface _exec`, `docs read`, `k8s`, `desk watch`). Its own errors MUST NOT use 126, 127 or 128 and above, apart from 130 and 141.
+
+#### Scenario: Stale task cache
+- **WHEN** `forgectl tasks ls` would serve a cache older than 72h without `--allow-stale`
+- **THEN** it exits 7
+
+#### Scenario: Pass-through child code
+- **WHEN** `forgectl k8s logs` runs and kubectl exits 3
+- **THEN** forgectl exits 3
 
 ### Requirement: Usage exceptions keep exit 1
 Where exit 2 already means something else in a verb, usage errors MUST exit 1 instead: every `tasks` subverb, `env check`, `k8s`, `resume snapshot` and `surface event`. `resume snapshot` and `surface event` are Claude Code hook verbs and MUST NOT exit 2 for a bad flag, an unresolvable `$HOME`, or an unparseable config.

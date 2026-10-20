@@ -1,7 +1,7 @@
 ---
 name: openspec-propose
 description: Propose a new OpenSpec change with all artifacts generated in one step. Use when the user wants to quickly describe what they want to build and get a complete proposal with design, specs, and tasks ready for implementation. Also use when the user says "openspec propose" or "opsx propose".
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(scripts/openspec.sh:*)
 license: MIT
 compatibility: Requires openspec CLI.
 metadata:
@@ -9,6 +9,9 @@ metadata:
   version: "1.0"
   generatedBy: "1.14.3"
 ---
+
+<!-- forgectl: pinned openspec CLI -->
+**In this repo, run every `openspec ...` command below as `scripts/openspec.sh ...`** (same arguments). It runs the pinned CLI from `scripts/openspec/package-lock.json`. Never run `npx openspec`: that npm name is an unrelated package.
 
 Propose a new change - create the change and generate all artifacts in one step.
 

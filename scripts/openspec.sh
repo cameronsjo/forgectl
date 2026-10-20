@@ -22,6 +22,8 @@ if [[ ! -x "$bin" || "$pin/package-lock.json" -nt "$pin/node_modules/.package-lo
   npm ci --prefix "$pin" --ignore-scripts --no-audit --no-fund --loglevel=error >&2
 fi
 
+# No telemetry and no npm update check: a run makes no network call.
 export OPENSPEC_TELEMETRY="${OPENSPEC_TELEMETRY:-0}"
+export OPENSPEC_NO_UPDATE_CHECK="${OPENSPEC_NO_UPDATE_CHECK:-1}"
 cd "$root"
 exec "$bin" "$@"
