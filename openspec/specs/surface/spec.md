@@ -45,11 +45,19 @@ A worker MUST inherit only an allowlisted environment (such as `PATH`, `HOME`, `
 - **THEN** the ledger row holds the brief's marker and the harness receives the brief as its prompt argument
 
 ### Requirement: Folder trust preflight
-A claude launch MUST be refused before anything is created when Claude Code has not trusted the launch folder (for a worker, its repository root) for the account the session runs as, naming the `cd <repo root> && claude` fix. forgectl MUST NOT write trust itself. A missing or unreadable account config refuses nothing.
+A claude or codex launch MUST be refused before anything is created when its harness has not trusted the launch folder (for a worker, its repository root) for the account the session runs as, naming the fix: `cd <repo root> && claude` for claude, `cd <repo root> && codex` for codex. For claude, trust of the folder or any parent counts. For codex, only an entry for the folder or its repository root counts, by exact or physical path, and any recorded `trust_level` counts as decided. The account is `CLAUDE_CONFIG_DIR` for claude and `CODEX_HOME` for codex. forgectl MUST NOT write trust itself. A missing or unreadable account config refuses nothing.
 
 #### Scenario: Untrusted repository
 - **WHEN** a claude worker launch targets a repository absent from the account's trusted folders
 - **THEN** the launch exits non-zero before creating a worktree, branch, ledger row, or surface
+
+#### Scenario: Untrusted codex repository
+- **WHEN** a codex launch, worker or `--dry-run`, targets a repository with no trust entry in `$CODEX_HOME/config.toml`
+- **THEN** the launch exits non-zero before creating anything, naming `cd <repo root> && codex`
+
+#### Scenario: Codex trust does not inherit
+- **WHEN** codex trusts a parent folder but has no entry for the repository root
+- **THEN** a codex launch into the repository is refused
 
 ### Requirement: Launch dry run and JSON
 `surface launch --dry-run` SHALL run the launch's pre-write checks and print what it would create, creating no worktree, branch, ledger row, or surface and calling no backend, and MUST NOT print the harness path, arguments, environment, or brief. With `--json`, a real launch prints `{"surface","name","target","harness","ref","workspace_id","tab_id","pane_id","terminal_id","worker"}`, and a worker whose ledger row cannot be completed still prints the object and exits 1.

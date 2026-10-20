@@ -65,6 +65,22 @@ func TestMain(m *testing.M) {
 		panic("set TMPDIR: " + err.Error())
 	}
 
+	// A codex launch checks folder trust in $CODEX_HOME/config.toml
+	// (forgectl#1240). Point it at an empty home, where the check refuses
+	// nothing, so the developer's own codex trust list cannot change what a
+	// codex launch test sees. Tests of the check set CODEX_HOME themselves.
+	codexHome := filepath.Join(tmp, "codex-home")
+	if err := os.Mkdir(codexHome, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("create codex home: " + err.Error())
+	}
+	if err := os.Setenv("CODEX_HOME", codexHome); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("set CODEX_HOME: " + err.Error())
+	}
+
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	// The settings dir is left 0500, which RemoveAll cannot empty unless

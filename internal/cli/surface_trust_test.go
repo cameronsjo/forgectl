@@ -146,9 +146,14 @@ func TestCheckWorkerFolderTrust(t *testing.T) {
 		{name: "the profile env beats the inherited value", lc: withEnv, spec: workerSpec{name: "w"}},
 		{name: "an injected value beats the inherited value", lc: claude, spec: workerSpec{name: "w"},
 			injected: map[string]string{"CLAUDE_CONFIG_DIR": trusted}},
-		{name: "a codex worker is not checked", lc: codex, spec: workerSpec{name: "w"}},
-		{name: "--harness codex is not checked", lc: codex, spec: workerSpec{name: "w", harness: "codex"}},
+		{name: "a codex worker is checked against its own home", lc: codex, spec: workerSpec{name: "w"}},
+		{name: "--harness codex is checked against its own home", lc: codex, spec: workerSpec{name: "w", harness: "codex"}},
 	}
+	// The codex cases run as an account that trusts top, so the claude
+	// accounts above say nothing about them.
+	codexHome := t.TempDir()
+	writeCodexConfig(t, codexHome, "[projects.\""+filepath.ToSlash(top)+"\"]\ntrust_level = \"trusted\"\n")
+	t.Setenv("CODEX_HOME", codexHome)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := checkWorkerFolderTrust(c.lc, top, c.spec, c.injected, c.unset)
@@ -167,5 +172,107 @@ func TestCheckWorkerFolderTrust(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// A codex account with no entry for top refuses the worker.
+	writeCodexConfig(t, codexHome, "")
+	if err := checkWorkerFolderTrust(codex, top, workerSpec{name: "w"}, nil, nil); !errors.Is(err, errUntrustedFolder) {
+		t.Errorf("untrusted codex home: err = %v, want errUntrustedFolder", err)
+	}
+}
+
+func writeCodexConfig(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCodexFolderTrust pins codex's reading: an entry for the folder's exact
+// spelling or physical path counts, any recorded trust_level counts, and a
+// trusted parent does not (codex-cli 0.163.0 asked again for a new repository
+// under a trusted home directory).
+func TestCodexFolderTrust(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(base, "projects", "repo")
+	if err := os.MkdirAll(repo, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfgDir := t.TempDir()
+	conf := func(body string) string { return writeCodexConfig(t, cfgDir, body) }
+	entry := func(p, level string) string {
+		return "[projects.\"" + filepath.ToSlash(p) + "\"]\ntrust_level = \"" + level + "\"\n"
+	}
+
+	cases := []struct {
+		name, body string
+		dirs       []string
+		want       claudeTrustState
+	}{
+		{"the folder itself", entry(repo, "trusted"), []string{repo}, trustTrusted},
+		{"through a symlink", entry(repo, "trusted"), []string{link}, trustTrusted},
+		{"the link's own spelling", entry(link, "trusted"), []string{link}, trustTrusted},
+		{"a recorded untrusted decision", entry(repo, "untrusted"), []string{repo}, trustTrusted},
+		{"a trusted parent does not count", entry(base, "trusted"), []string{repo}, trustUntrusted},
+		{"the repository root counts for a folder in it", entry(repo, "trusted"), []string{filepath.Join(repo, "sub"), repo}, trustTrusted},
+		{"an entry with no trust_level", "[projects.\"" + filepath.ToSlash(repo) + "\"]\n", []string{repo}, trustUntrusted},
+		{"no projects", "model = \"x\"\n", []string{repo}, trustUntrusted},
+		{"an unparsable file", "[projects", []string{repo}, trustUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := codexFolderTrust(conf(c.body), c.dirs...); got != c.want {
+				t.Errorf("trust = %v, want %v", got, c.want)
+			}
+		})
+	}
+	if got := codexFolderTrust(filepath.Join(t.TempDir(), "config.toml"), repo); got != trustUnknown {
+		t.Errorf("a missing file = %v, want unknown", got)
+	}
+	if got := codexFolderTrust("", repo); got != trustUnknown {
+		t.Errorf("no file = %v, want unknown", got)
+	}
+}
+
+// TestCodexConfigFile follows codex's lookup: $CODEX_HOME/config.toml, else
+// ~/.codex/config.toml.
+func TestCodexConfigFile(t *testing.T) {
+	home, codexHome := t.TempDir(), t.TempDir()
+	if got := codexConfigFile("", home); got != filepath.Join(home, ".codex", "config.toml") {
+		t.Errorf("default account: %s", got)
+	}
+	if got := codexConfigFile(codexHome, home); got != filepath.Join(codexHome, "config.toml") {
+		t.Errorf("CODEX_HOME account: %s", got)
+	}
+	if got := codexConfigFile("", ""); got != "" {
+		t.Errorf("no home: %q", got)
+	}
+}
+
+// TestCheckCodexFolderTrust_Message names the repository root, where codex
+// applies trust, and the account's CODEX_HOME when it is not the default.
+func TestCheckCodexFolderTrust_Message(t *testing.T) {
+	codexHome := t.TempDir()
+	writeCodexConfig(t, codexHome, "")
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	err := checkCodexFolderTrust(sub, root, codexHome)
+	if !errors.Is(err, errUntrustedFolder) {
+		t.Fatalf("err = %v, want errUntrustedFolder", err)
+	}
+	if want := "cd " + root + " && CODEX_HOME=" + codexHome + " codex"; !strings.Contains(err.Error(), want) {
+		t.Errorf("message %q lacks %q", err, want)
+	}
+	if err := checkCodexFolderTrust(sub, "", codexHome); err == nil || !strings.Contains(err.Error(), "cd "+sub+" ") {
+		t.Errorf("outside a repository the fix names the folder: %v", err)
 	}
 }
