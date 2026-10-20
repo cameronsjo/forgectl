@@ -11,8 +11,8 @@ When `[launch.worker] settings` names a file (absolute, or `~/`-relative), a cla
 - **WHEN** `[launch.worker] settings` is unset
 - **THEN** the worker's `--settings` is unchanged
 
-### Requirement: Worker settings file can only narrow
-The file MUST only carry `enabledPlugins` with `false` values, `skillOverrides` with `name-only`, `user-invocable-only` or `off`, `outputStyle`, and `permissions.deny` rules shaped `Tool`, `Tool(specifier)` or `mcp__…`. Any other key or value, a missing or unreadable file, or a file over 64 KiB MUST refuse the launch.
+### Requirement: Worker settings file can only remove
+The file MUST only carry `enabledPlugins` with `false` values, `skillOverrides` with `off` only, `outputStyle`, and `permissions.deny` rules shaped `Tool`, `Tool(specifier)` or `mcp__…`. Any other key or value, a missing or unreadable file, or a file over 64 KiB MUST refuse the launch.
 
 #### Scenario: Widening file refused
 - **WHEN** the file carries `permissions.allow` or `enabledPlugins` with `true`

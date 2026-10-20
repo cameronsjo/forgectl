@@ -5,7 +5,7 @@ A claude worker (`surface launch --worktree`) loads everything an interactive se
 ## What Changes
 
 - New config key `[launch.worker] settings = "<path>"`: a JSON file merged into the `--settings` document every claude worker already gets.
-- The file may only remove things: `enabledPlugins` (false values only), `skillOverrides` (`name-only`, `user-invocable-only`, `off`), `outputStyle`, and `permissions.deny` (rules in the shape the Claude Code settings schema accepts). Any other key or value refuses the launch.
+- The file may only remove things: `enabledPlugins` (false values only), `skillOverrides` (`off` only), `outputStyle`, and `permissions.deny` (rules in the shape the Claude Code settings schema accepts). Any other key or value refuses the launch.
 - A key forgectl sets keeps forgectl's value; deny rules are a union.
 - `forgectl launch which` and `forgectl config` show the file on a `settings:` line under the worker row, and `--json` carries it as `worker.settings`. A file the launch would refuse shows in `worker.refused`.
 - No file set: no change. Codex and pi workers never read it.

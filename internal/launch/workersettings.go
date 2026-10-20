@@ -25,14 +25,15 @@ const maxWorkerSettingsBytes = 64 << 10
 
 // workerSettingsFile is the shape a [launch.worker] settings file may take.
 // Every key only takes something away from the worker; anything else is
-// refused by the strict decoder, so the file can never widen a worker past
-// the floor (no permissions.allow, defaultMode, hooks, env, or a plugin
-// turned on).
+// refused by the strict decoder, so the file can never add a permission, a
+// hook or a plugin (no permissions.allow, defaultMode, hooks, env, or a
+// plugin turned on). Taking away can still remove protections: turning off a
+// guard plugin turns off its guards, which is the operator's call.
 //
 //   - enabledPlugins: plugin@marketplace -> false turns a plugin off for the
 //     worker, with its skills, agents, hooks, output style and MCP servers.
-//   - skillOverrides: skill -> name-only | user-invocable-only | off. Claude
-//     Code 2.1.305 applies it to user and synced skills, not plugin skills.
+//   - skillOverrides: skill -> off. Claude Code 2.1.305 applies it to user
+//     and synced skills, not plugin skills.
 //   - outputStyle: the output style the worker uses.
 //   - permissions.deny: deny rules; Agent(plugin:agent) also drops the agent
 //     from the worker's agent listing.
@@ -46,15 +47,13 @@ type workerSettingsFile struct {
 }
 
 // narrowingSkillOverrides are the skillOverrides values a worker file may
-// set. "on" is left out: it would re-list a skill the operator turned off.
-var narrowingSkillOverrides = []string{"name-only", "user-invocable-only", "off"}
+// set. Only "off": the flag layer sits over the operator's settings, so any
+// other value could re-list a skill the operator turned off.
+var narrowingSkillOverrides = []string{"off"}
 
-// workerDenyRule is the shape a deny rule in the file must take: a tool name
-// with an optional (specifier), or an mcp__ name. Claude Code checks the
-// whole --settings document, and one rule it rejects voids every key in it,
-// forgectl's own included (forgectl#694), so the file is held to the tool
-// names the vendored settings schema accepts
-// (internal/pr/testdata/claude-code-settings.schema.json, permissionRule).
+// workerDenyTools are the tool names a deny rule in the file may name: those
+// the vendored settings schema's permissionRule accepts
+// (internal/pr/testdata/claude-code-settings.schema.json).
 // TestWorkerDenyToolsMatchTheSettingsSchema keeps the two lists together.
 var workerDenyTools = []string{
 	"Agent", "Artifact", "Bash", "Cd", "Edit", "EnterWorktree", "ExitPlanMode", "Glob", "Grep",
@@ -63,6 +62,11 @@ var workerDenyTools = []string{
 	"TaskUpdate", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch", "Workflow", "Write",
 }
 
+// workerDenyRule is the shape a deny rule in the file must take: a tool name
+// with an optional (specifier), or an mcp__ name. Claude Code checks the
+// whole --settings document, and one rule it rejects voids every key in it,
+// forgectl's own included (forgectl#694), so a rule outside the schema's
+// shape is refused here rather than passed on.
 var workerDenyRule = regexp.MustCompile(`^((` + strings.Join(workerDenyTools, "|") + `)(\([^)]+\))?|mcp__.*)$`)
 
 // readWorkerSettingsFor is readWorkerSettings with the home directory looked
@@ -135,7 +139,7 @@ func parseWorkerSettings(raw []byte) (*workerSettingsFile, error) {
 			return nil, err
 		}
 		if v == nil || !slices.Contains(narrowingSkillOverrides, *v) {
-			return nil, fmt.Errorf("skillOverrides %q must be one of %s", name, strings.Join(narrowingSkillOverrides, ", "))
+			return nil, fmt.Errorf("skillOverrides %q must be %s", name, strings.Join(narrowingSkillOverrides, " or "))
 		}
 	}
 	if s.OutputStyle != nil {
@@ -157,13 +161,15 @@ func parseWorkerSettings(raw []byte) (*workerSettingsFile, error) {
 }
 
 // checkSettingName refuses an empty string or one carrying a control or
-// format character, which no plugin, skill, style or rule name needs and
-// which `launch which` would otherwise echo to a terminal.
+// format character or a line or paragraph separator, which no plugin, skill,
+// style or rule name needs. U+2028 and U+2029 matter beyond display: Claude
+// Code checks rule patterns with JavaScript regexps, where `.` stops at them,
+// so `mcp__a<U+2028>b` passes Go's `mcp__.*` but voids the whole document.
 func checkSettingName(key, v string) error {
 	if strings.TrimSpace(v) == "" {
 		return fmt.Errorf("%s has an empty entry", key)
 	}
-	if strings.IndexFunc(v, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
+	if strings.IndexFunc(v, func(r rune) bool { return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) }) >= 0 {
 		return fmt.Errorf("%s entry %q carries a control character", key, v)
 	}
 	return nil

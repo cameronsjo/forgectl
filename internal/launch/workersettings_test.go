@@ -30,7 +30,7 @@ func writeSettings(t *testing.T, body string) string {
 func TestParseWorkerSettingsAcceptsOnlyNarrowingKeys(t *testing.T) {
 	ok := `{
 	  "enabledPlugins": {"artificer-voice@workbench": false, "cadence-palette@workbench": false},
-	  "skillOverrides": {"deep-research": "off", "dataviz": "name-only", "loop": "user-invocable-only"},
+	  "skillOverrides": {"deep-research": "off", "loop": "off"},
 	  "outputStyle": "default",
 	  "permissions": {"deny": ["Agent(cadence:doc-writer)"]}
 	}`
@@ -48,6 +48,10 @@ func TestParseWorkerSettingsAcceptsOnlyNarrowingKeys(t *testing.T) {
 		"duplicate turns on": `{"enabledPlugins": {"x@m": false, "x@m": true}}`,
 		"skill on":           `{"skillOverrides": {"x": "on"}}`,
 		"skill unknown":      `{"skillOverrides": {"x": "hidden"}}`,
+		"skill name-only":    `{"skillOverrides": {"x": "name-only"}}`,
+		"skill invocable":    `{"skillOverrides": {"x": "user-invocable-only"}}`,
+		"line separator":     "{\"permissions\": {\"deny\": [\"mcp__a\\u2028b\"]}}",
+		"para separator":     "{\"permissions\": {\"deny\": [\"mcp__a\\u2029b\"]}}",
 		"empty plugin":       `{"enabledPlugins": {"": false}}`,
 		"empty deny":         `{"permissions": {"deny": [" "]}}`,
 		"control char":       `{"permissions": {"deny": ["Agent(x)\u001b[2J"]}}`,
@@ -226,7 +230,7 @@ func TestMergedWorkerSettingsValidateAgainstTheSettingsSchema(t *testing.T) {
 	schema := workerSettingsSchema(t)
 	file, err := parseWorkerSettings([]byte(`{
 	  "enabledPlugins": {"artificer-voice@workbench": false},
-	  "skillOverrides": {"deep-research": "off", "dataviz": "name-only"},
+	  "skillOverrides": {"deep-research": "off"},
 	  "outputStyle": "default",
 	  "permissions": {"deny": ["Agent(cadence:doc-writer)", "Skill(cadence:dream)", "WebFetch", "mcp__board"]}
 	}`))
@@ -265,5 +269,21 @@ func TestWorkerDenyToolsMatchTheSettingsSchema(t *testing.T) {
 	}
 	if _, err := parseWorkerSettings([]byte(`{"permissions":{"deny":["Foo(x)"]}}`)); err == nil {
 		t.Error("the file accepted a deny rule the schema rejects")
+	}
+}
+
+// TestWorkerSettingsIgnoredOffClaudeAndHomeFailure: a codex worker's posture
+// never names or refuses the claude file, and a ~/ path with no home refuses.
+func TestWorkerSettingsIgnoredOffClaudeAndHomeFailure(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "codex"},
+		Worker:   config.LaunchWorker{Settings: "/nonexistent/w.json"},
+	}
+	if w := DefaultWorkerPosture(lc); w.Settings != "" || w.Refused != "" {
+		t.Errorf("codex worker posture read the claude file: %+v", w)
+	}
+	_, err := readWorkerSettingsFor("~/w.json", func() (string, error) { return "", errors.New("no home") })
+	if !errors.Is(err, ErrWorkerSettings) {
+		t.Errorf("~/ path with no home = %v, want ErrWorkerSettings", err)
 	}
 }
