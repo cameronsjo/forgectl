@@ -245,13 +245,14 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			// A worker is a full harness (ADR-0010, 2026-10-08): no isolation
 			// flags, only the worker settings after the posture.
 			want := []string{"--permission-mode", mode,
-				"--settings", `{"useAutoModeDuringPlan":false}`,
+				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["Bash(forgectl tasks done:*)"]}}`,
 			}
 			// Only acceptEdits carries the allow list; a plan worker that could
 			// commit and push unprompted would be looser than its mode.
 			if mode == "acceptEdits" {
 				want[len(want)-1] = `{"useAutoModeDuringPlan":false,"permissions":{` +
-					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
+					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
+					`"deny":["Bash(forgectl tasks done:*)"]}}`
 			}
 			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
 				t.Errorf("worker argv %q, want it to start %q", args, want)
@@ -461,8 +462,9 @@ func TestBuildInvocation_WorkerSessionID(t *testing.T) {
 }
 
 // TestWorkerClaudeSettingsJSON pins the worker settings as data: both parse,
-// turn off auto mode during plan, and deny nothing; only the acceptEdits
-// settings pre-approve commands, and exactly the agreed list.
+// turn off auto mode during plan, and deny exactly `forgectl tasks done`
+// (ADR-0010, 2026-10-20 amendment); only the acceptEdits settings pre-approve
+// commands, and exactly the agreed list.
 func TestWorkerClaudeSettingsJSON(t *testing.T) {
 	wantAllow := []string{
 		"Bash(go test *)", "Bash(go build *)", "Bash(make *)",
@@ -490,8 +492,10 @@ func TestWorkerClaudeSettingsJSON(t *testing.T) {
 			if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
 				t.Error("useAutoModeDuringPlan is not false")
 			}
-			if len(s.Permissions.Deny) != 0 {
-				t.Errorf("worker settings deny %q; a worker is a full harness (ADR-0010, 2026-10-08)", s.Permissions.Deny)
+			// A worker is otherwise a full harness (ADR-0010, 2026-10-08): the one
+			// deny is the board close, which cannot be undone.
+			if want := []string{"Bash(forgectl tasks done:*)"}; !slices.Equal(s.Permissions.Deny, want) {
+				t.Errorf("deny list = %q, want exactly %q", s.Permissions.Deny, want)
 			}
 			if !slices.Equal(s.Permissions.Allow, tc.allow) {
 				t.Errorf("allow list = %q, want exactly %q (widening it needs a security review)", s.Permissions.Allow, tc.allow)
