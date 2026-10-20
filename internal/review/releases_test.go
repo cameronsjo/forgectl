@@ -379,6 +379,9 @@ func TestDerive_LintCopyVerdict(t *testing.T) {
 		{"lint missing", func(f *RepoFacts) { f.LintCopySHA256, f.LintCopyMissing = "", true }, canon, "match", "missing", ""},
 		{"lint read failed", func(f *RepoFacts) { f.LintCopySHA256 = "" }, canon, "match", "", "lint copy: hash unavailable"},
 		{"no canonical lint hash", func(*RepoFacts) {}, Canonical{Gate: canon.Gate}, "match", "", "lint copy: hash unavailable"},
+		// A missing copy is a fact the canonical hash does not change.
+		{"lint missing, no canonical lint hash", func(f *RepoFacts) { f.LintCopySHA256, f.LintCopyMissing = "", true }, Canonical{Gate: canon.Gate}, "match", "missing", ""},
+		{"gate missing, no canonical gate hash", func(f *RepoFacts) { f.GateCopySHA256, f.GateCopyMissing = "", true }, Canonical{Lint: canon.Lint}, "missing", "match", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

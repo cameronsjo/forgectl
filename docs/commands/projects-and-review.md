@@ -265,10 +265,12 @@ Inputs:
   than 64 keys is refused.
 - Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
   sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
-  those, every `release-pr` row reads `unknown`.
+  those, every `release-pr` row that has a gate copy reads `unknown`. A missing
+  gate copy still stalls its row as `missing`.
 - Canonical lint hash: `--lint-sha256`, else `$FORGECTL_LINT_SHA256`, else the
   sha256 of `../scripts/release/lint-release-env.sh` beside the registry. With
-  none of those, every `release-pr` row reads `unknown`.
+  none of those, every `release-pr` row that has a lint copy reads `unknown`. A
+  missing lint copy still stalls its row as `missing`.
 - Auth: gh's own (`GH_TOKEN`, `GITHUB_TOKEN`, or its stored login), pinned to
   `[github] host`. The token needs read access to contents, pull requests,
   actions, and checks (the gate's annotations) on every tracked repo, and to

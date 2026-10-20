@@ -81,7 +81,7 @@ Each tracked repo SHALL be `ok`, `paused` (toggle not `on`), `stalled`, or `unkn
 
 #### Scenario: No canonical gate hash
 - **WHEN** no `--gate-sha256`, `$FORGECTL_GATE_SHA256`, or canonical script beside the registry is available
-- **THEN** every `release-pr` row reads `unknown`
+- **THEN** every `release-pr` row that has a gate copy reads `unknown`, and a missing gate copy is still reported `missing`
 
 #### Scenario: Lint copy drift
 - **WHEN** a repo's `.github/scripts/lint-release-env.sh` hash differs from the canonical hash
@@ -93,7 +93,7 @@ Each tracked repo SHALL be `ok`, `paused` (toggle not `on`), `stalled`, or `unkn
 
 #### Scenario: No canonical lint hash
 - **WHEN** no `--lint-sha256`, `$FORGECTL_LINT_SHA256`, or `../scripts/release/lint-release-env.sh` beside the registry is available
-- **THEN** every `release-pr` row reads `unknown`
+- **THEN** every `release-pr` row that has a lint copy reads `unknown`, and a missing lint copy is still reported `missing`
 
 ### Requirement: Releasable commit detection
 A commit SHALL be releasable when its subject type is `feat`, `fix`, or `perf`, its type or scope carries `!`, or its body has a `BREAKING CHANGE:` footer. `no-release-pr` MUST fire for a `release-pr` repo only when a releasable unreleased commit older than 24h exists with no open release PR. When the compare read is short of the branch's ahead count and shows nothing releasable, the row MUST be `unknown`.
