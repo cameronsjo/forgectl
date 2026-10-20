@@ -67,18 +67,12 @@ func TestSuspendFilter(t *testing.T) {
 // nothing there. The huh check counts per file because a form's chain spans
 // lines.
 //
-// desk_model_unix.go is the one allowed gap: the desk files belong to another
-// change and move onto ProgramOptions with it.
-//
 // Mutation that turns it red: write tea.WithContext(ctx) in place of
 // keymap.ProgramOptions(ctx)... in cockpit.go, or drop Suspendable from confirm.go.
 func TestEveryProgramTakesTheSuspendFilter(t *testing.T) {
 	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return err
-		}
-		if filepath.Base(path) == "desk_model_unix.go" {
-			return nil
 		}
 		raw, err := os.ReadFile(path) // #nosec G304 G122 -- source scan of this repo's own tree, read-only
 		if err != nil {
