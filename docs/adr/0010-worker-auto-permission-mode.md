@@ -122,3 +122,13 @@ The boundary is the one this ADR already records: accidents, not adversaries. Th
 - **Admitting event on the row.** Each intake row records `labeler` and `labeled_at` beside `source` and `author`.
 
 This is a stopgap. A worker can give itself a terminal (`script`, `expect`, a pty library, `tmux send-keys`) or type into any herdr pane through herdr-bridge (2026-10-08 amendment). Cheaper still, it can skip intake entirely and write a row straight into the drain's `queue.json`: the file is mode 0600 and owned by the operator, which the worker is, and rows carry no signature, so the drain launches that row with no terminal and no marker check. So the confirmation makes a person the expected reader of the candidate list; it does not prove a person typed the answer. It stops accidents, not adversaries, and it puts a person back in a loop the plan meant to run unattended. The real fix is the one this ADR already names: a separate agent identity for workers (the per-worker GitHub App token, forgectl#1134), so the labeler check can tell the operator from a worker.
+
+## Amendment 2026-10-20: workers get a GitHub App identity
+
+Cameron's decision (cameronsjo/forgectl#1309): workers stop acting on GitHub as the operator and use a GitHub App, `forgectl-worker`, not a machine user. A machine user's fine-grained token cannot reach repositories another personal account owns, so it would need a classic `repo` token, broad and valid for up to a year. An App token is scoped to one repository and a fixed permission set, and expires in an hour.
+
+- With `[surface.identity]` configured, each launch mints a token for the worker's one repository (Contents and Pull requests write, Issues and Metadata read) and hands it over through a private `gh` config directory. `git` pushes over HTTPS with it and commits as the bot; `SSH_AUTH_SOCK` leaves the allowlist. The drain refreshes the token; close and reap revoke it.
+- Intake refuses a candidate the bot authored or labeled. Terminal confirmation stays, because a worker can still write `queue.json` directly.
+- A mint failure refuses the launch rather than falling back to the operator.
+
+What it does not change: a worker still runs as the operator's uid, so it can read the operator's keychain `gh` login and the App key on purpose. This fixes attribution and accidents, not adversaries (cameronsjo/cadence-ecosystem ADR-0046). The sandbox in forgectl#1134 §4 remains the path to containment. Behavior: `openspec/changes/worker-github-app/`.
