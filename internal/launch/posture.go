@@ -231,6 +231,10 @@ type WorkerPosture struct {
 	// Refused is the worker floor's (or the worker profile's) refusal, or ""
 	// when a worker may start with this posture.
 	Refused string
+	// Settings is the [launch.worker] settings file a claude worker merges
+	// into its --settings, as configured, or "" for none. A file the launch
+	// would refuse is reported in Refused.
+	Settings string
 }
 
 // ResolveWorkerPosture resolves the worker posture for cwd through the same
@@ -263,6 +267,13 @@ func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject
 	w.Values, w.Notes = values, notes
 	if _, err := applyWorkerFloor(p); err != nil {
 		w.Refused = err.Error()
+		return w
+	}
+	if p.Harness == "claude" && lc.Worker.Settings != "" {
+		w.Settings = lc.Worker.Settings
+		if _, err := readWorkerSettingsFor(lc.Worker.Settings, os.UserHomeDir); err != nil {
+			w.Refused = err.Error()
+		}
 	}
 	return w
 }
