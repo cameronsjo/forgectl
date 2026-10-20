@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.51.1](https://github.com/cameronsjo/forgectl/compare/v0.51.0...v0.51.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **build:** stop pinning Go in .mise.toml ([#1301](https://github.com/cameronsjo/forgectl/issues/1301)) ([a14ed74](https://github.com/cameronsjo/forgectl/commit/a14ed7488266c3f5d12278871444397364a6759d))
+* **surface:** stop forwarding the launcher's cmux panel and terminal-lifecycle ids to a surface-launched harness ([fff4e6d](https://github.com/cameronsjo/forgectl/commit/fff4e6dc89100936d908e7be125c938279a18626))
+
 ## [0.51.0](https://github.com/cameronsjo/forgectl/compare/v0.50.0...v0.51.0) (2026-10-18)
 
 
