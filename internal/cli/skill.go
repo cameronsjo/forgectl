@@ -4,10 +4,12 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/skill"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // skillExitUsage is the exit code for a refused --skill invocation.
@@ -17,17 +19,20 @@ const skillExitUsage = 2
 // RunE (rootRun) acts on them; real flags put --skill in --help and keep
 // `--install` from parsing as a verb.
 func addSkillFlags(root *cobra.Command) {
-	root.Flags().Bool("skill", false, "print the agent skill (--install <dir> writes it)")
+	root.Flags().Bool("skill", false, "print the agent skill, or one reference file by name (--install <dir> writes it)")
 	// Hidden: --skill's description names it, and --help is held to a size bound
 	// (forgectl#1086) a second flag row would break.
 	root.Flags().String("install", "", "with --skill: write the skill to this absolute directory")
 	_ = root.Flags().MarkHidden("install")
 }
 
-// runRootSkill handles `forgectl --skill [--install <dir>]`. It reports
-// handled=false when --skill is absent, so the root falls through to its usual
-// help. --install without --skill is a usage error rather than a silent no-op.
-func runRootSkill(cmd *cobra.Command, _ []string) (handled bool, err error) {
+// runRootSkill handles `forgectl --skill [<reference> | --install <dir>]`. It
+// reports handled=false when --skill is absent, so the root falls through to
+// its usual help. --install without --skill is a usage error rather than a
+// silent no-op. A reference name prints that one file from references/, so a
+// skill can read it without installing the whole tree; an unknown name lists
+// the valid ones.
+func runRootSkill(cmd *cobra.Command, args []string) (handled bool, err error) {
 	wantSkill, _ := cmd.Flags().GetBool("skill")
 	installDir, _ := cmd.Flags().GetString("install")
 	installSet := cmd.Flags().Changed("install")
@@ -37,6 +42,21 @@ func runRootSkill(cmd *cobra.Command, _ []string) (handled bool, err error) {
 			return true, WithExitCode(fmt.Errorf("--install only works with --skill: forgectl --skill --install <absolute-dir>"), skillExitUsage)
 		}
 		return false, nil
+	}
+	if len(args) > 1 {
+		return true, WithExitCode(fmt.Errorf("--skill takes at most one reference name: forgectl --skill [<reference>]"), skillExitUsage)
+	}
+	if len(args) == 1 {
+		if installSet {
+			return true, WithExitCode(fmt.Errorf("--install writes the whole skill and takes no reference name: forgectl --skill --install <absolute-dir>"), skillExitUsage)
+		}
+		text, err := skill.Reference(args[0])
+		if err != nil {
+			return true, WithExitCode(fmt.Errorf("unknown skill reference %s; valid names: %s",
+				termsafe.QuoteArgMax(args[0], termsafe.ArgEchoMaxRunes), strings.Join(skill.References(), ", ")), skillExitUsage)
+		}
+		_, err = fmt.Fprint(cmd.OutOrStdout(), text)
+		return true, err
 	}
 	if !installSet {
 		_, err := fmt.Fprint(cmd.OutOrStdout(), skill.Text())
