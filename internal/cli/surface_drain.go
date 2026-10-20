@@ -522,8 +522,9 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 
 func newSurfaceDrainEventsCmd() *cobra.Command {
 	var (
-		asJSON bool
-		since  int64
+		asJSON    bool
+		latestRun bool
+		since     int64
 	)
 	cmd := &cobra.Command{
 		Use:   "events",
@@ -539,7 +540,9 @@ claude-slots missing, and with [surface.merge]
 mode auto the autopilot's merges (merged) and refusals (merge-refused, once
 per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
-seq; a cursor resets when the drain restarts.
+seq; a cursor resets when the drain restarts. Without --since (or with
+--since 0) every run in the file prints; --latest-run keeps only the latest
+run's events, from its seq 1 on.
 
 --json prints {"events":[{"v","ts","seq","kind","name","repo","state",
 "attempt","error","note"}]}.
@@ -547,18 +550,20 @@ seq; a cursor resets when the drain restarts.
 Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 
   forgectl surface drain events
+  forgectl surface drain events --latest-run --json
   forgectl surface drain events --since 40 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSurfaceDrainEvents(cmd, since, asJSON)
+			return runSurfaceDrainEvents(cmd, since, latestRun, asJSON)
 		},
 	}
 	cmd.Flags().Int64Var(&since, "since", 0, "print only the latest drain run's events after this seq")
+	cmd.Flags().BoolVar(&latestRun, "latest-run", false, "print only the latest drain run's events (--since already implies it)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error","note"}]} as JSON`)
 	return cmd
 }
 
-func runSurfaceDrainEvents(cmd *cobra.Command, since int64, asJSON bool) error {
+func runSurfaceDrainEvents(cmd *cobra.Command, since int64, latestRun, asJSON bool) error {
 	if since < 0 {
 		return WithExitCode(fmt.Errorf("--since must be 0 or more, got %d", since), exitUsage)
 	}
@@ -573,6 +578,9 @@ func runSurfaceDrainEvents(cmd *cobra.Command, since int64, asJSON bool) error {
 	events, err := drain.ParseEvents(older, current)
 	if err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	if latestRun {
+		events = drain.LatestRun(events)
 	}
 	events = drain.Since(events, since)
 	if asJSON {

@@ -823,7 +823,9 @@ func TestDrainStatusAndEvents(t *testing.T) {
 	if err := files.WriteStatus(lock, data); err != nil {
 		t.Fatal(err)
 	}
-	for i, e := range []drain.Event{{Seq: 1, Kind: drain.EventStart}, {Seq: 2, Kind: drain.EventState, Name: "w", State: "claimed"}, {Seq: 3, Kind: drain.EventState, Name: "w", State: "launched"}} {
+	// Two runs: an earlier one of two events, then the latest of three.
+	for i, e := range []drain.Event{{Seq: 1, Kind: drain.EventStart}, {Seq: 2, Kind: drain.EventStop},
+		{Seq: 1, Kind: drain.EventStart}, {Seq: 2, Kind: drain.EventState, Name: "w", State: "claimed"}, {Seq: 3, Kind: drain.EventState, Name: "w", State: "launched"}} {
 		e.TS = drainT0.Add(time.Duration(i) * time.Second)
 		line, err := drain.EncodeEvent(e)
 		if err != nil {
@@ -846,8 +848,24 @@ func TestDrainStatusAndEvents(t *testing.T) {
 		t.Fatalf("events --since 2: %q, %v", out, err)
 	}
 	out, err = runQueueCmd(t, newSurfaceDrainEventsCmd())
-	if err != nil || strings.Count(out, "\n") != 3 || !strings.Contains(out, "#3 state w launched") {
-		t.Fatalf("events text: %q, %v", out, err)
+	if err != nil || strings.Count(out, "\n") != 5 || !strings.Contains(out, "#3 state w launched") {
+		t.Fatalf("events text: %q, %v; want both runs", out, err)
+	}
+	// --latest-run keeps the latest run only; --since 0 still means every run.
+	out, err = runQueueCmd(t, newSurfaceDrainEventsCmd(), "--latest-run", "--json")
+	ev = drainEventsResult{}
+	if err != nil || json.Unmarshal([]byte(out), &ev) != nil || len(ev.Events) != 3 || ev.Events[0].Kind != drain.EventStart || ev.Events[2].State != "launched" {
+		t.Fatalf("events --latest-run: %q, %v; want the latest run's 3 events", out, err)
+	}
+	out, err = runQueueCmd(t, newSurfaceDrainEventsCmd(), "--since", "0", "--json")
+	ev = drainEventsResult{}
+	if err != nil || json.Unmarshal([]byte(out), &ev) != nil || len(ev.Events) != 5 {
+		t.Fatalf("events --since 0: %q, %v; want all 5", out, err)
+	}
+	out, err = runQueueCmd(t, newSurfaceDrainEventsCmd(), "--latest-run", "--since", "2", "--json")
+	ev = drainEventsResult{}
+	if err != nil || json.Unmarshal([]byte(out), &ev) != nil || len(ev.Events) != 1 || ev.Events[0].State != "launched" {
+		t.Fatalf("events --latest-run --since 2: %q, %v", out, err)
 	}
 }
 
