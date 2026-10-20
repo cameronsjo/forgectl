@@ -5,6 +5,8 @@
 
 Every plan carries a `status:` in its frontmatter, one of `current`, `in-flight`, `proposed`, `done`, `superseded`. This page is generated from them.
 
+No new plans land here after 2026-10-20. New work is proposed as an OpenSpec change under [`openspec/changes/`](../../openspec/changes/), and the current behavior lives in [`openspec/specs/`](../../openspec/specs/). The plans below finish where they are.
+
 ## Current
 
 Forward-looking and in force until a later one supersedes it.

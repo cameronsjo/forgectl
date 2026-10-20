@@ -1,0 +1,32 @@
+schema: spec-driven
+
+# Constraints an agent cannot infer from the code. Everything else (layout,
+# commands, gotchas) is in AGENTS.md and docs/; keep it there, not here.
+context: |
+  forgectl is a Go CLI that agents drive as often as people do. Every change
+  holds to the agent contract (docs/adr/0008-agent-contract.md): no prompt
+  without a TTY, --json on anything that prints state, the exit codes in
+  docs/exit-codes.md, and the --json failure object in docs/json-contract.md.
+  A secret value never reaches argv, a log line, or a transcript.
+  A durable design decision also gets an ADR in docs/adr/; the spec says what
+  the behavior is, the ADR says why it is that way.
+  docs/plans/ is frozen history (no new plans after 2026-10-20). Read a done
+  plan as background, never as a requirement.
+  Run the OpenSpec CLI as scripts/openspec.sh (the pinned version), not a
+  bare `openspec` or `npx`.
+  Commits and PR titles are Conventional Commits. CHANGELOG.md is written by
+  Release Please only.
+
+rules:
+  proposal:
+    - Link the GitHub issue the change implements (cameronsjo/forgectl#N). Every change has one.
+    - Name every user-facing surface the change touches (verb, flag, --json field, exit code, config key) so docs/commands/ and the skill can be updated with it.
+  specs:
+    - Spec observable behavior (verbs, flags, output, exit codes, files a user relies on), never internal package or type names.
+  tasks:
+    - End with a task to update the matching docs/commands/ page and the README Usage roster when a verb or flag changes.
+
+operations:
+  archive:
+    guidance:
+      - Archive only after the implementing PR has merged to main.
