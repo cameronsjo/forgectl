@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.52.0](https://github.com/cameronsjo/forgectl/compare/v0.51.1...v0.52.0) (2026-10-21)
+
+
+### Features
+
+* **cli:** unknown verbs under --json get an unknown_command object ([4a25a27](https://github.com/cameronsjo/forgectl/commit/4a25a27f435625b24c4dd4018566bbb85d30af94))
+* **cli:** unknown verbs under --json get an unknown_command object ([2bb57dc](https://github.com/cameronsjo/forgectl/commit/2bb57dc3531c55665938a1a66f8fed9ecb3b3607))
+* **launch:** [launch.worker] settings names a JSON file merged into each claude worker's --settings; it can only turn plugins off, hide skills, set the output style, and add deny rules ([582dc73](https://github.com/cameronsjo/forgectl/commit/582dc73d3ad55249da5225dd49ff25689e7d7af8))
+* **launch:** [launch.worker] tools gives claude workers only the listed built-in tools (--tools) ([ccb8061](https://github.com/cameronsjo/forgectl/commit/ccb80613cc976b05f4d1393f003edf42a801b01e))
+* queue, drain and desk --json rows carry a shared work status (status, on, reason, evidence) beside their native state ([c13a56c](https://github.com/cameronsjo/forgectl/commit/c13a56cf7ff7cf7fe9dd5386c053e9cbaa6ab10c))
+* **review:** add --lint-sha256 and $FORGECTL_LINT_SHA256; with no canonical lint hash from the flag, the env, or the script beside the registry, every release-pr row with a lint copy reads unknown ([f5cacf9](https://github.com/cameronsjo/forgectl/commit/f5cacf9a0cfc9313d0ec9fd15766d14ac61ecca7))
+* **review:** add --lint-sha256 and $FORGECTL_LINT_SHA256; with no canonical lint hash from the flag, the env, or the script beside the registry, every release-pr row with a lint copy reads unknown ([06f95e3](https://github.com/cameronsjo/forgectl/commit/06f95e3eb07e579c9d1fa0c8a80212a8fdfd5129))
+* **review:** add --lint-sha256 and $FORGECTL_LINT_SHA256; with no canonical lint hash from the flag, the env, or the script beside the registry, every release-pr row with a lint copy reads unknown ([aff4454](https://github.com/cameronsjo/forgectl/commit/aff4454f0c0c186af9a8f4227a0e1052ed3cf0b5))
+* **review:** the release radar checks each release-pr repo's vendored lint-release-env.sh for drift, as it does ship-gate.sh (lint_copy in --json, a LINT COPY table column) ([f5cacf9](https://github.com/cameronsjo/forgectl/commit/f5cacf9a0cfc9313d0ec9fd15766d14ac61ecca7))
+* **review:** the release radar checks each release-pr repo's vendored lint-release-env.sh for drift, as it does ship-gate.sh (lint_copy in --json, a LINT COPY table column) ([06f95e3](https://github.com/cameronsjo/forgectl/commit/06f95e3eb07e579c9d1fa0c8a80212a8fdfd5129))
+* **review:** the release radar checks each release-pr repo's vendored lint-release-env.sh for drift, as it does ship-gate.sh (lint_copy in --json, a LINT COPY table column) ([aff4454](https://github.com/cameronsjo/forgectl/commit/aff4454f0c0c186af9a8f4227a0e1052ed3cf0b5))
+* **skill:** print one reference file with forgectl --skill &lt;reference&gt; ([c92d67c](https://github.com/cameronsjo/forgectl/commit/c92d67c195cc699fc379b72beb16997d3b622a81))
+* **skill:** print one reference file with forgectl --skill &lt;reference&gt; ([e8c14af](https://github.com/cameronsjo/forgectl/commit/e8c14af629220bb5d48563e1e051d9f9a26710fe))
+* **surface:** drain events --latest-run reads only the latest run ([303f8f6](https://github.com/cameronsjo/forgectl/commit/303f8f6e05c78cde81ec3e6bdeba95bba1aa7e58))
+* **surface:** drain events --latest-run reads only the latest run ([e98a895](https://github.com/cameronsjo/forgectl/commit/e98a895e65c9af22a490085c5a02e4f153d279ee))
+* **surface:** refuse a codex launch into a folder codex has not trusted, naming the `cd <repo root> && codex` fix ([7dcb4d3](https://github.com/cameronsjo/forgectl/commit/7dcb4d305a51443397ec527fca9219d879caf62c))
+
+
+### Bug Fixes
+
+* **desk:** suspend on Ctrl+Z like every other forgectl TUI ([273cce4](https://github.com/cameronsjo/forgectl/commit/273cce4ef4b4890d7e84c6cdcb8b19c3e7dbea89))
+* **desk:** suspend on Ctrl+Z like every other forgectl TUI ([bef7cd1](https://github.com/cameronsjo/forgectl/commit/bef7cd1e379e534ff0679cb1169b00a3c5c58ea5))
+* **launch:** deny forgectl tasks done in every claude worker's settings ([dd0b5bf](https://github.com/cameronsjo/forgectl/commit/dd0b5bf3baf4c0a22593e47d4f732bc42b83d2e7))
+* **launch:** deny forgectl tasks done in every claude worker's settings ([0438ed4](https://github.com/cameronsjo/forgectl/commit/0438ed45803dbcc20968e222cdfdb3d065feb923))
+* **openspec:** refuse wrapper subcommands that reach outside the repo ([7613a24](https://github.com/cameronsjo/forgectl/commit/7613a2452b49250b863b2cff4f0d2a536d29d855))
+* **surface:** word the worker rules so an echo is no marker mention ([736e5fc](https://github.com/cameronsjo/forgectl/commit/736e5fc46688da03dc19ca55010a9469b56b70b0))
+* **surface:** word the worker rules so an echo is no marker mention ([b3d3f9f](https://github.com/cameronsjo/forgectl/commit/b3d3f9f37f5ce3efebf7dd183c99ccd1455ff05a))
+
 ## [0.51.1](https://github.com/cameronsjo/forgectl/compare/v0.51.0...v0.51.1) (2026-10-20)
 
 
