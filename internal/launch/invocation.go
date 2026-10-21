@@ -237,14 +237,23 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // classifier would be the only check on its shell (forgectl#1060). Off, a
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
+//
+// The one deny rule keeps a worker from closing a board task with
+// `forgectl tasks done`: a board write cannot be undone, the operator or the
+// coordinator closes the task once the work lands, and a deny holds in every
+// permission mode, even over the operator's own allow rules (ADR-0010,
+// 2026-10-20 amendment). It backs up the FORGECTL_DRAIN_WORKER refusal, which
+// a worker can unset.
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
 // every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
 // allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
-	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
+	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // withWorkerSettings inserts the worker settings right after the posture's
 // leading --permission-mode pair:
