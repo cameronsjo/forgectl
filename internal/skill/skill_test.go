@@ -3,6 +3,7 @@
 package skill
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -139,5 +140,23 @@ func TestInstall_HardlinkIsReplacedNotWrittenThrough(t *testing.T) {
 	}
 	if installed, _ := os.ReadFile(filepath.Join(dir, "SKILL.md")); string(installed) != Text() { //nolint:gosec // G304: test path
 		t.Error("SKILL.md was not installed")
+	}
+}
+
+func TestReference_ReadsOnlyFilesInReferences(t *testing.T) {
+	got, err := Reference("desk.md")
+	if err != nil {
+		t.Fatalf("Reference(desk.md): %v", err)
+	}
+	if !strings.HasPrefix(got, "# Desk") {
+		t.Errorf("Reference(desk.md) starts %q", got[:min(len(got), 40)])
+	}
+	if alias, err := Reference("references/desk.md"); err != nil || alias != got {
+		t.Errorf("Reference(references/desk.md) = %v, want the same text as desk.md", err)
+	}
+	for _, name := range []string{"", "SKILL.md", "../SKILL.md", "references/../SKILL.md", "references", "desk"} {
+		if _, err := Reference(name); !errors.Is(err, ErrUnknownReference) {
+			t.Errorf("Reference(%q) = %v, want ErrUnknownReference", name, err)
+		}
 	}
 }

@@ -2,6 +2,8 @@ package drain
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -23,6 +25,28 @@ const (
 	// reported rows costs a bounded number of GitHub calls per tick.
 	CloserReadsPerTick = 4
 )
+
+// mergedWhyFormat is the close reason the closer records on a row whose PR
+// merged. MergedPR reads it back, so the two cannot drift apart.
+const mergedWhyFormat = "PR #%d merged; the drain closed the worker"
+
+var mergedWhyRe = regexp.MustCompile(`^PR #([0-9]{1,9}) merged; the drain closed the worker(;|$)`)
+
+// MergedPR reports the PR number a closed row's last_error names when the
+// closer closed it after that PR merged. It is the only merge record a queue
+// row carries: false means the row did not close through a merge the closer
+// saw, not that no merge happened.
+func MergedPR(lastError string) (int, bool) {
+	m := mergedWhyRe.FindStringSubmatch(lastError)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
 
 // PRState is a worker PR's state as the closer reads it.
 type PRState string
@@ -88,7 +112,7 @@ func DecideCloser(q worker.QueueRow, pr PRRead, now time.Time) CloserDecision {
 	switch pr.State {
 	case PRMerged:
 		d.Close, d.Merged = true, true
-		d.Why = fmt.Sprintf("PR #%d merged; the drain closed the worker", pr.Number)
+		d.Why = fmt.Sprintf(mergedWhyFormat, pr.Number)
 	case PRClosed:
 		if q.PRClosedAt == nil {
 			at := now.UTC().Truncate(time.Second)

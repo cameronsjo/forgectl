@@ -31,17 +31,18 @@ Every forgectl-assigned exit code is one of these. Branch on the exit status fir
 | 1 | `failed` | The verb ran and the result did not hold: a failed step, drift, a partial result, a refusal that carries its reason, a degraded `--strict` report. The default for any error with no class. | Read the output. Re-run once if it names a transient cause; otherwise stop and report. |
 | 2 | `usage` | Nothing was attempted, and the caller or operator can fix it by changing the call or the setup: a bad flag or argument, an unknown verb, a malformed name, something absent or unconfigured (no terminal, no herdr pane, no backend on `PATH`), a config that does not parse. | Stop. Fix the call or setup. Do not retry it unchanged. |
 | 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | Stop. Escalate to whoever owns the credential. |
-| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal, and `tasks done` and `tasks mcp` inside a drain worker (cameronsjo/forgectl#1226). | Stop. Escalate. |
+| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today `tasks` host refusal, `tasks done` and `tasks mcp` inside a drain worker (cameronsjo/forgectl#1226), and `surface send` between two workers while `peer_messages` is off. | Stop. Escalate. |
 | 5 | `unreachable` (reserved) | A configured dependency is present but did not answer: the instance, the network, a socket. | Retry with backoff, then escalate. |
 | 6 | `not_found` (reserved) | The thing the caller named does not exist: a task id, a worker, an item, a run. | Stop. List or inspect to find the right name. |
 
 The boundary between 2 and 5: absent or unconfigured is 2, configured and present but silent is 5.
 
-Phase 1 emits only 0 to 4 (plus the four verb exceptions below, and 75, 130 and 141 outside the table). **5 and 6 are reserved: no verb emits them until Phase 2 is built.** A new verb must not use them for anything else.
+Phase 1 emits only 0 to 4 (plus the four verb exceptions below, and 7, 75, 130 and 141 outside the table). **5 and 6 are reserved: no verb emits them until Phase 2 is built.** A new verb must not use them for anything else.
 
 Outside the table, documented once in the same place:
 
-- **75** (`desk watch` reached `--deadline`; the last line holds the resume command), **130** (interrupted) and **141** (stdout closed) already ship in `desk.go`. `resume` also uses 130 for a cancelled pick.
+- **7** (`tasks ls`, `show` and `ready` refused a board cache older than 72h; `--allow-stale` serves it. Added 2026-10-17, [#1289](https://github.com/cameronsjo/forgectl/issues/1289), outside the table so 5 and 6 stay reserved.)
+- **75** (`desk watch` reached `--deadline`, and the last line holds the resume command; `surface send` queued a message it could not deliver yet, and a later `send`, `flush` or hook event retries it), **130** (interrupted) and **141** (stdout closed) already ship in `desk.go`. `resume` also uses 130 for a cancelled pick.
 - **Pass-through** verbs return a child's code, which the table does not govern: `launch`, `surface _exec`, `docs read` (the reader's status), `k8s` (kubectl's, including a remote command's), and `desk watch` for its run's rc. Each one's help says so. 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141; a pass-through verb can return them.
 
 ### Root mapping

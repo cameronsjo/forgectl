@@ -458,8 +458,10 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	return err
 }
 
-// checkWorkerFolderTrust refuses a claude worker whose repository Claude Code
-// has not trusted for the account the worker runs as (forgectl#1240). It runs
+// checkWorkerFolderTrust refuses a claude or codex worker whose repository
+// root the harness has not trusted for the account the worker runs as
+// (forgectl#1240). The account is CLAUDE_CONFIG_DIR for claude and
+// CODEX_HOME for codex. It runs
 // before the worktree or ledger row exists. The repository root is checked:
 // the worktree under <repo>/.claude/worktrees/ does not exist yet, and it
 // inherits the root's trust.
@@ -474,10 +476,16 @@ func checkWorkerFolderTrust(lc config.LaunchConfig, top string, spec workerSpec,
 	req := spec.request(lc, worker.WorktreePath(top, spec.name), injected, unset)
 	req.Worker = true
 	built, err := launch.BuildInvocation(req)
-	if err != nil || built.Invocation.Harness != "claude" {
+	if err != nil {
 		return nil //nolint:nilerr // the launch's own build reports this error; the trust check does not pre-empt it
 	}
-	return checkClaudeFolderTrust(top, envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR"))
+	switch built.Invocation.Harness {
+	case "claude":
+		return checkClaudeFolderTrust(top, envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR"))
+	case "codex":
+		return checkCodexFolderTrust(top, top, envValue(built.Invocation.Env, "CODEX_HOME"))
+	}
+	return nil
 }
 
 // errProfileNotClaude refuses --profile for a worker that is not claude.

@@ -45,11 +45,27 @@ A worker MUST inherit only an allowlisted environment (such as `PATH`, `HOME`, `
 - **THEN** the ledger row holds the brief's marker and the harness receives the brief as its prompt argument
 
 ### Requirement: Folder trust preflight
-A claude launch MUST be refused before anything is created when Claude Code has not trusted the launch folder (for a worker, its repository root) for the account the session runs as, naming the `cd <repo root> && claude` fix. forgectl MUST NOT write trust itself. A missing or unreadable account config refuses nothing.
+A claude or codex launch MUST be refused before anything is created when its harness has not trusted the launch folder (for a worker, its repository root) for the account the session runs as (`CLAUDE_CONFIG_DIR` for claude, `CODEX_HOME` for codex), naming the `cd <repo root> && <harness>` fix. forgectl MUST NOT write trust itself. A missing or unreadable account config refuses nothing.
 
 #### Scenario: Untrusted repository
 - **WHEN** a claude worker launch targets a repository absent from the account's trusted folders
 - **THEN** the launch exits non-zero before creating a worktree, branch, ledger row, or surface
+
+#### Scenario: Claude trust inherits
+- **WHEN** Claude Code trusts a parent folder of the launch folder
+- **THEN** a claude launch into it is not refused
+
+#### Scenario: Untrusted codex repository
+- **WHEN** a codex launch, worker or `--dry-run`, targets a repository with no trust entry in `$CODEX_HOME/config.toml`
+- **THEN** the launch exits non-zero before creating anything, naming `cd <repo root> && codex`
+
+#### Scenario: Codex trust does not inherit
+- **WHEN** codex trusts a parent folder but has no entry for the repository root
+- **THEN** a codex launch into the repository is refused
+
+#### Scenario: Any recorded codex decision counts
+- **WHEN** codex has an entry for the repository root, by exact or physical path, with any `trust_level`, `untrusted` included
+- **THEN** a codex launch into it is not refused
 
 ### Requirement: Launch dry run and JSON
 `surface launch --dry-run` SHALL run the launch's pre-write checks and print what it would create, creating no worktree, branch, ledger row, or surface and calling no backend, and MUST NOT print the harness path, arguments, environment, or brief. With `--json`, a real launch prints `{"surface","name","target","harness","ref","workspace_id","tab_id","pane_id","terminal_id","worker"}`, and a worker whose ledger row cannot be completed still prints the object and exits 1.
@@ -138,6 +154,17 @@ Before merging, `surface merge` MUST re-read the PR and required check runs and 
 #### Scenario: Head moved during confirmation
 - **WHEN** a commit is pushed to the PR between the verdict and the merge
 - **THEN** the merge is refused and nothing merges
+
+### Requirement: Drain events by run
+`surface drain events` SHALL print the events file oldest first. `seq` counts from 1 in each drain process. With `--since <n>` above 0 it MUST print only the latest run's events with `seq` above `n`. With no `--since`, or `--since 0`, it SHALL print every run. `--latest-run` MUST limit the output to the latest run, from its last `seq` 1 event on.
+
+#### Scenario: Latest run only
+- **WHEN** the events file holds two runs and `surface drain events --latest-run --json` runs
+- **THEN** only the second run's events print, starting at its `seq` 1
+
+#### Scenario: Zero cursor reads every run
+- **WHEN** the events file holds two runs and `surface drain events --since 0 --json` runs
+- **THEN** both runs' events print
 
 ### Requirement: Worker settings deny board closes
 A claude worker's `--settings` MUST deny `Bash(forgectl tasks done:*)` in every permission mode, so a worker cannot close a board task through that shell command even where the operator's own allow rules would let it. Board MCP tools are not denied.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,17 +9,21 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// errUntrustedFolder refuses a surface launch whose directory Claude Code has
-// never trusted for the account the session will run as (forgectl#1240).
+// errUntrustedFolder refuses a surface launch whose directory the harness
+// (Claude Code or codex) has never trusted for the account the session will
+// run as (forgectl#1240).
 // Without it the launch exits 0 and the session sits at the folder-trust
 // dialog in a pane nobody may be watching, and the first sign is `surface
 // ready` reporting the dialog. forgectl never writes trust itself: the dialog
 // guards repo-supplied hooks, MCP servers and CLAUDE.md, so the operator
 // answers it once, by hand.
-var errUntrustedFolder = errors.New("launch: Claude Code has not trusted this folder")
+var errUntrustedFolder = errors.New("launch: the harness has not trusted this folder")
 
 // claudeTrustState is what the folder-trust check could tell.
 type claudeTrustState int
@@ -129,6 +134,112 @@ func checkClaudeFolderTrust(dir, configDir string) error {
 	}
 	return fmt.Errorf("%w: %s has no trusted entry, for it or a parent, in %s; trust it once by hand: cd %s && %s, accept the folder-trust dialog, then /exit",
 		errUntrustedFolder, termsafe.QuotePath(dir), termsafe.QuotePath(file), quoteShellWord(dir), run)
+}
+
+// codexConfigFile is the file codex keeps folder trust in:
+// <CODEX_HOME>/config.toml, else ~/.codex/config.toml. "" when neither a
+// CODEX_HOME nor a home directory is known.
+func codexConfigFile(codexHome, home string) string {
+	if codexHome != "" {
+		return filepath.Join(codexHome, "config.toml")
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+// codexFolderTrust reports whether codex has a trust decision for any of
+// dirs in its config file. Unlike Claude Code, codex does not inherit trust
+// from a parent: a trusted home directory did not cover a new repository
+// inside it (codex-cli 0.163.0, forgectl#1240). It keeps one
+// [projects."<path>"] entry per folder, written under the repository root's
+// physical path. So each dir counts by its exact spelling and its physical
+// path, and no parent counts.
+//
+// Any recorded trust_level counts, "untrusted" included: that is a decision
+// the operator already made, and codex does not ask again. Only a folder with
+// no entry at all gets the dialog.
+func codexFolderTrust(configFile string, dirs ...string) claudeTrustState {
+	if configFile == "" {
+		return trustUnknown
+	}
+	data, err := os.ReadFile(configFile) //nolint:gosec // G304: the harness account's own config file, read only
+	if err != nil {
+		return trustUnknown
+	}
+	var doc struct {
+		Projects map[string]struct {
+			TrustLevel string `toml:"trust_level"`
+		} `toml:"projects"`
+	}
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		return trustUnknown
+	}
+	decided := func(path string) bool {
+		for _, key := range []string{path, filepath.ToSlash(path)} {
+			if entry, ok := doc.Projects[key]; ok && entry.TrustLevel != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if decided(filepath.Clean(dir)) {
+			return trustTrusted
+		}
+		if physical, err := filepath.EvalSymlinks(dir); err == nil && decided(physical) {
+			return trustTrusted
+		}
+	}
+	return trustUntrusted
+}
+
+// checkCodexFolderTrust refuses a codex launch when the account whose home is
+// codexHome ("" for the default ~/.codex) has no trust entry for dir or for
+// root, its repository root ("" outside a repository). The fix names root
+// when there is one: codex applies trust to the repository root. Only a
+// definite "untrusted" refuses; an unreadable config lets the launch go ahead.
+func checkCodexFolderTrust(dir, root, codexHome string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	file := codexConfigFile(codexHome, home)
+	if codexFolderTrust(file, dir, root) != trustUntrusted {
+		return nil
+	}
+	fixDir := root
+	if fixDir == "" {
+		fixDir = dir
+	}
+	run := "codex"
+	if codexHome != "" {
+		run = "CODEX_HOME=" + quoteShellWord(codexHome) + " codex"
+	}
+	return fmt.Errorf("%w: %s has no trust entry in %s; trust it once by hand: cd %s && %s, accept \"Trust this folder\", then /quit",
+		errUntrustedFolder, termsafe.QuotePath(fixDir), termsafe.QuotePath(file), quoteShellWord(fixDir), run)
+}
+
+// checkSurfaceFolderTrust is the trust preflight for a plain surface launch:
+// the claude check for a claude session, the codex check (with the folder's
+// repository root, when it is in one) for a codex session. Other harnesses
+// are not checked.
+func checkSurfaceFolderTrust(ctx context.Context, run worker.GitRunner, harness, dir string, env []string) error {
+	switch harness {
+	case "claude":
+		return checkClaudeFolderTrust(dir, envValue(env, "CLAUDE_CONFIG_DIR"))
+	case "codex":
+		root, err := worker.RepoTop(ctx, run, dir)
+		if err != nil {
+			root = "" // not a repository: codex trusts the folder itself
+		}
+		return checkCodexFolderTrust(dir, root, envValue(env, "CODEX_HOME"))
+	}
+	return nil
 }
 
 // quoteShellWord is shellQuote for a command printed in an error, falling

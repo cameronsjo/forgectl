@@ -25,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tui"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // errDeskDumbTerminal is the dashboard's refusal under TERM=dumb (#1152).
@@ -513,6 +514,8 @@ type deskItemJSON struct {
 	Refusal         string     `json:"refusal"`
 	Hold            string     `json:"hold"`
 	PID             int        `json:"pid"`
+	// Work is the item's state in the shared vocabulary (internal/workstate).
+	Work workstate.Work `json:"work"`
 }
 
 // deskStatusJSON is `desk status --json`.
@@ -564,6 +567,7 @@ func itemView(it desk.Item, now time.Time) deskItemJSON {
 		What: it.What, Why: it.Why, TTY: it.TTY, After: it.After, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
 		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, Hold: it.Hold, PID: it.Meta.PID,
+		Work: workstate.ForDeskItem(it),
 	}
 	if v.After == nil {
 		v.After = []string{}

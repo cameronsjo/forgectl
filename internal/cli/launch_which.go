@@ -127,6 +127,9 @@ type launchWhichWorkerJSON struct {
 	Posture []launchWhichPostureJSON `json:"posture"`
 	Notes   []string                 `json:"notes"`
 	Refused string                   `json:"refused,omitempty"`
+	// Settings is the [launch.worker] settings file a claude worker merges
+	// into its --settings, as configured (#1323).
+	Settings string `json:"settings,omitempty"`
 }
 
 type launchWhichPostureJSON struct {
@@ -136,7 +139,7 @@ type launchWhichPostureJSON struct {
 }
 
 func buildLaunchWhichWorkerJSON(w launch.WorkerPosture) *launchWhichWorkerJSON {
-	out := &launchWhichWorkerJSON{Harness: w.Harness, Posture: []launchWhichPostureJSON{}, Notes: []string{}, Refused: w.Refused}
+	out := &launchWhichWorkerJSON{Harness: w.Harness, Posture: []launchWhichPostureJSON{}, Notes: []string{}, Refused: w.Refused, Settings: w.Settings}
 	for _, v := range w.Values {
 		out.Posture = append(out.Posture, launchWhichPostureJSON(v))
 	}
@@ -174,6 +177,9 @@ func printWorkerPosture(w io.Writer, th theme.Theme, p launch.WorkerPosture) {
 
 	view := buildLaunchWhichWorkerJSON(p)
 	row("worker", workerPostureSummary(view), valueStyle.Render)
+	if view.Settings != "" {
+		row("", "settings: "+view.Settings, valueStyle.Render)
+	}
 	if view.Refused != "" {
 		row("", "refused: "+view.Refused, dimStyle.Render)
 	}

@@ -229,6 +229,10 @@ type LaunchWorker struct {
 	PermissionMode string `toml:"permission_mode,omitempty"`
 	Sandbox        string `toml:"sandbox,omitempty"`
 	ApprovalPolicy string `toml:"approval_policy,omitempty"`
+	// Settings is a JSON file merged into a claude worker's --settings. It
+	// may only remove things (plugins, skills, agents, the output style);
+	// internal/launch/workersettings.go says which keys it takes (#1323).
+	Settings string `toml:"settings,omitempty"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project

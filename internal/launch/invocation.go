@@ -266,7 +266,11 @@ const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{
 // --permission-mode anywhere could anchor on a user token in a passthrough
 // argv. Any other shape means a posture builder changed, and the launch is
 // refused rather than started without the setting.
-func withWorkerSettings(args []string) ([]string, error) {
+//
+// file is the operator's [launch.worker] settings file, already read and
+// checked (nil for none); its keys are laid over the built-in settings by
+// mergeWorkerSettings, which never lets it change one forgectl sets.
+func withWorkerSettings(args []string, file *workerSettingsFile) ([]string, error) {
 	if len(args) < 2 || args[0] != "--permission-mode" {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
@@ -276,6 +280,10 @@ func withWorkerSettings(args []string) ([]string, error) {
 	settings := workerClaudeSettings
 	if args[1] == "acceptEdits" {
 		settings = workerClaudeEditSettings
+	}
+	settings, err := mergeWorkerSettings(settings, file)
+	if err != nil {
+		return nil, err
 	}
 	out = append(out, "--settings", settings)
 	return append(out, args[2:]...), nil
@@ -464,7 +472,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, err
 	}
 	if req.Worker && profile.Harness == "claude" {
-		if harnessArgs, err = withWorkerSettings(harnessArgs); err != nil {
+		var file *workerSettingsFile
+		if file, err = readWorkerSettingsFor(req.Config.Worker.Settings, os.UserHomeDir); err != nil {
+			return BuiltInvocation{}, err
+		}
+		if harnessArgs, err = withWorkerSettings(harnessArgs, file); err != nil {
 			return BuiltInvocation{}, err
 		}
 	}

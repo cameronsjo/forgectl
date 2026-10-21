@@ -353,12 +353,11 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if err != nil {
 		return err
 	}
-	// Before anything is created, and in --dry-run too: a claude session in a
-	// folder its account never trusted would sit at the trust dialog.
-	if built.Invocation.Harness == "claude" {
-		if err := checkClaudeFolderTrust(built.Invocation.CWD, envValue(built.Invocation.Env, "CLAUDE_CONFIG_DIR")); err != nil {
-			return err
-		}
+	// Before anything is created, and in --dry-run too: a claude or codex
+	// session in a folder its account never trusted would sit at the trust
+	// dialog.
+	if err := checkSurfaceFolderTrust(cmd.Context(), deps.Runner, built.Invocation.Harness, built.Invocation.CWD, built.Invocation.Env); err != nil {
+		return err
 	}
 
 	if opts.DryRun {

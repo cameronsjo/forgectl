@@ -281,6 +281,23 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
+**Trimming a claude worker: `settings`.** A worker loads everything an interactive session loads. To give it less, point `[launch.worker] settings` at a JSON file. forgectl merges it into the `--settings` document every claude worker already gets:
+
+```toml
+[launch.worker]
+settings = "~/.config/forgectl/worker-settings.json"
+```
+
+```json
+{
+  "enabledPlugins": { "artificer-voice@workbench": false, "cadence-palette@workbench": false },
+  "outputStyle": "default",
+  "permissions": { "deny": ["Agent(cadence:doc-writer)", "Agent(cadence-voice:editorial-reviewer)"] }
+}
+```
+
+The file can only take things away, so it cannot add a permission or a hook. It can still remove protections: turning off a guard plugin such as `cadence-guardrails` turns off its guards for the worker. It accepts four keys: `enabledPlugins` with `false` values (turns a plugin off for the worker, with its skills, agents, hooks, output style and MCP servers), `skillOverrides` with `off` only (Claude Code 2.1.305 applies it to user and synced skills, not plugin skills), `outputStyle`, and `permissions.deny` (an `Agent(plugin:agent)` rule also drops the agent from the worker's listing). Anything else refuses the launch: `permissions.allow`, `defaultMode`, `hooks`, `env`, a plugin set to `true`, a deny rule outside the `Tool`, `Tool(specifier)` or `mcp__…` shape, or a missing or unreadable file. A key forgectl sets keeps forgectl's value, and deny rules add to forgectl's. Codex and pi workers never read the file. `forgectl launch which` shows the file on a `settings:` line under the worker row (`worker.settings` under `--json`) and reports a file the launch would refuse.
+
 A pi worker takes none of these fields: pi has no permission or sandbox flag, so it runs with pi's own config and extensions, as a claude worker runs with your settings (ADR-0010, 2026-10-08 amendment). It still takes no harness args, and `allow_danger` and `add_dir` are cleared.
 
 A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `auto`, `workspace-write` and `on-request`. Setting `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. `auto` is allowed (ADR-0010, 2026-10-07): set `permission_mode = "auto"` in `[launch.worker]` to send a worker's tool calls to Claude Code's classifier instead of prompting; a project block that sets `acceptEdits` or stricter still wins. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.

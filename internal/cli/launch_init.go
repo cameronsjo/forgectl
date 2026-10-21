@@ -89,6 +89,7 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # permission_mode = "acceptEdits"   # "plan" keeps workers read-only; "auto" runs them unattended
 # sandbox         = "workspace-write"
 # approval_policy = "on-request"
+# settings        = "~/.config/forgectl/worker-settings.json"  # claude workers: JSON that turns plugins off and denies agents
 `
 
 func newLaunchInitCmd(boundary *config.LegacyMigrationBoundary) *cobra.Command {

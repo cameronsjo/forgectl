@@ -32,6 +32,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // deskRun runs `desk ARGS` against a fresh command tree and returns stdout,
@@ -364,6 +365,14 @@ func TestDeskStatus(t *testing.T) {
 	}
 	if len(snap.Pending) != 1 || snap.Pending[0].SHA256 != sha || len(snap.Done) != 1 || snap.Done[0].ExitCode == nil || *snap.Done[0].ExitCode != 3 {
 		t.Errorf("status --json = %+v", snap)
+	}
+	// A done item that exited 3 did not meet its goal: it is blocked on the
+	// operator, not resolved.
+	if len(snap.Pending) == 1 && snap.Pending[0].Work != (workstate.Work{Status: workstate.Blocked, On: workstate.Operator, Reason: "approve or skip"}) {
+		t.Errorf("waiting item work = %+v", snap.Pending[0].Work)
+	}
+	if len(snap.Done) == 1 && snap.Done[0].Work != (workstate.Work{Status: workstate.Blocked, On: workstate.Operator, Reason: "failed: exit 3"}) {
+		t.Errorf("done item work = %+v", snap.Done[0].Work)
 	}
 
 	out, _, err = deskRun(t, deskDeps(), "status", waiting)
