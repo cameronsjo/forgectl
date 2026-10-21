@@ -2,7 +2,6 @@ package worker
 
 import (
 	"errors"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -187,12 +186,12 @@ func TestFindReportCapsLength(t *testing.T) {
 
 // TestComposeLaunchCarriesTheWorkerRules pins forgectl's rule in every launch
 // brief: never post a review marker, approve, or merge. It sits between the
-// task and the report instruction, and holds no "cadence-review:" with a
-// colon, so a worker echoing it posts nothing the merge policy reads as a
-// marker.
+// task and the report instruction. That a worker echoing it posts no marker
+// mention is TestWorkerRulesMentionNoMarker's to say, in merge, which owns
+// the scan.
 func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 	got := Compose("Fix the login bug.", testMarker, ViaLaunch)
-	for _, want := range []string{"never post a cadence-review marker", "never approve a pull request", "never merge one", "never create, comment on or mark done a board task"} {
+	for _, want := range []string{"never post the merge policy's review marker", "never approve a pull request", "never merge one", "never create, comment on or mark done a board task"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch brief lacks %q:\n%s", want, got)
 		}
@@ -200,9 +199,6 @@ func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 	instruction, ok := strings.CutPrefix(got, "Fix the login bug.\n\n"+WorkerRules+"\n\n")
 	if !ok || !strings.HasPrefix(instruction, "When you finish") {
 		t.Fatalf("launch brief shape:\n%s", got)
-	}
-	if regexp.MustCompile(`(?i)review\s*:`).MatchString(WorkerRules) {
-		t.Fatalf("the rule holds a marker-shaped mention: %q", WorkerRules)
 	}
 	if err := CheckBrief(got, ViaLaunch); err != nil {
 		t.Fatalf("the composed launch brief fails its own check: %v", err)

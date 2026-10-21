@@ -281,6 +281,32 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
+**Trimming a claude worker: `settings`.** A worker loads everything an interactive session loads. To give it less, point `[launch.worker] settings` at a JSON file. forgectl merges it into the `--settings` document every claude worker already gets:
+
+```toml
+[launch.worker]
+settings = "~/.config/forgectl/worker-settings.json"
+```
+
+```json
+{
+  "enabledPlugins": { "artificer-voice@workbench": false, "cadence-palette@workbench": false },
+  "outputStyle": "default",
+  "permissions": { "deny": ["Agent(cadence:doc-writer)", "Agent(cadence-voice:editorial-reviewer)"] }
+}
+```
+
+The file can only take things away, so it cannot add a permission or a hook. It can still remove protections: turning off a guard plugin such as `cadence-guardrails` turns off its guards for the worker. It accepts four keys: `enabledPlugins` with `false` values (turns a plugin off for the worker, with its skills, agents, hooks, output style and MCP servers), `skillOverrides` with `off` only (Claude Code 2.1.305 applies it to user and synced skills, not plugin skills), `outputStyle`, and `permissions.deny` (an `Agent(plugin:agent)` rule also drops the agent from the worker's listing). Anything else refuses the launch: `permissions.allow`, `defaultMode`, `hooks`, `env`, a plugin set to `true`, a deny rule outside the `Tool`, `Tool(specifier)` or `mcp__…` shape, or a missing or unreadable file. A key forgectl sets keeps forgectl's value, and deny rules add to forgectl's. Codex and pi workers never read the file. `forgectl launch which` shows the file on a `settings:` line under the worker row (`worker.settings` under `--json`) and reports a file the launch would refuse.
+
+**Trimming a claude worker: `tools`.** `[launch.worker] tools` gives claude workers only the built-in tools you list, passed as `--tools`. The tool listing is the largest block in a session's fixed context: on Claude Code 2.1.305, ten core tools in place of the cloud set of 38 saved about 18k first-request tokens.
+
+```toml
+[launch.worker]
+tools = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "Agent"]
+```
+
+Names are Claude Code's built-in tool names, case and all. Claude Code drops a name it does not know without a word, and `--tools read,bash` started a session with no tools at all, so forgectl refuses any entry that is not a capitalized name (`Read`, `WebFetch`). It does not check names against a list, because the built-in set differs between versions and machines; a misspelled capitalized name still drops silently. An empty list and `"default"` refuse the launch: leave the key out to keep every built-in tool. MCP tools are not built-ins and are not named here. A worker loses any tool you leave out, so a worker that fetches pages needs `WebFetch`, and one that waits on a process needs `Monitor`. Codex and pi workers ignore the list. `forgectl launch which` shows it on a `tools:` line under the worker row (`worker.tools` under `--json`).
+
 A pi worker takes none of these fields: pi has no permission or sandbox flag, so it runs with pi's own config and extensions, as a claude worker runs with your settings (ADR-0010, 2026-10-08 amendment). It still takes no harness args, and `allow_danger` and `add_dir` are cleared.
 
 A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `auto`, `workspace-write` and `on-request`. Setting `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. `auto` is allowed (ADR-0010, 2026-10-07): set `permission_mode = "auto"` in `[launch.worker]` to send a worker's tool calls to Claude Code's classifier instead of prompting; a project block that sets `acceptEdits` or stricter still wins. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.

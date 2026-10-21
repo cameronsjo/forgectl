@@ -23,15 +23,19 @@ import (
 const (
 	envReleaseRegistry = "FORGECTL_RELEASE_REGISTRY"
 	envGateSHA256      = "FORGECTL_GATE_SHA256"
+	envLintSHA256      = "FORGECTL_LINT_SHA256"
 )
 
 // defaultRegistryRel is the registry's home under $HOME: the
 // cadence-ecosystem checkout's docs/release-rhythm.yaml.
 const defaultRegistryRel = "Projects/cadence-ecosystem/docs/release-rhythm.yaml"
 
-// canonicalGateRel is where the canonical gate sits relative to the
-// registry's directory (docs/ → scripts/release/ship-gate.sh).
-const canonicalGateRel = "../scripts/release/ship-gate.sh"
+// Where each canonical vendored script sits relative to the registry's
+// directory (docs/ → scripts/release/).
+const (
+	canonicalGateRel = "../scripts/release/ship-gate.sh"
+	canonicalLintRel = "../scripts/release/lint-release-env.sh"
+)
 
 var reHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -45,6 +49,7 @@ func newReviewReleasesCmd(api review.APIGetter, now func() time.Time) *cobra.Com
 	var (
 		registry    string
 		gateSHA     string
+		lintSHA     string
 		asJSON      bool
 		failOnStall bool
 	)
@@ -56,16 +61,16 @@ docs/release-rhythm.yaml, ADR-0044) and asks GitHub, read-only, where every
 release-pr, testflight, and manual-cut repo stands: its last release, commits
 since, the release PR waiting, the last ship run and the gate's reason, human
 gates, endpoint lag (tap and bucket versions), and whether the vendored
-ship-gate.sh still matches the canonical copy. Continuous and dormant repos
-are listed in a footer.
+ship-gate.sh and lint-release-env.sh still match their canonical copies.
+Continuous and dormant repos are listed in a footer.
 
 A repo is stalled when its nightly toggle is on and it has no ship run in 26h,
 when the same non-quiet gate reason (not go, no-pr, or paused) shows on its
 last 2 scheduled runs, when the last run reports half-shipped, when an
-endpoint trails the release by more than 24h, when its gate copy drifted, when
-a feat, fix, perf, breaking commit has waited over 24h with no release PR open
-(no-release-pr), or when the release-PR workflow has a run waiting, queued, or
-pending for over 1h (release-workflow-stuck).
+endpoint trails the release by more than 24h, when its gate or lint copy is
+missing or drifted, when a feat, fix, perf, breaking commit has waited over
+24h with no release PR open (no-release-pr), or when the release-PR workflow
+has a run waiting, queued, or pending for over 1h (release-workflow-stuck).
 A paused repo (toggle not on) is shown but not judged on its beat. A repo
 whose reads failed is unknown, and the failure is named.
 
@@ -76,7 +81,9 @@ whose reads failed is unknown, and the failure is named.
 The registry path comes from --registry, then $` + envReleaseRegistry + `, then
 ~/` + defaultRegistryRel + `. The canonical gate hash comes from --gate-sha256,
 then $` + envGateSHA256 + `, then the sha256 of ` + canonicalGateRel + ` beside the
-registry. GitHub auth is gh's: GH_TOKEN, GITHUB_TOKEN, or its stored login.`,
+registry; the canonical lint hash likewise from --lint-sha256, then
+$` + envLintSHA256 + `, then ` + canonicalLintRel + `. GitHub auth is gh's:
+GH_TOKEN, GITHUB_TOKEN, or its stored login.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			regPath, err := resolveRegistryPath(registry)
@@ -87,8 +94,11 @@ registry. GitHub auth is gh's: GH_TOKEN, GITHUB_TOKEN, or its stored login.`,
 			if err != nil {
 				return err
 			}
-			canonical, err := resolveCanonicalGate(gateSHA, regPath)
-			if err != nil {
+			var canonical review.Canonical
+			if canonical.Gate, err = resolveCanonicalHash("gate", gateSHA, envGateSHA256, canonicalGateRel, regPath); err != nil {
+				return err
+			}
+			if canonical.Lint, err = resolveCanonicalHash("lint", lintSHA, envLintSHA256, canonicalLintRel, regPath); err != nil {
 				return err
 			}
 			facts := review.Collect(cmd.Context(), api, reg)
@@ -110,6 +120,7 @@ registry. GitHub auth is gh's: GH_TOKEN, GITHUB_TOKEN, or its stored login.`,
 	}
 	cmd.Flags().StringVar(&registry, "registry", "", "path to release-rhythm.yaml (default $"+envReleaseRegistry+" or ~/"+defaultRegistryRel+")")
 	cmd.Flags().StringVar(&gateSHA, "gate-sha256", "", "canonical ship-gate.sh sha256 (default $"+envGateSHA256+" or the file beside the registry)")
+	cmd.Flags().StringVar(&lintSHA, "lint-sha256", "", "canonical lint-release-env.sh sha256 (default $"+envLintSHA256+" or the file beside the registry)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the report as JSON to stdout")
 	cmd.Flags().BoolVar(&failOnStall, "fail-on-stall", false, "exit 1 when any repo is stalled or unknown")
 	return cmd
@@ -129,27 +140,28 @@ func resolveRegistryPath(flag string) (string, error) {
 	return filepath.Join(home, defaultRegistryRel), nil
 }
 
-// resolveCanonicalGate returns the canonical gate hash, or "" when none is
-// available. An empty hash does not fail the command: each release-pr row
-// then reports its gate copy as unknowable, which --fail-on-stall treats as
-// a failure.
-func resolveCanonicalGate(flag, regPath string) (string, error) {
-	for _, v := range []string{flag, os.Getenv(envGateSHA256)} {
+// resolveCanonicalHash returns one canonical script's hash from the flag,
+// then the env var, then the file at rel beside the registry, or "" when
+// none is available. An empty hash does not fail the command: each
+// release-pr row then reports that copy as unknowable, which
+// --fail-on-stall treats as a failure.
+func resolveCanonicalHash(name, flag, envName, rel, regPath string) (string, error) {
+	for _, v := range []string{flag, os.Getenv(envName)} {
 		if v == "" {
 			continue
 		}
 		v = strings.ToLower(strings.TrimSpace(v))
 		if !reHex64.MatchString(v) {
-			return "", errors.New("canonical gate sha256 must be 64 hex characters")
+			return "", fmt.Errorf("canonical %s sha256 must be 64 hex characters", name)
 		}
 		return v, nil
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(regPath), canonicalGateRel))
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(regPath), rel)) //nolint:gosec // G304: rel is one of the canonical*Rel constants; the caller names the registry
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read canonical gate: %w", err)
+		return "", fmt.Errorf("read canonical %s: %w", name, err)
 	}
 	return review.SHA256Hex(raw), nil
 }
@@ -162,9 +174,9 @@ func renderReleasesTable(out io.Writer, rep review.Report) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	w := &stickyWriter{w: tw}
-	w.printf("REPO\tCLASS\tSTATE\tLAST RELEASE\tUNRELEASED\tRELEASE PR\tLAST SHIP\tHUMAN GATES\tENDPOINTS\tGATE COPY\n")
+	w.printf("REPO\tCLASS\tSTATE\tLAST RELEASE\tUNRELEASED\tRELEASE PR\tLAST SHIP\tHUMAN GATES\tENDPOINTS\tGATE COPY\tLINT COPY\n")
 	for _, r := range rep.Rows {
-		w.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		w.printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Repo, r.Class, r.State,
 			safeText(releaseCell(r, now)),
 			unreleasedCell(r),
@@ -172,7 +184,8 @@ func renderReleasesTable(out io.Writer, rep review.Report) error {
 			safeText(shipCell(r, now)),
 			gatesCell(r, now),
 			safeText(endpointsCell(r)),
-			dash(r.GateCopy))
+			dash(r.GateCopy),
+			dash(r.LintCopy))
 	}
 	if w.err != nil {
 		return w.err

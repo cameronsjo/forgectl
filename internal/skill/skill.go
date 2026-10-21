@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
 
 // Package skill embeds forgectl's agent skill (SKILL.md plus references/) so
-// the binary is the only source of it: `forgectl --skill` prints it and
+// the binary is the only source of it: `forgectl --skill` prints it,
+// `forgectl --skill <reference>` prints one reference file, and
 // `forgectl --skill --install <dir>` writes it out. The text ships in the
 // build that documents the commands, so the two cannot drift apart across
 // releases; skill_test.go in internal/cli holds them together within one.
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 //go:embed all:skill
@@ -41,6 +43,46 @@ func Text() string {
 		panic(fmt.Sprintf("skill: embedded %s missing: %v", Entry, err))
 	}
 	return string(b)
+}
+
+// RefDir is the directory beside SKILL.md that holds the reference files.
+const RefDir = "references"
+
+// ErrUnknownReference reports a name that is not one of References.
+var ErrUnknownReference = errors.New("no such skill reference")
+
+// References returns the reference files' names in lexical order: the names
+// Reference accepts.
+func References() []string {
+	entries, err := fs.ReadDir(FS(), RefDir)
+	if err != nil {
+		panic(fmt.Sprintf("skill: embedded %s missing: %v", RefDir, err))
+	}
+	var names []string
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// Reference returns one reference file by name: "desk.md", or
+// "references/desk.md" as SKILL.md links it. Any other name, a path into a
+// subdirectory included, is ErrUnknownReference.
+func Reference(name string) (string, error) {
+	base := strings.TrimPrefix(name, RefDir+"/")
+	for _, n := range References() {
+		if n != base {
+			continue
+		}
+		b, err := fs.ReadFile(FS(), path.Join(RefDir, n))
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	return "", ErrUnknownReference
 }
 
 // Install writes the skill (SKILL.md and references/) into dir and returns the

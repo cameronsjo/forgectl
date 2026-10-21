@@ -127,6 +127,13 @@ type launchWhichWorkerJSON struct {
 	Posture []launchWhichPostureJSON `json:"posture"`
 	Notes   []string                 `json:"notes"`
 	Refused string                   `json:"refused,omitempty"`
+	// Settings is the [launch.worker] settings file a claude worker merges
+	// into its --settings, as configured (#1323).
+	Settings string `json:"settings,omitempty"`
+	// Tools is the [launch.worker] tools allowlist a claude worker gets as
+	// --tools, as configured; absent means every built-in tool. A pointer so
+	// a configured empty list (which the launch refuses) still shows as [].
+	Tools *[]string `json:"tools,omitempty"`
 }
 
 type launchWhichPostureJSON struct {
@@ -136,7 +143,11 @@ type launchWhichPostureJSON struct {
 }
 
 func buildLaunchWhichWorkerJSON(w launch.WorkerPosture) *launchWhichWorkerJSON {
-	out := &launchWhichWorkerJSON{Harness: w.Harness, Posture: []launchWhichPostureJSON{}, Notes: []string{}, Refused: w.Refused}
+	out := &launchWhichWorkerJSON{Harness: w.Harness, Posture: []launchWhichPostureJSON{}, Notes: []string{}, Refused: w.Refused, Settings: w.Settings}
+	if w.Tools != nil {
+		tools := w.Tools
+		out.Tools = &tools
+	}
 	for _, v := range w.Values {
 		out.Posture = append(out.Posture, launchWhichPostureJSON(v))
 	}
@@ -174,6 +185,12 @@ func printWorkerPosture(w io.Writer, th theme.Theme, p launch.WorkerPosture) {
 
 	view := buildLaunchWhichWorkerJSON(p)
 	row("worker", workerPostureSummary(view), valueStyle.Render)
+	if view.Settings != "" {
+		row("", "settings: "+view.Settings, valueStyle.Render)
+	}
+	if view.Tools != nil {
+		row("", "tools: "+strings.Join(*view.Tools, ", "), valueStyle.Render)
+	}
 	if view.Refused != "" {
 		row("", "refused: "+view.Refused, dimStyle.Render)
 	}

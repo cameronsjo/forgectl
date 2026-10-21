@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // `surface drain start|stop|status|events` run and inspect the detached
@@ -51,17 +52,21 @@ type drainStopResult struct {
 
 // drainStatusView is what `drain status --json` prints.
 type drainStatusView struct {
-	Status          string            `json:"status"`
-	PauseReason     string            `json:"pause_reason,omitempty"`
-	PID             int               `json:"pid"`
-	ProcessStart    int64             `json:"process_start"`
-	HerdrSession    string            `json:"herdr_session,omitempty"`
-	StartedAt       *time.Time        `json:"started_at,omitempty"`
-	LastTick        *time.Time        `json:"last_tick,omitempty"`
-	IntervalSeconds int64             `json:"interval_seconds"`
-	Seq             int64             `json:"seq"`
-	Counts          map[string]int    `json:"counts"`
-	Attention       []drain.Attention `json:"attention"`
+	Status          string               `json:"status"`
+	PauseReason     string               `json:"pause_reason,omitempty"`
+	PID             int                  `json:"pid"`
+	ProcessStart    int64                `json:"process_start"`
+	HerdrSession    string               `json:"herdr_session,omitempty"`
+	StartedAt       *time.Time           `json:"started_at,omitempty"`
+	LastTick        *time.Time           `json:"last_tick,omitempty"`
+	IntervalSeconds int64                `json:"interval_seconds"`
+	Seq             int64                `json:"seq"`
+	Counts          map[string]int       `json:"counts"`
+	Attention       []drainAttentionView `json:"attention"`
+	// Work is the drain's own state in the shared vocabulary
+	// (internal/workstate). Absent when the drain is stopped with nothing
+	// queued or live: a drain with no work makes no claim.
+	Work *workstate.Work `json:"work,omitempty"`
 	// HeldSlots counts the rows holding a slot (drain.HoldsSlot), and
 	// Holding names them, so a queue held back by failed rows whose workers
 	// are still live is explainable: surface close frees each.
@@ -74,6 +79,28 @@ type drainStatusView struct {
 	SlotsHold *drain.SlotsHold `json:"slots_hold,omitempty"`
 	HeldFor   *int64           `json:"slots_held_seconds,omitempty"`
 	Error     string           `json:"error,omitempty"`
+}
+
+// drainAttentionView is one attention row with its shared status.
+type drainAttentionView struct {
+	drain.Attention
+	Work workstate.Work `json:"work"`
+}
+
+// drainWork fills the shared-vocabulary fields of v from its own status and
+// counts, and the attention rows' from their queue state.
+func drainWork(v *drainStatusView, attention []drain.Attention) {
+	waiting := 0
+	for _, s := range []worker.QueueState{worker.QueueQueued, worker.QueueClaimed, worker.QueueLaunched, worker.QueueNeedsYou} {
+		waiting += v.Counts[string(s)]
+	}
+	if w, ok := workstate.ForDrain(v.Status, v.PauseReason, waiting); ok {
+		v.Work = &w
+	}
+	v.Attention = make([]drainAttentionView, 0, len(attention))
+	for _, a := range attention {
+		v.Attention = append(v.Attention, drainAttentionView{Attention: a, Work: workstate.ForQueueRow(worker.QueueRow{State: worker.QueueState(a.State)})})
+	}
 }
 
 // drainEventsResult is what `drain events --json` prints.
@@ -379,11 +406,13 @@ why, separating a full cap (exit 1) from a check that cannot answer. Counts
 and rows are read from the queue now, not from the last tick.
 
 --json prints {"status","pause_reason","pid","process_start","herdr_session",
-"started_at","last_tick","interval_seconds","seq","counts","attention",
+"started_at","last_tick","interval_seconds","seq","counts","attention","work",
 "held_slots","holding","slots_hold","slots_held_seconds","error"}, where
-attention is [{"name","repo","state","last_error","state_at"}] and
+attention is [{"name","repo","state","last_error","state_at","work"}] and
 slots_hold, present only while claude launches are held, is
-{"cond","reason","since"}.
+{"cond","reason","since"}. work is the shared status
+({"status","on","reason","evidence"}, docs/status-vocabulary.md), absent when
+the drain is stopped with nothing queued or live.
 
 Exit 0: printed, whatever the state. Exit 2: drain.json or the queue cannot
 be read.
@@ -394,7 +423,7 @@ be read.
 			return runSurfaceDrainStatus(cmd, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","held_slots","holding","slots_hold","slots_held_seconds","error"} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","work","held_slots","holding","slots_hold","slots_held_seconds","error"} as JSON`)
 	return cmd
 }
 
@@ -434,7 +463,9 @@ func runSurfaceDrainStatus(cmd *cobra.Command, asJSON bool) error {
 			view.HeldFor = &held
 		}
 	}
-	view.Counts, view.Attention = drain.Summarize(rows)
+	var attention []drain.Attention
+	view.Counts, attention = drain.Summarize(rows)
+	drainWork(&view, attention)
 	view.Holding = drain.Held(rows, readLedgers(rows, view.HerdrSession, func(repo, session string) ([]worker.Row, error) {
 		led, err := worker.Open(repo, session)
 		if err != nil {
@@ -522,8 +553,9 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 
 func newSurfaceDrainEventsCmd() *cobra.Command {
 	var (
-		asJSON bool
-		since  int64
+		asJSON    bool
+		latestRun bool
+		since     int64
 	)
 	cmd := &cobra.Command{
 		Use:   "events",
@@ -539,7 +571,9 @@ claude-slots missing, and with [surface.merge]
 mode auto the autopilot's merges (merged) and refusals (merge-refused, once
 per row, head and reasons). seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
-seq; a cursor resets when the drain restarts.
+seq; a cursor resets when the drain restarts. Without --since (or with
+--since 0) every run in the file prints; --latest-run keeps only the latest
+run's events, from its seq 1 on.
 
 --json prints {"events":[{"v","ts","seq","kind","name","repo","state",
 "attempt","error","note"}]}.
@@ -547,18 +581,20 @@ seq; a cursor resets when the drain restarts.
 Exit 0: printed. Exit 2: the events file cannot be read or does not parse.
 
   forgectl surface drain events
+  forgectl surface drain events --latest-run --json
   forgectl surface drain events --since 40 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSurfaceDrainEvents(cmd, since, asJSON)
+			return runSurfaceDrainEvents(cmd, since, latestRun, asJSON)
 		},
 	}
 	cmd.Flags().Int64Var(&since, "since", 0, "print only the latest drain run's events after this seq")
+	cmd.Flags().BoolVar(&latestRun, "latest-run", false, "print only the latest drain run's events (--since already implies it)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"events":[{"v","ts","seq","kind","name","repo","state","attempt","error","note"}]} as JSON`)
 	return cmd
 }
 
-func runSurfaceDrainEvents(cmd *cobra.Command, since int64, asJSON bool) error {
+func runSurfaceDrainEvents(cmd *cobra.Command, since int64, latestRun, asJSON bool) error {
 	if since < 0 {
 		return WithExitCode(fmt.Errorf("--since must be 0 or more, got %d", since), exitUsage)
 	}
@@ -573,6 +609,9 @@ func runSurfaceDrainEvents(cmd *cobra.Command, since int64, asJSON bool) error {
 	events, err := drain.ParseEvents(older, current)
 	if err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	if latestRun {
+		events = drain.LatestRun(events)
 	}
 	events = drain.Since(events, since)
 	if asJSON {

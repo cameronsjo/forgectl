@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -355,10 +356,13 @@ type RepoFacts struct {
 	PendingReleaseRuns []RunFact `json:"pending_release_runs,omitempty"`
 	// Endpoints mirrors the registry's endpoints with the version found.
 	Endpoints []EndpointFact `json:"endpoints,omitempty"`
-	// GateCopySHA256 is the sha256 of .github/scripts/ship-gate.sh on the
-	// branch ("" with GateCopyMissing when the file is absent).
+	// GateCopySHA256 is the sha256 of GateCopyPath on the branch ("" with
+	// GateCopyMissing when the file is absent).
 	GateCopySHA256  string `json:"gate_copy_sha256,omitempty"`
 	GateCopyMissing bool   `json:"gate_copy_missing,omitempty"`
+	// LintCopySHA256 is the same for LintCopyPath.
+	LintCopySHA256  string `json:"lint_copy_sha256,omitempty"`
+	LintCopyMissing bool   `json:"lint_copy_missing,omitempty"`
 	// UpstreamDueSince is the committer date of the oldest upstream commit
 	// newer than LastRelease; nil when upstream has nothing newer.
 	UpstreamDueSince *time.Time `json:"upstream_due_since,omitempty"`
@@ -441,8 +445,10 @@ type Row struct {
 	Endpoints []EndpointStatus `json:"endpoints"`
 
 	// GateCopy is "match", "drift", "missing", or "" when the class has no
-	// vendored gate.
+	// vendored gate or its hash is unknowable. LintCopy is the same for the
+	// vendored release-environment lint.
 	GateCopy string `json:"gate_copy,omitempty"`
+	LintCopy string `json:"lint_copy,omitempty"`
 
 	Stalls []string `json:"stalls"`
 	Errors []string `json:"errors"`
@@ -466,6 +472,7 @@ type FooterEntry struct {
 type Report struct {
 	GeneratedAt   time.Time `json:"generated_at"`
 	CanonicalGate string    `json:"canonical_gate_sha256"`
+	CanonicalLint string    `json:"canonical_lint_sha256"`
 	// Failing is true when any row is stalled or unknown: the --fail-on-stall verdict.
 	FailingRows bool          `json:"failing"`
 	Rows        []Row         `json:"repos"`
@@ -483,10 +490,25 @@ func (r Report) Failing() bool {
 	return false
 }
 
+// The release scripts cadence-ecosystem vendors byte for byte into every
+// release-pr repo (its scripts/release/README.md). The radar flags a copy
+// that is missing or differs from the canonical bytes.
+const (
+	GateCopyPath = ".github/scripts/ship-gate.sh"
+	LintCopyPath = ".github/scripts/lint-release-env.sh"
+)
+
+// Canonical holds the sha256 of each canonical vendored script; "" when
+// unavailable, which makes every release-pr row unknown.
+type Canonical struct {
+	Gate string
+	Lint string
+}
+
 // BuildReport derives every tracked row and the footer. facts is keyed by
 // repo; a tracked repo with no facts is reported unknown.
-func BuildReport(reg Registry, facts map[string]RepoFacts, canonicalGate string, now time.Time) Report {
-	rep := Report{GeneratedAt: now.UTC(), CanonicalGate: canonicalGate, Rows: []Row{}, Footer: []FooterEntry{}}
+func BuildReport(reg Registry, facts map[string]RepoFacts, canonical Canonical, now time.Time) Report {
+	rep := Report{GeneratedAt: now.UTC(), CanonicalGate: canonical.Gate, CanonicalLint: canonical.Lint, Rows: []Row{}, Footer: []FooterEntry{}}
 	for _, e := range reg.Repos {
 		if !e.Tracked() {
 			rep.Footer = append(rep.Footer, FooterEntry{Repo: e.Repo, Class: e.Class, HumanGates: nonNil(e.HumanGates)})
@@ -496,7 +518,7 @@ func BuildReport(reg Registry, facts map[string]RepoFacts, canonicalGate string,
 		if !ok {
 			f = RepoFacts{Repo: e.Repo, Errors: []string{"no facts collected"}}
 		}
-		rep.Rows = append(rep.Rows, Derive(e, f, canonicalGate, now))
+		rep.Rows = append(rep.Rows, Derive(e, f, canonical, now))
 	}
 	rep.FailingRows = rep.Failing()
 	return rep
@@ -504,7 +526,7 @@ func BuildReport(reg Registry, facts map[string]RepoFacts, canonicalGate string,
 
 // Derive turns one registry entry and its facts into a Row, applying every
 // stall rule. It is pure: same inputs, same Row.
-func Derive(e RegistryEntry, f RepoFacts, canonicalGate string, now time.Time) Row {
+func Derive(e RegistryEntry, f RepoFacts, canonical Canonical, now time.Time) Row {
 	row := Row{
 		Repo:           e.Repo,
 		Class:          e.Class,
@@ -583,21 +605,10 @@ func Derive(e RegistryEntry, f RepoFacts, canonicalGate string, now time.Time) R
 		row.Endpoints = append(row.Endpoints, st)
 	}
 
-	// Gate-copy drift: the vendored gate must be the canonical bytes.
+	// Vendored-copy drift: each vendored script must be the canonical bytes.
 	if e.Class == ClassReleasePR {
-		switch {
-		case f.GateCopyMissing:
-			row.GateCopy = "missing"
-			row.Stalls = append(row.Stalls, "gate copy .github/scripts/ship-gate.sh is missing")
-		case f.GateCopySHA256 == "" || canonicalGate == "":
-			// Unknowable, not clean: fail closed.
-			row.Errors = append(row.Errors, "gate copy: hash unavailable")
-		case f.GateCopySHA256 == canonicalGate:
-			row.GateCopy = "match"
-		default:
-			row.GateCopy = "drift"
-			row.Stalls = append(row.Stalls, "gate copy drifted from the canonical ship-gate.sh")
-		}
+		row.GateCopy = judgeCopy(&row, "gate copy", GateCopyPath, f.GateCopySHA256, f.GateCopyMissing, canonical.Gate)
+		row.LintCopy = judgeCopy(&row, "lint copy", LintCopyPath, f.LintCopySHA256, f.LintCopyMissing, canonical.Lint)
 	}
 
 	switch {
@@ -641,6 +652,25 @@ func runStalls(runs []RunFact, now time.Time) []string {
 }
 
 // ---- small pure helpers ---------------------------------------------------
+
+// judgeCopy applies the drift rule to one vendored script and returns its
+// verdict: "match", "drift", "missing", or "" when the hash is unknowable.
+// A missing or drifted copy stalls the row; an unknowable hash fails closed.
+func judgeCopy(row *Row, label, file, sha string, missing bool, canonical string) string {
+	switch {
+	case missing:
+		row.Stalls = append(row.Stalls, label+" "+file+" is missing")
+		return "missing"
+	case sha == "" || canonical == "":
+		row.Errors = append(row.Errors, label+": hash unavailable")
+		return ""
+	case sha == canonical:
+		return "match"
+	default:
+		row.Stalls = append(row.Stalls, label+" drifted from the canonical "+path.Base(file))
+		return "drift"
+	}
+}
 
 // ReGateAnnotation matches the notice or error line ship-gate.sh's finish()
 // writes: "ship-gate <reason>: <detail>".

@@ -237,14 +237,23 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // classifier would be the only check on its shell (forgectl#1060). Off, a
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
+//
+// The one deny rule keeps a worker from closing a board task with
+// `forgectl tasks done`: a board write cannot be undone, the operator or the
+// coordinator closes the task once the work lands, and a deny holds in every
+// permission mode, even over the operator's own allow rules (ADR-0010,
+// 2026-10-20 amendment). It backs up the FORGECTL_DRAIN_WORKER refusal, which
+// a worker can unset.
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
 // every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
 // allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
-	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
+	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // withWorkerSettings inserts the worker settings right after the posture's
 // leading --permission-mode pair:
@@ -257,7 +266,11 @@ const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{
 // --permission-mode anywhere could anchor on a user token in a passthrough
 // argv. Any other shape means a posture builder changed, and the launch is
 // refused rather than started without the setting.
-func withWorkerSettings(args []string) ([]string, error) {
+//
+// file is the operator's [launch.worker] settings file, already read and
+// checked (nil for none); its keys are laid over the built-in settings by
+// mergeWorkerSettings, which never lets it change one forgectl sets.
+func withWorkerSettings(args []string, file *workerSettingsFile) ([]string, error) {
 	if len(args) < 2 || args[0] != "--permission-mode" {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
@@ -267,6 +280,10 @@ func withWorkerSettings(args []string) ([]string, error) {
 	settings := workerClaudeSettings
 	if args[1] == "acceptEdits" {
 		settings = workerClaudeEditSettings
+	}
+	settings, err := mergeWorkerSettings(settings, file)
+	if err != nil {
+		return nil, err
 	}
 	out = append(out, "--settings", settings)
 	return append(out, args[2:]...), nil
@@ -455,8 +472,19 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, err
 	}
 	if req.Worker && profile.Harness == "claude" {
-		if harnessArgs, err = withWorkerSettings(harnessArgs); err != nil {
+		var file *workerSettingsFile
+		if file, err = readWorkerSettingsFor(req.Config.Worker.Settings, os.UserHomeDir); err != nil {
 			return BuiltInvocation{}, err
+		}
+		if harnessArgs, err = withWorkerSettings(harnessArgs, file); err != nil {
+			return BuiltInvocation{}, err
+		}
+		tools, err := workerToolsArg(req.Config.Worker.Tools)
+		if err != nil {
+			return BuiltInvocation{}, err
+		}
+		if tools != "" {
+			harnessArgs = append(harnessArgs, "--tools", tools)
 		}
 	}
 	if req.SessionID != "" {
