@@ -86,3 +86,24 @@ func TestWorkerSettingsInLaunchWhich(t *testing.T) {
 		t.Fatalf("config view did not carry the file and its refusal: %+v", view.Worker)
 	}
 }
+
+// TestWorkerToolsInLaunchWhich: the tools list shows as a row, escaped, and
+// in the worker JSON; config carries it with its refusal.
+func TestWorkerToolsInLaunchWhich(t *testing.T) {
+	var buf bytes.Buffer
+	printWorkerPosture(&buf, theme.Theme{}, launch.WorkerPosture{Harness: "claude", Tools: []string{"Bash", "Read\x1b[31m"}})
+	if got := buf.String(); !strings.Contains(got, "tools: Bash, Read") || strings.Contains(got, "\x1b[31m") {
+		t.Errorf("tools row unescaped or missing: %q", got)
+	}
+	raw, err := json.Marshal(buildLaunchWhichWorkerJSON(launch.WorkerPosture{Harness: "claude", Tools: []string{"Bash", "Read"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"tools":["Bash","Read"]`) {
+		t.Errorf("worker JSON lacks tools: %s", raw)
+	}
+	view := resolveLaunchView(config.Config{Launch: config.LaunchConfig{Worker: config.LaunchWorker{Tools: []string{"read"}}}})
+	if view.Worker == nil || !strings.Contains(view.Worker.Refused, "[launch.worker] tools") {
+		t.Fatalf("config view did not carry the list's refusal: %+v", view.Worker)
+	}
+}

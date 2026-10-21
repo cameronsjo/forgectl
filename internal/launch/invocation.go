@@ -470,6 +470,13 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if harnessArgs, err = withWorkerSettings(harnessArgs, file); err != nil {
 			return BuiltInvocation{}, err
 		}
+		tools, err := workerToolsArg(req.Config.Worker.Tools)
+		if err != nil {
+			return BuiltInvocation{}, err
+		}
+		if tools != "" {
+			harnessArgs = append(harnessArgs, "--tools", tools)
+		}
 	}
 	if req.SessionID != "" {
 		if !req.Worker || profile.Harness != "claude" {
