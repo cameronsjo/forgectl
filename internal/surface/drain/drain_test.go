@@ -391,6 +391,16 @@ func TestEventsSince(t *testing.T) {
 	if len(got) != 1 || got[0].Seq != 2 {
 		t.Fatalf("Since 1 = %+v; want only the second run's seq 2", got)
 	}
+	if got := LatestRun(events); len(got) != 2 || got[0].Kind != "second run" || got[1].Seq != 2 {
+		t.Fatalf("LatestRun = %+v; want the second run's seq 1 and 2", got)
+	}
+	// The latest run's start rotated out: every event in view is that run's.
+	if got := LatestRun(events[1:3]); len(got) != 2 || got[0].Seq != 2 {
+		t.Fatalf("LatestRun with no seq 1 = %+v; want both events", got)
+	}
+	if got := LatestRun(nil); len(got) != 0 {
+		t.Fatalf("LatestRun(nil) = %+v", got)
+	}
 	if _, err := ParseEvents([]byte(`{"v":2}` + "\n")); err == nil || !strings.Contains(err.Error(), "version 2") {
 		t.Fatalf("a version-2 line: %v", err)
 	}
