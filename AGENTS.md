@@ -32,7 +32,8 @@ forgectl plans work with [OpenSpec](https://github.com/Fission-AI/OpenSpec) (#13
   is set.
 - The `openspec-*` skills and `/opsx` commands are generated. After
   `scripts/openspec.sh update`, run `scripts/openspec-localize.sh` so they
-  call the pinned wrapper; `TestOpenSpecSkillsUsePinnedCLI` fails until you do.
+  call the pinned wrapper and pre-allow only the subcommands they run;
+  `TestOpenSpecSkillsUsePinnedCLI` fails until you do.
 - `docs/plans/` is frozen: `TestPlansIndex` rejects a plan dated after
   2026-10-20. The plans already there finish in place, frontmatter and all.
 - ADRs in `docs/adr/` stay. A spec says what the behavior is; an ADR says why.
