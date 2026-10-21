@@ -102,6 +102,19 @@ func TestWorkerToolsInLaunchWhich(t *testing.T) {
 	if !strings.Contains(string(raw), `"tools":["Bash","Read"]`) {
 		t.Errorf("worker JSON lacks tools: %s", raw)
 	}
+	for _, c := range []struct {
+		tools []string
+		want  string
+		has   bool
+	}{{nil, `"tools"`, false}, {[]string{}, `"tools":[]`, true}} {
+		raw, err := json.Marshal(buildLaunchWhichWorkerJSON(launch.WorkerPosture{Harness: "claude", Tools: c.tools}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), c.want) != c.has {
+			t.Errorf("tools %#v: JSON %s, want %s present=%v", c.tools, raw, c.want, c.has)
+		}
+	}
 	view := resolveLaunchView(config.Config{Launch: config.LaunchConfig{Worker: config.LaunchWorker{Tools: []string{"read"}}}})
 	if view.Worker == nil || !strings.Contains(view.Worker.Refused, "[launch.worker] tools") {
 		t.Fatalf("config view did not carry the list's refusal: %+v", view.Worker)

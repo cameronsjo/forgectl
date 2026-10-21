@@ -599,7 +599,7 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 			_, _ = fmt.Fprintf(out, "                       settings: %s\n", safeText(w.Settings))
 		}
 		if w.Tools != nil {
-			_, _ = fmt.Fprintf(out, "                       tools: %s\n", safeText(strings.Join(w.Tools, ", ")))
+			_, _ = fmt.Fprintf(out, "                       tools: %s\n", safeText(strings.Join(*w.Tools, ", ")))
 		}
 		if w.Refused != "" {
 			_, _ = fmt.Fprintf(out, "                       refused: %s\n", safeText(w.Refused))
