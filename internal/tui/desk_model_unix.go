@@ -22,6 +22,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/runview"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -112,7 +113,7 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 	if opts.NewerInstalled == nil {
 		opts.NewerInstalled = installedNewer(opts.Version)
 	}
-	_, err := tea.NewProgram(newDeskModel(ctx, d, opts), tea.WithContext(ctx)).Run()
+	_, err := tea.NewProgram(newDeskModel(ctx, d, opts), keymap.ProgramOptions(ctx)...).Run()
 	return err
 }
 
