@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // `surface enqueue`, `dequeue` and `queue` manage the machine's queue of
@@ -49,6 +50,9 @@ type queueRowView struct {
 	StateAt     time.Time  `json:"state_at"`
 	// AgeSeconds is how long the row has been in its state.
 	AgeSeconds int64 `json:"age_seconds"`
+	// Work is the row's state in the shared vocabulary (internal/workstate),
+	// computed on read and never stored.
+	Work workstate.Work `json:"work"`
 }
 
 func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
@@ -56,6 +60,7 @@ func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
 		Name: r.Name, Repo: r.Repo, Batch: r.Batch, State: string(r.State), Attempts: r.Attempts,
 		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, Profile: r.Profile, Model: r.Model, Harness: r.Launch().Harness,
 		Source: r.Source, Author: r.Author, Labeler: r.Labeler, LabeledAt: r.LabeledAt, PRClosedAt: r.PRClosedAt, CostUSD: r.CostUSD, BriefSHA256: r.BriefSHA256, EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
+		Work: workstate.ForQueueRow(r),
 	}
 }
 
@@ -110,7 +115,7 @@ refused naming both brief hashes, as is another --harness, --profile or --model.
 queue file stays under 768 KiB; an enqueue past that is refused before
 anything is written. --json prints {"added","name","repo","batch","state",
 "attempts","last_error","launch_id","session","profile","model","harness",
-"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds","work"}.
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
@@ -135,7 +140,7 @@ setup error, such as an unusable brief or an unreadable queue file.
 	cmd.Flags().StringVar(&opts.Profile, "profile", "", "[surface.profiles] name the worker runs under (main: the drain's own CLAUDE_CONFIG_DIR)")
 	cmd.Flags().StringVar(&opts.Model, "model", "", "model the worker runs on, instead of the launch profile's")
 	cmd.Flags().StringVar(&opts.Harness, "harness", worker.DefaultQueueHarness, "harness the drain launches the worker with: claude, codex, or pi")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","brief_sha256","enqueued_at","state_at","age_seconds"} as JSON`)
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","brief_sha256","enqueued_at","state_at","age_seconds","work"} as JSON`)
 	return cmd
 }
 
@@ -233,7 +238,7 @@ may be running (claimed, launched, needs-you): run surface close first. After
 dequeue the same name can be enqueued again, which is how a failed row is
 retried. --json prints the removed row as it was: {"name","repo","batch",
 "state","attempts","last_error","launch_id","session","profile","model","harness",
-"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}.
+"source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds","work"}.
 
 Exit 0: removed. Exit 1: refused, the worker is live. Exit 2: no such row,
 or a usage or setup error.
@@ -244,7 +249,7 @@ or a usage or setup error.
 			return runSurfaceDequeue(cmd, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds","work"} JSON`)
 	return cmd
 }
 
@@ -288,7 +293,7 @@ reported, failed, closed, expired. A dequeued row is removed, not kept.
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
 "launch_id","session","profile","model","harness","source","author",
 "labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at",
-"state_at","age_seconds"}]}.
+"state_at","age_seconds","work"}]}.
 source, author, labeler and labeled_at are set on rows surface intake made:
 gh:<owner>/<repo>#<number>, the issue's author, and the login and RFC 3339
 time of the labeling that admitted it. pr_closed_at (RFC 3339) is when the
@@ -313,7 +318,7 @@ Exit 0: listed. Exit 2: the queue file cannot be read.
 			return reportQueue(cmd.OutOrStdout(), rows, time.Now(), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","harness","source","author","labeler","labeled_at","pr_closed_at","cost_usd","brief_sha256","enqueued_at","state_at","age_seconds","work"}]} as JSON`)
 	return cmd
 }
 
