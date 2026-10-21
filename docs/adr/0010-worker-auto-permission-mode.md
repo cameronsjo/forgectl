@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The 2026-10-20 amendment adds an optional operator file that can only trim a worker.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The 2026-10-20 amendment adds an optional operator file and tool list that can only trim a worker.)
 
 Date: 2026-10-05
 
@@ -130,3 +130,5 @@ The full-harness decision (2026-10-08) stands as the default. `[launch.worker] s
 The file can only remove things. forgectl accepts `enabledPlugins` (false only), `skillOverrides` (`off` only), `outputStyle`, and `permissions.deny`, and refuses everything else, so no file can raise a worker past the floor, add an allow rule, or add a hook. Removing is not the same as safe: turning off a guard plugin removes its protections. A key forgectl sets keeps forgectl's value. Deny rules are held to the shape the Claude Code settings schema accepts, because one rule Claude Code rejects voids the whole document, forgectl's `useAutoModeDuringPlan = false` included (forgectl#694).
 
 This does not restore the 2026-10-05 isolation. A worker still loads the operator's user settings, allow rules, hooks and MCP servers unless the file turns a plugin off. Turning off a guard plugin (`cadence-guardrails`) is possible and is the operator's call.
+
+`[launch.worker] tools` is the same kind of trim: a built-in tool allowlist passed as `--tools`. It only removes tools, and forgectl checks only that each entry is shaped like a tool name, since Claude Code drops unknown names without an error.
