@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,6 +60,56 @@ func TestRootSkill_InstallWritesTheTree(t *testing.T) {
 	}
 }
 
+// TestRootSkill_PrintsOneReference pins `forgectl --skill <reference>`: each
+// file in the skill's references/ prints exactly, by its name or by the
+// references/ path SKILL.md links it under, so a skill can read one without
+// installing the tree.
+func TestRootSkill_PrintsOneReference(t *testing.T) {
+	names := skill.References()
+	if !slices.Contains(names, "desk.md") || !slices.Contains(names, "board-tasks.md") {
+		t.Fatalf("References() = %v, want desk.md and board-tasks.md among them", names)
+	}
+	for _, name := range names {
+		want, err := fs.ReadFile(skill.FS(), "references/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, arg := range []string{name, "references/" + name} {
+			out, err := runSkillRoot(t, "--skill", arg)
+			if err != nil {
+				t.Fatalf("--skill %s: %v", arg, err)
+			}
+			if out != string(want) {
+				t.Errorf("--skill %s printed something other than references/%s", arg, name)
+			}
+		}
+	}
+}
+
+// TestRootSkill_UnknownReferenceListsTheNames pins the refusal: an unknown
+// name, or a path that leaves references/, exits 2 and lists every valid name.
+// A name without .md that is also a verb (`desk`) resolves to that verb
+// instead, which refuses --skill as an unknown flag, also exit 2.
+func TestRootSkill_UnknownReferenceListsTheNames(t *testing.T) {
+	for _, arg := range []string{"nope.md", "SKILL.md", "references/../SKILL.md", "board-tasks"} {
+		out, err := runSkillRoot(t, "--skill", arg)
+		if err == nil {
+			t.Fatalf("--skill %s: want an error, printed %q", arg, out)
+		}
+		if got := ExitCode(err); got != 2 {
+			t.Errorf("--skill %s: exit code = %d, want 2 (%v)", arg, got, err)
+		}
+		if out != "" {
+			t.Errorf("--skill %s wrote %q to stdout", arg, out)
+		}
+		for _, name := range skill.References() {
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("--skill %s: error %q does not list %s", arg, err, name)
+			}
+		}
+	}
+}
+
 func TestRootSkill_UsageErrorsExitTwo(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent")
 	cases := map[string][]string{
@@ -66,6 +117,10 @@ func TestRootSkill_UsageErrorsExitTwo(t *testing.T) {
 		"missing dir":           {"--skill", "--install", missing},
 		"empty dir":             {"--skill", "--install", ""},
 		"install without skill": {"--install", t.TempDir()},
+		"two references":        {"--skill", "desk.md", "board-tasks.md"},
+		"reference and install": {"--skill", "desk.md", "--install", t.TempDir()},
+		"reference alone":       {"desk.md"},
+		"verb-named reference":  {"--skill", "desk"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -197,8 +197,14 @@ func (e *structuredTerminalError) Error() string {
 // Cobra otherwise concatenates all of them into one opaque error string, after
 // which the error sink cannot tell a hostile embedded newline from its own
 // "Did you mean" layout.
+//
+// With --skill set, a positional is a reference name, which runRootSkill
+// validates.
 func safeRootArgs(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
+		return nil
+	}
+	if wantSkill, _ := cmd.Flags().GetBool("skill"); wantSkill {
 		return nil
 	}
 

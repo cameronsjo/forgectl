@@ -6,7 +6,7 @@ license: Apache-2.0 WITH Commons-Clause
 
 # Using forgectl
 
-forgectl is a Go binary that owns the things a session should never hand-roll: env files without values in argv or transcript, profiled Claude Code launches, terminal surfaces, workflows with a human blessing gate, an operator queue, and built-in recipes. This skill ships inside the binary: `forgectl --skill` prints it, and `forgectl --skill --install <dir>` writes it (with `references/`) to an absolute directory, so the text always matches the binary that carries it.
+forgectl is a Go binary that owns the things a session should never hand-roll: env files without values in argv or transcript, profiled Claude Code launches, terminal surfaces, workflows with a human blessing gate, an operator queue, and built-in recipes. This skill ships inside the binary: `forgectl --skill` prints it, `forgectl --skill <reference>` prints one file from `references/` (for example `forgectl --skill desk.md`), and `forgectl --skill --install <dir>` writes it (with `references/`) to an absolute directory, so the text always matches the binary that carries it.
 
 This skill teaches when to reach for forgectl, not what to type; the binary documents its own flags (`forgectl <verb> --help`).
 
