@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/claudeproject"
 )
 
 // The fixture $HOME is built programmatically rather than checked in as
@@ -89,7 +91,7 @@ func (f *fixture) transcript(id, cwd, branch, title string) {
 		`{"type":"user","gitBranch":"` + branch + `","cwd":"` + cwd + `"}`,
 		`{"type":"ai-title","aiTitle":"` + title + `","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), claudeproject.Slug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 }
 
@@ -685,7 +687,7 @@ func TestReadTranscript_SurvivesAnOverlongLine(t *testing.T) {
 		`{"type":"user","gitBranch":"feat/after-the-blob"}`,
 		`{"type":"ai-title","aiTitle":"found-after-the-blob","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), claudeproject.Slug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 
 	branch, title := readTranscript(f.Paths, id, cwd, nil)
@@ -886,21 +888,6 @@ func TestScan_TolerantOfMissingHome(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("Scan returned %d sessions from an empty home, want 0", len(got))
-	}
-}
-
-// TestSlugify pins the project-directory encoding against the real names
-// observed on disk.
-func TestSlugify(t *testing.T) {
-	cases := map[string]string{
-		"/Users/cameron/Projects/claude-configurations/forgectl": "-Users-cameron-Projects-claude-configurations-forgectl",
-		"/Users/cameron/.dotfiles":                               "-Users-cameron--dotfiles",
-		"/private/tmp/drill-396-proj":                            "-private-tmp-drill-396-proj",
-	}
-	for cwd, want := range cases {
-		if got := ProjectSlug(cwd); got != want {
-			t.Errorf("ProjectSlug(%q) = %q, want %q", cwd, got, want)
-		}
 	}
 }
 
