@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The 2026-10-20 amendment adds an optional operator file that can only trim a worker.)
 
 Date: 2026-10-05
 
@@ -122,3 +122,11 @@ The boundary is the one this ADR already records: accidents, not adversaries. Th
 - **Admitting event on the row.** Each intake row records `labeler` and `labeled_at` beside `source` and `author`.
 
 This is a stopgap. A worker can give itself a terminal (`script`, `expect`, a pty library, `tmux send-keys`) or type into any herdr pane through herdr-bridge (2026-10-08 amendment). Cheaper still, it can skip intake entirely and write a row straight into the drain's `queue.json`: the file is mode 0600 and owned by the operator, which the worker is, and rows carry no signature, so the drain launches that row with no terminal and no marker check. So the confirmation makes a person the expected reader of the candidate list; it does not prove a person typed the answer. It stops accidents, not adversaries, and it puts a person back in a loop the plan meant to run unattended. The real fix is the one this ADR already names: a separate agent identity for workers (the per-worker GitHub App token, forgectl#1134), so the labeler check can tell the operator from a worker.
+
+## Amendment 2026-10-20: an operator file can trim a worker
+
+The full-harness decision (2026-10-08) stands as the default. `[launch.worker] settings` lets the operator hand claude workers a JSON file that forgectl merges into their `--settings` (forgectl#1323). Its purpose is context, not containment: a worker with one bounded task does not need every plugin's skills and agents, the operator's output style, or every mod.
+
+The file can only remove things. forgectl accepts `enabledPlugins` (false only), `skillOverrides` (`off` only), `outputStyle`, and `permissions.deny`, and refuses everything else, so no file can raise a worker past the floor, add an allow rule, or add a hook. Removing is not the same as safe: turning off a guard plugin removes its protections. A key forgectl sets keeps forgectl's value. Deny rules are held to the shape the Claude Code settings schema accepts, because one rule Claude Code rejects voids the whole document, forgectl's `useAutoModeDuringPlan = false` included (forgectl#694).
+
+This does not restore the 2026-10-05 isolation. A worker still loads the operator's user settings, allow rules, hooks and MCP servers unless the file turns a plugin off. Turning off a guard plugin (`cadence-guardrails`) is possible and is the operator's call.

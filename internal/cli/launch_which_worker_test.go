@@ -65,3 +65,24 @@ func TestResolveLaunchView_Worker(t *testing.T) {
 		t.Fatalf("worker view %+v", view.Worker)
 	}
 }
+
+// TestWorkerSettingsInLaunchWhich is forgectl#1323: the settings file shows on
+// its own line, escaped, and under --json as worker.settings.
+func TestWorkerSettingsInLaunchWhich(t *testing.T) {
+	var buf bytes.Buffer
+	printWorkerPosture(&buf, theme.Theme{}, launch.WorkerPosture{Harness: "claude", Settings: "/cfg/w.json\x1b[31m"})
+	if got := buf.String(); !strings.Contains(got, "settings: /cfg/w.json") || strings.Contains(got, "\x1b[31m") {
+		t.Errorf("settings row unescaped or missing: %q", got)
+	}
+	raw, err := json.Marshal(buildLaunchWhichWorkerJSON(launch.WorkerPosture{Harness: "claude", Settings: "/cfg/w.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"settings":"/cfg/w.json"`) {
+		t.Errorf("worker JSON lacks settings: %s", raw)
+	}
+	view := resolveLaunchView(config.Config{Launch: config.LaunchConfig{Worker: config.LaunchWorker{Settings: "/nonexistent/w.json"}}})
+	if view.Worker == nil || view.Worker.Settings != "/nonexistent/w.json" || !strings.Contains(view.Worker.Refused, "[launch.worker] settings") {
+		t.Fatalf("config view did not carry the file and its refusal: %+v", view.Worker)
+	}
+}
