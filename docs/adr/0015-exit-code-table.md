@@ -37,10 +37,11 @@ Every forgectl-assigned exit code is one of these. Branch on the exit status fir
 
 The boundary between 2 and 5: absent or unconfigured is 2, configured and present but silent is 5.
 
-Phase 1 emits only 0 to 4 (plus the four verb exceptions below, and 75, 130 and 141 outside the table). **5 and 6 are reserved: no verb emits them until Phase 2 is built.** A new verb must not use them for anything else.
+Phase 1 emits only 0 to 4 (plus the four verb exceptions below, and 7, 75, 130 and 141 outside the table). **5 and 6 are reserved: no verb emits them until Phase 2 is built.** A new verb must not use them for anything else.
 
 Outside the table, documented once in the same place:
 
+- **7** (`tasks ls`, `show` and `ready` refused a board cache older than 72h; `--allow-stale` serves it. Added 2026-10-17, [#1289](https://github.com/cameronsjo/forgectl/issues/1289), outside the table so 5 and 6 stay reserved.)
 - **75** (`desk watch` reached `--deadline`; the last line holds the resume command), **130** (interrupted) and **141** (stdout closed) already ship in `desk.go`. `resume` also uses 130 for a cancelled pick.
 - **Pass-through** verbs return a child's code, which the table does not govern: `launch`, `surface _exec`, `docs read` (the reader's status), `k8s` (kubectl's, including a remote command's), and `desk watch` for its run's rc. Each one's help says so. 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141; a pass-through verb can return them.
 
