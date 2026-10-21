@@ -235,6 +235,10 @@ type WorkerPosture struct {
 	// into its --settings, as configured, or "" for none. A file the launch
 	// would refuse is reported in Refused.
 	Settings string
+	// Tools is the [launch.worker] tools allowlist a claude worker gets as
+	// --tools, as configured, or nil for every built-in tool. A list the
+	// launch would refuse is reported in Refused.
+	Tools []string
 }
 
 // ResolveWorkerPosture resolves the worker posture for cwd through the same
@@ -272,6 +276,12 @@ func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject
 	if p.Harness == "claude" && lc.Worker.Settings != "" {
 		w.Settings = lc.Worker.Settings
 		if _, err := readWorkerSettingsFor(lc.Worker.Settings, os.UserHomeDir); err != nil {
+			w.Refused = err.Error()
+		}
+	}
+	if p.Harness == "claude" && lc.Worker.Tools != nil {
+		w.Tools = lc.Worker.Tools
+		if _, err := workerToolsArg(lc.Worker.Tools); err != nil && w.Refused == "" {
 			w.Refused = err.Error()
 		}
 	}
