@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/fang"
@@ -65,6 +66,84 @@ func unknownSubcommand(root *cobra.Command, args []string) error {
 		return nil
 	}
 	return asUsageError(found, found.ValidateArgs(positional))
+}
+
+// unknownCommandJSON answers an unknown verb or subverb asked for with --json
+// (`forgectl zzbogus --json`, `forgectl desk zzbogus --json`) with the --json
+// failure object, code unknown_command, instead of fang's frame. Cobra parses
+// flags before it validates positionals, and a group declares no --json, so
+// without this the error names the wrong problem ("unknown flag: --json") and
+// a caller probing for a verb this forgectl lacks cannot tell it apart from a
+// bad call. The exit code is the one the same call gets without --json.
+//
+// It returns nil, leaving cobra to report, unless --json is asked for (before
+// any `--`), args resolve to a group (a command with subcommands that declares
+// no --json and takes no positional of its own), and the group's validator
+// refuses the first positional as an unknown command. Any other flag that does
+// not parse stays cobra's to report.
+func unknownCommandJSON(root *cobra.Command, args []string) error {
+	if !argvAsksJSON(args) {
+		return nil
+	}
+	if first, _ := firstNonFlag(args); builtinVerbs[first] && first != "completion" {
+		return nil
+	}
+	found, rest, err := root.Find(args)
+	if err != nil || found == nil || !found.HasSubCommands() || parentTakesArg(found) || found.Flags().Lookup("json") != nil {
+		return nil
+	}
+	found.InitDefaultHelpFlag()
+	// Parsing has side effects (a slice flag appends), but a group that
+	// declares no --json never reaches a Run with --json in its argv: cobra
+	// refuses the flag first.
+	if found.ParseFlags(withoutJSONFlag(rest)) != nil {
+		return nil
+	}
+	positional := found.Flags().Args()
+	if len(positional) == 0 {
+		return nil
+	}
+	verr := found.ValidateArgs(positional)
+	var unknown *structuredTerminalError
+	if verr == nil || !chainAs(verr, &unknown) {
+		return nil
+	}
+	return jsonFailure(found, asUsageError(found, verr), true, jsonCodeUnknownCommand)
+}
+
+// argvAsksJSON reports whether args ask for --json before any `--`: a bare
+// --json, or --json=<bool>, the last one winning.
+func argvAsksJSON(args []string) bool {
+	want := false
+	for _, a := range args {
+		switch {
+		case a == "--":
+			return want
+		case a == "--json":
+			want = true
+		case strings.HasPrefix(a, "--json="):
+			if v, err := strconv.ParseBool(strings.TrimPrefix(a, "--json=")); err == nil {
+				want = v
+			}
+		}
+	}
+	return want
+}
+
+// withoutJSONFlag returns args with every --json and --json=<v> before any
+// `--` removed, so a command that does not declare --json can parse the rest.
+func withoutJSONFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i, a := range args {
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		if a == "--json" || strings.HasPrefix(a, "--json=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // mentionsHelp reports whether args hold a help flag before any `--`: the long

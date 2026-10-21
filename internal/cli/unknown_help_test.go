@@ -5,6 +5,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,5 +207,52 @@ func TestGroupHelpStillSucceeds(t *testing.T) {
 				t.Errorf("execCommand(%q) error = %v (stderr %q), want help and success", args, err, stderr)
 			}
 		}
+	}
+}
+
+// TestUnknownCommandUnderJSON pins the --json contract for a verb that does
+// not exist: at the root and under every group, `<path> bogusverbxyz --json`
+// writes one {"error","code","path"} object with code unknown_command as the
+// whole of stderr, and exits as the same call does without --json. Before,
+// fang's frame said "unknown flag: --json", which named the wrong problem.
+//
+// Mutation that turns it red: drop the unknownCommandJSON call from
+// execCommand.
+func TestUnknownCommandUnderJSON(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	paths := append([][]string{nil}, groupPaths(newRoot(deps))...)
+	for _, path := range paths {
+		name := strings.TrimSpace("forgectl " + strings.Join(path, " "))
+		bare := append(append([]string(nil), path...), "bogusverbxyz")
+		for _, args := range [][]string{append(slices.Clone(bare), "--json"), append(append(slices.Clone(path), "--json"), "bogusverbxyz")} {
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				_, plainErr := runUnknownHelpArgs(t, bare...)
+				stderr, err := runUnknownHelpArgs(t, args...)
+				if err == nil {
+					t.Fatalf("execCommand(%q) = nil, want an unknown-command error", args)
+				}
+				if got, want := ExitCode(err), ExitCode(plainErr); got != want || got == 0 {
+					t.Errorf("exit %d under --json, %d without; want the same, non-zero", got, want)
+				}
+				var obj jsonFailureObject
+				if strings.Count(stderr, "\n") != 1 || json.Unmarshal([]byte(stderr), &obj) != nil {
+					t.Fatalf("stderr = %q, want exactly one JSON object line", stderr)
+				}
+				if obj.Code != jsonCodeUnknownCommand || obj.Path != "" || !strings.Contains(obj.Error, `"bogusverbxyz" for "`+name+`"`) {
+					t.Errorf("object = %+v, want code %s naming the token and %q", obj, jsonCodeUnknownCommand, name)
+				}
+			})
+		}
+	}
+
+	// No --json asked for: the human frame, as before.
+	for _, args := range [][]string{{"bogusverbxyz", "--json=false"}, {"bogusverbxyz", "--", "--json"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stderr, err := runUnknownHelpArgs(t, args...)
+			if err == nil || strings.Contains(stderr, jsonCodeUnknownCommand) {
+				t.Errorf("execCommand(%q) = %v, stderr %q; want the human error", args, err, stderr)
+			}
+		})
 	}
 }

@@ -334,6 +334,9 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	if err := unknownSubcommand(root, args); err != nil {
 		return renderCommandError(ctx, root, th, err)
 	}
+	if err := unknownCommandJSON(root, args); err != nil {
+		return renderCommandError(ctx, root, th, err)
+	}
 	withCancelHandling(root)
 	root.SetArgs(args)
 	trimHelpFrames(root)
