@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The 2026-10-20 amendment adds an optional operator file and tool list that can only trim a worker.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The first 2026-10-20 amendment adds an optional operator file and tool list that can only trim a worker. The second denies `forgectl tasks done` to every claude worker.)
 
 Date: 2026-10-05
 
