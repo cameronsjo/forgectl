@@ -168,7 +168,7 @@ func runWorkerUsage(cmd *cobra.Command, deps module.Deps, repo, name string, asJ
 	}
 	row, ok := findRow(rows, name)
 	if !ok {
-		return WithExitCode(fmt.Errorf("no worker named %q in %s's ledger", name, w.top), exitUsage)
+		return WithExitCode(fmt.Errorf("no worker named %q in %s's ledger; forgectl surface list shows the workers", name, w.top), exitUsage)
 	}
 	return reportWorkerUsage(cmd, priceWorker(cmd.Context(), row, w.top, price), asJSON)
 }

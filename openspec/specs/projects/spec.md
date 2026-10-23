@@ -17,11 +17,15 @@
 - **THEN** the command fails naming the hosts the inventory does have, rather than printing an empty list
 
 ### Requirement: JSON output keeps stdout clean
-`projects list --json` SHALL write rows (`host`, `owner`, `name`, `sshUrl`, `mirror`, `private`, `cloned`, `localPath`, `status`) to stdout as a bare array, `[]` when empty, and MUST send degradation notes to stderr only.
+`projects list --json` SHALL write rows (`host`, `owner`, `name`, `sshUrl`, `mirror`, `private`, `cloned`, `localPath`, `status`, `ssh_url`, `local_path`) to stdout as a bare array, `[]` when empty, and MUST send degradation notes to stderr only. `ssh_url` and `local_path` SHALL carry the same values as `sshUrl` and `localPath`, and SHALL be left out whenever those keys are. `--fields` SHALL accept either spelling.
 
 #### Scenario: A degraded host under --json
 - **WHEN** one host is unreachable and `--json` is set
 - **THEN** stdout holds only the JSON rows that loaded and the note goes to stderr
+
+#### Scenario: Snake-case keys beside camelCase
+- **WHEN** the operator runs `forgectl projects list --json` and a row has a clone URL
+- **THEN** the row carries both `sshUrl` and `ssh_url` with the same value
 
 ### Requirement: Degradation and strict mode
 A degraded host SHALL still exit 0 by default. `--strict` MUST exit 1 whenever any host produced a degradation note, after writing the rows that did load. When no source can be read at all, `list`, `pick`, `clone` and `worktree` MUST exit 1 with `no project source could be read` after printing the notes, never reporting an empty account. A machine with no `tea` binary SHALL add no note.
