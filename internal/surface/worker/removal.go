@@ -40,6 +40,10 @@ type WorktreeFacts struct {
 	Ahead int
 	// Stashes counts stash entries made on Branch.
 	Stashes int
+	// Submodules lists what makes git refuse to remove the worktree as one
+	// holding submodules: each populated gitlink's path, and the worktree's
+	// own modules directory when it has one.
+	Submodules []string
 }
 
 // Present reports whether there is a worktree to remove.
@@ -56,6 +60,9 @@ func RemovalBlockers(f WorktreeFacts) []string {
 	var out []string
 	if strings.TrimSpace(f.Status) != "" {
 		out = append(out, "it has uncommitted, untracked, or ignored files (git status --porcelain --ignored is not empty)")
+	}
+	if len(f.Submodules) > 0 {
+		out = append(out, fmt.Sprintf("it holds submodules (%s), and git worktree remove refuses a worktree that does", strings.Join(f.Submodules, ", ")))
 	}
 	if f.Branch == "" {
 		out = append(out, "HEAD is detached, so its commits are reachable only from the worktree's own reflog")
@@ -116,6 +123,9 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	git := func(args ...string) (string, error) {
 		return gitenv.Run(ctx, run, gitenv.Local, append(gitenv.PinnedArgs(path, gitDir), args...)...)
 	}
+	if f.Submodules, err = submodulesIn(path, gitDir, git); err != nil {
+		return WorktreeFacts{}, err
+	}
 	// status re-hashes stat-dirty files through any filter driver the
 	// worktree's .gitattributes names, and the worktree is the worker's to
 	// write; RunUnfiltered blanks every driver so none runs as the operator.
@@ -124,7 +134,15 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// (GIT_OPTIONAL_LOCKS=0) stops status from taking index.lock to write that
 	// refresh back: this inspection also backs `surface close --dry-run`, which
 	// must change nothing, and the answer needs no refreshed index.
-	if f.Status, err = gitenv.RunUnfilteredPinned(ctx, run, gitenv.Bin, path, gitDir, "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
+	// --ignore-submodules=dirty keeps status from running a child git status
+	// in each populated submodule, which would read the submodule's .git a
+	// second time, after RunUnfiltered listed its drivers: one swapped in
+	// between could name drivers nobody blanked (#1338). It still reports a
+	// gitlink whose commit moved or is staged, which =all hides (measured on
+	// git 2.43: none and untracked run the child, dirty and all do not). What
+	// the child would have found no longer matters: a populated submodule
+	// keeps the worktree on its own.
+	if f.Status, err = gitenv.RunUnfilteredPinned(ctx, run, gitenv.Bin, path, gitDir, "--no-optional-locks", "status", "--porcelain", "--ignored", "--ignore-submodules=dirty"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
@@ -181,6 +199,40 @@ func RemoveWorktree(ctx context.Context, run GitRunner, top, path string) error 
 	return nil
 }
 
+// submodulesIn returns what git worktree remove counts as submodules in the
+// worktree at path: its git dir's modules directory, and each gitlink in its
+// index whose path holds a .git. git refuses on either ("working trees
+// containing submodules cannot be moved or removed"), so close keeps the
+// worktree and says why instead of failing at the remove. git runs a git
+// call pinned to the worktree's checked git dir.
+func submodulesIn(path, gitDir string, git func(...string) (string, error)) ([]string, error) {
+	var out []string
+	modules := filepath.Join(gitDir, "modules")
+	if info, err := os.Lstat(modules); err == nil && info.IsDir() {
+		out = append(out, modules)
+	}
+	index, err := git("ls-files", "-z", "--stage")
+	if err != nil {
+		return nil, fmt.Errorf("worker: list the index of %s: %w", path, err)
+	}
+	for entry := range strings.SplitSeq(index, "\x00") {
+		meta, p, ok := strings.Cut(entry, "\t")
+		if !ok || !strings.HasPrefix(meta, "160000 ") {
+			continue
+		}
+		// git's own check follows symbolic links here, so this one does too.
+		_, err := os.Lstat(filepath.Join(path, filepath.FromSlash(p), ".git"))
+		switch {
+		case err == nil:
+			out = append(out, p)
+		case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		default:
+			return nil, fmt.Errorf("worker: check submodule %s in %s: %w", p, path, err)
+		}
+	}
+	return out, nil
+}
+
 // maxGitFileBytes bounds the gitfile checkGitFile reads: "gitdir: " and a
 // path under the common git dir.
 const maxGitFileBytes = 4096
@@ -188,8 +240,11 @@ const maxGitFileBytes = 4096
 // checkGitFile refuses a worktree whose .git is not the gitfile git wrote:
 // a regular file naming a directory under <common git dir>/worktrees. The worktree
 // is the worker's to write, and a .git it pointed elsewhere would hand git a
-// config the worker wrote. It returns that directory, resolved, for the
-// caller to pin its git calls to.
+// config the worker wrote. The directory must also be this worktree's own:
+// its gitdir file, which git writes back to the worktree's .git, must name
+// path, or the calls pinned to it would read another worktree's branch and
+// stash (#1338). It returns that directory, resolved, for the caller to pin
+// its git calls to.
 //
 // The read never follows a symbolic link and never blocks (gitenv.OpenGitfile),
 // is checked on the open handle, and stops after maxGitFileBytes+1 bytes: a
@@ -222,7 +277,31 @@ func checkGitFile(common, path string) (string, error) {
 	if !ok || aerr != nil || perr != nil || parent != admin {
 		return "", fmt.Errorf("%w: %s points outside %s", ErrUnsafeWorktreeRoot, gitfile, admin)
 	}
-	return filepath.Join(admin, filepath.Base(dir)), nil
+	gitDir := filepath.Join(admin, filepath.Base(dir))
+	if err := checkBackLink(gitDir, path); err != nil {
+		return "", err
+	}
+	return gitDir, nil
+}
+
+// checkBackLink refuses gitDir unless its gitdir file names path/.git.
+// worktree.useRelativePaths writes that path relative to gitDir.
+func checkBackLink(gitDir, path string) error {
+	link := filepath.Join(gitDir, "gitdir")
+	data, err := readGitFile(link)
+	if err != nil {
+		return err
+	}
+	back := strings.TrimSpace(string(data))
+	if back != "" && !filepath.IsAbs(back) {
+		back = filepath.Join(gitDir, back)
+	}
+	want, werr := filepath.EvalSymlinks(path)
+	got, gerr := filepath.EvalSymlinks(filepath.Dir(back))
+	if back == "" || filepath.Base(back) != ".git" || werr != nil || gerr != nil || got != want {
+		return fmt.Errorf("%w: %s names %s, which %s does not name back", ErrUnsafeWorktreeRoot, filepath.Join(path, ".git"), gitDir, link)
+	}
+	return nil
 }
 
 // readGitFile reads the gitfile at gitfile, already found a small regular

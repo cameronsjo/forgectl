@@ -28,6 +28,7 @@ func TestRemovalBlockers(t *testing.T) {
 		"ahead of base":           {func(f *WorktreeFacts) { f.Ahead = 1 }, "beyond the worktree's base"},
 		"base unknown":            {func(f *WorktreeFacts) { f.Ahead = -1 }, "base commit is unknown"},
 		"stash":                   {func(f *WorktreeFacts) { f.Stashes = 1 }, "stash"},
+		"submodules":              {func(f *WorktreeFacts) { f.Submodules = []string{"sm"} }, "holds submodules (sm)"},
 		"on disk, not a worktree": {func(f *WorktreeFacts) { f.Listed = false }, "does not list it"},
 	}
 	for name, c := range cases {
@@ -114,6 +115,10 @@ func TestInspectWorktree(t *testing.T) {
 		"a stash entry": {"stash", func(t *testing.T, _ string, wt Worktree) {
 			writeFile(t, filepath.Join(wt.Path, "f"), "x\n")
 			mustGit(t, wt.Path, "stash", "push", "-q", "-u", "-m", "parked")
+		}},
+		"a populated submodule": {"holds submodules (", func(t *testing.T, _ string, wt Worktree) {
+			addSubmodule(t, wt.Path, gitRepo(t))
+			mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
 		}},
 	}
 	for name, c := range controls {
@@ -367,5 +372,130 @@ func TestInspectWorktreePinsTheCheckedGitDir(t *testing.T) {
 	}
 	if f.Branch != "feat" || f.Status != "" || f.Ahead != 0 {
 		t.Fatalf("facts = branch %q, status %q, ahead %d; want feat, clean, 0 from the checked git dir", f.Branch, f.Status, f.Ahead)
+	}
+}
+
+// addSubmodule adds the repository sub to the working tree dir as sm.
+func addSubmodule(t *testing.T, dir, sub string) {
+	t.Helper()
+	mustGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sm")
+}
+
+// swapBeforeStatus is a Runner that runs swap just before InspectWorktree's
+// git status, so after RunUnfiltered has listed every repository's drivers.
+type swapBeforeStatus struct {
+	fexec.OSRunner
+	swap    func() error
+	swapped bool
+}
+
+func (s *swapBeforeStatus) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if !s.swapped && slices.Contains(args, "status") {
+		s.swapped = true
+		if err := s.swap(); err != nil {
+			return "", err
+		}
+	}
+	return s.OSRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
+// A submodule's .git swapped after the driver listing, to a repository whose
+// config defines a driver nobody listed, never runs that driver: status does
+// not enter the submodule, and the submodule keeps the worktree on its own
+// (#1338). Mutation: drop --ignore-submodules=dirty from the status, and
+// the child status in sm runs the driver.
+func TestInspectWorktreeRunsNoSwappedSubmoduleDriver(t *testing.T) {
+	ctx := context.Background()
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, fexec.OSRunner{}, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := gitRepo(t)
+	writeFile(t, filepath.Join(sub, ".gitattributes"), "*.txt filter=evil\n")
+	writeFile(t, filepath.Join(sub, "a.txt"), "x\n")
+	mustGit(t, sub, "add", ".gitattributes", "a.txt")
+	mustGit(t, sub, "commit", "-q", "-m", "files")
+	addSubmodule(t, wt.Path, sub)
+	mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
+
+	// evil holds the same commit, so its index lists a.txt, with stat data
+	// that does not match sm's copy: status in sm re-hashes it through the
+	// driver evil's config defines.
+	evil := filepath.Join(t.TempDir(), "evil")
+	mustGit(t, top, "clone", "-q", sub, evil)
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	mustGit(t, evil, "config", "filter.evil.clean", "touch '"+marker+"'; cat")
+
+	gitfile := filepath.Join(wt.Path, "sm", ".git")
+	run := &swapBeforeStatus{swap: func() error {
+		return os.WriteFile(gitfile, []byte("gitdir: "+filepath.Join(evil, ".git")+"\n"), 0o600)
+	}}
+	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
+	if err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	if !run.swapped {
+		t.Fatal("the submodule's .git was never swapped; the test no longer models the window")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a driver from the swapped-in submodule repository ran during close's git status")
+	}
+	if !slices.Contains(f.Submodules, "sm") {
+		t.Fatalf("Submodules = %q, want sm", f.Submodules)
+	}
+}
+
+// A staged gitlink change is still reported: --ignore-submodules=all would
+// hide it, and removing the worktree would lose it.
+func TestInspectWorktreeReportsAStagedGitlink(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := gitRepo(t)
+	addSubmodule(t, wt.Path, sub)
+	mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
+	mustGit(t, sub, "commit", "-q", "--allow-empty", "-m", "next")
+	next := strings.TrimSpace(mustGit(t, sub, "rev-parse", "HEAD"))
+	// Staged without populating: only the index moves.
+	mustGit(t, wt.Path, "update-index", "--cacheinfo", "160000,"+next+",sm")
+	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
+	if err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	if !strings.Contains(f.Status, "sm") {
+		t.Fatalf("Status = %q, want the staged gitlink sm", f.Status)
+	}
+}
+
+// A gitfile naming another worktree's git dir is refused: its gitdir file
+// names that worktree, not this one, and the pinned calls would report the
+// other worktree's branch (#1338). Mutation: drop checkBackLink.
+func TestInspectWorktreeRefusesAnotherWorktreesGitDir(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := AddWorktree(ctx, run, top, "v", "other", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(other.Path, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, ".git"), string(data))
+	if _, err := InspectWorktree(ctx, run, top, "w", ""); !errors.Is(err, ErrUnsafeWorktreeRoot) {
+		t.Fatalf("another worktree's git dir was not refused: %v", err)
+	}
+	if _, err := InspectWorktree(ctx, run, top, "v", ""); err != nil {
+		t.Fatalf("the other worktree's own gitfile was refused: %v", err)
 	}
 }
