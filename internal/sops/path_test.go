@@ -11,7 +11,8 @@ package sops
 //
 // NormalizeValue
 //   [x] Strips exactly one trailing newline (LF and CRLF), and no more
-//   [x] Refused: empty, an interior newline, a C0 control byte, DEL,
+//   [x] Refused: empty, an interior newline, a C0 control byte, DEL, a C1
+//       control (NEL included), U+FFFE/U+FFFF,
 //       invalid UTF-8, over the size ceiling
 //   [x] A refusal never echoes the value
 //   [x] Interior whitespace and a tab survive
@@ -131,6 +132,8 @@ func TestNormalizeValue_Accepted(t *testing.T) {
 		{"a hash survives", "pass#word", "pass#word"},
 		{"a quote survives", "it's", "it's"},
 		{"unicode survives", "pässwörd-日本", "pässwörd-日本"},
+		{"a no-break space survives", "a\u00a0b", "a\u00a0b"},
+		{"a line separator survives", "a\u2028b", "a\u2028b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -163,6 +166,11 @@ func TestNormalizeValue_Refused(t *testing.T) {
 		{"a NUL byte", "before\x00after", "control character"},
 		{"an escape byte", "before\x1bafter", "control character"},
 		{"a DEL byte", "before\x7fafter", "control character"},
+		{"a C1 control", "before\u0080after", "control character"},
+		{"a C1 CSI", "before\u009bafter", "control character"},
+		{"a NEL", "before\u0085after", "control character"},
+		{"the noncharacter U+FFFE", "before\ufffeafter", "control character"},
+		{"the noncharacter U+FFFF", "before\uffffafter", "control character"},
 		{"invalid UTF-8", "bad\xff\xfebytes", "valid UTF-8"},
 		{"over the ceiling", strings.Repeat("a", maxValueBytes+1), "ceiling"},
 	}

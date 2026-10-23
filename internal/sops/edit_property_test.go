@@ -128,3 +128,34 @@ func TestSetScalar_ShapeInvariant(t *testing.T) {
 		})
 	}
 }
+
+// TestNormalizeValue_AcceptedValuesSurviveYAML ties NormalizeValue's
+// character rule to the YAML library rather than to a hand-kept list: every
+// Basic Multilingual Plane character it accepts must come back unchanged
+// from SetScalar and a yaml.v3 parse. A character YAML refuses (C1 controls,
+// U+FFFE) or rewrites (NEL as a line break) that slipped through would fail
+// here, before sops' editor loop could ever see it.
+func TestNormalizeValue_AcceptedValuesSurviveYAML(t *testing.T) {
+	for r := rune(0); r <= 0xFFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue // surrogates are not valid UTF-8 on their own
+		}
+		value, err := NormalizeValue("a" + string(r) + "b")
+		if err != nil {
+			continue
+		}
+		doc, _, err := SetScalar([]byte("k: x\n"), []string{"k"}, value)
+		if err != nil {
+			t.Errorf("%U: SetScalar refused an accepted value: %v", r, err)
+			continue
+		}
+		var got map[string]string
+		if err := yaml.Unmarshal(doc, &got); err != nil {
+			t.Errorf("%U: accepted value made an unparseable document: %v", r, err)
+			continue
+		}
+		if got["k"] != value {
+			t.Errorf("%U: value came back as %q", r, got["k"])
+		}
+	}
+}
