@@ -189,14 +189,17 @@ func parseStepLine(text, name string, lineno int) (Step, error) {
 	for _, opt := range opts {
 		switch {
 		case strings.HasPrefix(opt, "after="):
-			s.After = nil
+			// Repeated after= options add up: `after=a after=b` waits on both.
 			for _, a := range strings.Split(strings.TrimPrefix(opt, "after="), ",") {
-				if a != "" {
+				if a != "" && !slices.Contains(s.After, a) {
 					s.After = append(s.After, a)
 				}
 			}
 		case strings.HasPrefix(opt, "timeout="):
 			v := strings.TrimPrefix(opt, "timeout=")
+			if s.Timeout != 0 {
+				return Step{}, manifestErr("%s: step %s: timeout given twice", where, id)
+			}
 			n, err := strconv.Atoi(v)
 			if !timeoutRe.MatchString(v) || err != nil {
 				return Step{}, manifestErr("%s: step %s: bad timeout %q (whole seconds, at least 1)", where, id, v)
