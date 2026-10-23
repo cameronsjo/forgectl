@@ -192,7 +192,7 @@ func classify(lines []Line) {
 			lines[i] = Line{Kind: KindContinuation, Raw: raw, Section: currentSection, Key: valueKey}
 
 		case isSectionHeader(trimmed):
-			currentSection = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+			currentSection = sectionName(trimmed)
 			valueKey = ""
 			lines[i] = Line{Kind: KindSection, Raw: raw, Section: currentSection}
 
@@ -210,9 +210,18 @@ func classify(lines []Line) {
 	}
 }
 
-// isSectionHeader reports whether trimmed is a "[name]" section header.
+// isSectionHeader reports whether trimmed is a section header. configparser
+// matches `\[(?P<header>.+)\]` from the start of the line without anchoring
+// its end, so "[global] # mirror" is section "global": the header is
+// everything up to the LAST ']', and anything after it is ignored.
 func isSectionHeader(trimmed string) bool {
-	return len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'
+	return len(trimmed) >= 3 && trimmed[0] == '[' && strings.LastIndexByte(trimmed, ']') > 1
+}
+
+// sectionName returns the name of the header line trimmed (see
+// isSectionHeader), with surrounding whitespace removed.
+func sectionName(trimmed string) string {
+	return strings.TrimSpace(trimmed[1:strings.LastIndexByte(trimmed, ']')])
 }
 
 // indentOf returns the number of leading spaces and tabs in raw — the
