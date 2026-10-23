@@ -55,9 +55,10 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errInvalid, fmt.Sprintf(format, args...))
 }
 
-// sanitize checks every field of r and returns it with its items capped to
-// MaxItems and each text cleaned and cut. The refusals name a field, never
-// echo its value: the spool is untrusted, and a refusal can reach a terminal.
+// sanitize checks every field of r and returns it with its items held to
+// the parser's caps (admits) and each text cleaned and cut. The refusals
+// name a field, never echo its value: the spool is untrusted, and a refusal
+// can reach a terminal.
 func (r Record) sanitize() (Record, error) {
 	switch {
 	case !ValidSession(r.Session):
@@ -73,11 +74,11 @@ func (r Record) sanitize() (Record, error) {
 	case r.At.IsZero():
 		return Record{}, invalid("at is missing")
 	}
-	if len(r.Items) > MaxItems {
-		r.Items = r.Items[:MaxItems]
-	}
-	items := make([]Item, 0, len(r.Items))
+	items := make([]Item, 0, min(len(r.Items), MaxItems+maxSideItems))
 	for i, it := range r.Items {
+		if !admits(items, it.Kind) {
+			continue
+		}
 		clean, err := it.sanitize()
 		if err != nil {
 			return Record{}, invalid("item %d: %v", i+1, err)

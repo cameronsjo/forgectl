@@ -70,7 +70,7 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 - a lettered option, `**C.** …` (read, not queued: it belongs to the question above it);
 - any other bold lead, `**Nothing owed by me.** …` (read as a note, not queued).
 
-A line that matches none of these counts as seen and not read. A line under an item with no blank line between continues that item. The block ends at a blank line followed by prose, a heading, a thematic break (`---`, `***`, `___`) or a fence. As in CommonMark, a backtick run followed by text that holds a backtick is an inline span, not a fence, and a fence closes only on a bare marker. `Recommended: X` on an item's line (or a continuation) is cut from its text and mapped; a value outside the map stays in the text and sets no `rec`. At most 20 items are kept. `put` prints `items=`, `seen=` and `read=`.
+A line that matches none of these counts as seen and not read. A line under an item with no blank line between continues that item. The block ends at a blank line followed by prose, a heading, a thematic break (`---`, `***`, `___`) or a fence. As in CommonMark, a backtick run followed by text that holds a backtick is an inline span, not a fence, and a fence closes only on a bare marker. `Recommended: X` on an item's line (or a continuation) is cut from its text and mapped; a value outside the map stays in the text and sets no `rec`. At most 20 question and action items are kept, plus at most 40 notes and options, so options never crowd out a later question. `put` prints `items=`, `seen=` and `read=`.
 
 ### `put --json`
 

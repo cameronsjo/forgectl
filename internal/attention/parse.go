@@ -45,8 +45,12 @@ const (
 
 // Caps on what one block yields.
 const (
-	// MaxItems is the most items kept from one block.
+	// MaxItems is the most question and action items kept from one block.
 	MaxItems = 20
+	// maxSideItems is the most note and option items kept beside them. It
+	// is separate so options under early questions never crowd out a later
+	// question or action.
+	maxSideItems = 2 * MaxItems
 	// MaxText is the most runes kept of one item's text.
 	MaxText = 200
 	// maxN is the largest item number accepted.
@@ -153,7 +157,7 @@ func (b *blockParser) line(line string) bool {
 			return true
 		}
 		b.p.Read++
-		if len(b.p.Items) < MaxItems {
+		if admits(b.p.Items, it.Kind) {
 			b.p.Items = append(b.p.Items, it)
 			b.last = &b.p.Items[len(b.p.Items)-1]
 		} else {
@@ -337,4 +341,20 @@ func Clean(s string, maxRunes int) string {
 		out = strings.TrimRight(string(runes[:maxRunes-1]), " ") + "…"
 	}
 	return out
+}
+
+// admits reports whether an item of kind fits beside the kept ones: at most
+// MaxItems questions and actions, and at most maxSideItems notes and options.
+func admits(kept []Item, kind string) bool {
+	counted := kind == KindQuestion || kind == KindAction
+	n := 0
+	for _, k := range kept {
+		if (k.Kind == KindQuestion || k.Kind == KindAction) == counted {
+			n++
+		}
+	}
+	if counted {
+		return n < MaxItems
+	}
+	return n < maxSideItems
 }
