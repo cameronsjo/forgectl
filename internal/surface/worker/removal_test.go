@@ -305,3 +305,67 @@ func TestCheckGitFile(t *testing.T) {
 		}
 	})
 }
+
+// swapAfterCheck is a Runner that rewrites the worktree's gitfile to name
+// another repository just before the first git call after InspectWorktree
+// reads the common git dir, so after checkGitFile has passed: a process that
+// outlived the workspace swapping it between the check and the calls that
+// follow.
+type swapAfterCheck struct {
+	fexec.OSRunner
+	swap           func() error
+	armed, swapped bool
+}
+
+func (s *swapAfterCheck) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if s.armed && !s.swapped {
+		s.swapped = true
+		if err := s.swap(); err != nil {
+			return "", err
+		}
+	}
+	if slices.Contains(args, "--git-common-dir") {
+		s.armed = true
+	}
+	return s.OSRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
+// Every git call after the gitfile check runs against the git dir the check
+// found, so a gitfile swapped in after it is never read (#1304): the facts
+// are the worker's own branch, not the swapped-in repository's. Mutation:
+// run the calls with -C path alone (Branch comes back "evil"), or only the
+// status (it reports the tracked file as untracked).
+func TestInspectWorktreePinsTheCheckedGitDir(t *testing.T) {
+	ctx := context.Background()
+	top := gitRepo(t)
+	// A tracked file, which the swapped-in repository's empty index would
+	// report as untracked.
+	writeFile(t, filepath.Join(top, "tracked"), "x")
+	mustGit(t, top, "add", "tracked")
+	mustGit(t, top, "commit", "-q", "-m", "tracked")
+	wt, err := AddWorktree(ctx, fexec.OSRunner{}, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(t.TempDir(), "evil")
+	if err := os.Mkdir(evil, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, evil, "init", "-q", "-b", "evil")
+	mustGit(t, evil, "commit", "-q", "--allow-empty", "-m", "evil")
+
+	gitfile := filepath.Join(wt.Path, ".git")
+	run := &swapAfterCheck{swap: func() error {
+		return os.WriteFile(gitfile, []byte("gitdir: "+filepath.Join(evil, ".git")+"\n"), 0o600)
+	}}
+	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.swapped {
+		t.Fatal("the gitfile was never swapped; the test no longer models the window")
+	}
+	if f.Branch != "feat" || f.Status != "" || f.Ahead != 0 {
+		t.Fatalf("facts = branch %q, status %q, ahead %d; want feat, clean, 0 from the checked git dir", f.Branch, f.Status, f.Ahead)
+	}
+}

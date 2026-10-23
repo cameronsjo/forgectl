@@ -155,18 +155,23 @@ func refusal(v string) (string, bool) {
 
 // FilterListing reports whether args, a git argv as a fake Runner records it,
 // are one of gitenv.RunUnfiltered's or gitenv.RunNoHooks's listings ahead of
-// its call: the filter drivers and configured hooks, `[-C dir] config -z
+// its call: the filter drivers and configured hooks, `[-C dir [--git-dir=…
+// --work-tree=…]] config -z
 // --name-only --get-regexp ^(filter...` (or RunNoHooks's `^hook...` and
 // `^(include...`), or the submodules, `[-C dir] ls-files -z --stage -- :/`.
 func FilterListing(args []string) bool {
 	return driverListing(args) || submoduleListing(args)
 }
 
-// atStripped returns args without a leading profile and -C dir.
+// atStripped returns args without a leading profile and -C dir, and the
+// --git-dir and --work-tree options of gitenv.PinnedArgs after it.
 func atStripped(args []string) []string {
 	args = Strip(args)
 	if len(args) >= 2 && args[0] == "-C" {
 		args = args[2:]
+		if len(args) >= 2 && strings.HasPrefix(args[0], "--git-dir=") && strings.HasPrefix(args[1], "--work-tree=") {
+			args = args[2:]
+		}
 	}
 	return args
 }
