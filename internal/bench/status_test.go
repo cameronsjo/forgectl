@@ -425,6 +425,30 @@ func TestCheckChronicle_UnhealthyContainerDegrades(t *testing.T) {
 	}
 }
 
+func TestCheckChronicle_ExitedContainerDegrades(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return `{"Service":"db","State":"exited","Health":""}`, nil
+		default: // launchctl: loaded
+			return "", nil
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q, reason = %q; want degraded", c.State, c.Reason)
+	}
+	if !strings.Contains(c.Reason, "not running") {
+		t.Errorf("reason = %q, want it to mention not running", c.Reason)
+	}
+}
+
 func TestCheckChronicle_RestartingBeatsDaemonNotLoaded(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("LaunchAgent check is darwin-only")
@@ -507,6 +531,9 @@ func TestOTLPTarget(t *testing.T) {
 		"localhost:16317":           "tcp://localhost:16317",
 		"https://collector:4317":    "tcp://collector:4317",
 		"http://127.0.0.1:16317/v1": "tcp://127.0.0.1:16317",
+		"http://localhost":          "tcp://localhost:80",
+		"https://collector/v1":      "tcp://collector:443",
+		"http://[::1]":              "tcp://[::1]:80",
 	}
 	for in, want := range cases {
 		if got := otlpTarget(in); got != want {
