@@ -355,12 +355,13 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 	// machine's remote-tracking ref and can be stale. The lease makes the
 	// server refuse the delete if the branch has moved since, so commits
 	// pushed from elsewhere are never deleted unseen.
-	args := []string{"push"}
-	if isObjectID(info.RemoteTip) {
-		args = append(args, "--force-with-lease=refs/heads/"+info.Name+":"+info.RemoteTip)
+	// Without a checked tip there is nothing to lease, so the delete is
+	// refused rather than run unconditionally.
+	if !isObjectID(info.RemoteTip) {
+		return fmt.Errorf("delete remote branch %s: no checked remote tip to lease the delete on", termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes))
 	}
-	args = append(args, remoteName, "--delete", "--", info.Name)
-	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, args...); err != nil {
+	lease := "--force-with-lease=refs/heads/" + info.Name + ":" + info.RemoteTip
+	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, "push", lease, remoteName, "--delete", "--", info.Name); err != nil {
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
@@ -691,11 +692,11 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) ([]ghPRRow, e
 // remote tips, whichever exist) is contained in the head commit of one of
 // the PRs merged from that name. A name match alone is not enough: a fork
 // PR can share the name, and a branch reused after its PR merged carries
-// commits no merged PR has; deleting either with `-D` would lose them. A tip equal to a merged
-// head is contained; otherwise `git merge-base --is-ancestor` decides,
-// which covers a local branch left behind a head someone else pushed to.
-// An unknown tip, or a head commit missing locally, counts as not
-// contained.
+// commits no merged PR has; deleting either with `-D` would lose them. A
+// tip equal to a merged head is contained; otherwise `git merge-base
+// --is-ancestor` decides, which covers a local branch left behind a head
+// someone else pushed to. An unknown tip, or a head commit missing
+// locally, counts as not contained.
 func (c *Client) mergedOnServer(ctx context.Context, name string, tips, heads []string) bool {
 	if len(tips) == 0 || len(heads) == 0 {
 		return false

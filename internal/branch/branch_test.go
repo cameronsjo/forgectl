@@ -30,7 +30,8 @@ package branch
 //       every tip of the branch (local and remote): a fork PR or a reused
 //       branch with the same name is not merged; a tip behind the head is
 //       still merged
-//   [x] The remote delete leases the remote tip the merge was checked on
+//   [x] The remote delete leases the remote tip the merge was checked on,
+//       and is refused when there is no valid tip to lease
 
 import (
 	"context"
@@ -155,7 +156,7 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 	client := New(fake)
 
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := client.Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -204,7 +205,7 @@ func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 	client := New(fake)
 
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := client.Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -257,7 +258,7 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 				},
 			}
 			item := Classification{
-				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
 			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "upstream", Remote: true})
@@ -317,7 +318,7 @@ func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 				},
 			}
 			item := Classification{
-				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
 			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -355,7 +356,7 @@ func TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -716,6 +717,28 @@ func TestPrune_RemoteDelete_LeasesTheCheckedTip(t *testing.T) {
 	t.Fatalf("no git push call: %+v", fake.Calls)
 }
 
+// TestPrune_RemoteDelete_RefusedWithoutACheckedTip: an item with no valid
+// RemoteTip has nothing to lease on, so Prune refuses the remote delete
+// instead of running an unconditional `push --delete`.
+func TestPrune_RemoteDelete_RefusedWithoutACheckedTip(t *testing.T) {
+	for _, tip := range []string{"", "not-a-sha"} {
+		fake := &exec.FakeRunner{}
+		item := Classification{
+			Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: tip, MergedOnServer: true},
+			Group: SafeToDelete,
+		}
+		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+		if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+			t.Fatalf("tip %q: results = %+v, want one refusal", tip, results)
+		}
+		for _, call := range fake.Calls {
+			if args := gitenvtest.Strip(call.Args); call.Name == "git" && len(args) > 0 && args[0] == "push" {
+				t.Fatalf("tip %q: push ran without a lease: %+v", tip, call)
+			}
+		}
+	}
+}
+
 // TestRemoteBranches_ExcludesHeadSymref is a direct regression test for a bug
 // caught via a manual dry-run against this repo's own origin remote:
 // refs/remotes/<remote>/HEAD is a symref, and git's %(refname:short) renders
@@ -844,7 +867,7 @@ func TestPrune_RemoteDeleteFailure_DoesNotEchoGitStderr(t *testing.T) {
 		return "", nil
 	}}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -876,7 +899,7 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 		return "", nil
 	}}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -938,7 +961,7 @@ func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 			return "", nil
 		}}
 		item := Classification{
-			Info:  Info{Name: "fix-404", RemoteExists: true, MergedOnServer: true},
+			Info:  Info{Name: "fix-404", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 			Group: SafeToDelete,
 		}
 		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -979,7 +1002,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 				}
 				return "", nil
 			}},
-		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				args = gitenvtest.Strip(args)
 				if name == "git" && args[0] == "push" {
@@ -987,21 +1010,21 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 				}
 				return "", nil
 			}},
-		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				if isGetURL(name, args) {
 					return "", subprocessFailure(name, args)
 				}
 				return "", nil
 			}},
-		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				if isGetURL(name, args) {
 					return githubRemoteURL, nil
 				}
 				return "", nil
 			}},
-		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				switch {
 				case isGetURL(name, args):
@@ -1063,7 +1086,7 @@ func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -1096,7 +1119,7 @@ func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
