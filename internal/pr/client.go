@@ -55,6 +55,14 @@ type Client struct {
 	// writer — see the residual note on discardStale.
 	lockWait time.Duration
 
+	// tmuxBudget, when positive, replaces lockedTmuxBudget as the bound on
+	// each unit of tmux work done under the lifecycle lock (tmuxbudget.go).
+	// Zero means the default. It exists for integration tests that run the
+	// REAL tmux on a loaded machine, where one fork and exec can take longer
+	// than the production bound and the test would then assert on the budget
+	// instead of on the behavior it is about (forgectl#1120).
+	tmuxBudget time.Duration
+
 	// onLock, when non-nil, is called with ("acquire"|"release") around every
 	// successful lifecycle-lock hold. It exists so an in-package test can prove
 	// a composite verb takes ONE hold and does no long work inside it — the
@@ -292,6 +300,14 @@ func WithRecordFS(rfs recordFS) Option {
 // milliseconds.
 func WithLockWait(d time.Duration) Option {
 	return func(c *Client) { c.lockWait = d }
+}
+
+// WithLockedTmuxBudget overrides how long each unit of tmux work under the
+// lifecycle lock may take before it counts as unanswered — used by tests that
+// drive a real tmux, so a slow fork on a loaded machine is not read as a hung
+// server. Zero or less keeps the default.
+func WithLockedTmuxBudget(d time.Duration) Option {
+	return func(c *Client) { c.tmuxBudget = d }
 }
 
 // WithNotifier supplies the notifier the drainer calls once per successful

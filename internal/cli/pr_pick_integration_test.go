@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
@@ -226,6 +227,13 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 		pr.WithSessionsDir(sessionsDir),
 		pr.WithTmuxSession("reviews"),
 		pr.WithDispatchWait(func(context.Context) error { return nil }),
+		// The production 3 s bound on tmux work under the lifecycle lock is
+		// not what these rows test, and it is a wall-clock timer around a real
+		// fork and exec. On a loaded host the admission list-windows outlived
+		// it, and the verified row failed with the unreadable-count refusal
+		// (forgectl#1120). A minute keeps a hung tmux from hanging the test
+		// while taking the timer out of every assertion below.
+		pr.WithLockedTmuxBudget(time.Minute),
 	)
 	t.Cleanup(func() {
 		for _, session := range mustListSessions(t, client) {

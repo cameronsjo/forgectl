@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,12 +43,36 @@ func TestWithStatus_ShowsAtOnceThenErases(t *testing.T) {
 	}
 }
 
+// slowLineWriter is a buffer that closes seen once a write carries the slow
+// status line. withStatus serializes its writes, and the buffer is read only
+// after withStatus returns.
+type slowLineWriter struct {
+	bytes.Buffer
+	seen chan struct{}
+	once sync.Once
+}
+
+func (w *slowLineWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), inventoryStatusSlow) {
+		w.once.Do(func() { close(w.seen) })
+	}
+	return w.Buffer.Write(p)
+}
+
 // TestWithStatus_SlowWaitSaysSo: a wait that does not end becomes an
 // explanation (I7), not a line that never changes.
+//
+// The work runs until the slow line is written, not for a fixed 120 ms: under
+// load the slow timer's callback could miss that window and the test failed
+// on a correct withStatus (forgectl#1120). The bound below only stops a
+// regression from hanging the test; it fails through the assertion.
 func TestWithStatus_SlowWaitSaysSo(t *testing.T) {
-	var buf bytes.Buffer
-	_ = withStatus(context.Background(), &buf, true, 10*time.Millisecond, func() error {
-		time.Sleep(120 * time.Millisecond)
+	buf := &slowLineWriter{seen: make(chan struct{})}
+	_ = withStatus(context.Background(), buf, true, 10*time.Millisecond, func() error {
+		select {
+		case <-buf.seen:
+		case <-time.After(10 * time.Second):
+		}
 		return nil
 	})
 	if !strings.Contains(buf.String(), inventoryStatusSlow) {

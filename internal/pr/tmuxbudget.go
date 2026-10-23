@@ -45,19 +45,35 @@ var budgetTimeout = context.WithTimeout
 // Not safe for concurrent use; every holder is a single goroutine under the
 // lifecycle lock.
 type tmuxBudget struct {
+	// limit is the bound each unit gets: lockedTmuxBudget, unless the client
+	// was built with WithLockedTmuxBudget.
+	limit time.Duration
 	// cutOff is set once any bounded call ended with its context done — the
 	// deadline passed, or the caller cancelled. Either way tmux did not answer
 	// in time, and a sweep stops asking it.
 	cutOff bool
 }
 
-func newTmuxBudget() *tmuxBudget { return &tmuxBudget{} }
+func (c *Client) newTmuxBudget() *tmuxBudget {
+	return &tmuxBudget{limit: c.tmuxBudgetLimit()}
+}
 
-// bound returns ctx limited to one full lockedTmuxBudget. The returned done
+// tmuxBudgetLimit is this client's bound on one unit of tmux work under the
+// lifecycle lock: the package default, or WithLockedTmuxBudget's override.
+// The default is read at each call, so an in-package test that swaps the
+// variable still governs every client.
+func (c *Client) tmuxBudgetLimit() time.Duration {
+	if c.tmuxBudget > 0 {
+		return c.tmuxBudget
+	}
+	return lockedTmuxBudget
+}
+
+// bound returns ctx limited to one full budget limit. The returned done
 // func must be called once the tmux work is over: it records whether the
 // deadline (or the caller) cut the work off, and releases the context.
 func (b *tmuxBudget) bound(ctx context.Context) (context.Context, func()) {
-	bctx, cancel := budgetTimeout(ctx, lockedTmuxBudget)
+	bctx, cancel := budgetTimeout(ctx, b.limit)
 	return bctx, func() {
 		if bctx.Err() != nil {
 			b.cutOff = true
@@ -70,7 +86,7 @@ func (b *tmuxBudget) bound(ctx context.Context) (context.Context, func()) {
 // earlier call under this budget was already cut off.
 func (b *tmuxBudget) exhausted() bool { return b.cutOff }
 
-// boundedTmux bounds one call site's tmux work with a fresh lockedTmuxBudget.
-func boundedTmux(ctx context.Context) (context.Context, func()) {
-	return newTmuxBudget().bound(ctx)
+// boundedTmux bounds one call site's tmux work with a fresh budget.
+func (c *Client) boundedTmux(ctx context.Context) (context.Context, func()) {
+	return c.newTmuxBudget().bound(ctx)
 }
