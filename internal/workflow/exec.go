@@ -124,6 +124,13 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		slog.Debug("Dry-run mode: skipping execution")
 		return nil
 	}
+	// Seed every resolved param, defaults included, so a step template can be
+	// resolved in one pass against params plus exports. Params and exports
+	// share one namespace and BuildPlan refuses a collision, so no export is
+	// shadowed.
+	for name, v := range plan.params {
+		wctx.Set(name, v)
+	}
 	for i, step := range plan.Steps {
 		if i < e.resumeFrom {
 			slog.Debug("Skipping checkpointed step (resume).", "stepIndex", i, "stepUse", step.Uses)
@@ -134,12 +141,16 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 			slog.Error("Unknown step verb.", "stepIndex", i, "stepUse", step.Uses)
 			return fmt.Errorf("step %d: unknown step verb %s", i, termsafe.QuoteArgMax(step.Uses, 0))
 		}
-		// Re-interpolate the step's fields against the live Context: exports
-		// earlier steps produced (${workspace}, ${review}) resolve here, where
+		// Resolve the step's template against the live Context: params, and the
+		// exports earlier steps produced (${workspace}, ${review}), resolve here, where
 		// nothing is deferred — so a forward reference (consuming an export
 		// before its step has run) is a hard error, never a literal "${...}"
 		// handed to a command.
-		resolved, err := interpolatePlanStep(wctx, step)
+		src := step
+		if len(plan.templates) == len(plan.Steps) {
+			src = plan.templates[i]
+		}
+		resolved, err := interpolatePlanStep(wctx, src)
 		if err != nil {
 			slog.Error("Failed to resolve step exports.", "stepIndex", i, "stepUse", step.Uses, "error", err)
 			cleanupSandbox(wctx)

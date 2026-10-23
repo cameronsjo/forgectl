@@ -114,6 +114,59 @@ func TestExecutor_RunOnlyWorkflow_ComposedArgv(t *testing.T) {
 	}
 }
 
+// TestExecutor_ParamValueResolvedOnce pins that a --param VALUE is substituted
+// once and never scanned for references again: the argv a step receives
+// matches what --dry-run printed. Before the fix the execute pass re-read the
+// plan-time output, so "cost ${" failed as unterminated, "${foo}" as an
+// unknown variable, and "${workspace}" silently became the sandbox path.
+//
+// Mutation: interpolate plan.Steps[i] instead of plan.templates[i] in Run and
+// every case goes red.
+func TestExecutor_ParamValueResolvedOnce(t *testing.T) {
+	for _, val := range []string{"cost ${", "${foo}", "${workspace}", "$${who}"} {
+		t.Run(val, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			wf := Workflow{
+				DSLVersion: 1,
+				Name:       "param-once",
+				Params:     map[string]Param{"repo": {Required: true}, "note": {Required: true}},
+				Steps: []Step{
+					{Uses: "worktree", Repo: "${repo}", Ref: "HEAD"},
+					{Uses: "run", Cmd: "echo", Args: []string{"${note}", "${workspace}"}},
+					{Uses: "teardown"},
+				},
+			}
+			plan, err := BuildPlan(wf, map[string]string{"repo": t.TempDir(), "note": val}, testRegistry(t))
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+			if got := plan.Steps[1].Args[0]; got != val {
+				t.Fatalf("plan arg = %q, want %q", got, val)
+			}
+
+			wctx := NewContext(nil)
+			if err := NewExecutor(fake, testRegistry(t)).Run(context.Background(), plan, wctx); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			var echo *exec.Call
+			for i := range fake.Calls {
+				if fake.Calls[i].Name == "echo" {
+					echo = &fake.Calls[i]
+				}
+			}
+			if echo == nil {
+				t.Fatalf("no echo call in %+v", fake.Calls)
+			}
+			if echo.Args[0] != val {
+				t.Errorf("run arg = %q, want the param value %q unchanged", echo.Args[0], val)
+			}
+			if ws, _ := wctx.Get("workspace"); echo.Args[1] != ws || ws == "" {
+				t.Errorf("${workspace} arg = %q, want the exported workspace %q", echo.Args[1], ws)
+			}
+		})
+	}
+}
+
 // discardingFake is a FakeRunner that also offers exec.DiscardingRunner and
 // records which of the two paths a step took.
 type discardingFake struct {

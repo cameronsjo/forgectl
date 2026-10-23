@@ -16,6 +16,16 @@ type Plan struct {
 	Name    string
 	Version string
 	Steps   []PlanStep
+
+	// templates holds each step's fields as written, before any ${} is
+	// resolved, and params the resolved param values. Executor.Run resolves
+	// templates[i] once against params plus the exports earlier steps
+	// produced, so a param VALUE is never read again as a reference: a
+	// --param holding "${workspace}" stays that literal text, as --dry-run
+	// shows it. A Plan built by hand has neither, and Run falls back to
+	// re-resolving Steps.
+	templates []PlanStep
+	params    map[string]string
 }
 
 // BuildPlan merges cliParams over each param's default, enforces required
@@ -67,8 +77,9 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 	}
 
 	steps := make([]PlanStep, 0, len(wf.Steps))
+	templates := make([]PlanStep, 0, len(wf.Steps))
 	for i, s := range wf.Steps {
-		ps, err := planStep(ctx, s)
+		ps, err := interpolatePlanStep(ctx, templateStep(s))
 		if err != nil {
 			// Capped (#761): this fires before exec.go's registry check, so
 			// s.Uses is still unvetted workflow-file text of any length.
@@ -77,10 +88,11 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 			return Plan{}, fmt.Errorf("step %d (%s): %w", i, uses, err)
 		}
 		steps = append(steps, ps)
+		templates = append(templates, templateStep(s))
 	}
 
 	slog.Debug("Successfully built plan.", "workflowName", wf.Name, "resolvedStepCount", len(steps))
-	return Plan{Name: wf.Name, Version: wf.Version, Steps: steps}, nil
+	return Plan{Name: wf.Name, Version: wf.Version, Steps: steps, templates: templates, params: resolved}, nil
 }
 
 // resolveParams merges cliParams over each declared param's default and
@@ -121,9 +133,10 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 	return out, nil
 }
 
-// planStep interpolates every field of one Step against ctx.
-func planStep(ctx *Context, s Step) (PlanStep, error) {
-	return interpolatePlanStep(ctx, PlanStep{
+// templateStep copies one Step's fields into a PlanStep as written, with every
+// ${} reference still unresolved.
+func templateStep(s Step) PlanStep {
+	return PlanStep{
 		Uses:    s.Uses,
 		Repo:    s.Repo,
 		Ref:     s.Ref,
@@ -135,15 +148,17 @@ func planStep(ctx *Context, s Step) (PlanStep, error) {
 		To:      s.To,
 		Cmd:     s.Cmd,
 		Args:    s.Args,
-	})
+	}
 }
 
 // interpolatePlanStep resolves every ${} reference in a step's fields against
-// ctx. It runs twice per step: once at plan time (where a deferred export
-// passes through as the literal ${name}), and again in Executor.Run against
-// the live Context just before dispatch — where nothing is deferred, so a
-// reference to an export whose step hasn't run yet fails loudly instead of
-// reaching a command as the literal string "${name}".
+// ctx. It runs on each step's template twice: once at plan time (where a
+// deferred export passes through as the literal ${name}), and again in
+// Executor.Run against the live Context just before dispatch — where nothing
+// is deferred, so a reference to an export whose step hasn't run yet fails
+// loudly instead of reaching a command as the literal string "${name}". Both
+// passes start from the template, never from the other's output, so a
+// substituted value is never scanned for references.
 func interpolatePlanStep(ctx *Context, in PlanStep) (PlanStep, error) {
 	// Copy the struct, then interpolate every field through the SHARED field
 	// enumeration (step.PlanStep.Interpolate). Slice fields are replaced with
