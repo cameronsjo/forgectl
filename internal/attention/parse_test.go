@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -139,6 +140,47 @@ func TestParseRecommendedMap(t *testing.T) {
 		if len(p.Items) != 1 || p.Items[0].Rec != want {
 			t.Errorf("Recommended: %s -> %+v, want %q", raw, p.Items, want)
 		}
+	}
+}
+
+// TestParseOptionsDoNotCrowdOutQuestions pins that notes and options have
+// their own cap: five questions of four options each must not push a later
+// question or action past MaxItems.
+func TestParseOptionsDoNotCrowdOutQuestions(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("**What's next:**\n")
+	for q := 1; q <= 5; q++ {
+		b.WriteString("- **Question " + strconv.Itoa(q) + "**: pick one\n")
+		for _, tag := range []string{"A", "B", "C", "D"} {
+			b.WriteString("  - **" + tag + ".** choice\n")
+		}
+	}
+	b.WriteString("- **Action 6 (Cameron)**: run the migration\n")
+	p := Parse(b.String())
+	var qa []Item
+	for _, it := range p.Items {
+		if it.Kind == KindQuestion || it.Kind == KindAction {
+			qa = append(qa, it)
+		}
+	}
+	if len(qa) != 6 || qa[5].Kind != KindAction || qa[5].N != 6 {
+		t.Fatalf("question and action items = %+v, want questions 1-5 and action 6", qa)
+	}
+	if len(p.Items) != 26 {
+		t.Errorf("items = %d, want 26 (6 counted, 20 options)", len(p.Items))
+	}
+}
+
+func TestParseSideItemsCapped(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("**What's next:**\n- **Question 1**: pick\n")
+	for range maxSideItems + 10 {
+		b.WriteString("  - **A.** choice\n")
+	}
+	b.WriteString("- **Question 2**: and this\n")
+	p := Parse(b.String())
+	if len(p.Items) != maxSideItems+2 || p.Items[len(p.Items)-1].N != 2 {
+		t.Fatalf("items = %d, last %+v; want %d ending with question 2", len(p.Items), p.Items[len(p.Items)-1], maxSideItems+2)
 	}
 }
 
