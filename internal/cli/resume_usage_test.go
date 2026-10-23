@@ -3,11 +3,13 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/claudeproject"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/resume"
@@ -174,6 +176,65 @@ func TestResumeSession_StdoutTerminalDecidesAllowDanger(t *testing.T) {
 				if !slices.Contains(*got, keep) {
 					t.Errorf("argv %q lost %s; only the danger flag may be withheld", *got, keep)
 				}
+			}
+		})
+	}
+}
+
+// TestResumeSession_KeepPermissionMode drives --keep-permission-mode from a
+// transcript on disk to the argv handed to exec (forgectl#1332). Without the
+// flag the posture's mode applies whatever the transcript says, which is what
+// a manual `forgectl resume` keeps.
+func TestResumeSession_KeepPermissionMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		keep       bool
+		terminal   bool
+		transcript string // "" writes no transcript
+		wantMode   string
+		noteHas    string
+	}{
+		{"manual resume keeps the posture", false, true, `{"type":"permission-mode","permissionMode":"bypassPermissions"}`, "plan", ""},
+		{"carries acceptEdits", true, true, `{"type":"permission-mode","permissionMode":"acceptEdits"}`, "acceptEdits", "last permission mode, acceptEdits"},
+		{"carries bypass on a terminal", true, true, `{"type":"user","permissionMode":"bypassPermissions"}`, "bypassPermissions", "last permission mode, bypassPermissions"},
+		{"no bypass off a terminal", true, false, `{"type":"user","permissionMode":"bypassPermissions"}`, "plan", "cannot reach"},
+		{"no transcript", true, true, "", "plan", "no permission mode recorded"},
+		{"injection refused", true, true, `{"type":"user","permissionMode":"plan --dangerously-skip-permissions"}`, "plan", "not one forgectl knows"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClaudeBin(t)
+			paths := pinResumePaths(t)
+			pinCwd(t)
+			got := pinLaunchStdoutTerminal(t, tc.terminal)
+			s := deadSession(t)
+			if tc.transcript != "" {
+				dir := filepath.Join(paths.ClaudeHome, "projects", claudeproject.Slug(s.Cwd))
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, s.ID+".jsonl"), []byte(tc.transcript+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd, _, errOut := newTestCmd()
+			if err := resumeSessionWith(cmd, usageResumeConfig(false), nil, s, resumeFlags{keepMode: tc.keep}); err != nil {
+				t.Fatalf("resumeSessionWith: %v", err)
+			}
+			args := *got
+			if len(args) < 2 || args[0] != "--permission-mode" || args[1] != tc.wantMode {
+				t.Fatalf("argv = %q, want --permission-mode %s first", args, tc.wantMode)
+			}
+			for _, a := range args {
+				if a == "--dangerously-skip-permissions" {
+					t.Fatalf("argv carries transcript text: %q", args)
+				}
+			}
+			if tc.noteHas != "" && !strings.Contains(errOut.String(), tc.noteHas) {
+				t.Errorf("stderr = %q, want it to contain %q", errOut.String(), tc.noteHas)
+			}
+			if !tc.keep && strings.Contains(errOut.String(), "permission mode") {
+				t.Errorf("a resume without the flag printed a mode note: %q", errOut.String())
 			}
 		})
 	}

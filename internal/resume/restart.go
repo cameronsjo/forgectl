@@ -103,8 +103,10 @@ type RestartPlanItem struct {
 }
 
 // ManualResume is the by-hand command for a session this run did not resume.
+// It carries KeepPermissionModeFlag, as the relaunch line does, so resuming by
+// hand puts the session back in the mode it was in, as the run would have.
 func ManualResume(sessionID string) string {
-	return "forgectl resume " + sessionID
+	return "forgectl resume " + KeepPermissionModeFlag + " " + sessionID
 }
 
 // PlanRestart turns the outdated set into a plan. only, when non-empty,

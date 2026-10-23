@@ -198,7 +198,7 @@ func TestResumeRestart_FailedRelaunchExitsOne(t *testing.T) {
 	if ExitCode(err) != 1 {
 		t.Fatalf("exit %d (%v), want 1", ExitCode(err), err)
 	}
-	if !strings.Contains(out, "failed") || !strings.Contains(out, "by hand: forgectl resume "+restartSID) {
+	if !strings.Contains(out, "failed") || !strings.Contains(out, "by hand: "+resume.ManualResume(restartSID)) {
 		t.Errorf("out = %q; a failure names the by-hand command", out)
 	}
 }
@@ -265,7 +265,7 @@ func TestResumeRestart_RefusesASessionInTwoPanes(t *testing.T) {
 		{ID: "w9Z:p2", Agent: "claude", Session: restartSID},
 	}
 	out, err := runRestartCmd(t, "--outdated")
-	if err != nil || env.terminated != 0 || !strings.Contains(out, "2 panes (w9Z:p1, w9Z:p2)") || !strings.Contains(out, "forgectl resume "+restartSID) {
+	if err != nil || env.terminated != 0 || !strings.Contains(out, "2 panes (w9Z:p1, w9Z:p2)") || !strings.Contains(out, resume.ManualResume(restartSID)) {
 		t.Fatalf("err=%v terminated=%d out=%q", err, env.terminated, out)
 	}
 }
@@ -285,10 +285,47 @@ func TestResumeRestart_ListFailureIsNamed(t *testing.T) {
 	}
 	for _, want := range []string{
 		"note       herdr pane list failed (herdr down)",
-		"pane-gone  " + restartSID + "  pane w0:p999 no longer exists; re-reading the pane list: herdr pane list failed (herdr down); by hand: forgectl resume " + restartSID,
+		"pane-gone  " + restartSID + "  pane w0:p999 no longer exists; re-reading the pane list: herdr pane list failed (herdr down); by hand: " + resume.ManualResume(restartSID),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("out lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestResumeRestart_PrintsASummary(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated", "--session", restartSID)
+	if err != nil {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "summary    1 session(s): 1 resumed") {
+		t.Errorf("out = %q, want a summary line", out)
+	}
+}
+
+func TestRestartSummary(t *testing.T) {
+	ev := func(st resume.RestartState) resume.RestartEvent {
+		return resume.RestartEvent{SessionID: "s", State: st}
+	}
+	cases := []struct {
+		name   string
+		finals []resume.RestartEvent
+		want   string
+	}{
+		{"no sessions", nil, ""},
+		{"one resumed", []resume.RestartEvent{ev(resume.StateResumed)}, "1 session(s): 1 resumed"},
+		{"every state, fixed order", []resume.RestartEvent{
+			ev(resume.StatePaneGone), ev(resume.StateLeft), ev(resume.StateFailed),
+			ev(resume.StateSkipped), ev(resume.StateResumed), ev(resume.StateResumed),
+		}, "6 session(s): 2 resumed, 1 skipped, 1 failed, 1 left, 1 pane-gone"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := restartSummary(resume.RestartResult{Finals: tc.finals}); got != tc.want {
+				t.Errorf("restartSummary = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

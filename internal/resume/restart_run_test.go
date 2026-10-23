@@ -410,7 +410,7 @@ func TestSystemRestartEnv_Relaunch(t *testing.T) {
 	if err := env.Relaunch(context.Background(), testPane, testSID); err != nil {
 		t.Fatal(err)
 	}
-	want := "herdr pane run w7P:p1 '/x/forgectl' 'resume' '" + testSID + "'"
+	want := "herdr pane run w7P:p1 '/x/forgectl' 'resume' '" + KeepPermissionModeFlag + "' '" + testSID + "'"
 	if len(run.Calls) != 1 {
 		t.Fatalf("calls = %+v", run.Calls)
 	}
