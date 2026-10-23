@@ -77,7 +77,7 @@ func TestLoadReviewed_FoldsStoredKeys(t *testing.T) {
 	if err := s.MarkKey("github.com/other/repo#1"); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		t.Fatal(err)
 	}
