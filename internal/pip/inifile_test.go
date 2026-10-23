@@ -181,6 +181,44 @@ func TestRemove_CommentsOutContinuationLinesToo(t *testing.T) {
 	}
 }
 
+// configparser keeps a value open across blank and comment lines, so the
+// indented URLs after them still belong to extra-index-url. Removing it must
+// mark them too; left bare, configparser would read them as part of
+// index-url, the entry above.
+func TestRemove_ContinuationAfterBlankAndCommentLines(t *testing.T) {
+	src := "[global]\nindex-url = https://pypi.org/simple\nextra-index-url =\n    https://a\n\n    https://b\n    # mirror\n    https://c\nretries = 3\n"
+	f := Parse([]byte(src))
+	if n := f.Remove("global", "extra-index-url"); n != 1 {
+		t.Fatalf("Remove returned %d, want 1", n)
+	}
+	wantMarked := map[int]bool{2: true, 3: true, 5: true, 7: true}
+	for i, l := range f.Lines {
+		if got := hasRemovedMarker(l.Raw); got != wantMarked[i] {
+			t.Errorf("line %d %q: marked = %v, want %v", i, l.Raw, got, wantMarked[i])
+		}
+	}
+	if e := findEntry(t, f, "retries"); e.Kind != KindEntry {
+		t.Errorf("retries after the value: kind %v, want an entry", e.Kind)
+	}
+	if f.Restore(); string(f.Serialize()) != src {
+		t.Errorf("restore(remove(x)) != x: %q", f.Serialize())
+	}
+}
+
+// A line indented deeper than its entry continues the value even when it is
+// shaped like a section header or an entry, as configparser reads it.
+func TestClassify_DeeperIndentContinuesWhateverItsShape(t *testing.T) {
+	f := Parse([]byte("[global]\nkey = a\n    [b]\n    other = c\nnext = d\n"))
+	for i, want := range []LineKind{KindSection, KindEntry, KindContinuation, KindContinuation, KindEntry} {
+		if got := f.Lines[i].Kind; got != want {
+			t.Errorf("line %d %q: kind %v, want %v", i, f.Lines[i].Raw, got, want)
+		}
+	}
+	if f.Lines[3].Key != "key" || f.Lines[3].Section != "global" {
+		t.Errorf("line 3 = %+v, want a continuation of key in [global]", f.Lines[3])
+	}
+}
+
 func TestRemove_OnlyMatchesRequestedSection(t *testing.T) {
 	src := "[global]\nindex-url = https://internal.example.com/simple\n\n[install]\nindex-url = https://other.example.com/simple\n"
 	f := Parse([]byte(src))
