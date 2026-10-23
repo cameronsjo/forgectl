@@ -54,6 +54,13 @@ import (
 // polling, or supervision of any kind. Staying alive long enough to do that is
 // itself work — see the signal handling in Run.
 
+// reaperSignalSeen is called with each terminal signal Run's handling took.
+// A test seam: a signal sent to this process is handled on the main thread,
+// later than the send returns, and a test that let Run return before then
+// would have Run release the handling first, so the late signal would kill
+// the test binary with no failing test named (forgectl#1120).
+var reaperSignalSeen = func(os.Signal) {}
+
 var (
 	// errSocketUnsafe reports a bootstrap socket this process will not dial.
 	errSocketUnsafe = errors.New("forgectl: surface bootstrap socket is not safe to dial")
@@ -142,9 +149,15 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 	// SIGTERM is not caught either — a kill aimed at this process should work.
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGQUIT)
-	defer signal.Stop(signals)
+	defer func() {
+		// Stop guarantees no further send, so the close ends the drain.
+		signal.Stop(signals)
+		close(signals)
+	}()
+	seen := reaperSignalSeen
 	go func() {
-		for range signals { //nolint:revive // draining is the whole behaviour
+		for s := range signals { // draining is the whole behaviour
+			seen(s)
 		}
 	}()
 
