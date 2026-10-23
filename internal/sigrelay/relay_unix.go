@@ -4,12 +4,16 @@ package sigrelay
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// settleWait is how long a re-raise waits for the default action to take.
+var settleWait = time.Second
 
 // interruptSignals are the terminating signals Group passes on to the child
 // it runs in a process group of its own: SIGINT (Ctrl-C, which the terminal
@@ -24,6 +28,11 @@ var interruptSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGH
 // when the child shared forgectl's group; or a handler someone else registered,
 // a concurrent Group call or a command's own scope, which then decides.
 // It waits up to a second for the re-raised signal to take, then returns.
+// It skips the wait when ctx was cancelled from above: whoever cancelled it
+// is already unwinding and lives on by design, so the second would be lost
+// on every later call (#1020: 8 sequential stops took 8s). With no handler
+// left, a re-raise ends the process inside Kill, so the wait only ever bought
+// time for a listener to act.
 //
 // A signal the process inherited as ignored stays ignored, as in
 // internal/sops: nohup ignores SIGHUP, and a non-interactive shell starts a
@@ -39,6 +48,7 @@ func interruptible(ctx context.Context) (context.Context, func()) {
 	if len(sigs) == 0 {
 		return ctx, func() {}
 	}
+	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	// Buffered by one: signal.Notify never blocks on a send.
 	ch := make(chan os.Signal, 1)
@@ -73,7 +83,9 @@ func interruptible(ctx context.Context) (context.Context, func()) {
 			}
 			if s, ok := got.(syscall.Signal); ok {
 				_ = syscall.Kill(syscall.Getpid(), s)
-				time.Sleep(time.Second)
+				if !errors.Is(parent.Err(), context.Canceled) {
+					time.Sleep(settleWait)
+				}
 			}
 		})
 	}
