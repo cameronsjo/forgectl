@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // `surface close` removes a worker's worktree only when doing so cannot lose
@@ -63,7 +64,7 @@ func RemovalBlockers(f WorktreeFacts) []string {
 		out = append(out, "it has uncommitted, untracked, or ignored files (git status --porcelain --ignored is not empty)")
 	}
 	if len(f.Submodules) > 0 {
-		out = append(out, fmt.Sprintf("it holds submodules (%s), and git worktree remove refuses a worktree that does", strings.Join(f.Submodules, ", ")))
+		out = append(out, fmt.Sprintf("it holds submodules (%s), and git worktree remove refuses a worktree that does", submoduleList(f.Submodules)))
 	}
 	if f.Branch == "" {
 		out = append(out, "HEAD is detached, so its commits are reachable only from the worktree's own reflog")
@@ -80,6 +81,21 @@ func RemovalBlockers(f WorktreeFacts) []string {
 		out = append(out, fmt.Sprintf("%d stash entr(y/ies) were made on branch %s", f.Stashes, f.Branch))
 	}
 	return out
+}
+
+// maxNamedSubmodules caps how many submodules a blocker names. The paths are
+// the worker's to choose, so each is quoted and cut short as well.
+const maxNamedSubmodules = 3
+
+func submoduleList(subs []string) string {
+	var named []string
+	for _, p := range subs[:min(len(subs), maxNamedSubmodules)] {
+		named = append(named, termsafe.QuotePathMax(p, 80))
+	}
+	if more := len(subs) - len(named); more > 0 {
+		named = append(named, fmt.Sprintf("and %d more", more))
+	}
+	return strings.Join(named, ", ")
 }
 
 // InspectWorktree reads the facts RemovalBlockers decides on, for the worker
@@ -135,16 +151,20 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// (GIT_OPTIONAL_LOCKS=0) stops status from taking index.lock to write that
 	// refresh back: this inspection also backs `surface close --dry-run`, which
 	// must change nothing, and the answer needs no refreshed index.
-	// --ignore-submodules=dirty keeps status from running a child git status
-	// in each populated submodule, which would read the submodule's .git a
-	// second time, after RunUnfiltered listed its drivers: one swapped in
-	// between could name drivers nobody blanked (#1338). It still reports a
-	// gitlink whose commit moved or is staged, which =all hides (measured on
-	// git 2.43: none and untracked run the child, dirty and all do not). What
-	// the child would have found no longer matters: a populated submodule
-	// keeps the worktree on its own.
-	if f.Status, err = gitenv.RunUnfilteredPinned(ctx, run, gitenv.Bin, path, gitDir, "--no-optional-locks", "status", "--porcelain", "--ignored", "--ignore-submodules=dirty"); err != nil {
-		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
+	//
+	// A submodule keeps the worktree whatever status says, and RunUnfiltered
+	// would refuse one whose .git it cannot read, failing close without the
+	// reason, so status runs only in a worktree submodulesIn found none in.
+	// One populated after that is the worker's too: --ignore-submodules=dirty
+	// keeps status from running a child git status in it, which would read a
+	// .git that RunUnfiltered's listing never saw and could name drivers
+	// nobody blanked (#1338). It still reports a gitlink whose commit moved or
+	// is staged, which =all hides (measured on git 2.43: none and untracked
+	// run the child, dirty and all do not).
+	if len(f.Submodules) == 0 {
+		if f.Status, err = gitenv.RunUnfilteredPinned(ctx, run, gitenv.Bin, path, gitDir, "--no-optional-locks", "status", "--porcelain", "--ignored", "--ignore-submodules=dirty"); err != nil {
+			return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
+		}
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
 	// Both only add blockers or fall back to the stricter base count, so a

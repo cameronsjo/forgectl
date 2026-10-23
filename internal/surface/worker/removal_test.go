@@ -28,7 +28,7 @@ func TestRemovalBlockers(t *testing.T) {
 		"ahead of base":           {func(f *WorktreeFacts) { f.Ahead = 1 }, "beyond the worktree's base"},
 		"base unknown":            {func(f *WorktreeFacts) { f.Ahead = -1 }, "base commit is unknown"},
 		"stash":                   {func(f *WorktreeFacts) { f.Stashes = 1 }, "stash"},
-		"submodules":              {func(f *WorktreeFacts) { f.Submodules = []string{"sm"} }, "holds submodules (sm)"},
+		"submodules":              {func(f *WorktreeFacts) { f.Submodules = []string{"sm"} }, "holds submodules ("},
 		"on disk, not a worktree": {func(f *WorktreeFacts) { f.Listed = false }, "does not list it"},
 	}
 	for name, c := range cases {
@@ -399,50 +399,50 @@ func (s *swapBeforeStatus) RunWithEnvFiltered(ctx context.Context, env map[strin
 	return s.OSRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
 }
 
-// A submodule's .git swapped after the driver listing, to a repository whose
-// config defines a driver nobody listed, never runs that driver: status does
-// not enter the submodule, and the submodule keeps the worktree on its own
-// (#1338). Mutation: drop --ignore-submodules=dirty from the status, and
-// the child status in sm runs the driver.
-func TestInspectWorktreeRunsNoSwappedSubmoduleDriver(t *testing.T) {
+// A submodule populated after the driver listing, by a .git naming a
+// repository whose config defines a driver nobody listed, never runs that
+// driver: status does not enter the submodule (#1338). Mutation: drop
+// --ignore-submodules=dirty from the status, and the child status in sm runs
+// the driver.
+func TestInspectWorktreeRunsNoLatePopulatedSubmoduleDriver(t *testing.T) {
 	ctx := context.Background()
 	top := gitRepo(t)
 	wt, err := AddWorktree(ctx, fexec.OSRunner{}, top, "w", "feat", baseOf(t, top))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := gitRepo(t)
-	writeFile(t, filepath.Join(sub, ".gitattributes"), "*.txt filter=evil\n")
-	writeFile(t, filepath.Join(sub, "a.txt"), "x\n")
-	mustGit(t, sub, "add", ".gitattributes", "a.txt")
-	mustGit(t, sub, "commit", "-q", "-m", "files")
-	addSubmodule(t, wt.Path, sub)
-	mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
-
-	// evil holds the same commit, so its index lists a.txt, with stat data
-	// that does not match sm's copy: status in sm re-hashes it through the
-	// driver evil's config defines.
-	evil := filepath.Join(t.TempDir(), "evil")
-	mustGit(t, top, "clone", "-q", sub, evil)
+	// evil's index lists a.txt with stat data that does not match sm's
+	// copy, so status in sm would re-hash it through evil's driver.
+	evil := gitRepo(t)
+	writeFile(t, filepath.Join(evil, ".gitattributes"), "*.txt filter=evil\n")
+	writeFile(t, filepath.Join(evil, "a.txt"), "x\n")
+	mustGit(t, evil, "add", ".gitattributes", "a.txt")
+	mustGit(t, evil, "commit", "-q", "-m", "files")
 	marker := filepath.Join(t.TempDir(), "filter-ran")
 	mustGit(t, evil, "config", "filter.evil.clean", "touch '"+marker+"'; cat")
 
-	gitfile := filepath.Join(wt.Path, "sm", ".git")
+	// An unpopulated gitlink sm, with evil's files laid out but no .git, so
+	// neither submodulesIn nor the listing finds a submodule there.
+	sm := filepath.Join(wt.Path, "sm")
+	if err := os.Mkdir(sm, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sm, ".gitattributes"), "*.txt filter=evil\n")
+	writeFile(t, filepath.Join(sm, "a.txt"), "x\n")
+	mustGit(t, wt.Path, "update-index", "--add", "--cacheinfo", "160000,"+headOf(t, evil)+",sm")
+	mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
+
 	run := &swapBeforeStatus{swap: func() error {
-		return os.WriteFile(gitfile, []byte("gitdir: "+filepath.Join(evil, ".git")+"\n"), 0o600)
+		return os.WriteFile(filepath.Join(sm, ".git"), []byte("gitdir: "+filepath.Join(evil, ".git")+"\n"), 0o600)
 	}}
-	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
-	if err != nil {
+	if _, err := InspectWorktree(ctx, run, top, "w", wt.Base); err != nil {
 		t.Fatalf("InspectWorktree: %v", err)
 	}
 	if !run.swapped {
-		t.Fatal("the submodule's .git was never swapped; the test no longer models the window")
+		t.Fatal("sm was never populated before status; the test no longer models the window")
 	}
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("a driver from the swapped-in submodule repository ran during close's git status")
-	}
-	if !slices.Contains(f.Submodules, "sm") {
-		t.Fatalf("Submodules = %q, want sm", f.Submodules)
+		t.Fatal("a driver from the late-populated submodule ran during close's git status")
 	}
 }
 
@@ -456,19 +456,23 @@ func TestInspectWorktreeReportsAStagedGitlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := gitRepo(t)
-	addSubmodule(t, wt.Path, sub)
-	mustGit(t, wt.Path, "commit", "-q", "-m", "sm")
-	mustGit(t, sub, "commit", "-q", "--allow-empty", "-m", "next")
-	next := strings.TrimSpace(mustGit(t, sub, "rev-parse", "HEAD"))
-	// Staged without populating: only the index moves.
-	mustGit(t, wt.Path, "update-index", "--cacheinfo", "160000,"+next+",sm")
+	// Staged without populating: only the index holds it.
+	mustGit(t, wt.Path, "update-index", "--add", "--cacheinfo", "160000,"+headOf(t, top)+",sm")
 	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
 	if err != nil {
 		t.Fatalf("InspectWorktree: %v", err)
 	}
-	if !strings.Contains(f.Status, "sm") {
-		t.Fatalf("Status = %q, want the staged gitlink sm", f.Status)
+	if len(f.Submodules) != 0 || !strings.Contains(f.Status, "sm") {
+		t.Fatalf("Submodules = %q, Status = %q; want none, and the staged gitlink sm", f.Submodules, f.Status)
+	}
+}
+
+// The blocker names at most maxNamedSubmodules of the worker's paths, each
+// quoted, and counts the rest.
+func TestSubmoduleList(t *testing.T) {
+	got := submoduleList([]string{"a", "b\x1b[2J", "c", "d", "e"})
+	if strings.ContainsRune(got, 0x1b) || !strings.HasSuffix(got, "and 2 more") {
+		t.Fatalf("submoduleList = %q", got)
 	}
 }
 
@@ -528,5 +532,30 @@ func TestSubmodulesIn(t *testing.T) {
 	}
 	if want := []string{"populated", "loop"}; !slices.Equal(got, want) {
 		t.Fatalf("submodulesIn = %q, want %q", got, want)
+	}
+}
+
+// A gitlink whose .git RunUnfiltered would refuse (here an empty file)
+// keeps the worktree with the submodule reason, not a failed close: status
+// is skipped once a submodule is found. Mutation: run status anyway.
+func TestInspectWorktreeNamesAnUnreadableSubmodule(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(wt.Path, "sm"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, "sm", ".git"), "")
+	mustGit(t, wt.Path, "update-index", "--add", "--cacheinfo", "160000,"+headOf(t, top)+",sm")
+	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
+	if err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	if !slices.Contains(f.Submodules, "sm") {
+		t.Fatalf("Submodules = %q, want sm", f.Submodules)
 	}
 }
