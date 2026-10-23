@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Manifest grammar, planner, lint, and hash.
@@ -87,11 +88,23 @@ func TestParseBadStepIDs(t *testing.T) {
 }
 
 func TestParseBadTimeouts(t *testing.T) {
-	for _, bad := range []string{"0", "-1", "abc", "1.5x", "99999999999999999999"} {
+	for _, bad := range []string{"0", "-1", "abc", "1.5x", "99999999999999999999", "9223372037"} {
 		_, err := ParseManifest("a timeout="+bad+" -- true\n", "m.manifest")
 		if err == nil || !strings.Contains(err.Error(), "m.manifest:1: step a: bad timeout") {
 			t.Errorf("timeout=%s: err = %v", bad, err)
 		}
+	}
+}
+
+// The largest timeout whose deadline still fits a time.Duration is accepted;
+// one second more would wrap negative (see TestParseBadTimeouts).
+func TestParseMaxTimeoutAccepted(t *testing.T) {
+	m := parse(t, "a timeout=9223372036 -- true\n")
+	if got := m.step("a").Timeout; got != 9223372036 {
+		t.Errorf("timeout = %d, want 9223372036", got)
+	}
+	if d := time.Duration(m.step("a").Timeout) * time.Second; d <= 0 {
+		t.Errorf("deadline offset %v wrapped", d)
 	}
 }
 
