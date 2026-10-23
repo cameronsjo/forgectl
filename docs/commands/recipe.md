@@ -21,7 +21,8 @@ of three manual steps through a terminal multiplexer.
 then `HERDR_ACTIVE_PANE_ID`. `HERDR_ACTIVE_PANE_ID` is herdr's *focused* pane
 for the workspace, not necessarily the caller's own — it is a reasonable
 default target, and a wrong answer to "is this me". No target from any source
-exits `2`.
+exits `2`. An explicit `--target ""` (an unset `"$PANE"`, say) also
+exits `2` instead of falling back to the environment.
 
 **Preflight.** Before any side effect, `afk` runs `herdr agent get <target>`.
 That single call proves herdr is installed, the server answers, and the
