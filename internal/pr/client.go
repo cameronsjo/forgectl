@@ -305,7 +305,10 @@ func WithLockWait(d time.Duration) Option {
 // WithLockedTmuxBudget overrides how long each unit of tmux work under the
 // lifecycle lock may take before it counts as unanswered — used by tests that
 // drive a real tmux, so a slow fork on a loaded machine is not read as a hung
-// server. Zero or less keeps the default.
+// server. Zero or less keeps the default. The default stays under the lock
+// wait so a verb queued behind a holder whose tmux hung still gets the lock;
+// a client that raises this past its lock wait gives that up, so raise
+// WithLockWait with it if a test runs verbs concurrently.
 func WithLockedTmuxBudget(d time.Duration) Option {
 	return func(c *Client) { c.tmuxBudget = d }
 }

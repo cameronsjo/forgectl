@@ -487,3 +487,30 @@ func TestAttach_DuplicateReviewWindowNamesSayWhatToDo(t *testing.T) {
 		t.Error("attach selected a window it could not tell apart from its twin")
 	}
 }
+
+// WithLockedTmuxBudget sets the bound every budget of the client applies, and
+// zero or less keeps lockedTmuxBudget (forgectl#1120). Mutation: ignore the
+// option in tmuxBudgetLimit.
+func TestWithLockedTmuxBudgetSetsTheBound(t *testing.T) {
+	var got []time.Duration
+	old := budgetTimeout
+	budgetTimeout = func(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+		got = append(got, d)
+		return context.WithCancel(ctx)
+	}
+	t.Cleanup(func() { budgetTimeout = old })
+	for _, c := range []struct {
+		opt  time.Duration
+		want time.Duration
+	}{{time.Minute, time.Minute}, {0, lockedTmuxBudget}, {-time.Second, lockedTmuxBudget}} {
+		got = nil
+		client := New(nil, WithLockedTmuxBudget(c.opt))
+		_, done := client.boundedTmux(context.Background())
+		done()
+		_, done = client.newTmuxBudget().bound(context.Background())
+		done()
+		if len(got) != 2 || got[0] != c.want || got[1] != c.want {
+			t.Fatalf("WithLockedTmuxBudget(%s): bounds %v, want %s twice", c.opt, got, c.want)
+		}
+	}
+}
