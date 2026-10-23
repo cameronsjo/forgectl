@@ -110,7 +110,7 @@ A commit SHALL be releasable when its subject type is `feat`, `fix`, or `perf`, 
 - **THEN** that row is `unknown` naming the failed read and the command exits 1
 
 ### Requirement: Reviewed marks ignore owner and repo case
-A reviewed mark SHALL match its item whatever the case of the owner and repo it was typed with, since forge owner and repo names are case-insensitive. Marks already stored in another case MUST read as the same mark, the newest winning. A local `local/repo#N` mark MUST keep its case.
+A reviewed mark SHALL match its item whatever the case of the owner and repo it was typed with, since forge owner and repo names are case-insensitive. Marks already stored in another case MUST read as the same mark, the newest winning.
 
 #### Scenario: Mark typed in another case
 - **WHEN** `review mark CameronSjo/Forgectl#76` runs and the forge lists the item as `cameronsjo/forgectl#76`

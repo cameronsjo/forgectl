@@ -100,14 +100,9 @@ func (s *ReviewedStore) keys(ref Ref) (qualified, legacy string) {
 // foldKey is the store's spelling of a key. GitHub and Gitea owner and repo
 // names are case-insensitive, and a typed ref keeps the case it was typed in
 // while a listing returns the forge's, so every key is ASCII-lowercased (as
-// sessionkey already does). A local ref's "local/repo#N" key is left alone: it
-// names a directory, and directory names can differ only in case.
-func foldKey(key string) string {
-	if strings.HasPrefix(key, localOwnerSentinel+"/") {
-		return key
-	}
-	return asciiLower(key)
-}
+// sessionkey already does). A local ref's key is "local/<oid>#N" with a
+// lowercase hex oid, so folding leaves it as it was.
+func foldKey(key string) string { return asciiLower(key) }
 
 // lookup returns the newest mark among a ref's qualified and legacy keys.
 func (s *ReviewedStore) lookup(ref Ref) (time.Time, bool) {
@@ -385,7 +380,7 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 	slog.Debug("Preparing to sync reviewed store (host-scoped).", "storeSize", len(s.at), "openCount", len(openKeys), "activeHosts", activeHosts)
 	active := make(map[string]bool, len(activeHosts))
 	for _, h := range activeHosts {
-		active[h] = true
+		active[foldKey(h)] = true // a configured host may carry capitals; stored keys are folded
 	}
 	open := make(map[string]bool, len(openKeys))
 	for _, k := range openKeys {

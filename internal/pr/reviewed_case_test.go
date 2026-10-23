@@ -1,6 +1,7 @@
 package pr
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,7 +60,7 @@ func TestReviewedStore_KeyFunctionsAreCaseInsensitive(t *testing.T) {
 // newest when two spellings collide.
 func TestLoadReviewed_FoldsStoredKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pr-reviewed.json")
-	data := `{"github.com/CameronSjo/Forgectl#76":"2026-10-01T00:00:00Z","github.com/cameronsjo/forgectl#76":"2026-09-01T00:00:00Z","local/MyRepo#3":"2026-10-01T00:00:00Z"}`
+	data := `{"github.com/CameronSjo/Forgectl#76":"2026-10-01T00:00:00Z","github.com/cameronsjo/forgectl#76":"2026-09-01T00:00:00Z"}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,42 @@ func TestLoadReviewed_FoldsStoredKeys(t *testing.T) {
 	if !ok || !at.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("folded mark = %v, %v; want the newer 2026-10-01", at, ok)
 	}
-	if foldKey("local/MyRepo#3") != "local/MyRepo#3" {
-		t.Error("a local key was folded")
+	if _, ok := s.ReviewedAt(Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 3, local: true}); ok {
+		t.Error("an unrelated local mark matched")
+	}
+
+	// The next write persists one folded key in place of both spellings.
+	if err := s.MarkKey("github.com/other/repo#1"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk map[string]time.Time
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := onDisk["github.com/CameronSjo/Forgectl#76"]; ok {
+		t.Errorf("mixed-case key still on disk: %v", onDisk)
+	}
+	if got := onDisk["github.com/cameronsjo/forgectl#76"]; !got.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("folded key on disk = %v, want the newer 2026-10-01", got)
+	}
+}
+
+// A Gitea host configured with capitals still scopes pruning: stored keys are
+// folded, so the active host must be too.
+func TestReviewedStore_SyncKeysScopedFoldsActiveHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pr-reviewed.json")
+	s := LoadReviewed(path)
+	if err := s.MarkKey("Git.Example.com/o/closed#1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncKeysScoped(nil, []string{"Git.Example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.IsReviewedKey("git.example.com/o/closed#1", time.Time{}) {
+		t.Error("a closed item on a capitalised active host was not pruned")
 	}
 }
