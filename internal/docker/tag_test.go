@@ -5,6 +5,8 @@ package docker
 // deriveTag / devTag (Classification: pure logic / data transformer)
 //   [x] Happy: deriveTag joins repo, slugified branch, and shortsha as
 //       "{repo}:{branch-slug}-{shortsha}"
+//   [x] Boundary: a long branch is cut so slug + "-" + shortsha stays
+//       within maxTagLen, never ending the slug on a separator
 //   [x] Happy: devTag appends the fixed ":dev" alias to repo
 //
 // slugifyBranch (Classification: pure logic / sanitizer)
@@ -68,6 +70,32 @@ func TestDeriveTag(t *testing.T) {
 	want := "myrepo:feature-foo-abc1234"
 	if got != want {
 		t.Errorf("deriveTag = %q, want %q", got, want)
+	}
+}
+
+// dockerTag is the docker/distribution grammar for the tag component.
+var dockerTag = regexp.MustCompile(`^[\w][\w.-]{0,127}$`)
+
+func TestDeriveTag_LongBranchStaysWithinTagLimit(t *testing.T) {
+	cases := []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{"long branch cut to fit the sha", "feature/" + strings.Repeat("a", 130), "feature-" + strings.Repeat("a", 112) + "-abc1234"},
+		{"cut landing on a separator drops it", strings.Repeat("a", 119) + "/bbbb", strings.Repeat("a", 119) + "-abc1234"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deriveTag("myrepo", tc.branch, "abc1234")
+			tag := strings.TrimPrefix(got, "myrepo:")
+			if !dockerTag.MatchString(tag) {
+				t.Errorf("deriveTag tag component %q (len %d) is not a valid docker tag", tag, len(tag))
+			}
+			if got != "myrepo:"+tc.want {
+				t.Errorf("deriveTag = %q, want %q", got, "myrepo:"+tc.want)
+			}
+		})
 	}
 }
 
