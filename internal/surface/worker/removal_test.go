@@ -499,3 +499,34 @@ func TestInspectWorktreeRefusesAnotherWorktreesGitDir(t *testing.T) {
 		t.Fatalf("the other worktree's own gitfile was refused: %v", err)
 	}
 }
+
+// submodulesIn names each gitlink once, and counts a gitlink whose .git it
+// cannot rule out as a submodule rather than failing close.
+func TestSubmodulesIn(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "populated"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "populated", ".git"), "")
+	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	const oid = "0123456789012345678901234567890123456789"
+	index := "160000 " + oid + " 1\tpopulated\x00" +
+		"160000 " + oid + " 2\tpopulated\x00" +
+		"160000 " + oid + " 0\tempty\x00" +
+		"160000 " + oid + " 0\tabsent\x00" +
+		"160000 " + oid + " 0\tloop\x00" +
+		"100644 " + oid + " 0\tfile\x00"
+	got, err := submodulesIn(dir, gitDir, func(...string) (string, error) { return index, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"populated", "loop"}; !slices.Equal(got, want) {
+		t.Fatalf("submodulesIn = %q, want %q", got, want)
+	}
+}

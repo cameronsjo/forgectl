@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -207,8 +208,9 @@ func RemoveWorktree(ctx context.Context, run GitRunner, top, path string) error 
 // call pinned to the worktree's checked git dir.
 func submodulesIn(path, gitDir string, git func(...string) (string, error)) ([]string, error) {
 	var out []string
+	// git's is_directory follows a symbolic link, so this stat does too.
 	modules := filepath.Join(gitDir, "modules")
-	if info, err := os.Lstat(modules); err == nil && info.IsDir() {
+	if info, err := os.Stat(modules); err == nil && info.IsDir() {
 		out = append(out, modules)
 	}
 	index, err := git("ls-files", "-z", "--stage")
@@ -217,17 +219,18 @@ func submodulesIn(path, gitDir string, git func(...string) (string, error)) ([]s
 	}
 	for entry := range strings.SplitSeq(index, "\x00") {
 		meta, p, ok := strings.Cut(entry, "\t")
-		if !ok || !strings.HasPrefix(meta, "160000 ") {
+		// A conflicted gitlink has an entry per stage; name it once.
+		if !ok || !strings.HasPrefix(meta, "160000 ") || slices.Contains(out, p) {
 			continue
 		}
-		// git's own check follows symbolic links here, so this one does too.
+		// Anything at <gitlink>/.git counts, where git counts only a .git
+		// naming a repository, and so does any error but its absence: a
+		// worker's empty file, dangling link or symlink loop keeps the
+		// worktree with a reason, rather than failing close or leaving the
+		// decision to git's own check at remove.
 		_, err := os.Lstat(filepath.Join(path, filepath.FromSlash(p), ".git"))
-		switch {
-		case err == nil:
+		if err == nil || (!errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
 			out = append(out, p)
-		case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
-		default:
-			return nil, fmt.Errorf("worker: check submodule %s in %s: %w", p, path, err)
 		}
 	}
 	return out, nil
