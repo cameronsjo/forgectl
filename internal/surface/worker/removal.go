@@ -171,7 +171,10 @@ func RemoveWorktree(ctx context.Context, run GitRunner, top, path string) error 
 		return fmt.Errorf("%w: %s is not directly under %s", ErrUnsafeWorktreeRoot, path, filepath.Join(append([]string{top}, worktreeDirs...)...))
 	}
 	// worktree remove runs its own dirty check in path, so path's filter
-	// drivers are blanked too. RunUnfilteredAlso pins hooks off.
+	// drivers are blanked too. RunUnfilteredAlso pins hooks off. The listing
+	// for path stays unpinned on purpose: git's own check runs with
+	// GIT_DIR=<path>/.git after validating that gitfile itself, and a pinned
+	// listing could read a different repository than that check does (#1304).
 	if _, err := gitenv.RunUnfilteredAlso(ctx, run, gitenv.Bin, top, []string{path}, "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("worker: git worktree remove %s: %w", path, err)
 	}

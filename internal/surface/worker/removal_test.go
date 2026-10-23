@@ -313,14 +313,14 @@ func TestCheckGitFile(t *testing.T) {
 // follow.
 type swapAfterCheck struct {
 	fexec.OSRunner
-	gitfile, evil  string
+	swap           func() error
 	armed, swapped bool
 }
 
 func (s *swapAfterCheck) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
 	if s.armed && !s.swapped {
 		s.swapped = true
-		if err := os.WriteFile(s.gitfile, []byte("gitdir: "+s.evil+"\n"), 0o600); err != nil {
+		if err := s.swap(); err != nil {
 			return "", err
 		}
 	}
@@ -354,7 +354,10 @@ func TestInspectWorktreePinsTheCheckedGitDir(t *testing.T) {
 	mustGit(t, evil, "init", "-q", "-b", "evil")
 	mustGit(t, evil, "commit", "-q", "--allow-empty", "-m", "evil")
 
-	run := &swapAfterCheck{gitfile: filepath.Join(wt.Path, ".git"), evil: filepath.Join(evil, ".git")}
+	gitfile := filepath.Join(wt.Path, ".git")
+	run := &swapAfterCheck{swap: func() error {
+		return os.WriteFile(gitfile, []byte("gitdir: "+filepath.Join(evil, ".git")+"\n"), 0o600)
+	}}
 	f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
 	if err != nil {
 		t.Fatal(err)

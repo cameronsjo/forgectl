@@ -3,6 +3,7 @@
 package gitenv_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -253,4 +254,26 @@ func running(pid int) bool {
 	}
 	_, after, ok := strings.Cut(string(stat), ") ")
 	return !ok || !strings.HasPrefix(after, "Z")
+}
+
+// A pinned call never looks at dir/.git: with a FIFO there and the real
+// repository pinned elsewhere, it runs instead of refusing the FIFO (#1304).
+// Mutation: key a pinned tree by gitDirKey(dir) (the not-a-regular-file
+// refusal).
+func TestRunUnfilteredPinnedIgnoresTheTreesDotGit(t *testing.T) {
+	gitenvtest.RequireGit(t)
+	dir := t.TempDir()
+	gitenvtest.Git(t, dir, "init", "-q", "-b", "main")
+	moved := filepath.Join(t.TempDir(), "moved.git")
+	if err := os.Rename(filepath.Join(dir, ".git"), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(dir, ".git"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if _, err := gitenv.RunUnfilteredPinned(ctx, exec.OSRunner{}, gitenv.Bin, dir, moved, "status", "--porcelain"); err != nil {
+		t.Fatalf("RunUnfilteredPinned with a FIFO at dir/.git: %v", err)
+	}
 }

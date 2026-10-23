@@ -527,7 +527,9 @@ func RunUnfilteredPinned(ctx context.Context, r Runner, bin, dir, gitDir string,
 
 // PinnedArgs are the global options that run git in the working tree dir
 // against the repository gitDir, without reading dir/.git: -C dir
-// --git-dir=gitDir --work-tree=. (the work tree resolves after -C).
+// --git-dir=gitDir --work-tree=. (the work tree resolves after -C). As with
+// RunUnfilteredPinned, dir must be non-empty and gitDir absolute; it does
+// not check, so an empty dir would make the work tree the process's cwd.
 func PinnedArgs(dir, gitDir string) []string {
 	return tree{dir: dir, gitDir: gitDir}.at()
 }
