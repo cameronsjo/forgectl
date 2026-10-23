@@ -457,8 +457,8 @@ One step per line; `#` comments and blank lines are ignored:
 ```
 
 - A step id is lowercase letters and digits, starting with a letter, at most 32 characters.
-- `after=` names the steps this one waits for. Steps run in waves, in manifest order, at most 4 at a time.
-- `timeout=S` sends SIGTERM to the step's process group after `S` seconds, then SIGKILL 5 seconds later; the step's rc is 124.
+- `after=` names the steps this one waits for; repeated `after=` options add up. Steps run in waves, in manifest order, at most 4 at a time.
+- `timeout=S` sends SIGTERM to the step's process group after `S` seconds, then SIGKILL 5 seconds later; the step's rc is 124. It may appear once per step.
 - A failed step skips every step that depends on it.
 - A step writes `key=value` lines to `$STEP_OUT`; every step that depends on it sees them as `OUT_<step>_<key>`.
 - `private` keeps the step's output out of the combined log and replaces its `STEP_OUT` values of 6 or more characters in later output with `<redacted:OUT_<step>_<key>>`. Redaction reduces exposure; it is not a guarantee (see [ADR-0012](../adr/0012-desk-threat-model.md)).

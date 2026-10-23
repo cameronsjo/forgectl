@@ -129,6 +129,15 @@ A `.manifest` item SHALL hold one step per line as `<step> [after=a,b] [timeout=
 - **THEN** `stage` is skipped
 - **AND** the batch ends with rc 1
 
+#### Scenario: Repeated after= options
+- **WHEN** a manifest step reads `c after=a after=b -- <command>`
+- **THEN** `c` waits on both `a` and `b`
+- **AND** a failure of either one skips `c`
+
+#### Scenario: Repeated timeout
+- **WHEN** a manifest step gives `timeout=` twice
+- **THEN** the manifest is refused with an error naming the line and the step
+
 ### Requirement: Operator signal on add
 When an item is queued, `add` SHALL notify the operator inside a herdr pane (a notification plus the pane's blocked state) and on macOS (a desktop notification), each switchable off under `[desk]` `notify_herdr` and `notify_macos`. A signal that fails MUST be reported as a `warning: operator signal failed:` line and MUST NOT fail the add.
 

@@ -95,6 +95,23 @@ func TestParseBadTimeouts(t *testing.T) {
 	}
 }
 
+func TestParseRepeatedAfterCombines(t *testing.T) {
+	m := parse(t, "a -- true\nb -- true\nc after=a after=b after=a -- true\n")
+	if got := m.step("c").After; !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("c.After = %v, want [a b]", got)
+	}
+	if got := m.Waves(); !reflect.DeepEqual(got, [][]string{{"a", "b"}, {"c"}}) {
+		t.Errorf("waves = %v", got)
+	}
+}
+
+func TestParseRepeatedTimeoutRefused(t *testing.T) {
+	_, err := ParseManifest("a timeout=5 timeout=60 -- true\n", "m.manifest")
+	if err == nil || !strings.Contains(err.Error(), "m.manifest:1: step a: timeout given twice") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 const graphManifest = "build -- true\nlint -- true\npush after=build -- true\ndeploy after=push,lint -- true\nx -- true\n"
 
 func TestWavesKeepManifestOrder(t *testing.T) {
