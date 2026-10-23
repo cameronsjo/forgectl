@@ -328,8 +328,9 @@ func parseComposePS(out string) (total, running, unhealthy, restarting int, err 
 
 // otlpTarget turns an OTLP endpoint (http://host:port or host:port) into a
 // tcp:// reachability target — the gRPC transport is not HTTP-probeable.
-// A URL with no port gets its scheme's default (80 or 443), as the exporter
-// would dial it; a bare host:port is used as written.
+// A URL with no port gets its scheme's HTTP default (80 or 443), so the dial
+// has a port at all; a gRPC exporter may pick its own default for such a URL,
+// so set the port when it matters. A bare host:port is used as written.
 func otlpTarget(endpoint string) string {
 	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 		if u.Port() == "" {

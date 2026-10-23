@@ -5,6 +5,7 @@ import (
 	"errors"
 	osexec "os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -433,7 +434,8 @@ func TestCheckChronicle_ExitedContainerDegrades(t *testing.T) {
 		case "uv":
 			return chronicleJSON, nil
 		case "docker":
-			return `{"Service":"db","State":"exited","Health":""}`, nil
+			return `{"Service":"api","State":"running","Health":"healthy"}` + "\n" +
+				`{"Service":"db","State":"exited","Health":""}`, nil
 		default: // launchctl: loaded
 			return "", nil
 		}
@@ -446,6 +448,9 @@ func TestCheckChronicle_ExitedContainerDegrades(t *testing.T) {
 	}
 	if !strings.Contains(c.Reason, "not running") {
 		t.Errorf("reason = %q, want it to mention not running", c.Reason)
+	}
+	if !slices.Contains(c.Details, "compose: 1/2 running") {
+		t.Errorf("details = %q, want compose: 1/2 running", c.Details)
 	}
 }
 
