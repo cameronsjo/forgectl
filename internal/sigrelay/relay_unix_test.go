@@ -85,3 +85,37 @@ func TestGroupDeadlineWithoutSignal(t *testing.T) {
 		t.Errorf("cancel took %v with no signal to re-raise", d)
 	}
 }
+
+// A command's own scope that catches the signal and cancels its context
+// lives on, so the stops of the calls it goes on making under that context
+// return at once instead of waiting a second each (#1020: 8 sequential stops
+// took 8s). Mutation: settle regardless of the parent (the loop takes stops ×
+// window).
+func TestGroupStopUnderACancelledParentDoesNotWait(t *testing.T) {
+	old := settleWait
+	settleWait = 300 * time.Millisecond
+	t.Cleanup(func() { settleWait = old })
+
+	own := make(chan os.Signal, 64)
+	signal.Notify(own, syscall.SIGHUP)
+	t.Cleanup(func() { signal.Stop(own) })
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent() // the command's scope caught the signal and is unwinding
+
+	const stops = 6
+	start := time.Now()
+	for i := 0; i < stops; i++ {
+		ctx, cancel := Group(parent, time.Minute)
+		if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
+			t.Fatal(err)
+		}
+		<-ctx.Done()
+		// Let the watch take the signal, so stop has one to re-raise.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}
+	if d := time.Since(start); d >= settleWait {
+		t.Errorf("%d stops took %v, want under %v", stops, d, settleWait)
+	}
+}
