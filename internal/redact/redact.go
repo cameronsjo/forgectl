@@ -110,13 +110,13 @@ func userArg(a string) string {
 
 // tokenPrefixes are the leading bytes of well-known credential formats
 // (GitHub, GitLab personal, pipeline-trigger and CI job, Slack, OpenAI/Stripe-style,
-// AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
+// Stripe restricted keys, AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
 // written lower-case and matched case-insensitively. A token pasted where a
 // flag name goes (--ghp_…) is a value, not a name. stdoutTokens, below, are
 // the same formats at their issued case and length, for Stdout; a format
 // added to one belongs in the other.
 var tokenPrefixes = []string{
-	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "glcbt-", "xox", "sk-", "sk_", "akia", "asia",
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "glcbt-", "xox", "sk-", "sk_", "rk_", "akia", "asia",
 	"aiza", "npm_", "pypi-", "hf_", "shpat_",
 }
 
