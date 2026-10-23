@@ -612,3 +612,80 @@ func TestListCmd_HostFailureNoteIsCategorical(t *testing.T) {
 		}
 	}
 }
+
+// projects list --json carries ssh_url and local_path beside sshUrl and
+// localPath (Cameron's ruling on forgectl#1095: snake_case, additive only),
+// and --fields takes either spelling.
+func TestListCmd_JSONFlag_CarriesSnakeCaseKeysBesideCamelCase(t *testing.T) {
+	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
+	run := func(args ...string) []map[string]any {
+		t.Helper()
+		client := listFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
+		cmd := newProjectsListCmd(client)
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("%v: %v\nstderr: %s", args, err, stderr.String())
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+			t.Fatalf("%v: stdout is not a JSON array: %v\n%s", args, err, stdout.String())
+		}
+		return rows
+	}
+
+	rows := run("--json")
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	const url = "git@github.com:cameronsjo/forgectl.git"
+	if rows[0]["sshUrl"] != url || rows[0]["ssh_url"] != url {
+		t.Errorf("sshUrl = %v, ssh_url = %v; want both %q", rows[0]["sshUrl"], rows[0]["ssh_url"], url)
+	}
+	// Not cloned: neither spelling of the local path appears, as before.
+	if _, ok := rows[0]["local_path"]; ok {
+		t.Errorf("local_path present on an uncloned row: %v", rows[0])
+	}
+
+	// The old reader still decodes the same output.
+	var repos []projects.Repo
+	client := listFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
+	cmd := newProjectsListCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &repos); err != nil || len(repos) != 1 || repos[0].SSHURL != url {
+		t.Errorf("projects.Repo decode: %v %+v", err, repos)
+	}
+
+	for _, f := range []string{"ssh_url", "sshUrl"} {
+		got := run("--json", "--fields", "name,"+f)
+		if len(got) != 1 || got[0][f] != url || len(got[0]) != 2 {
+			t.Errorf("--fields name,%s = %v", f, got)
+		}
+	}
+}
+
+func TestProjectRowsJSON_RepeatsLocalPathInSnakeCase(t *testing.T) {
+	rows := projectRowsJSON([]projects.Repo{{Host: "github.com", Owner: "o", Name: "r", Cloned: true, LocalPath: "/p/r"}})
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got[0]["localPath"] != "/p/r" || got[0]["local_path"] != "/p/r" {
+		t.Errorf("row = %v; want localPath and local_path both /p/r", got[0])
+	}
+	if _, ok := got[0]["ssh_url"]; ok {
+		t.Errorf("ssh_url present with no sshUrl: %v", got[0])
+	}
+}

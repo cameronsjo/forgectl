@@ -211,7 +211,7 @@ func statusRows(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	}
 	row, ok := findRow(rows, name)
 	if !ok {
-		return worker.Row{}, nil, WithExitCode(fmt.Errorf("no worker named %q in %s's ledger", name, w.top), exitUsage)
+		return worker.Row{}, nil, WithExitCode(fmt.Errorf("no worker named %q in %s's ledger; forgectl surface list shows the workers", name, w.top), exitUsage)
 	}
 	q, err := worker.OpenQueue()
 	if err != nil {

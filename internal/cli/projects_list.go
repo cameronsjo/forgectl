@@ -121,7 +121,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				if bound.set {
 					w = window(len(repos), bound.limit)
 				}
-				kept := repos[:w.Shown]
+				kept := projectRowsJSON(repos[:w.Shown])
 				var rows any = kept
 				if fields != nil {
 					projected, err := projectRows(kept, fields)
@@ -159,7 +159,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"host","owner","name","sshUrl","mirror","private","cloned","localPath","status"}] to stdout (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"host","owner","name","sshUrl","mirror","private","cloned","localPath","status","ssh_url","local_path"}] to stdout (ssh_url and local_path repeat sshUrl and localPath in snake_case) (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any host produced a degradation note (output is still written)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by hostname (e.g. github.com, git.example.com) or \"local\"")
 	bound.addFlags(cmd, projectsJSONKeys)
@@ -171,7 +171,25 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 const projectsNarrowFlags = "a name query, --host"
 
 // projectsJSONKeys are the row fields --fields accepts, in wire order.
-var projectsJSONKeys = []string{"host", "owner", "name", "sshUrl", "mirror", "private", "cloned", "localPath", "status"}
+var projectsJSONKeys = []string{"host", "owner", "name", "sshUrl", "mirror", "private", "cloned", "localPath", "status", "ssh_url", "local_path"}
+
+// projectRowJSON is one `projects list --json` row: the repo, then its two
+// camelCase keys again in snake_case, the spelling every other verb uses.
+// Additive only (ADR-0008): sshUrl and localPath stay, so no reader breaks
+// (Cameron's ruling on forgectl#1095, 2026-10-14).
+type projectRowJSON struct {
+	projects.Repo
+	SSHURLSnake    string `json:"ssh_url,omitempty"`
+	LocalPathSnake string `json:"local_path,omitempty"`
+}
+
+func projectRowsJSON(repos []projects.Repo) []projectRowJSON {
+	rows := make([]projectRowJSON, 0, len(repos))
+	for _, r := range repos {
+		rows = append(rows, projectRowJSON{Repo: r, SSHURLSnake: r.SSHURL, LocalPathSnake: r.LocalPath})
+	}
+	return rows
+}
 
 // filterRepos narrows the inventory by host and/or a case-insensitive name
 // substring. Either filter empty means "don't filter on it".
