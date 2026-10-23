@@ -20,6 +20,8 @@ package pip
 //   [x] Happy: ';' is recognized as a comment prefix alongside '#'
 //   [x] Happy: 'key: value' (colon delimiter) parses the same as 'key = value'
 //   [x] Unhappy: a line with neither '=' nor ':' is inert (Comment), not a panic
+//   [x] Happy: a header with text after its last ']' still opens the section,
+//       as configparser reads it; "[]" stays inert
 //
 // File.Remove / File.Restore (Classification: pure logic / stateful mutation)
 //   [x] Happy: Remove comments out the matching entry line
@@ -31,6 +33,7 @@ package pip
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +106,41 @@ func TestClassify_SectionHeaderSetsSectionForFollowingLines(t *testing.T) {
 	f := Parse([]byte("[install]\ntrusted-host = pypi.internal.example.com\n"))
 	entry := findEntry(t, f, "trusted-host")
 	if entry.Section != "install" {
+		t.Errorf("Section = %q, want %q", entry.Section, "install")
+	}
+}
+
+// TestClassify_HeaderWithTrailingTextStartsTheSection pins configparser's
+// header rule: `\[(?P<header>.+)\]` is matched from the start of the line
+// only, so text after the last ']' does not stop the line opening a section.
+// Python 3.13 reads every one of these the same way.
+func TestClassify_HeaderWithTrailingTextStartsTheSection(t *testing.T) {
+	cases := []struct {
+		header, want string
+	}{
+		{"[global] # mirror", "global"},
+		{"[global]; note", "global"},
+		{"[a]b]", "a]b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.header, func(t *testing.T) {
+			f := Parse([]byte("[install]\nindex-url = keep\n" + tc.header + "\nindex-url = https://x\n"))
+			if n := f.Remove(tc.want, "index-url"); n != 1 {
+				t.Fatalf("Remove(%q, index-url) = %d, want 1; out=%q", tc.want, n, f.Serialize())
+			}
+			if strings.Contains(string(f.Serialize()), "#index-url = keep") || !strings.Contains(string(f.Serialize()), "\nindex-url = keep\n") {
+				t.Fatalf("the [install] entry was touched: %q", f.Serialize())
+			}
+		})
+	}
+}
+
+// TestClassify_EmptyBracketsAreNotAHeader: the header pattern needs at least
+// one character between the brackets. configparser rejects "[]" as a parse
+// error; Parse keeps it inert, so the section stays unchanged.
+func TestClassify_EmptyBracketsAreNotAHeader(t *testing.T) {
+	f := Parse([]byte("[install]\n[]\ntrusted-host = a\n"))
+	if entry := findEntry(t, f, "trusted-host"); entry.Section != "install" {
 		t.Errorf("Section = %q, want %q", entry.Section, "install")
 	}
 }
