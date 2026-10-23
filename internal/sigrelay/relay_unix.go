@@ -30,7 +30,9 @@ var interruptSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGH
 // It waits up to a second for the re-raised signal to take, then returns.
 // It skips the wait when ctx was cancelled from above: whoever cancelled it
 // is already unwinding and lives on by design, so the second would be lost
-// on every later call (#1020: 8 sequential stops took 8s).
+// on every later call (#1020: 8 sequential stops took 8s). With no handler
+// left, a re-raise ends the process inside Kill, so the wait only ever bought
+// time for a listener to act.
 //
 // A signal the process inherited as ignored stays ignored, as in
 // internal/sops: nohup ignores SIGHUP, and a non-interactive shell starts a

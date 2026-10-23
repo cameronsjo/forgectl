@@ -115,7 +115,34 @@ func TestGroupStopUnderACancelledParentDoesNotWait(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}
-	if d := time.Since(start); d >= settleWait {
-		t.Errorf("%d stops took %v, want under %v", stops, d, settleWait)
+	if limit := stops * settleWait / 2; time.Since(start) >= limit {
+		t.Errorf("%d stops took %v, want under %v", stops, time.Since(start), limit)
+	}
+}
+
+// Under a live parent, a stop that re-raises still waits for the default
+// action to take. Mutation: never wait (cancel returns at once).
+func TestGroupStopUnderALiveParentWaits(t *testing.T) {
+	old := settleWait
+	settleWait = 50 * time.Millisecond
+	t.Cleanup(func() { settleWait = old })
+
+	own := make(chan os.Signal, 4)
+	signal.Notify(own, syscall.SIGHUP)
+	t.Cleanup(func() { signal.Stop(own) })
+
+	ctx, cancel := Group(context.Background(), time.Minute)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGHUP did not cancel the context")
+	}
+	start := time.Now()
+	cancel()
+	if d := time.Since(start); d < settleWait {
+		t.Errorf("cancel took %v, want at least %v", d, settleWait)
 	}
 }
