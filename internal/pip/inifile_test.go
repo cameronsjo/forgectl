@@ -33,7 +33,6 @@ package pip
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 )
 
@@ -121,6 +120,7 @@ func TestClassify_HeaderWithTrailingTextStartsTheSection(t *testing.T) {
 		{"[global] # mirror", "global"},
 		{"[global]; note", "global"},
 		{"[a]b]", "a]b"},
+		{"[x]=y", "x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.header, func(t *testing.T) {
@@ -128,8 +128,10 @@ func TestClassify_HeaderWithTrailingTextStartsTheSection(t *testing.T) {
 			if n := f.Remove(tc.want, "index-url"); n != 1 {
 				t.Fatalf("Remove(%q, index-url) = %d, want 1; out=%q", tc.want, n, f.Serialize())
 			}
-			if strings.Contains(string(f.Serialize()), "#index-url = keep") || !strings.Contains(string(f.Serialize()), "\nindex-url = keep\n") {
-				t.Fatalf("the [install] entry was touched: %q", f.Serialize())
+			// The other direction: [install] owns exactly its own entry.
+			g := Parse([]byte("[install]\nindex-url = keep\n" + tc.header + "\nindex-url = https://x\n"))
+			if n := g.Remove("install", "index-url"); n != 1 {
+				t.Fatalf("Remove(install, index-url) = %d, want 1; out=%q", n, g.Serialize())
 			}
 		})
 	}
