@@ -504,8 +504,7 @@ func TestDeskWatch_ClosedPipeExits141(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	cmd := osexec.CommandContext(ctx, os.Args[0], "-test.run=^TestDeskCLIHelperProcess$") //nolint:gosec // G204: the test binary itself
-	cmd.Env = append(os.Environ(), deskWatchHelperEnv+"="+string(args))
+	cmd := reExecTest(ctx, "TestDeskCLIHelperProcess", deskWatchHelperEnv+"="+string(args))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
