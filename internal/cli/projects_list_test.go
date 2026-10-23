@@ -670,6 +670,23 @@ func TestListCmd_JSONFlag_CarriesSnakeCaseKeysBesideCamelCase(t *testing.T) {
 			t.Errorf("--fields name,%s = %v", f, got)
 		}
 	}
+
+	// The --limit envelope's items carry the same snake_case keys.
+	client = listFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
+	cmd = newProjectsListCmd(client)
+	stdout.Reset()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--json", "--limit", "5"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil || len(env.Items) != 1 || env.Items[0]["ssh_url"] != url {
+		t.Errorf("--limit envelope items: %v %v", err, env.Items)
+	}
 }
 
 func TestProjectRowsJSON_RepeatsLocalPathInSnakeCase(t *testing.T) {
