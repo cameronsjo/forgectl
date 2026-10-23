@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -97,6 +98,13 @@ func newRecipeAfkCmd(deps module.Deps) *cobra.Command {
 		Short: "Journal and compact the current Herdr agent pane",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// An explicit --target "" (often an unset "$PANE") must not fall
+			// back to the environment: HERDR_ACTIVE_PANE_ID names the FOCUSED
+			// pane, which may be someone else's session, and /compact there
+			// cannot be undone. Refuse it, as an empty --prompt is refused.
+			if cmd.Flags().Changed("target") && opts.Target == "" {
+				return WithExitCode(errors.New("--target is empty; pass a Herdr agent name or pane id, or omit the flag to use HERDR_PANE_ID"), exitUsage)
+			}
 			return runRecipeAfk(cmd.Context(), deps.Runner, opts)
 		},
 	}
