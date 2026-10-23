@@ -26,9 +26,11 @@ package branch
 //       documented
 //   [x] Prune uses `-D` (force), not `-d`, for the local delete
 //   [x] Enumerate skips a gone-but-unconfirmed branch unless IncludeGone
-//   [x] A merged PR confirms a branch only when it is a same-repo PR whose
-//       head commit contains every tip of the branch: a fork PR or a reused
+//   [x] A merged PR confirms a branch only when its head commit contains
+//       every tip of the branch (local and remote): a fork PR or a reused
 //       branch with the same name is not merged; a tip behind the head is
+//       still merged
+//   [x] The remote delete leases the remote tip the merge was checked on
 
 import (
 	"context"
@@ -582,22 +584,25 @@ func groupOf(t *testing.T, report Report, name string) (Group, bool) {
 }
 
 // TestEnumerate_MergedNameMatchAloneIsNotMerged covers the PR rows that
-// share a branch's name without holding its commits: a fork PR, and a
-// same-repo PR merged before the branch was reused. Neither may mark the
-// branch MergedOnServer, because Prune deletes it with `-D`.
+// share a branch's name without holding its commits: a fork PR, PRs merged
+// before the branch was reused, and rows whose head commit is missing or
+// not an object id. None may mark the branch MergedOnServer, because Prune
+// deletes it with `-D`. The non-hex head must also never reach git argv.
 func TestEnumerate_MergedNameMatchAloneIsNotMerged(t *testing.T) {
 	cases := []struct {
 		name       string
 		mergedJSON string
 		isAncestor bool
 	}{
-		{"fork PR with the same head name", `[{"number":8,"headRefName":"feat/x","headRefOid":"` + reusedTip + `","isCrossRepository":true}]`, true},
-		{"reused branch past the merged head", `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`, false},
+		{"fork PR with the same head name", `[{"number":8,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"}]`, false},
+		{"reused branch past both merged heads", `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"},{"number":11,"headRefName":"feat/x","headRefOid":"` + mainTip + `"}]`, false},
 		{"merged row without a head commit", `[{"number":10,"headRefName":"feat/x"}]`, true},
+		{"merged row with a non-hex head", `[{"number":12,"headRefName":"feat/x","headRefOid":"--upload-pack=x"}]`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := New(mergedNameFixture(reusedTip, tc.mergedJSON, tc.isAncestor), WithDefaultBranch("main"))
+			fake := mergedNameFixture(reusedTip, tc.mergedJSON, tc.isAncestor)
+			client := New(fake, WithDefaultBranch("main"))
 			report, err := client.Enumerate(context.Background(), EnumerateOptions{Local: true})
 			if err != nil {
 				t.Fatalf("Enumerate: %v", err)
@@ -605,6 +610,11 @@ func TestEnumerate_MergedNameMatchAloneIsNotMerged(t *testing.T) {
 			group, merged := groupOf(t, report, "feat/x")
 			if merged || group == SafeToDelete {
 				t.Fatalf("feat/x group = %v, MergedOnServer = %v; a name match alone must not confirm a merge", group, merged)
+			}
+			for _, call := range fake.Calls {
+				if contains(call.Args, "--upload-pack=x") {
+					t.Fatalf("a non-hex head reached argv: %+v", call)
+				}
 			}
 		})
 	}
@@ -633,6 +643,77 @@ func TestEnumerate_TipBehindMergedHeadIsMerged(t *testing.T) {
 	if !sawAncestry {
 		t.Fatalf("expected `git merge-base --is-ancestor %s %s`, calls: %+v", reusedTip, squashedTip, fake.Calls)
 	}
+}
+
+// TestEnumerate_RemoteTipAheadOfMergedHeadIsNotMerged: the local branch is
+// the merged head, but its remote has commits pushed after the merge. Every
+// tip must be contained, so the branch is not MergedOnServer.
+func TestEnumerate_RemoteTipAheadOfMergedHeadIsNotMerged(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
+				return "main\t\t\t" + mainTip + "\nfeat/x\torigin/feat/x\t[ahead 0, behind 1]\t" + squashedTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/remotes/origin"):
+				return "refs/remotes/origin/main\torigin/main\t" + mainTip + "\n" +
+					"refs/remotes/origin/feat/x\torigin/feat/x\t" + reusedTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "merge-base":
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
+			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
+				return "main\n", nil
+			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
+				return `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"}]`, nil
+			case name == "gh":
+				return "[]", nil
+			}
+			return "", nil
+		},
+	}
+	report, err := New(fake, WithDefaultBranch("main")).Enumerate(context.Background(), EnumerateOptions{Local: true, Remote: true})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if group, merged := groupOf(t, report, "feat/x"); merged || group == SafeToDelete {
+		t.Fatalf("feat/x group = %v, MergedOnServer = %v; a remote tip past the merged head must block the merge", group, merged)
+	}
+}
+
+// TestPrune_RemoteDelete_LeasesTheCheckedTip: the remote delete carries a
+// lease on the tip the merge was confirmed against, so the server refuses
+// it if the branch moved after this machine last fetched.
+func TestPrune_RemoteDelete_LeasesTheCheckedTip(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
+			case name == "gh":
+				return "", ghNotFound(args)
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results = %+v, want one success", results)
+	}
+	want := []string{"push", "--force-with-lease=refs/heads/feat/done:" + squashedTip, "origin", "--delete", "--", "feat/done"}
+	for _, call := range fake.Calls {
+		args := gitenvtest.Strip(call.Args)
+		if call.Name == "git" && len(args) > 0 && args[0] == "push" {
+			if strings.Join(args, " ") != strings.Join(want, " ") {
+				t.Fatalf("push argv = %q, want %q", args, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("no git push call: %+v", fake.Calls)
 }
 
 // TestRemoteBranches_ExcludesHeadSymref is a direct regression test for a bug

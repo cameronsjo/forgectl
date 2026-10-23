@@ -160,13 +160,13 @@ func (c *Client) Enumerate(ctx context.Context, opts EnumerateOptions) (Report, 
 		slog.Warn("Failed to list merged PRs; server-confirmed-merge detection may be incomplete.", "error", err)
 		mergedRows = nil
 	}
-	// Only a same-repo PR's head is this repo's branch: a fork PR that
-	// happens to share the name says nothing about ours. Several merged PRs
-	// can share a head name when a branch is reused, so keep every head
-	// commit.
+	// A head name says nothing on its own: a fork PR can share it, and a
+	// reused branch keeps it. mergedOnServer checks the head commits
+	// against the branch's tips instead. Several merged PRs can share a
+	// head name, so keep every head commit.
 	mergedHeads := make(map[string][]string)
 	for _, r := range mergedRows {
-		if r.IsCrossRepository || r.HeadRefOid == "" {
+		if r.HeadRefOid == "" {
 			continue
 		}
 		mergedHeads[r.HeadRefName] = append(mergedHeads[r.HeadRefName], r.HeadRefOid)
@@ -204,6 +204,7 @@ func (c *Client) Enumerate(ctx context.Context, opts EnumerateOptions) (Report, 
 				infos[row.name] = info
 			}
 			info.RemoteExists = true
+			info.RemoteTip = row.tip
 			tips[row.name] = append(tips[row.name], row.tip)
 		}
 	}
@@ -349,7 +350,17 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 	// The repository's config may name an ext:: or fd:: remote and allow
 	// it; refuse both, as every Transport call that reaches a remote does
 	// (#987).
-	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, "push", remoteName, "--delete", "--", info.Name); err != nil {
+	//
+	// The merge was confirmed against info.RemoteTip, which is this
+	// machine's remote-tracking ref and can be stale. The lease makes the
+	// server refuse the delete if the branch has moved since, so commits
+	// pushed from elsewhere are never deleted unseen.
+	args := []string{"push"}
+	if isObjectID(info.RemoteTip) {
+		args = append(args, "--force-with-lease=refs/heads/"+info.Name+":"+info.RemoteTip)
+	}
+	args = append(args, remoteName, "--delete", "--", info.Name)
+	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, args...); err != nil {
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
@@ -647,10 +658,9 @@ func (c *Client) mergedLocally(ctx context.Context, defaultBranch string) (map[s
 // ghPRRow is the on-the-wire shape of one `gh pr list --json` row this
 // package needs.
 type ghPRRow struct {
-	Number            int    `json:"number"`
-	HeadRefName       string `json:"headRefName"`
-	HeadRefOid        string `json:"headRefOid"`
-	IsCrossRepository bool   `json:"isCrossRepository"`
+	Number      int    `json:"number"`
+	HeadRefName string `json:"headRefName"`
+	HeadRefOid  string `json:"headRefOid"`
 }
 
 // prHeadsByState runs `gh pr list --state <state>` and returns its rows.
@@ -659,7 +669,7 @@ type ghPRRow struct {
 func (c *Client) prHeadsByState(ctx context.Context, state string) ([]ghPRRow, error) {
 	out, err := c.run.Run(ctx, "gh", "pr", "list",
 		"--state", state,
-		"--json", "number,headRefName,headRefOid,isCrossRepository",
+		"--json", "number,headRefName,headRefOid",
 		"--limit", ghListLimit)
 	if err != nil {
 		// Categorical cause (#658): gh's stderr is host-chosen text.
@@ -679,9 +689,9 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) ([]ghPRRow, e
 
 // mergedOnServer reports whether every tip of branch name (its local and
 // remote tips, whichever exist) is contained in the head commit of one of
-// the same-repo PRs merged from that name. A name match alone is not
-// enough: a branch reused after its PR merged carries commits no merged PR
-// has, and deleting it with `-D` would lose them. A tip equal to a merged
+// the PRs merged from that name. A name match alone is not enough: a fork
+// PR can share the name, and a branch reused after its PR merged carries
+// commits no merged PR has; deleting either with `-D` would lose them. A tip equal to a merged
 // head is contained; otherwise `git merge-base --is-ancestor` decides,
 // which covers a local branch left behind a head someone else pushed to.
 // An unknown tip, or a head commit missing locally, counts as not
