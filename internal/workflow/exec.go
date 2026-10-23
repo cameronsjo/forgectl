@@ -146,11 +146,7 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		// nothing is deferred — so a forward reference (consuming an export
 		// before its step has run) is a hard error, never a literal "${...}"
 		// handed to a command.
-		src := step
-		if len(plan.templates) == len(plan.Steps) {
-			src = plan.templates[i]
-		}
-		resolved, err := interpolatePlanStep(wctx, src)
+		resolved, err := interpolatePlanStep(wctx, plan.stepTemplate(i))
 		if err != nil {
 			slog.Error("Failed to resolve step exports.", "stepIndex", i, "stepUse", step.Uses, "error", err)
 			cleanupSandbox(wctx)

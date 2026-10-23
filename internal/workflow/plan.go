@@ -22,10 +22,20 @@ type Plan struct {
 	// templates[i] once against params plus the exports earlier steps
 	// produced, so a param VALUE is never read again as a reference: a
 	// --param holding "${workspace}" stays that literal text, as --dry-run
-	// shows it. A Plan built by hand has neither, and Run falls back to
-	// re-resolving Steps.
+	// shows it. A Plan built by hand has neither; see stepTemplate.
 	templates []PlanStep
 	params    map[string]string
+}
+
+// stepTemplate returns step i as written in the workflow file: the text Run
+// resolves and MissingResumeExport scans for export references, so the two
+// read the same thing. A Plan built by hand (tests) has no templates, and its
+// Steps stand in for them.
+func (p Plan) stepTemplate(i int) PlanStep {
+	if len(p.templates) == len(p.Steps) {
+		return p.templates[i]
+	}
+	return p.Steps[i]
 }
 
 // BuildPlan merges cliParams over each param's default, enforces required
