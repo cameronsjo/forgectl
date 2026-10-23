@@ -70,7 +70,7 @@ var uncappedAllowlist = map[string]struct {
 	"internal/cli/workflow.go:printPlan":             {2, "workflow run --dry-run is the review before blessing (#782): the plan's name and version print whole"},
 	"internal/cli/workflow.go:printField":            {1, "workflow run --dry-run is the review before blessing (#782): cmd, repo, ref and every other step field print whole"},
 	"internal/cli/workflow.go:quoteEach":             {1, "workflow run --dry-run is the review before blessing (#782, #816): args and globs print whole, each quoted"},
-	"internal/cli/resume.go:resumeSession":           {2, "resume --dry-run's exec line is the review of what resume would run (#782's rule): the binary and argv print whole"},
+	"internal/cli/resume.go:resumeSessionWith":       {2, "resume --dry-run's exec line is the review of what resume would run (#782's rule): the binary and argv print whole"},
 	"internal/cli/resume_hooks.go:printHooksPreview": {1, "the hooks preview names the hook commands that would fire (#782's rule): each prints whole"},
 
 	// Whole paths (#832): QuotePathIfUnsafe leaves an ordinary path verbatim
