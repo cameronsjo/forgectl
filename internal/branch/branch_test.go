@@ -26,6 +26,9 @@ package branch
 //       documented
 //   [x] Prune uses `-D` (force), not `-d`, for the local delete
 //   [x] Enumerate skips a gone-but-unconfirmed branch unless IncludeGone
+//   [x] A merged PR confirms a branch only when it is a same-repo PR whose
+//       head commit contains every tip of the branch: a fork PR or a reused
+//       branch with the same name is not merged; a tip behind the head is
 
 import (
 	"context"
@@ -36,6 +39,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
+
+// mainTip, squashedTip and reusedTip are branch tip commits in the
+// Enumerate fixtures.
+const (
+	mainTip     = "1111111111111111111111111111111111111111"
+	squashedTip = "2222222222222222222222222222222222222222"
+	reusedTip   = "3333333333333333333333333333333333333333"
 )
 
 // githubRemoteURL is `git remote get-url origin` output for a github.com
@@ -463,14 +474,14 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
-				return "main\t\t\nfeat/squashed\t\t\n", nil
+				return "main\t\t\t" + mainTip + "\nfeat/squashed\t\t\t" + squashedTip + "\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/remotes/origin"):
 				// Includes the origin/HEAD symref row, exactly as real git emits
 				// it (see TestRemoteBranches_ExcludesHeadSymref) — its
 				// %(refname:short) is the bare "origin", not "origin/HEAD".
-				return "refs/remotes/origin/HEAD\torigin\n" +
-					"refs/remotes/origin/main\torigin/main\n" +
-					"refs/remotes/origin/feat/squashed\torigin/feat/squashed\n", nil
+				return "refs/remotes/origin/HEAD\torigin\t" + mainTip + "\n" +
+					"refs/remotes/origin/main\torigin/main\t" + mainTip + "\n" +
+					"refs/remotes/origin/feat/squashed\torigin/feat/squashed\t" + squashedTip + "\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "worktree":
 				return "worktree /repo\nHEAD deadbeef\nbranch refs/heads/main\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
@@ -481,7 +492,7 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "open"):
 				return "[]", nil
 			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
-				return `[{"number":7,"headRefName":"feat/squashed"}]`, nil
+				return `[{"number":7,"headRefName":"feat/squashed","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`, nil
 			}
 			return "", nil
 		},
@@ -527,6 +538,103 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 	}
 }
 
+// mergedNameFixture answers Enumerate's git and gh calls for one local
+// branch feat/x at localTip with no remote, where the merged-PR query
+// returns mergedJSON. isAncestor answers `git merge-base --is-ancestor`.
+func mergedNameFixture(localTip, mergedJSON string, isAncestor bool) *exec.FakeRunner {
+	return &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
+				return "main\t\t\t" + mainTip + "\nfeat/x\t\t\t" + localTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "merge-base":
+				if isAncestor {
+					return "", nil
+				}
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
+			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
+				return "main\n", nil
+			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
+				return mergedJSON, nil
+			case name == "gh":
+				return "[]", nil
+			}
+			return "", nil
+		},
+	}
+}
+
+func groupOf(t *testing.T, report Report, name string) (Group, bool) {
+	t.Helper()
+	for _, g := range []struct {
+		group Group
+		items []Classification
+	}{{SafeToDelete, report.SafeToDelete}, {Blocked, report.Blocked}, {NeedsAttention, report.NeedsAttention}} {
+		for _, c := range g.items {
+			if c.Info.Name == name {
+				return g.group, c.Info.MergedOnServer
+			}
+		}
+	}
+	t.Fatalf("%s missing from report %+v", name, report)
+	return "", false
+}
+
+// TestEnumerate_MergedNameMatchAloneIsNotMerged covers the PR rows that
+// share a branch's name without holding its commits: a fork PR, and a
+// same-repo PR merged before the branch was reused. Neither may mark the
+// branch MergedOnServer, because Prune deletes it with `-D`.
+func TestEnumerate_MergedNameMatchAloneIsNotMerged(t *testing.T) {
+	cases := []struct {
+		name       string
+		mergedJSON string
+		isAncestor bool
+	}{
+		{"fork PR with the same head name", `[{"number":8,"headRefName":"feat/x","headRefOid":"` + reusedTip + `","isCrossRepository":true}]`, true},
+		{"reused branch past the merged head", `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`, false},
+		{"merged row without a head commit", `[{"number":10,"headRefName":"feat/x"}]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := New(mergedNameFixture(reusedTip, tc.mergedJSON, tc.isAncestor), WithDefaultBranch("main"))
+			report, err := client.Enumerate(context.Background(), EnumerateOptions{Local: true})
+			if err != nil {
+				t.Fatalf("Enumerate: %v", err)
+			}
+			group, merged := groupOf(t, report, "feat/x")
+			if merged || group == SafeToDelete {
+				t.Fatalf("feat/x group = %v, MergedOnServer = %v; a name match alone must not confirm a merge", group, merged)
+			}
+		})
+	}
+}
+
+// TestEnumerate_TipBehindMergedHeadIsMerged: a local branch whose tip is an
+// ancestor of the merged head (someone pushed to the PR from elsewhere) has
+// nothing the PR lacks, so it is still SafeToDelete.
+func TestEnumerate_TipBehindMergedHeadIsMerged(t *testing.T) {
+	mergedJSON := `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`
+	fake := mergedNameFixture(reusedTip, mergedJSON, true)
+	report, err := New(fake, WithDefaultBranch("main")).Enumerate(context.Background(), EnumerateOptions{Local: true})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if group, merged := groupOf(t, report, "feat/x"); group != SafeToDelete || !merged {
+		t.Fatalf("feat/x group = %v, MergedOnServer = %v; want SafeToDelete", group, merged)
+	}
+	var sawAncestry bool
+	for _, call := range fake.Calls {
+		args := gitenvtest.Strip(call.Args)
+		if call.Name == "git" && len(args) == 4 && args[0] == "merge-base" && args[1] == "--is-ancestor" && args[2] == reusedTip && args[3] == squashedTip {
+			sawAncestry = true
+		}
+	}
+	if !sawAncestry {
+		t.Fatalf("expected `git merge-base --is-ancestor %s %s`, calls: %+v", reusedTip, squashedTip, fake.Calls)
+	}
+}
+
 // TestRemoteBranches_ExcludesHeadSymref is a direct regression test for a bug
 // caught via a manual dry-run against this repo's own origin remote:
 // refs/remotes/<remote>/HEAD is a symref, and git's %(refname:short) renders
@@ -549,9 +657,13 @@ func TestRemoteBranches_ExcludesHeadSymref(t *testing.T) {
 	}
 	client := New(fake, WithRemoteName("origin"))
 
-	names, err := client.remoteBranches(context.Background(), "origin")
+	rows, err := client.remoteBranches(context.Background(), "origin")
 	if err != nil {
 		t.Fatalf("remoteBranches: %v", err)
+	}
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.name)
 	}
 	for _, n := range names {
 		if n == "origin" || n == "HEAD" {

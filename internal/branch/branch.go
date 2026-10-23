@@ -146,18 +146,36 @@ func (c *Client) Enumerate(ctx context.Context, opts EnumerateOptions) (Report, 
 		return Report{}, err
 	}
 
-	openByHead, err := c.prHeadsByState(ctx, "open")
+	openRows, err := c.prHeadsByState(ctx, "open")
 	if err != nil {
 		slog.Warn("Failed to list open PRs; open-PR blocking may be incomplete.", "error", err)
-		openByHead = nil
+		openRows = nil
 	}
-	mergedByHead, err := c.prHeadsByState(ctx, "merged")
+	openByHead := make(map[string]int, len(openRows))
+	for _, r := range openRows {
+		openByHead[r.HeadRefName] = r.Number
+	}
+	mergedRows, err := c.prHeadsByState(ctx, "merged")
 	if err != nil {
 		slog.Warn("Failed to list merged PRs; server-confirmed-merge detection may be incomplete.", "error", err)
-		mergedByHead = nil
+		mergedRows = nil
+	}
+	// Only a same-repo PR's head is this repo's branch: a fork PR that
+	// happens to share the name says nothing about ours. Several merged PRs
+	// can share a head name when a branch is reused, so keep every head
+	// commit.
+	mergedHeads := make(map[string][]string)
+	for _, r := range mergedRows {
+		if r.IsCrossRepository || r.HeadRefOid == "" {
+			continue
+		}
+		mergedHeads[r.HeadRefName] = append(mergedHeads[r.HeadRefName], r.HeadRefOid)
 	}
 
 	infos := make(map[string]*Info)
+	// tips holds each branch's local and remote tip commits, whichever
+	// sides exist; mergedOnServer checks every one of them.
+	tips := make(map[string][]string)
 
 	if opts.Local {
 		rows, err := c.localBranches(ctx)
@@ -170,21 +188,23 @@ func (c *Client) Enumerate(ctx context.Context, opts EnumerateOptions) (Report, 
 				LocalExists:  true,
 				UpstreamGone: strings.Contains(row.track, "[gone]"),
 			}
+			tips[row.name] = append(tips[row.name], row.tip)
 		}
 	}
 
 	if opts.Remote {
-		names, err := c.remoteBranches(ctx, remoteName)
+		rows, err := c.remoteBranches(ctx, remoteName)
 		if err != nil {
 			return Report{}, err
 		}
-		for _, name := range names {
-			info, ok := infos[name]
+		for _, row := range rows {
+			info, ok := infos[row.name]
 			if !ok {
-				info = &Info{Name: name}
-				infos[name] = info
+				info = &Info{Name: row.name}
+				infos[row.name] = info
 			}
 			info.RemoteExists = true
+			tips[row.name] = append(tips[row.name], row.tip)
 		}
 	}
 
@@ -208,7 +228,7 @@ func (c *Client) Enumerate(ctx context.Context, opts EnumerateOptions) (Report, 
 		info := infos[name]
 		info.Protected = name == defaultBranch
 		info.MergedLocally = mergedLocally[name]
-		info.MergedOnServer = mergedByHead[name] != 0
+		info.MergedOnServer = c.mergedOnServer(ctx, name, tips[name], mergedHeads[name])
 		info.OpenPRNumber = openByHead[name]
 		info.WorktreePath = worktreeByBranch[name]
 
@@ -491,12 +511,13 @@ type localRow struct {
 	name     string
 	upstream string
 	track    string
+	tip      string
 }
 
 // localBranches lists every local branch and its upstream tracking state.
 func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
 	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "for-each-ref",
-		"--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
+		"--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(objectname)",
 		"--", "refs/heads")
 	if err != nil {
 		return nil, fmt.Errorf("list local branches: %w", err)
@@ -506,7 +527,7 @@ func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.SplitN(line, "\t", 4)
 		row := localRow{name: parts[0]}
 		if len(parts) > 1 {
 			row.upstream = parts[1]
@@ -514,9 +535,19 @@ func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
 		if len(parts) > 2 {
 			row.track = parts[2]
 		}
+		if len(parts) > 3 {
+			row.tip = strings.TrimSpace(parts[3])
+		}
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// remoteRow is one remote-tracking branch: its name with the "<remote>/"
+// prefix stripped, and its tip commit.
+type remoteRow struct {
+	name string
+	tip  string
 }
 
 // remoteBranches lists every branch under refs/remotes/<remoteName>, strips
@@ -530,22 +561,22 @@ func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
 // "<remote>/" prefix misses this entirely, since "origin" never carries that
 // prefix to strip. Caught via a manual dry-run against this repo's own
 // origin remote.
-func (c *Client) remoteBranches(ctx context.Context, remoteName string) ([]string, error) {
+func (c *Client) remoteBranches(ctx context.Context, remoteName string) ([]remoteRow, error) {
 	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "for-each-ref",
-		"--format=%(refname)%09%(refname:short)",
+		"--format=%(refname)%09%(refname:short)%09%(objectname)",
 		"--", "refs/remotes/"+remoteName)
 	if err != nil {
 		return nil, fmt.Errorf("list remote branches: %w", err)
 	}
 	prefix := remoteName + "/"
 	headRef := "refs/remotes/" + remoteName + "/HEAD"
-	var names []string
+	var rows []remoteRow
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.SplitN(line, "\t", 3)
 		full := parts[0]
 		if full == headRef {
 			continue
@@ -554,9 +585,13 @@ func (c *Client) remoteBranches(ctx context.Context, remoteName string) ([]strin
 		if len(parts) > 1 {
 			short = parts[1]
 		}
-		names = append(names, strings.TrimPrefix(short, prefix))
+		row := remoteRow{name: strings.TrimPrefix(short, prefix)}
+		if len(parts) > 2 {
+			row.tip = parts[2]
+		}
+		rows = append(rows, row)
 	}
-	return names, nil
+	return rows, nil
 }
 
 // worktrees maps each worktree-checked-out branch name to its worktree path,
@@ -612,17 +647,19 @@ func (c *Client) mergedLocally(ctx context.Context, defaultBranch string) (map[s
 // ghPRRow is the on-the-wire shape of one `gh pr list --json` row this
 // package needs.
 type ghPRRow struct {
-	Number      int    `json:"number"`
-	HeadRefName string `json:"headRefName"`
+	Number            int    `json:"number"`
+	HeadRefName       string `json:"headRefName"`
+	HeadRefOid        string `json:"headRefOid"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
-// prHeadsByState runs `gh pr list --state <state>` and returns a
-// headRefName -> PR number map. state is a package-controlled literal
-// ("open" or "merged"), never user input.
-func (c *Client) prHeadsByState(ctx context.Context, state string) (map[string]int, error) {
+// prHeadsByState runs `gh pr list --state <state>` and returns its rows.
+// state is a package-controlled literal ("open" or "merged"), never user
+// input.
+func (c *Client) prHeadsByState(ctx context.Context, state string) ([]ghPRRow, error) {
 	out, err := c.run.Run(ctx, "gh", "pr", "list",
 		"--state", state,
-		"--json", "number,headRefName",
+		"--json", "number,headRefName,headRefOid,isCrossRepository",
 		"--limit", ghListLimit)
 	if err != nil {
 		// Categorical cause (#658): gh's stderr is host-chosen text.
@@ -637,11 +674,65 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) (map[string]i
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		return nil, fmt.Errorf("parse gh pr list --state %s output: %w", state, err)
 	}
-	byHead := make(map[string]int, len(rows))
-	for _, r := range rows {
-		byHead[r.HeadRefName] = r.Number
+	return rows, nil
+}
+
+// mergedOnServer reports whether every tip of branch name (its local and
+// remote tips, whichever exist) is contained in the head commit of one of
+// the same-repo PRs merged from that name. A name match alone is not
+// enough: a branch reused after its PR merged carries commits no merged PR
+// has, and deleting it with `-D` would lose them. A tip equal to a merged
+// head is contained; otherwise `git merge-base --is-ancestor` decides,
+// which covers a local branch left behind a head someone else pushed to.
+// An unknown tip, or a head commit missing locally, counts as not
+// contained.
+func (c *Client) mergedOnServer(ctx context.Context, name string, tips, heads []string) bool {
+	if len(tips) == 0 || len(heads) == 0 {
+		return false
 	}
-	return byHead, nil
+	for _, tip := range tips {
+		if !c.containedInAny(ctx, tip, heads) {
+			slog.Debug("Merged PR head does not contain branch tip; not confirming merge.", "branch", name, "tip", tip)
+			return false
+		}
+	}
+	return true
+}
+
+// containedInAny reports whether commit tip is one of heads or an ancestor
+// of one.
+func (c *Client) containedInAny(ctx context.Context, tip string, heads []string) bool {
+	if tip == "" {
+		return false
+	}
+	for _, head := range heads {
+		if tip == head {
+			return true
+		}
+	}
+	for _, head := range heads {
+		if !isObjectID(tip) || !isObjectID(head) {
+			continue
+		}
+		if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "merge-base", "--is-ancestor", tip, head); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// isObjectID reports whether s is a full hex object id (SHA-1 or SHA-256),
+// so a value from gh's JSON can never reach git argv as an option.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // nonEmptyLines counts the lines of s that are not blank.

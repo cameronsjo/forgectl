@@ -65,9 +65,11 @@ type Info struct {
 	// can show local-vs-server disagreement.
 	MergedLocally bool
 
-	// MergedOnServer is true when a `gh pr list --state merged` row's
-	// headRefName matches this branch — the ONLY signal Classify trusts for
-	// SafeToDelete (gotcha #1, #5).
+	// MergedOnServer is true when a same-repo `gh pr list --state merged`
+	// row's headRefName matches this branch AND its headRefOid contains
+	// every tip of the branch (local and remote) — the ONLY signal Classify
+	// trusts for SafeToDelete (gotcha #1, #5). A fork PR with the same
+	// name, or a branch reused after its PR merged, does not count.
 	MergedOnServer bool
 
 	// OpenPRNumber is nonzero when an OPEN PR's headRefName matches this
