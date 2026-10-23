@@ -105,12 +105,16 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	if err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: read the common git dir of %s: %w", top, err)
 	}
-	if err := checkGitFile(strings.TrimSpace(common), path); err != nil {
+	gitDir, err := checkGitFile(strings.TrimSpace(common), path)
+	if err != nil {
 		return WorktreeFacts{}, err
 	}
 
+	// Every call below runs against gitDir, the directory checkGitFile found
+	// the gitfile naming, and never reads path/.git again: a process that
+	// outlives the workspace could swap the gitfile after the check (#1304).
 	git := func(args ...string) (string, error) {
-		return gitenv.Run(ctx, run, gitenv.Local, append([]string{"-C", path}, args...)...)
+		return gitenv.Run(ctx, run, gitenv.Local, append(gitenv.PinnedArgs(path, gitDir), args...)...)
 	}
 	// status re-hashes stat-dirty files through any filter driver the
 	// worktree's .gitattributes names, and the worktree is the worker's to
@@ -120,7 +124,7 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// (GIT_OPTIONAL_LOCKS=0) stops status from taking index.lock to write that
 	// refresh back: this inspection also backs `surface close --dry-run`, which
 	// must change nothing, and the answer needs no refreshed index.
-	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
+	if f.Status, err = gitenv.RunUnfilteredPinned(ctx, run, gitenv.Bin, path, gitDir, "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
@@ -181,24 +185,25 @@ const maxGitFileBytes = 4096
 // checkGitFile refuses a worktree whose .git is not the gitfile git wrote:
 // a regular file naming a directory under <common git dir>/worktrees. The worktree
 // is the worker's to write, and a .git it pointed elsewhere would hand git a
-// config the worker wrote.
+// config the worker wrote. It returns that directory, resolved, for the
+// caller to pin its git calls to.
 //
 // The read never follows a symbolic link and never blocks (gitenv.OpenGitfile),
 // is checked on the open handle, and stops after maxGitFileBytes+1 bytes: a
 // process that outlives the workspace could swap a FIFO or an endless file in
 // after the Lstat, and close must refuse it rather than hang (#1079).
-func checkGitFile(common, path string) error {
+func checkGitFile(common, path string) (string, error) {
 	gitfile := filepath.Join(path, ".git")
 	info, err := os.Lstat(gitfile)
 	if err != nil {
-		return fmt.Errorf("worker: check %s: %w", gitfile, err)
+		return "", fmt.Errorf("worker: check %s: %w", gitfile, err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxGitFileBytes {
-		return fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+		return "", fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
 	}
 	data, err := readGitFile(gitfile)
 	if err != nil {
-		return err
+		return "", err
 	}
 	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
 	if ok && !filepath.IsAbs(dir) {
@@ -212,9 +217,9 @@ func checkGitFile(common, path string) error {
 	admin, aerr := filepath.EvalSymlinks(filepath.Join(common, "worktrees"))
 	parent, perr := filepath.EvalSymlinks(filepath.Dir(dir))
 	if !ok || aerr != nil || perr != nil || parent != admin {
-		return fmt.Errorf("%w: %s points outside %s", ErrUnsafeWorktreeRoot, gitfile, admin)
+		return "", fmt.Errorf("%w: %s points outside %s", ErrUnsafeWorktreeRoot, gitfile, admin)
 	}
-	return nil
+	return filepath.Join(admin, filepath.Base(dir)), nil
 }
 
 // readGitFile reads the gitfile at gitfile, already found a small regular

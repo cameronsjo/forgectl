@@ -132,8 +132,8 @@ func listedNames(out string) (filters, hooks []string, err error) {
 
 // listConfig runs `git config -z --name-only --get-regexp keys` in dir under
 // Local, reading every scope. No match is an empty listing.
-func listConfig(ctx context.Context, r Runner, bin, dir, keys, what string) (string, error) {
-	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "config", "-z", "--name-only", "--get-regexp", keys)...)
+func listConfig(ctx context.Context, r Runner, bin string, t tree, keys, what string) (string, error) {
+	out, err := RunBin(ctx, r, bin, Local, append(t.at(), "config", "-z", "--name-only", "--get-regexp", keys)...)
 	if err != nil {
 		// git config exits 1, printing nothing, when no key matches.
 		var ce *fexec.CommandError
@@ -166,7 +166,7 @@ func listConfig(ctx context.Context, r Runner, bin, dir, keys, what string) (str
 func RunNoHooks(ctx context.Context, r Runner, dir string, args ...string) (string, error) {
 	dctx, cancel := Bounded(ctx)
 	defer cancel()
-	out, err := listConfig(dctx, r, Bin, dir, hookKeys, "configured hooks")
+	out, err := listConfig(dctx, r, Bin, tree{dir: dir}, hookKeys, "configured hooks")
 	if err != nil {
 		return "", err
 	}
