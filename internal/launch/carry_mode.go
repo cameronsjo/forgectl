@@ -44,7 +44,7 @@ func CarryPermissionMode(p Profile, mode string) (Profile, string) {
 	case !IsPermissionMode(mode):
 		return fallback("the transcript's last permission mode " + termsafe.QuoteArgMax(mode, maxCarriedModeEcho) + " is not one forgectl knows")
 	case mode == "bypassPermissions" && !p.AllowDanger && p.PermissionMode != "bypassPermissions":
-		return fallback("the session was in bypassPermissions, which this posture cannot reach (allow_danger is off)")
+		return fallback("the session was in bypassPermissions, which this posture cannot reach (allow_danger is off here, or was cleared because stdout is not a terminal)")
 	}
 	p.PermissionMode = mode
 	return p, "resuming in the session's last permission mode, " + mode

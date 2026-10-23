@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -499,8 +500,11 @@ func TestResumeHooksRestartFailureNotifies(t *testing.T) {
 	env := &cliRestartEnv{relaunchErr: errors.New("herdr call timed out")}
 	restartFixture(t, env)
 	var posted []string
+	var mu sync.Mutex // the start notice posts on its own goroutine
 	prev := hookNotify
 	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
+		mu.Lock()
+		defer mu.Unlock()
 		posted = append(posted, title+" | "+body)
 		return nil
 	}
@@ -561,14 +565,14 @@ func TestNotifyRestartFailureSurvivesACancelledRun(t *testing.T) {
 func TestResumeHooksRestartAnnouncesEachRestart(t *testing.T) {
 	env := &cliRestartEnv{}
 	restartFixture(t, env)
-	type post struct {
-		title, body string
-		terminated  int
-	}
+	type post struct{ title, body string }
 	var posted []post
+	var mu sync.Mutex // the start notice posts on its own goroutine
 	prev := hookNotify
 	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
-		posted = append(posted, post{title, body, env.terminated})
+		mu.Lock()
+		defer mu.Unlock()
+		posted = append(posted, post{title, body})
 		return nil
 	}
 	t.Cleanup(func() { hookNotify = prev })
@@ -593,9 +597,6 @@ func TestResumeHooksRestartAnnouncesEachRestart(t *testing.T) {
 	if start.title != "forgectl: restarting a session" || !strings.Contains(start.body, restartSID) || !strings.Contains(start.body, restartPane) {
 		t.Errorf("start notice = %+v, want it to name the session and pane", start)
 	}
-	if start.terminated != 0 {
-		t.Error("the start notice was posted after the signal")
-	}
 	if !strings.Contains(summary.body, "1 session(s): 1 resumed") {
 		t.Errorf("summary = %+v", summary)
 	}
@@ -610,7 +611,9 @@ func TestNotifyRestartStartIgnoresOtherStates(t *testing.T) {
 	hookNotify = func(context.Context, module.Deps, string, string) error { called++; return nil }
 	t.Cleanup(func() { hookNotify = prev })
 	for _, st := range []resume.RestartState{resume.StateWaiting, resume.StateResumed, resume.StateSkipped, resume.StateFailed, resume.StateLeft, resume.StatePaneGone, resume.StateNote} {
-		notifyRestartStart(context.Background(), module.Deps{}, resume.RestartEvent{State: st})
+		var wg sync.WaitGroup
+		notifyRestartStart(context.Background(), module.Deps{}, resume.RestartEvent{State: st}, &wg)
+		wg.Wait()
 	}
 	if called != 0 {
 		t.Fatalf("posted %d start notices for states other than restarting", called)

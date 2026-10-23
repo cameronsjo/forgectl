@@ -440,8 +440,6 @@ func sessionRowWidth(s resume.Session, l rowLayout) string {
 // replaced to fix, reintroduced one layer down.
 func displayWidth(s string) int { return ansi.StringWidth(s) }
 
-// resumeSession restores the session's tasks, moves into its directory, and
-// replaces this process with claude.
 // resumeFlags are `forgectl resume`'s behavior flags.
 type resumeFlags struct {
 	fork, dryRun bool
@@ -451,12 +449,14 @@ type resumeFlags struct {
 	keepMode bool
 }
 
-// resumeSession resumes s with the posture's own permission mode.
+// resumeSession resumes s with the posture's own permission mode. See
+// resumeSessionWith.
 func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, s resume.Session, fork, dryRun bool) error {
 	return resumeSessionWith(cmd, cfg, boundary, s, resumeFlags{fork: fork, dryRun: dryRun})
 }
 
-// resumeSessionWith resumes s under flags.
+// resumeSessionWith restores the session's tasks, moves into its directory,
+// and replaces this process with claude, under flags.
 func resumeSessionWith(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, s resume.Session, flags resumeFlags) error {
 	fork, dryRun := flags.fork, flags.dryRun
 	errOut := cmd.ErrOrStderr()
