@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -167,7 +168,7 @@ func newID() string {
 func quoteTrunc(s string) string {
 	const limit = 80
 	if len(s) > limit {
-		s = s[:limit] + "..."
+		s = cutBytes(s, limit) + "..."
 	}
 	return strconv.Quote(s)
 }
@@ -183,7 +184,15 @@ func oneLine(b []byte, limit int) string {
 		return r
 	}, s)
 	if len(s) > limit {
-		s = s[:limit] + "..."
+		s = cutBytes(s, limit) + "..."
 	}
 	return s
+}
+
+// cutBytes cuts s to at most limit bytes without splitting a UTF-8 character.
+func cutBytes(s string, limit int) string {
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }

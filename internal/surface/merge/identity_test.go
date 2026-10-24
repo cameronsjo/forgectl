@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,18 @@ func TestSplitNameWithOwner(t *testing.T) {
 		if _, _, err := SplitNameWithOwner(bad); err == nil {
 			t.Errorf("%q split without error", bad)
 		}
+	}
+}
+
+// firstError cuts a long message without splitting the "é" that straddles
+// maxErrorText.
+func TestFirstErrorCutsOnACharacter(t *testing.T) {
+	msg := strings.Repeat("a", maxErrorText-1) + "é" + strings.Repeat("b", 10)
+	got := firstError([]graphQLError{{Message: msg}})
+	if strings.Contains(got, `\x`) {
+		t.Errorf("firstError quotes a split character: %s", got)
+	}
+	if !strings.Contains(got, strings.Repeat("a", maxErrorText-1)+`"`) {
+		t.Errorf("firstError lost the text before the character: %s", got)
 	}
 }

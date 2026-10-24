@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -66,6 +67,9 @@ func refuseUnsafeRunes(field, s string) error {
 func truncate(s string, limit int) string {
 	if len(s) <= limit {
 		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
 	}
 	return s[:limit] + "… (truncated)"
 }

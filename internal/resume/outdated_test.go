@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -318,4 +319,16 @@ func TestReadProcessEnv_ReadsThisProcess(t *testing.T) {
 		}
 	}
 	t.Fatalf("no PATH= entry among %d environment entries", len(env))
+}
+
+// truncateForError keeps whole characters: a "é" straddling the 80-byte limit
+// is dropped, not split into a stray byte.
+func TestTruncateForErrorCutsOnACharacter(t *testing.T) {
+	got := truncateForError(strings.Repeat("a", 79) + "é" + "tail")
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateForError split a character: %q", got)
+	}
+	if want := strings.Repeat("a", 79) + "..."; got != want {
+		t.Errorf("truncateForError = %q, want %q", got, want)
+	}
 }
