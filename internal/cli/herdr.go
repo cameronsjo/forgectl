@@ -462,7 +462,9 @@ func (r organizeReport) applied(res applyResult, planned int) error {
 		r.printf("applied: %s, %s\n", plural(len(res.Applied), "move", "moves"), plural(len(res.Reordered), "reorder", "reorders"))
 		switch {
 		case res.FocusErr != nil:
-			return errors.New("could not restore focus: " + r.safe(res.FocusErr.Error()))
+			// Every move landed; only the cosmetic focus step failed, so the
+			// run still exits 0 and says so as a warning (#732).
+			r.printf("warning: %s\n", focusWarning(r.safe(res.FocusErr.Error())))
 		case res.FocusTab != "":
 			r.printf("focus restored to %s\n", r.tab(res.FocusTitle, res.FocusTab))
 		}
@@ -480,7 +482,7 @@ func (r organizeReport) applied(res applyResult, planned int) error {
 	focus := "focus was not changed"
 	switch {
 	case res.FocusErr != nil:
-		focus = "could not restore focus: " + r.safe(res.FocusErr.Error())
+		focus = focusWarning(r.safe(res.FocusErr.Error()))
 	case res.FocusTab != "":
 		focus = "focus restored to " + r.tab(res.FocusTitle, res.FocusTab)
 	}
@@ -497,6 +499,10 @@ func (r organizeReport) applied(res applyResult, planned int) error {
 		"the plan is recomputed on every run; re-run forgectl herdr organize --apply to finish",
 	}, "\n"))
 }
+
+// focusWarning is the one wording for a failed focus restore, shared by the
+// human report and the JSON result's warnings.
+func focusWarning(why string) string { return "could not restore focus: " + why }
 
 // explain prints, for every tab, the rule that caught it and where it sits and
 // goes, then a per-rule tally and any rule workspace workspace_order omits.
@@ -566,7 +572,10 @@ type organizeResultJSON struct {
 	Applied []organizeMoveJSON `json:"applied"`
 	Blocked []organizeMoveJSON `json:"blocked"`
 	NotRun  []organizeMoveJSON `json:"not_run"`
-	Error   string             `json:"error"`
+	// Warnings are what --apply reported without failing the run: the
+	// session warnings, and a focus restore that did not succeed.
+	Warnings []string `json:"warnings"`
+	Error    string   `json:"error"`
 }
 
 func moveJSON(m organize.Move) organizeMoveJSON {
@@ -584,7 +593,7 @@ func writeOrganizeJSON(out io.Writer, plan organize.Plan, res *applyResult, runE
 			Moves: []organizeMoveJSON{}, Layout: []organizeLayoutJSON{},
 			Unmatched: []organizeUnmatchedJSON{}, Warnings: []string{},
 		},
-		Result: organizeResultJSON{Applied: []organizeMoveJSON{}, Blocked: []organizeMoveJSON{}, NotRun: []organizeMoveJSON{}},
+		Result: organizeResultJSON{Applied: []organizeMoveJSON{}, Blocked: []organizeMoveJSON{}, NotRun: []organizeMoveJSON{}, Warnings: []string{}},
 	}
 	for _, m := range plan.Moves {
 		doc.Plan.Moves = append(doc.Plan.Moves, moveJSON(m))
@@ -611,6 +620,10 @@ func writeOrganizeJSON(out io.Writer, plan organize.Plan, res *applyResult, runE
 		}
 		for _, m := range res.NotRun {
 			doc.Result.NotRun = append(doc.Result.NotRun, moveJSON(m))
+		}
+		doc.Result.Warnings = append(doc.Result.Warnings, res.Warnings...)
+		if res.FocusErr != nil {
+			doc.Result.Warnings = append(doc.Result.Warnings, focusWarning(res.FocusErr.Error()))
 		}
 	}
 	if runErr != nil {
