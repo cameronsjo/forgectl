@@ -280,20 +280,51 @@ func checkTeardownTarget(workspace string) error {
 // inside workspace. filepath.Glob can match a symlink whose target escapes the
 // sandbox; deleting through it would reach outside workspace, so every match
 // should be re-checked here before removal.
+//
+// A path that does not resolve whole (a dangling link, a file not created yet)
+// is judged by its longest existing prefix, resolved, plus the rest: so a
+// workspace under a symlinked temp dir (macOS's /var -> /private/var) still
+// holds it, and a missing file under a link that leaves the workspace does not.
+// A dangling link above the leaf is refused: where it points cannot be known.
 func WithinWorkspace(workspace, target string) bool {
-	realWS, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		realWS = workspace
+	realWS, ok := resolveExisting(workspace)
+	if !ok {
+		return false
 	}
-	realTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		realTarget = target
+	realTarget, ok := resolveExisting(target)
+	if !ok {
+		return false
 	}
 	rel, err := filepath.Rel(realWS, realTarget)
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting resolves the symlinks in p's longest existing prefix and
+// rejoins the unresolved rest. It reports false when a component above the
+// leaf is a symlink that does not resolve (dangling, or a loop). With no
+// prefix resolvable it returns p cleaned.
+func resolveExisting(p string) (string, bool) {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(resolved, rest), true
+		}
+		if rest != "" {
+			if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return "", false
+			}
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest), true
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // RejectOptionLike guards a value that becomes a positional argument in an
