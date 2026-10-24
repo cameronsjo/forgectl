@@ -85,6 +85,34 @@ func TestLogs_FiltersRecognizedJSONButKeepsOperationalContext(t *testing.T) {
 	}
 }
 
+// TestLogs_RecognizesOnlyExactLevelKeys pins that "Level" or "LEVEL" is not a
+// level key: encoding/json would match a struct field in any case, so a
+// "Level":"debug" line was hidden and could override an exact "level".
+func TestLogs_RecognizesOnlyExactLevelKeys(t *testing.T) {
+	input := strings.Join([]string{
+		`{"Level":"debug","message":"other casing"}`,
+		`{"level":"error","Level":"debug","message":"exact key wins"}`,
+		`{"severity":"error","Severity":"trace","message":"exact severity"}`,
+		`{"level":"debug","message":"hidden"}`,
+	}, "\n") + "\n"
+	runner := &fakeStreamingRunner{run: func(_ context.Context, _ io.Reader, stdout, _ io.Writer) error {
+		_, err := io.WriteString(stdout, input)
+		return err
+	}}
+	var stdout bytes.Buffer
+
+	err := New(runner).Logs(context.Background(), nil, &stdout, io.Discard, []string{"pod/api"}, LogsOptions{MinLevel: LevelWarn})
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	want := `{"Level":"debug","message":"other casing"}` + "\n" +
+		`{"level":"error","Level":"debug","message":"exact key wins"}` + "\n" +
+		`{"severity":"error","Severity":"trace","message":"exact severity"}` + "\n"
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestLogs_EscapesHostileRunesBeforeAddingTrustedSeverityStyle(t *testing.T) {
 	// C1 controls and bidi formatting are legal as raw JSON string runes even
 	// though they are unsafe at a terminal. C0 controls such as ESC are not

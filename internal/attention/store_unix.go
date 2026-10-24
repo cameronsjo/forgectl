@@ -29,8 +29,8 @@ const (
 	fileMode    = 0o600
 	// ancestorMode is for directories created above <state>/cadence.
 	ancestorMode = 0o755
-	// maxRecordBytes caps a record read back. One written here is far
-	// smaller: MaxItems texts of MaxText runes.
+	// maxRecordBytes caps a record read back. One written here is
+	// smaller: MaxItems+maxSideItems texts of MaxText runes.
 	maxRecordBytes = 128 << 10
 	recordExt      = ".json"
 )

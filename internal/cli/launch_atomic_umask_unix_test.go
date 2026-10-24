@@ -4,7 +4,6 @@ package cli
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -21,8 +20,8 @@ func TestWriteConfigAtomic_RestrictiveUmaskMayNarrowFreshMode(t *testing.T) {
 		return
 	}
 	path := filepath.Join(t.TempDir(), "config.toml")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestWriteConfigAtomic_RestrictiveUmaskMayNarrowFreshMode$")
-	cmd.Env = append(os.Environ(), "FORGECTL_TEST_RESTRICTIVE_UMASK=1", "FORGECTL_TEST_UMASK_PATH="+path)
+	cmd := reExecTest(t.Context(), "TestWriteConfigAtomic_RestrictiveUmaskMayNarrowFreshMode",
+		"FORGECTL_TEST_RESTRICTIVE_UMASK=1", "FORGECTL_TEST_UMASK_PATH="+path)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("umask subprocess: %v\n%s", err, output)
 	}

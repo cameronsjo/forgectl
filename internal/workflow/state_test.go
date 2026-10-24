@@ -252,6 +252,29 @@ func TestMissingResumeExport(t *testing.T) {
 	}
 }
 
+// TestMissingResumeExport_ParamValueIsNotAReference pins that the resume guard
+// reads each step as written, like Run does: a param VALUE of "${workspace}" is
+// literal text, so it must not make a resume refuse for a skipped export.
+func TestMissingResumeExport_ParamValueIsNotAReference(t *testing.T) {
+	reg := testRegistry(t)
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "resume-param",
+		Params:     map[string]Param{"repo": {Required: true}, "note": {Required: true}},
+		Steps: []Step{
+			{Uses: "worktree", Repo: "${repo}", Ref: "HEAD"},
+			{Uses: "run", Cmd: "echo", Args: []string{"${note}"}},
+		},
+	}
+	plan, err := BuildPlan(wf, map[string]string{"repo": "r", "note": "${workspace}"}, reg)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if name, idx, missing := MissingResumeExport(plan, 1, reg); missing {
+		t.Errorf("param value read as a reference: missing %q at step %d", name, idx)
+	}
+}
+
 func TestResumeRecorder_KeepsPrefixAndAppends(t *testing.T) {
 	redirectStateDir(t)
 

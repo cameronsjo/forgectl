@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -24,6 +26,10 @@ var (
 	outRefRe  = regexp.MustCompile(`OUT_([a-z][a-z0-9]{0,31})_([A-Za-z][A-Za-z0-9_]*)`)
 	timeoutRe = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
+
+// maxTimeoutSeconds is the largest timeout= whose deadline fits a time.Duration;
+// a larger one would wrap negative and kill the step the moment it starts.
+const maxTimeoutSeconds = math.MaxInt64 / int64(time.Second)
 
 const (
 	manifestSeparator = " -- "
@@ -189,17 +195,20 @@ func parseStepLine(text, name string, lineno int) (Step, error) {
 	for _, opt := range opts {
 		switch {
 		case strings.HasPrefix(opt, "after="):
-			s.After = nil
+			// Repeated after= options add up: `after=a after=b` waits on both.
 			for _, a := range strings.Split(strings.TrimPrefix(opt, "after="), ",") {
-				if a != "" {
+				if a != "" && !slices.Contains(s.After, a) {
 					s.After = append(s.After, a)
 				}
 			}
 		case strings.HasPrefix(opt, "timeout="):
 			v := strings.TrimPrefix(opt, "timeout=")
+			if s.Timeout != 0 {
+				return Step{}, manifestErr("%s: step %s: timeout given twice", where, id)
+			}
 			n, err := strconv.Atoi(v)
-			if !timeoutRe.MatchString(v) || err != nil {
-				return Step{}, manifestErr("%s: step %s: bad timeout %q (whole seconds, at least 1)", where, id, v)
+			if !timeoutRe.MatchString(v) || err != nil || int64(n) > maxTimeoutSeconds {
+				return Step{}, manifestErr("%s: step %s: bad timeout %q (whole seconds, 1 to %d)", where, id, v, maxTimeoutSeconds)
 			}
 			s.Timeout = n
 		case opt == "private":

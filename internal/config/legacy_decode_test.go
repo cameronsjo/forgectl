@@ -237,7 +237,7 @@ func TestDecodeLegacyLaunchRefusesWorker(t *testing.T) {
 	if !slices.Contains(keys, "worker") {
 		t.Fatalf("undecoded keys %q do not report [worker]", keys)
 	}
-	if lc.Worker != (LaunchWorker{}) {
+	if !lc.Worker.isZero() {
 		t.Fatalf("a legacy [worker] table was applied: %+v", lc.Worker)
 	}
 }

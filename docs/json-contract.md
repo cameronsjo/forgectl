@@ -31,6 +31,7 @@ All three keys are always present.
 | --- | --- |
 | `usage_error` | Nothing was attempted, and the call or setup can fix it. Either forgectl rejected a flag or positional argument before the verb ran (an unknown flag, a flag missing its value, a wrong number of arguments), or the verb refused a value before doing any work: `review` with a malformed `--repo` or an unknown `--kind`, a `sessions` verb with no concordance DSN configured. |
 | `failed` | The verb ran and failed before it wrote its verdict, for example because a subprocess failed, a flag combination was refused, or the config is invalid. |
+| `unknown_command` | The verb or subverb named does not exist (`forgectl zzbogus --json`, `forgectl desk zzbogus --json`), so nothing ran. It exits as the same call does without `--json`: 2, or 1 under `tasks`. A caller can read it as "this forgectl has no such verb" rather than a bad call. |
 
 `path` is the one resolved file the failure is about, relative to the repository root, when there is one. Today only env-file refusals set it. Everywhere else it is `""`.
 

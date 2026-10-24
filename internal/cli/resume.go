@@ -37,7 +37,7 @@ var resumeModule = module.Manifest{
 
 // newResumeCmd builds `forgectl resume` over the registry Deps.
 func newResumeCmd(deps module.Deps) *cobra.Command {
-	var fork, dryRun bool
+	var fork, dryRun, keepMode bool
 	var limit int
 
 	cmd := &cobra.Command{
@@ -101,6 +101,14 @@ starts a new session rather than continuing the old one, and a new session
 reads its own (empty) task list, so snapshotted tasks are reported rather than
 restored. Pass it in response to the live-session error, not defensively.
 
+The resumed session starts in the launch posture's permission mode (plan by
+default), whatever mode it was in before. --keep-permission-mode resumes it in
+the mode its transcript last recorded instead. The value must be a mode
+Claude Code accepts, and bypassPermissions carries only when the posture can
+reach it (allow_danger on, and stdout a terminal); otherwise, or when no mode
+is recorded, the posture's mode applies and a note on stderr says why.
+` + "`resume restart`" + ` and the update watcher relaunch with this flag.
+
 Exit codes: 0 resumed; 1 no session matched, the filter was ambiguous and there
 was no way to pick; 2 the target is still running
 (recoverable — use --fork); 130 the pick was cancelled (Esc or Ctrl+C). Note that ` + "`resume ls`" + ` exits 0 with an empty
@@ -114,12 +122,13 @@ guard; test the ls output instead.`,
 			if len(args) == 1 {
 				filter = args[0]
 			}
-			return runResume(cmd, deps.Cfg, deps.LegacyBoundary, filter, limit, fork, dryRun, deps.Theme)
+			return runResume(cmd, deps.Cfg, deps.LegacyBoundary, filter, limit, resumeFlags{fork: fork, dryRun: dryRun, keepMode: keepMode}, deps.Theme)
 		},
 	}
 	cmd.Flags().BoolVar(&fork, "fork", false, "branch a new session off the transcript instead of continuing it")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved session, cwd, and claude argv without resuming")
 	cmd.Flags().IntVar(&limit, "limit", resume.DefaultLimit, "how many recent sessions to consider (0 or negative means the default)")
+	cmd.Flags().BoolVar(&keepMode, strings.TrimPrefix(resume.KeepPermissionModeFlag, "--"), false, "resume in the permission mode the session was last in, not the posture's (falls back to the posture's when unknown)")
 
 	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd(), newResumeOutdatedCmd(deps), newResumeRestartCmd(deps), newResumeHooksCmd(deps))
 	return cmd
@@ -154,7 +163,8 @@ func scanFor(filter string, limit int) ([]resume.Session, error) {
 }
 
 // runResume is the pick-then-resume path.
-func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, filter string, limit int, fork, dryRun bool, th theme.Theme) error {
+func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, filter string, limit int, flags resumeFlags, th theme.Theme) error {
+	dryRun := flags.dryRun
 	sessions, err := scanSessions(filter, limit)
 	if err != nil {
 		return err
@@ -191,7 +201,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 			return WithExitCode(err, exitFailed)
 		}
 	}
-	return resumeSession(cmd, cfg, boundary, picked, fork, dryRun)
+	return resumeSessionWith(cmd, cfg, boundary, picked, flags)
 }
 
 // ambiguousMatch is the headless answer to "which of these did you mean".
@@ -430,9 +440,25 @@ func sessionRowWidth(s resume.Session, l rowLayout) string {
 // replaced to fix, reintroduced one layer down.
 func displayWidth(s string) int { return ansi.StringWidth(s) }
 
-// resumeSession restores the session's tasks, moves into its directory, and
-// replaces this process with claude.
+// resumeFlags are `forgectl resume`'s behavior flags.
+type resumeFlags struct {
+	fork, dryRun bool
+	// keepMode is --keep-permission-mode: resume in the session's last
+	// recorded permission mode instead of the posture's. A restart run's
+	// relaunch line sets it (forgectl#1332).
+	keepMode bool
+}
+
+// resumeSession resumes s with the posture's own permission mode. See
+// resumeSessionWith.
 func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, s resume.Session, fork, dryRun bool) error {
+	return resumeSessionWith(cmd, cfg, boundary, s, resumeFlags{fork: fork, dryRun: dryRun})
+}
+
+// resumeSessionWith restores the session's tasks, moves into its directory,
+// and replaces this process with claude, under flags.
+func resumeSessionWith(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, s resume.Session, flags resumeFlags) error {
+	fork, dryRun := flags.fork, flags.dryRun
 	errOut := cmd.ErrOrStderr()
 
 	// The one failure mode this feature introduces. Two claude processes
@@ -502,6 +528,13 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// same stdout would get.
 	if !launchStdoutIsTerminal() {
 		profile.AllowDanger = false
+	}
+	// After the AllowDanger clear, so an unattended resume can never carry
+	// bypassPermissions in through the transcript either.
+	if flags.keepMode {
+		var note string
+		profile, note = carryPermissionMode(profile, s)
+		_, _ = fmt.Fprintf(errOut, "forgectl: %s\n", note)
 	}
 	args := launch.ResumeArgs(profile, s.ID, fork)
 
@@ -596,6 +629,17 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	recordUsageSilently(cfg.Launch.UsageStats,
 		newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, launch.UsagePostureDefault))
 	return execHarness("", claudePath, args, env)
+}
+
+// carryPermissionMode applies --keep-permission-mode: the mode s's transcript
+// last recorded, checked by launch.CarryPermissionMode, or the posture's own
+// mode with a note saying why not.
+func carryPermissionMode(profile launch.Profile, s resume.Session) (launch.Profile, string) {
+	var mode string
+	if paths, err := resumePaths(); err == nil {
+		mode = resume.LastPermissionMode(paths, s.ID, s.Cwd)
+	}
+	return launch.CarryPermissionMode(profile, mode)
 }
 
 // forkTaskNote annotates the dry-run task line so a fork's task behavior is

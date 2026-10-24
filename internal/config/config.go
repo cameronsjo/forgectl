@@ -229,6 +229,20 @@ type LaunchWorker struct {
 	PermissionMode string `toml:"permission_mode,omitempty"`
 	Sandbox        string `toml:"sandbox,omitempty"`
 	ApprovalPolicy string `toml:"approval_policy,omitempty"`
+	// Settings is a JSON file merged into a claude worker's --settings. It
+	// may only remove things (plugins, skills, agents, the output style);
+	// internal/launch/workersettings.go says which keys it takes (#1323).
+	Settings string `toml:"settings,omitempty"`
+	// Tools is the built-in tool allowlist a claude worker gets as --tools.
+	// Unset keeps every built-in tool; internal/launch/workertools.go says
+	// which names it takes.
+	Tools []string `toml:"tools,omitempty"`
+}
+
+// isZero reports whether the [launch.worker] table set nothing. An empty
+// tools list is set (the launch refuses it), so only a nil one counts.
+func (w LaunchWorker) isZero() bool {
+	return w.PermissionMode == "" && w.Sandbox == "" && w.ApprovalPolicy == "" && w.Settings == "" && w.Tools == nil
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -284,7 +298,7 @@ type LaunchProject struct {
 // either route — the difference is which code path carries it, and that is
 // worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker == (LaunchWorker{}) && !lc.UsageStats
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker.isZero() && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the

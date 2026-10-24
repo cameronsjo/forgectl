@@ -191,7 +191,7 @@ func (c *Client) WindowsLiveForListing(ctx context.Context, refs []Ref) (live ma
 }
 
 func (c *Client) windowsLive(ctx context.Context, refs []Ref, list func(context.Context) ([]tmux.Window, error)) (map[Ref]bool, error) {
-	tctx, done := boundedTmux(ctx)
+	tctx, done := c.boundedTmux(ctx)
 	wins, err := list(tctx)
 	done()
 	if err != nil {
@@ -459,7 +459,7 @@ func (c *Client) occupancyFrom(ctx context.Context, summaries []SessionSummary) 
 // reserve, drain's claim), so the read is bounded by lockedTmuxBudget; a
 // timeout is ok=false, which refuses the admission rather than granting a slot.
 func (c *Client) reviewWindowSnapshot(ctx context.Context) (live int, names map[string]bool, ok bool) {
-	tctx, done := boundedTmux(ctx)
+	tctx, done := c.boundedTmux(ctx)
 	wins, err := c.countableWindows(tctx)
 	done()
 	if err != nil {

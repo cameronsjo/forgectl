@@ -110,14 +110,15 @@ func userArg(a string) string {
 
 // tokenPrefixes are the leading bytes of well-known credential formats
 // (GitHub, GitLab personal, pipeline-trigger and CI job, Slack, OpenAI/Stripe-style,
-// AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
-// written lower-case and matched case-insensitively. A token pasted where a
+// Stripe restricted keys, AWS access key ids, Google API keys, npm, PyPI,
+// Hugging Face, Shopify, and a JWT's "eyJ"), written lower-case and matched
+// case-insensitively. A token pasted where a
 // flag name goes (--ghp_…) is a value, not a name. stdoutTokens, below, are
 // the same formats at their issued case and length, for Stdout; a format
 // added to one belongs in the other.
 var tokenPrefixes = []string{
-	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "glcbt-", "xox", "sk-", "sk_", "akia", "asia",
-	"aiza", "npm_", "pypi-", "hf_", "shpat_",
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "glcbt-", "xox", "sk-", "sk_", "rk_", "akia", "asia",
+	"aiza", "npm_", "pypi-", "hf_", "shpat_", "eyj",
 }
 
 // stdoutToken is one credential format Stdout withholds: its issued prefix
@@ -156,9 +157,11 @@ var stdoutTokens = []stdoutToken{
 	{"shpat_", 32, isHex},
 }
 
-// tokenShaped reports whether name starts with a tokenPrefixes entry.
+// tokenShaped reports whether name starts with a tokenPrefixes entry once
+// any leading '-', '_' or '.' is skipped: isFlagName allows them, so a typed
+// ---ghp_… or a pasted --_ghp_… is still the token.
 func tokenShaped(name string) bool {
-	l := strings.ToLower(name)
+	l := strings.ToLower(strings.TrimLeft(name, "-_."))
 	for _, p := range tokenPrefixes {
 		if strings.HasPrefix(l, p) {
 			return true

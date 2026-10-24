@@ -159,6 +159,12 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	if hits, err = concordance.SearchRunbooks(ctx, "colim", "", 5); err != nil || len(hits) == 0 {
 		t.Errorf("trigram fallback missed partial token (err=%v hits=%v)", err, hits)
 	}
+	// The fallback matches the query literally: % and _ are not wildcards.
+	for _, q := range []string{"%", "col_ma"} {
+		if hits, err = concordance.SearchRunbooks(ctx, q, "", 5); err != nil || len(hits) != 0 {
+			t.Errorf("trigram fallback treated %q as a pattern (err=%v hits=%+v)", q, err, hits)
+		}
+	}
 }
 
 // TestIntegrationWhyAndLast exercises the path/topic recency query surface

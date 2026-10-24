@@ -20,6 +20,8 @@ package pip
 //   [x] Happy: ';' is recognized as a comment prefix alongside '#'
 //   [x] Happy: 'key: value' (colon delimiter) parses the same as 'key = value'
 //   [x] Unhappy: a line with neither '=' nor ':' is inert (Comment), not a panic
+//   [x] Happy: a header with text after its last ']' still opens the section,
+//       as configparser reads it; "[]" stays inert
 //
 // File.Remove / File.Restore (Classification: pure logic / stateful mutation)
 //   [x] Happy: Remove comments out the matching entry line
@@ -107,6 +109,44 @@ func TestClassify_SectionHeaderSetsSectionForFollowingLines(t *testing.T) {
 	}
 }
 
+// TestClassify_HeaderWithTrailingTextStartsTheSection pins configparser's
+// header rule: `\[(?P<header>.+)\]` is matched from the start of the line
+// only, so text after the last ']' does not stop the line opening a section.
+// Python 3.13 reads every one of these the same way.
+func TestClassify_HeaderWithTrailingTextStartsTheSection(t *testing.T) {
+	cases := []struct {
+		header, want string
+	}{
+		{"[global] # mirror", "global"},
+		{"[global]; note", "global"},
+		{"[a]b]", "a]b"},
+		{"[x]=y", "x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.header, func(t *testing.T) {
+			f := Parse([]byte("[install]\nindex-url = keep\n" + tc.header + "\nindex-url = https://x\n"))
+			if n := f.Remove(tc.want, "index-url"); n != 1 {
+				t.Fatalf("Remove(%q, index-url) = %d, want 1; out=%q", tc.want, n, f.Serialize())
+			}
+			// The other direction: [install] owns exactly its own entry.
+			g := Parse([]byte("[install]\nindex-url = keep\n" + tc.header + "\nindex-url = https://x\n"))
+			if n := g.Remove("install", "index-url"); n != 1 {
+				t.Fatalf("Remove(install, index-url) = %d, want 1; out=%q", n, g.Serialize())
+			}
+		})
+	}
+}
+
+// TestClassify_EmptyBracketsAreNotAHeader: the header pattern needs at least
+// one character between the brackets. configparser rejects "[]" as a parse
+// error; Parse keeps it inert, so the section stays unchanged.
+func TestClassify_EmptyBracketsAreNotAHeader(t *testing.T) {
+	f := Parse([]byte("[install]\n[]\ntrusted-host = a\n"))
+	if entry := findEntry(t, f, "trusted-host"); entry.Section != "install" {
+		t.Errorf("Section = %q, want %q", entry.Section, "install")
+	}
+}
+
 func TestClassify_KeyIsLowercasedRegardlessOfSourceCasing(t *testing.T) {
 	f := Parse([]byte("[global]\nIndex-URL = https://pypi.org/simple\n"))
 	entry := findEntry(t, f, "index-url")
@@ -178,6 +218,44 @@ func TestRemove_CommentsOutContinuationLinesToo(t *testing.T) {
 		if !hasRemovedMarker(l.Raw) {
 			t.Errorf("line %d not marked removed: %q", i, l.Raw)
 		}
+	}
+}
+
+// configparser keeps a value open across blank and comment lines, so the
+// indented URLs after them still belong to extra-index-url. Removing it must
+// mark them too; left bare, configparser would read them as part of
+// index-url, the entry above.
+func TestRemove_ContinuationAfterBlankAndCommentLines(t *testing.T) {
+	src := "[global]\nindex-url = https://pypi.org/simple\nextra-index-url =\n    https://a\n\n    https://b\n    # mirror\n    https://c\nretries = 3\n"
+	f := Parse([]byte(src))
+	if n := f.Remove("global", "extra-index-url"); n != 1 {
+		t.Fatalf("Remove returned %d, want 1", n)
+	}
+	wantMarked := map[int]bool{2: true, 3: true, 5: true, 7: true}
+	for i, l := range f.Lines {
+		if got := hasRemovedMarker(l.Raw); got != wantMarked[i] {
+			t.Errorf("line %d %q: marked = %v, want %v", i, l.Raw, got, wantMarked[i])
+		}
+	}
+	if e := findEntry(t, f, "retries"); e.Kind != KindEntry {
+		t.Errorf("retries after the value: kind %v, want an entry", e.Kind)
+	}
+	if f.Restore(); string(f.Serialize()) != src {
+		t.Errorf("restore(remove(x)) != x: %q", f.Serialize())
+	}
+}
+
+// A line indented deeper than its entry continues the value even when it is
+// shaped like a section header or an entry, as configparser reads it.
+func TestClassify_DeeperIndentContinuesWhateverItsShape(t *testing.T) {
+	f := Parse([]byte("[global]\nkey = a\n    [b]\n    other = c\nnext = d\n"))
+	for i, want := range []LineKind{KindSection, KindEntry, KindContinuation, KindContinuation, KindEntry} {
+		if got := f.Lines[i].Kind; got != want {
+			t.Errorf("line %d %q: kind %v, want %v", i, f.Lines[i].Raw, got, want)
+		}
+	}
+	if f.Lines[3].Key != "key" || f.Lines[3].Section != "global" {
+		t.Errorf("line 3 = %+v, want a continuation of key in [global]", f.Lines[3])
 	}
 }
 

@@ -443,7 +443,7 @@ func TestBriefFencesTheText(t *testing.T) {
 	if strings.Count(brief, "42") != 1 || !strings.Contains(brief, "whose body contains the line: Closes #42\n") {
 		t.Fatalf("issue number placement:\n%s", brief)
 	}
-	for _, rule := range []string{"Do not read the issue, its comments, linked issues or pull requests, or any URL, with gh, curl", "never create, add or remove labels", "Never merge a pull request", "never push to the default branch", "Never approve a pull request, and never post a cadence-review marker", "Never edit another repository", "open a draft pull request"} {
+	for _, rule := range []string{"Do not read the issue, its comments, linked issues or pull requests, or any URL, with gh, curl", "never create, add or remove labels", "Never merge a pull request", "never push to the default branch", "Never approve a pull request, and never post the merge policy's review marker", "Never edit another repository", "open a draft pull request"} {
 		if !strings.Contains(brief, rule) {
 			t.Errorf("brief lacks %q", rule)
 		}
@@ -494,5 +494,25 @@ func TestRowName(t *testing.T) {
 		if got != tc.want || len(got) > 48 {
 			t.Errorf("%s: RowName = %q, want %q", name, got, tc.want)
 		}
+	}
+}
+
+// A GraphQL error message cut to maxErrorText keeps whole characters: an "é"
+// straddling the limit is dropped, not split into a stray byte.
+func TestDecodePageCutsErrorTextOnACharacter(t *testing.T) {
+	msg := strings.Repeat("a", maxErrorText-1) + "é" + strings.Repeat("b", 10)
+	body, err := json.Marshal(map[string]any{"errors": []map[string]string{{"message": msg}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = DecodePage(body)
+	if err == nil {
+		t.Fatal("DecodePage accepted an errors array")
+	}
+	if strings.Contains(err.Error(), `\x`) {
+		t.Errorf("error quotes a split character: %v", err)
+	}
+	if !strings.Contains(err.Error(), strings.Repeat("a", maxErrorText-1)+`"`) {
+		t.Errorf("error lost the text before the character: %v", err)
 	}
 }

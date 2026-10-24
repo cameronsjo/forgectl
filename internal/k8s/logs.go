@@ -268,16 +268,16 @@ func logLineTransform(out io.Writer, opts LogsOptions) lineTransform {
 }
 
 func jsonSeverity(line []byte) (Level, bool) {
-	var fields struct {
-		Level    json.RawMessage `json:"level"`
-		Severity json.RawMessage `json:"severity"`
-	}
+	// A map, not a struct: encoding/json matches struct fields in any letter
+	// case, so {"Level":"debug"} would count as a level and a later "Level"
+	// would override an exact "level". Only the exact keys are recognized.
+	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(line, &fields); err != nil {
 		return 0, false
 	}
-	raw := fields.Level
+	raw := fields["level"]
 	if len(raw) == 0 {
-		raw = fields.Severity
+		raw = fields["severity"]
 	}
 	if len(raw) == 0 {
 		return 0, false

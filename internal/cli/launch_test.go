@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -30,11 +31,19 @@ func TestMain(m *testing.M) {
 	// Build by import path (no hardcoded Dir) so this is portable: `go test`
 	// runs with the package dir as cwd, inside the module, so go resolves the
 	// main package wherever the checkout lives (CI, any machine, post-merge).
-	build := exec.Command("go", "build", "-o", builtBinPath, "github.com/cameronsjo/forgectl")
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		_ = os.RemoveAll(dir)
-		panic("build forgectl: " + err.Error())
+	//
+	// A child the package's own tests start from this binary (reExecTest)
+	// runs one test that needs no forgectl binary, so it skips the build.
+	// Building there spent a parent's fixed budget: under a loaded
+	// `go test ./...` the child's link took the whole 20 s that
+	// TestDeskWatch_ClosedPipeExits141 gives its first line (forgectl#1120).
+	if os.Getenv(testChildEnv) == "" {
+		build := exec.CommandContext(context.Background(), "go", "build", "-o", builtBinPath, "github.com/cameronsjo/forgectl") //nolint:gosec // G204: the path is this run's own temp dir
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			_ = os.RemoveAll(dir)
+			panic("build forgectl: " + err.Error())
+		}
 	}
 
 	// The Claude reviewer refuses to dispatch where Claude Code's sandbox
@@ -65,6 +74,22 @@ func TestMain(m *testing.M) {
 		panic("set TMPDIR: " + err.Error())
 	}
 
+	// A codex launch checks folder trust in $CODEX_HOME/config.toml
+	// (forgectl#1240). Point it at an empty home, where the check refuses
+	// nothing, so the developer's own codex trust list cannot change what a
+	// codex launch test sees. Tests of the check set CODEX_HOME themselves.
+	codexHome := filepath.Join(tmp, "codex-home")
+	if err := os.Mkdir(codexHome, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("create codex home: " + err.Error())
+	}
+	if err := os.Setenv("CODEX_HOME", codexHome); err != nil {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(tmp)
+		panic("set CODEX_HOME: " + err.Error())
+	}
+
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	// The settings dir is left 0500, which RemoveAll cannot empty unless
@@ -72,6 +97,20 @@ func TestMain(m *testing.M) {
 	releaseReviews(tmp)
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
+}
+
+// testChildEnv marks a process as a child that a test in this package
+// started from the test binary itself; TestMain then skips the forgectl
+// build, which no such child uses.
+const testChildEnv = "FORGECTL_CLI_TEST_CHILD"
+
+// reExecTest returns a command that runs only the test named by run in a
+// fresh copy of this test binary, marked so its TestMain does not build
+// forgectl. env is added to the inherited environment.
+func reExecTest(ctx context.Context, run string, env ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+run+"$") //nolint:gosec // G204: the test binary itself
+	cmd.Env = append(append(os.Environ(), testChildEnv+"=1"), env...)
+	return cmd
 }
 
 // shortTempRoot makes the package's temp root directly in a short system temp

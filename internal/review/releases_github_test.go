@@ -11,8 +11,10 @@ package review
 //   [x] release-pr: picks the newest shaped release (skips beta and drafts),
 //       counts unreleased, keeps same-repo release PRs, reads the toggle,
 //       reads the gate reason from the Gate job's annotations, hashes the
-//       base64 gate copy, reads the endpoint version
+//       base64 gate and lint copies, reads the endpoint version
 //   [x] a missing gate copy is GateCopyMissing, not an error
+//   [x] a missing lint copy is LintCopyMissing, not an error, and stalls the
+//       row as a missing gate copy does; a failed lint read is unknown
 //   [x] a failed read is a categorical error on that repo only
 //
 // testflightReason (Classification: pure)
@@ -30,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +101,14 @@ func contents(s string) map[string]string {
 	return map[string]string{"type": "file", "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(s))}
 }
 
+// The vendored copies forgectlAPI serves, and the canonical pair they match.
+const (
+	gateBody = "#!/usr/bin/env bash\n"
+	lintBody = "#!/usr/bin/env bash\n# release-env lint\n"
+)
+
+var apiCanon = Canonical{Gate: SHA256Hex([]byte(gateBody)), Lint: SHA256Hex([]byte(lintBody))}
+
 func forgectlAPI() fakeAPI {
 	return fakeAPI{
 		"repos/cameronsjo/forgectl/releases?per_page=100": []map[string]any{
@@ -118,7 +129,8 @@ func forgectlAPI() fakeAPI {
 			{"number": 800, "title": "chore(main): release 9.9.9", "created_at": "2026-09-30T03:00:00Z", "head": map[string]any{"repo": map[string]any{"full_name": "stranger/forgectl"}}},
 			{"number": 801, "title": "feat: thing", "created_at": "2026-09-30T03:00:00Z", "head": map[string]any{"repo": map[string]any{"full_name": "cameronsjo/forgectl"}}},
 		},
-		"repos/cameronsjo/forgectl/contents/.github/scripts/ship-gate.sh?ref=main": contents("#!/usr/bin/env bash\n"),
+		"repos/cameronsjo/forgectl/contents/.github/scripts/ship-gate.sh?ref=main":        contents(gateBody),
+		"repos/cameronsjo/forgectl/contents/.github/scripts/lint-release-env.sh?ref=main": contents(lintBody),
 		"repos/cameronsjo/forgectl/actions/variables?per_page=100": map[string]any{
 			"variables": []map[string]any{{"name": "RELEASE_APP_ID", "value": "1"}, {"name": "SHIP_NIGHTLY", "value": "on"}},
 		},
@@ -176,8 +188,11 @@ func TestCollect_ReleasePR(t *testing.T) {
 	if strings.Join(reasons, ",") != "ci-red,no-pr,error" {
 		t.Errorf("reasons = %q, want ci-red,no-pr,error", reasons)
 	}
-	if f.GateCopySHA256 != SHA256Hex([]byte("#!/usr/bin/env bash\n")) {
+	if f.GateCopySHA256 != apiCanon.Gate {
 		t.Errorf("gate sha = %s (trailing newline must survive)", f.GateCopySHA256)
+	}
+	if f.LintCopySHA256 != apiCanon.Lint || f.LintCopyMissing {
+		t.Errorf("lint sha = %s missing = %v, want the lint body's hash", f.LintCopySHA256, f.LintCopyMissing)
 	}
 	if len(f.Endpoints) != 1 || f.Endpoints[0].Version != "0.19.0" {
 		t.Errorf("endpoints = %+v", f.Endpoints)
@@ -200,6 +215,38 @@ func TestCollect_MissingGateAndFailedRead(t *testing.T) {
 	}
 }
 
+// A consumer with no lint copy is answered the way a missing gate copy is:
+// LintCopyMissing, no read error, and a stall that names the file. A drifted
+// lint copy stalls; a failed lint read makes the row unknown.
+func TestCollect_LintCopy(t *testing.T) {
+	const lintPath = "repos/cameronsjo/forgectl/contents/.github/scripts/lint-release-env.sh?ref=main"
+	reg := Registry{Version: 1, Repos: []RegistryEntry{releasePR}}
+	stalls := func(api fakeAPI) (RepoFacts, Row) {
+		f := Collect(context.Background(), api, reg)["forgectl"]
+		return f, Derive(releasePR, f, apiCanon, t0)
+	}
+
+	api := forgectlAPI()
+	api[lintPath] = ErrAPINotFound
+	f, row := stalls(api)
+	if !f.LintCopyMissing || f.LintCopySHA256 != "" || len(f.Errors) != 0 {
+		t.Errorf("missing lint: missing=%v sha=%q errors=%q", f.LintCopyMissing, f.LintCopySHA256, f.Errors)
+	}
+	if row.LintCopy != "missing" || !slices.Contains(row.Stalls, "lint copy .github/scripts/lint-release-env.sh is missing") {
+		t.Errorf("missing lint: lint copy=%q stalls=%q", row.LintCopy, row.Stalls)
+	}
+
+	api[lintPath] = contents(lintBody + "# edited in place\n")
+	if _, row := stalls(api); row.LintCopy != "drift" || row.GateCopy != "match" || !slices.Contains(row.Stalls, "lint copy drifted from the canonical lint-release-env.sh") {
+		t.Errorf("drifted lint: gate=%q lint=%q stalls=%q", row.GateCopy, row.LintCopy, row.Stalls)
+	}
+
+	api[lintPath] = &APIStatusError{Status: 500}
+	if f, row := stalls(api); strings.Join(f.Errors, ";") != "lint copy: HTTP 500" || row.State != StateUnknown {
+		t.Errorf("failed lint read: errors=%q state=%s, want one lint error and unknown", f.Errors, row.State)
+	}
+}
+
 // An App token cannot read variables (403): the toggle is inferred from the
 // newest scheduled run, and with none to read the row fails closed.
 func TestCollect_ToggleFromRuns(t *testing.T) {
@@ -216,7 +263,7 @@ func TestCollect_ToggleFromRuns(t *testing.T) {
 	if f.Toggle == nil || f.Toggle.Value != "off" {
 		t.Errorf("paused scheduled run: toggle = %+v, want off", f.Toggle)
 	}
-	if row := Derive(releasePR, f, SHA256Hex([]byte("#!/usr/bin/env bash\n")), t0); row.State != StatePaused {
+	if row := Derive(releasePR, f, apiCanon, t0); row.State != StatePaused {
 		t.Errorf("state = %s (stalls %q errors %q), want paused", row.State, row.Stalls, row.Errors)
 	}
 
@@ -305,7 +352,25 @@ func TestTestflightReason(t *testing.T) {
 type liveFixture struct {
 	CapturedAt    time.Time            `json:"captured_at"`
 	CanonicalGate string               `json:"canonical_gate_sha256"`
+	CanonicalLint string               `json:"canonical_lint_sha256,omitempty"`
 	Facts         map[string]RepoFacts `json:"facts"`
+}
+
+// canonical returns the hashes the capture ran under. A capture recorded
+// before the radar read lint-release-env.sh has no lint facts: each row with
+// a gate copy gets a stand-in lint copy that matches, so the replay still
+// judges everything the capture did record.
+func (fx *liveFixture) canonical() Canonical {
+	if fx.CanonicalLint == "" {
+		fx.CanonicalLint = strings.Repeat("e", 64)
+		for repo, f := range fx.Facts {
+			if f.GateCopySHA256 != "" && f.LintCopySHA256 == "" && !f.LintCopyMissing {
+				f.LintCopySHA256 = fx.CanonicalLint
+				fx.Facts[repo] = f
+			}
+		}
+	}
+	return Canonical{Gate: fx.CanonicalGate, Lint: fx.CanonicalLint}
 }
 
 const (
@@ -326,7 +391,8 @@ func TestLiveFixtureReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep := BuildReport(reg, fx.Facts, fx.CanonicalGate, fx.CapturedAt)
+	canonical := fx.canonical()
+	rep := BuildReport(reg, fx.Facts, canonical, fx.CapturedAt)
 	if len(rep.Rows) != 9 || len(rep.Footer) != 5 {
 		t.Fatalf("rows=%d footer=%d, want 9 and 5", len(rep.Rows), len(rep.Footer))
 	}
@@ -357,7 +423,7 @@ func TestLiveFixtureReplays(t *testing.T) {
 	}
 	// Replayed 26h later with nothing new, the enabled repos stall and the
 	// paused ones do not: the negative control, on real data.
-	later := BuildReport(reg, fx.Facts, fx.CanonicalGate, fx.CapturedAt.Add(27*time.Hour))
+	later := BuildReport(reg, fx.Facts, canonical, fx.CapturedAt.Add(27*time.Hour))
 	for _, r := range later.Rows {
 		wantStall := r.Repo == "forgectl" || r.Repo == "cadence-hooks"
 		gotStall := false
@@ -394,6 +460,10 @@ func TestRecordReleasesFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical gate beside the registry: %v", err)
 	}
+	lint, err := os.ReadFile(filepath.Join(filepath.Dir(src), "..", "scripts", "release", "lint-release-env.sh")) //nolint:gosec // G304: an opt-in recorder; the developer names the registry
+	if err != nil {
+		t.Fatalf("canonical lint beside the registry: %v", err)
+	}
 	ctx := context.Background()
 	api := GhAPI{Run: githubauth.Runner(exec.OSRunner{}, "")}
 	alias := privateAliases(ctx, t, api, reg)
@@ -402,6 +472,7 @@ func TestRecordReleasesFixture(t *testing.T) {
 	fx := liveFixture{
 		CapturedAt:    time.Now().UTC().Truncate(time.Second),
 		CanonicalGate: SHA256Hex(gate),
+		CanonicalLint: SHA256Hex(lint),
 		Facts:         map[string]RepoFacts{},
 	}
 	n := 0

@@ -6,6 +6,7 @@ package review
 //   [x] feat, fix, perf and any `!` marker are releasable; chore, ci, docs,
 //       test, refactor, style, build and non-conventional subjects are not
 //   [x] a BREAKING CHANGE footer makes any type releasable
+//   [x] a subject over 200 bytes is cut on a rune boundary, never mid-character
 //
 // noReleasePRStall (Classification: stall rule)
 //   [x] 23h no stall, exactly 24h no stall, 25h stall
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func commit(subject string, h float64) CommitFact {
@@ -281,7 +283,7 @@ func TestCollect_ReleaseMachinery(t *testing.T) {
 	// A failed read is categorical and makes the row unknown.
 	api[wfPath] = &APIStatusError{Status: 500}
 	f = Collect(context.Background(), api, reg)["forgectl"]
-	if row := Derive(releasePR, f, SHA256Hex([]byte("#!/usr/bin/env bash\n")), t0); row.State != StateUnknown {
+	if row := Derive(releasePR, f, apiCanon, t0); row.State != StateUnknown {
 		t.Errorf("500: state=%s, want unknown", row.State)
 	}
 
@@ -352,9 +354,10 @@ func TestReleaseStuckFixture(t *testing.T) {
 	}
 	entry := RegistryEntry{Repo: "forgectl", Branch: "main", Class: ClassReleasePR, Entrypoint: ".github/workflows/ship.yml", TagPattern: "v-semver"}
 	reg := Registry{Version: 1, Repos: []RegistryEntry{entry}}
+	canonical := fx.canonical()
 	f := fx.Facts["forgectl"]
 
-	at := BuildReport(reg, fx.Facts, fx.CanonicalGate, fx.CapturedAt)
+	at := BuildReport(reg, fx.Facts, canonical, fx.CapturedAt)
 	row := at.Rows[0]
 	if row.State != StateStalled || !at.Failing() || len(row.Errors) != 0 {
 		t.Fatalf("captured instant: state=%s failing=%v errors=%q stalls=%q, want stalled", row.State, at.Failing(), row.Errors, row.Stalls)
@@ -363,7 +366,7 @@ func TestReleaseStuckFixture(t *testing.T) {
 		t.Errorf("captured instant stalls = %q", row.Stalls)
 	}
 
-	later := BuildReport(reg, fx.Facts, fx.CanonicalGate, fx.CapturedAt.Add(8*time.Hour)).Rows[0]
+	later := BuildReport(reg, fx.Facts, canonical, fx.CapturedAt.Add(8*time.Hour)).Rows[0]
 	if len(later.Stalls) != 2 || !strings.HasPrefix(later.Stalls[0], "no-release-pr: 2 releasable commit(s) since v0.24.0, oldest 25h ago") || !strings.HasPrefix(later.Stalls[1], "release-workflow-stuck") {
 		t.Errorf("+8h stalls = %q, want no-release-pr and release-workflow-stuck", later.Stalls)
 	}
@@ -372,12 +375,12 @@ func TestReleaseStuckFixture(t *testing.T) {
 	// captured instant is ok, and a release PR silences no-release-pr.
 	f.PendingReleaseRuns = nil
 	fixed := map[string]RepoFacts{"forgectl": f}
-	if r := BuildReport(reg, fixed, fx.CanonicalGate, fx.CapturedAt).Rows[0]; r.State != StateOK {
+	if r := BuildReport(reg, fixed, canonical, fx.CapturedAt).Rows[0]; r.State != StateOK {
 		t.Errorf("no stuck run at capture: state=%s stalls=%q, want ok", r.State, r.Stalls)
 	}
 	f.ReleasePRs = []PRFact{{Number: 1032, CreatedAt: fx.CapturedAt}}
 	fixed["forgectl"] = f
-	if r := BuildReport(reg, fixed, fx.CanonicalGate, fx.CapturedAt.Add(8*time.Hour)).Rows[0]; r.State != StateOK {
+	if r := BuildReport(reg, fixed, canonical, fx.CapturedAt.Add(8*time.Hour)).Rows[0]; r.State != StateOK {
 		t.Errorf("release PR open at +8h: state=%s stalls=%q, want ok", r.State, r.Stalls)
 	}
 }
@@ -390,5 +393,17 @@ func TestScrubCommit_KeepsTheVerdict(t *testing.T) {
 		if out.Releasable() != in.Releasable() || strings.Contains(out.Subject, "secret") || strings.Contains(out.Subject, "private") {
 			t.Errorf("scrubCommit(%q) = %q (releasable %v, was %v)", subject, out.Subject, out.Releasable(), in.Releasable())
 		}
+	}
+}
+
+func TestNewCommitFact_CutsALongSubjectOnARuneBoundary(t *testing.T) {
+	// "é" is two bytes and starts at byte 199, so a 200-byte cut splits it.
+	subject := "feat: " + strings.Repeat("a", 193) + "é more"
+	f := NewCommitFact(subject, time.Time{})
+	if !utf8.ValidString(f.Subject) {
+		t.Fatalf("Subject = %q, not valid UTF-8", f.Subject)
+	}
+	if want := "feat: " + strings.Repeat("a", 193); f.Subject != want {
+		t.Errorf("Subject = %q, want the 199 bytes before the é", f.Subject)
 	}
 }

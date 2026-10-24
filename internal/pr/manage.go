@@ -238,13 +238,13 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	// but it would leave `pr attach` waiting until Ctrl-C. The resolve gets the
 	// same bound the locked reads use; the select below is the interactive
 	// jump itself and stays on the caller's ctx.
-	tctx, done := boundedTmux(ctx)
+	tctx, done := c.boundedTmux(ctx)
 	window, err := c.resolveReviewWindow(tctx, sess.Ref)
 	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
 	done()
 	if timedOut {
 		return fmt.Errorf("select review window %q: tmux did not answer within %s; retry once tmux responds: %w",
-			name, lockedTmuxBudget, err)
+			name, c.tmuxBudgetLimit(), err)
 	}
 	if errors.Is(err, tmux.ErrAmbiguousWindow) {
 		return fmt.Errorf("select review window %q: %w — more than one window carries this review's name; "+

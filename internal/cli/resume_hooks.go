@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -305,6 +306,9 @@ func hookRestart(deps module.Deps, out io.Writer, harness string) resume.Restart
 		if err != nil {
 			return resume.RestartResult{}, err
 		}
+		// Start notices post off the restart's path; the run waits for them
+		// before its summary so none is cut off when the process exits.
+		var notices sync.WaitGroup
 		req := resume.RestartRequest{
 			Paths: paths, Installed: installed,
 			Runner:   deps.Runner,
@@ -312,13 +316,26 @@ func hookRestart(deps module.Deps, out io.Writer, harness string) resume.Restart
 			Options:  resume.RestartOptions{Timeout: timeout},
 			Progress: func(ev resume.RestartEvent) {
 				printRestartEvent(out, ev)
+				notifyRestartStart(ctx, deps, ev, &notices)
 				notifyRestartFailure(ctx, deps, ev)
 			},
 		}
 		if restartOverride != nil {
 			restartOverride(&req)
 		}
-		return resume.RestartOutdated(ctx, req)
+		res, err := resume.RestartOutdated(ctx, req)
+		notices.Wait()
+		if err == nil {
+			if summary := restartSummary(res); summary != "" {
+				printRestartSummary(out, summary)
+				// A run cut short by a signal (launchd's bootout) starts no
+				// further command: the log line above is its summary.
+				if ctx.Err() == nil {
+					_ = hookNotify(context.WithoutCancel(ctx), deps, "forgectl: session restart finished", summary)
+				}
+			}
+		}
+		return res, err
 	}
 }
 
@@ -861,6 +878,29 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 // call instead of running osascript.
 var hookNotify = func(ctx context.Context, deps module.Deps, title, body string) error {
 	return notify.New(deps.Runner).Notify(ctx, title, body)
+}
+
+// notifyRestartStart tells the operator, before the signal, that the watcher
+// is about to restart a session. A restart the operator did not start looks
+// like a session that died and came back on its own (forgectl#1332), so each
+// one is announced, naming the session and its pane, as it begins. It is a
+// notice, not a request: the run's safety checks have already passed, and the
+// stop follows at once. It posts on its own goroutine, tracked by wg: the
+// event fires after the last empty-input check, and waiting on osascript (up
+// to its 5 s timeout) there would widen the window in which a draft typed
+// into the pane is lost to the signal.
+func notifyRestartStart(ctx context.Context, deps module.Deps, ev resume.RestartEvent, wg *sync.WaitGroup) {
+	if ev.State != resume.StateRestarting {
+		return
+	}
+	body := "Session " + ev.SessionID + ": " + ev.Detail + ", then resuming it in the same pane in its last permission mode, onto the updated claude."
+	// Detached for the same reason as notifyRestartFailure: the restart this
+	// announces runs on whatever the run's context does.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = hookNotify(context.WithoutCancel(ctx), deps, "forgectl: restarting a session", body)
+	}()
 }
 
 // notifyRestartFailure tells the operator about a session the watcher could

@@ -981,14 +981,17 @@ func TestStdout_HeaderStartsAWord(t *testing.T) {
 }
 
 // TestStdoutTokens_CoverTokenPrefixes: every credential format tokenPrefixes
-// names for a flag name has a Stdout shape (#952), so the two lists do not
-// drift apart.
+// names for a flag name has a Stdout shape (#952), and every stdoutTokens
+// format has a tokenPrefixes entry, so the two lists do not drift apart in
+// either direction. Stdout's own arms (tokenAt's xox, stdoutJWT) are outside
+// stdoutTokens and are checked by name.
 //
-// Mutation that turns it red: drop the hf_ entry from stdoutTokens.
+// Mutation that turns it red: drop the hf_ entry from stdoutTokens, or the
+// rk_ entry from tokenPrefixes (--rk_live_… then reached a log whole).
 func TestStdoutTokens_CoverTokenPrefixes(t *testing.T) {
 	for _, p := range tokenPrefixes {
-		if p == "xox" {
-			continue // tokenAt's own arm
+		if p == "xox" || p == "eyj" {
+			continue // tokenAt's own arm, stdoutJWT
 		}
 		covered := false
 		for _, tok := range stdoutTokens {
@@ -998,6 +1001,16 @@ func TestStdoutTokens_CoverTokenPrefixes(t *testing.T) {
 		}
 		if !covered {
 			t.Errorf("tokenPrefixes has %q and stdoutTokens has no format starting with it", p)
+		}
+	}
+	for _, tok := range stdoutTokens {
+		if !tokenShaped(tok.prefix) {
+			t.Errorf("stdoutTokens has %q and tokenPrefixes has no entry it starts with", tok.prefix)
+		}
+	}
+	for _, arm := range []string{"xoxb-", "eyJ"} {
+		if !tokenShaped(arm) {
+			t.Errorf("Stdout withholds %q… and tokenPrefixes has no entry it starts with", arm)
 		}
 	}
 }

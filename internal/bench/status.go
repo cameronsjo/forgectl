@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	osexec "os/exec"
 	"runtime"
@@ -202,6 +203,13 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 				c.State = StateDegraded
 				c.Reason = "chronicle DB container unhealthy (see details)"
 				containerDegraded = true
+			case running < total:
+				// An exited DB is down, not healthy: ps --all lists it, so
+				// total counts it and running does not.
+				c.Details = append(c.Details, fmt.Sprintf("compose: %d/%d running", running, total))
+				c.State = StateDegraded
+				c.Reason = "chronicle DB container not running (see details)"
+				containerDegraded = true
 			default:
 				c.Details = append(c.Details, fmt.Sprintf("compose: %d/%d running", running, total))
 				c.Reason = fmt.Sprintf("retention API reachable, %d/%d containers healthy", running, total)
@@ -320,8 +328,19 @@ func parseComposePS(out string) (total, running, unhealthy, restarting int, err 
 
 // otlpTarget turns an OTLP endpoint (http://host:port or host:port) into a
 // tcp:// reachability target — the gRPC transport is not HTTP-probeable.
+// A URL with no port gets its scheme's HTTP default (80 or 443), so the dial
+// has a port at all; a gRPC exporter may pick its own default for such a URL,
+// so set the port when it matters. A bare host:port is used as written.
 func otlpTarget(endpoint string) string {
 	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+		if u.Port() == "" {
+			switch u.Scheme {
+			case "http":
+				return "tcp://" + net.JoinHostPort(u.Hostname(), "80")
+			case "https":
+				return "tcp://" + net.JoinHostPort(u.Hostname(), "443")
+			}
+		}
 		return "tcp://" + u.Host
 	}
 	return "tcp://" + strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://")

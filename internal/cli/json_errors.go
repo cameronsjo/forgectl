@@ -41,6 +41,9 @@ const (
 	jsonCodeUsage = "usage_error"
 	// jsonCodeFailed: the verb ran and failed before emitting its verdict.
 	jsonCodeFailed = "failed"
+	// jsonCodeUnknownCommand: the verb or subverb named does not exist, so
+	// nothing ran (unknownCommandJSON). It exits as a usage error does.
+	jsonCodeUnknownCommand = "unknown_command"
 )
 
 // jsonFailureObject is the --json failure wire shape on stderr: always all

@@ -59,6 +59,7 @@ type safeWriter struct {
 	buf      []byte
 	context  []string // the last redactContext raw lines, so multi-line secrets stay withheld
 	skipLF   bool     // the last terminator was a \r, so a leading \n completes a CRLF
+	blankCR  bool     // that \r ended an empty line, which is a blank line if a \n completes it
 	dropping bool     // inside an over-long line, discarding until its terminator
 }
 
@@ -71,10 +72,16 @@ func (s *safeWriter) Write(p []byte) (int, error) {
 		if s.skipLF {
 			s.skipLF = false
 			if c == '\n' {
+				if s.blankCR {
+					s.emit("", true)
+				}
+				s.blankCR = false
 				continue
 			}
+			s.blankCR = false
 		}
 		if c == '\r' || c == '\n' {
+			s.blankCR = c == '\r' && !s.dropping && len(s.buf) == 0
 			switch {
 			case s.dropping:
 				s.dropping = false

@@ -1,8 +1,10 @@
 package mail
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestCleanBody(t *testing.T) {
@@ -99,5 +101,24 @@ func TestParsePriority(t *testing.T) {
 	}
 	if _, err := ParsePriority("urgent"); err == nil {
 		t.Error("ParsePriority(urgent) = nil error")
+	}
+}
+
+// Both cuts keep whole characters: a "é" straddling the limit is dropped, not
+// split into a stray byte.
+func TestTruncationsCutOnACharacter(t *testing.T) {
+	quoted := quoteTrunc(strings.Repeat("a", 79) + "é" + "tail")
+	if strings.Contains(quoted, `\x`) {
+		t.Errorf("quoteTrunc split a character: %s", quoted)
+	}
+	if want := strconv.Quote(strings.Repeat("a", 79) + "..."); quoted != want {
+		t.Errorf("quoteTrunc = %s, want %s", quoted, want)
+	}
+	line := oneLine([]byte(strings.Repeat("a", 19)+"é"+"tail"), 20)
+	if !utf8.ValidString(line) {
+		t.Errorf("oneLine split a character: %q", line)
+	}
+	if want := strings.Repeat("a", 19) + "..."; line != want {
+		t.Errorf("oneLine = %q, want %q", line, want)
 	}
 }

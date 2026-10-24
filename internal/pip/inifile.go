@@ -37,8 +37,8 @@ const (
 	KindSection
 	// KindEntry is a "key = value" (or "key: value") line.
 	KindEntry
-	// KindContinuation is an indented line extending the value of the
-	// nearest preceding KindEntry/KindContinuation line.
+	// KindContinuation is a line indented deeper than the nearest preceding
+	// KindEntry line, extending that entry's value.
 	KindContinuation
 )
 
@@ -119,9 +119,16 @@ func (f *File) Remove(section, key string) int {
 		line := f.Lines[i]
 		if line.Kind == KindEntry && strings.EqualFold(line.Section, section) && line.Key == wantKey {
 			f.Lines[i].Raw = removedMarker + line.Raw
+			// A value runs on through blank and comment lines (see classify),
+			// so step over them and mark every continuation line it holds.
 			j := i + 1
-			for j < len(f.Lines) && f.Lines[j].Kind == KindContinuation {
-				f.Lines[j].Raw = removedMarker + f.Lines[j].Raw
+			for j < len(f.Lines) {
+				k := f.Lines[j].Kind
+				if k == KindContinuation {
+					f.Lines[j].Raw = removedMarker + f.Lines[j].Raw
+				} else if k != KindBlank && k != KindComment {
+					break
+				}
 				j++
 			}
 			removed++
@@ -162,8 +169,14 @@ func (f *File) Restore() int {
 // line's Raw text and the running section/continuation state. It fully
 // overwrites every field but Raw, so it is safe to call repeatedly (e.g.
 // after Remove/Restore mutate some Raw values) to refresh the model.
+//
+// Continuations follow configparser's defaults: a value runs on through blank
+// and comment lines, and any later line indented deeper than its entry
+// extends it, even one shaped like "[name]" or "key = value". Only a line at
+// or left of the entry's indent ends the value.
 func classify(lines []Line) {
 	currentSection := ""
+	valueKey, valueIndent := "", 0 // the entry whose value is still open, if any
 	for i := range lines {
 		raw := lines[i].Raw
 		trimmed := strings.TrimSpace(raw)
@@ -175,34 +188,46 @@ func classify(lines []Line) {
 		case strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";"):
 			lines[i] = Line{Kind: KindComment, Raw: raw, Section: currentSection}
 
-		case isSectionHeader(trimmed):
-			currentSection = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-			lines[i] = Line{Kind: KindSection, Raw: raw, Section: currentSection}
+		case valueKey != "" && indentOf(raw) > valueIndent:
+			lines[i] = Line{Kind: KindContinuation, Raw: raw, Section: currentSection, Key: valueKey}
 
-		case isIndented(raw) && i > 0 && (lines[i-1].Kind == KindEntry || lines[i-1].Kind == KindContinuation):
-			lines[i] = Line{Kind: KindContinuation, Raw: raw, Section: currentSection, Key: lines[i-1].Key}
+		case isSectionHeader(trimmed):
+			currentSection = sectionName(trimmed)
+			valueKey = ""
+			lines[i] = Line{Kind: KindSection, Raw: raw, Section: currentSection}
 
 		default:
 			if key, ok := parseEntryKey(trimmed); ok {
+				valueKey, valueIndent = key, indentOf(raw)
 				lines[i] = Line{Kind: KindEntry, Raw: raw, Section: currentSection, Key: key}
 			} else {
 				// Malformed/unrecognized line: treat as inert rather than
 				// guessing wrong — Serialize doesn't care either way.
+				valueKey = ""
 				lines[i] = Line{Kind: KindComment, Raw: raw, Section: currentSection}
 			}
 		}
 	}
 }
 
-// isSectionHeader reports whether trimmed is a "[name]" section header.
+// isSectionHeader reports whether trimmed is a section header. configparser
+// matches `\[(?P<header>.+)\]` from the start of the line without anchoring
+// its end, so "[global] # mirror" is section "global": the header is
+// everything up to the LAST ']', and anything after it is ignored.
 func isSectionHeader(trimmed string) bool {
-	return len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'
+	return len(trimmed) >= 3 && trimmed[0] == '[' && strings.LastIndexByte(trimmed, ']') > 1
 }
 
-// isIndented reports whether raw's first byte is a space or tab — the
-// configparser signal for a continuation line.
-func isIndented(raw string) bool {
-	return len(raw) > 0 && (raw[0] == ' ' || raw[0] == '\t')
+// sectionName returns the name of the header line trimmed (see
+// isSectionHeader), with surrounding whitespace removed.
+func sectionName(trimmed string) string {
+	return strings.TrimSpace(trimmed[1:strings.LastIndexByte(trimmed, ']')])
+}
+
+// indentOf returns the number of leading spaces and tabs in raw — the
+// configparser measure that decides whether a line continues a value.
+func indentOf(raw string) int {
+	return len(raw) - len(strings.TrimLeft(raw, " \t"))
 }
 
 // parseEntryKey extracts the key from a "key = value" or "key: value" line,

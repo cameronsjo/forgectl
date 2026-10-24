@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -180,4 +181,24 @@ func TestMergeLegacyIntoLaunch(t *testing.T) {
 			t.Errorf("merged = %+v, want config.toml's values entirely unchanged", merged)
 		}
 	})
+}
+
+// TestLaunchWorkerToolsDecode: tools decodes from TOML; an empty list stays
+// set (non-nil) so the launch can refuse it, and either form makes [launch]
+// non-empty.
+func TestLaunchWorkerToolsDecode(t *testing.T) {
+	cfg, err := DecodeStrict([]byte("[launch.worker]\ntools = [\"Bash\", \"Read\"]\n"))
+	if err != nil {
+		t.Fatalf("DecodeStrict: %v", err)
+	}
+	if !slices.Equal(cfg.Launch.Worker.Tools, []string{"Bash", "Read"}) || cfg.Launch.IsZero() {
+		t.Errorf("tools = %q, IsZero %v", cfg.Launch.Worker.Tools, cfg.Launch.IsZero())
+	}
+	cfg, err = DecodeStrict([]byte("[launch.worker]\ntools = []\n"))
+	if err != nil {
+		t.Fatalf("DecodeStrict: %v", err)
+	}
+	if cfg.Launch.Worker.Tools == nil || cfg.Launch.IsZero() {
+		t.Errorf("tools = [] decoded as unset: %#v, IsZero %v", cfg.Launch.Worker.Tools, cfg.Launch.IsZero())
+	}
 }

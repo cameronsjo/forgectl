@@ -15,9 +15,15 @@ const devTagSuffix = ":dev"
 // build` applies alongside the caller-appended :dev alias (see devTag).
 // repo, branch, and shortsha are assumed already resolved (git plumbing,
 // not user input) — deriveTag itself only sanitizes branch via
-// slugifyBranch.
+// slugifyBranch. The slug is cut so the whole tag component, slug plus
+// "-" plus shortsha, stays within maxTagLen; slugifyBranch's own cap
+// covers the slug alone, not the suffix appended here.
 func deriveTag(repo, branch, shortsha string) string {
-	return repo + ":" + slugifyBranch(branch) + "-" + shortsha
+	slug := slugifyBranch(branch)
+	if budget := maxTagLen - 1 - len(shortsha); budget > 0 && len(slug) > budget {
+		slug = strings.TrimRight(slug[:budget], "-.")
+	}
+	return repo + ":" + slug + "-" + shortsha
 }
 
 // devTag builds the fixed :dev alias for repo.

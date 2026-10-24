@@ -685,6 +685,27 @@ func TestRecipeAfkCommandPromptFlagOverridesDefault(t *testing.T) {
 	}
 }
 
+// TestRecipeAfkCommandRejectsExplicitEmptyTarget pins that --target "" (an
+// unset "$PANE") refuses instead of falling back to HERDR_ACTIVE_PANE_ID, the
+// focused pane, which may be someone else's session.
+func TestRecipeAfkCommandRejectsExplicitEmptyTarget(t *testing.T) {
+	withRecipeEnv(t, map[string]string{herdrActivePaneIDEnv: "w9:p9"})
+	fake := compactedRunner()
+	root := newRoot(module.Deps{Runner: fake})
+	root.SetArgs([]string{"recipe", "afk", "--target", "", "--compact-only", "--skip-receipt"})
+
+	err := root.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("ExecuteContext() error = nil, want rejection of an explicit empty --target")
+	}
+	if ExitCode(err) != 2 {
+		t.Fatalf("ExitCode(error) = %d, want 2", ExitCode(err))
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("calls = %#v, want none", fake.Calls)
+	}
+}
+
 func TestRecipeAfkCommandRejectsArgs(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	root.SetArgs([]string{"recipe", "afk", "extra"})

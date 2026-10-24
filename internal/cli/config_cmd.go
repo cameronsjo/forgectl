@@ -595,6 +595,12 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
 	if w := resolved.Worker; w != nil {
 		_, _ = fmt.Fprintf(out, "  launch.worker        %s  (no project matched; launch which shows a directory's)\n", safeText(workerPostureSummary(w)))
+		if w.Settings != "" {
+			_, _ = fmt.Fprintf(out, "                       settings: %s\n", safeText(w.Settings))
+		}
+		if w.Tools != nil {
+			_, _ = fmt.Fprintf(out, "                       tools: %s\n", safeText(strings.Join(*w.Tools, ", ")))
+		}
 		if w.Refused != "" {
 			_, _ = fmt.Fprintf(out, "                       refused: %s\n", safeText(w.Refused))
 		}

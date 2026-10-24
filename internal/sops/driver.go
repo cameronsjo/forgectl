@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -559,7 +560,11 @@ func (w *workDir) readEditorError() string {
 		return ""
 	}
 	if len(data) > maxEditorErrorBytes {
-		data = data[:maxEditorErrorBytes]
+		cut := maxEditorErrorBytes
+		for cut > 0 && !utf8.RuneStart(data[cut]) {
+			cut--
+		}
+		data = data[:cut]
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
 	return strings.TrimSpace(line)

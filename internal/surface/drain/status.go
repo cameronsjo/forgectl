@@ -210,21 +210,29 @@ func ParseEvents(chunks ...[]byte) ([]Event, error) {
 	return out, nil
 }
 
-// Since returns the events after cursor from the latest drain run: seq
-// counts from 1 in each run, so a cursor never reaches back into an earlier
-// run. A zero cursor returns every event given.
-func Since(events []Event, cursor int64) []Event {
-	if cursor <= 0 {
-		return events
-	}
+// LatestRun returns the latest drain run's events: from the last event with
+// seq 1 on. seq counts from 1 in each run, so with no seq 1 in view every
+// event given is from one run (its start rotated out), and all are returned.
+func LatestRun(events []Event) []Event {
 	start := 0
 	for i, e := range events {
 		if e.Seq == 1 {
 			start = i
 		}
 	}
+	return events[start:]
+}
+
+// Since returns the events after cursor from the latest drain run: seq
+// counts from 1 in each run, so a cursor never reaches back into an earlier
+// run. A zero cursor returns every event given; LatestRun narrows that to
+// the latest run.
+func Since(events []Event, cursor int64) []Event {
+	if cursor <= 0 {
+		return events
+	}
 	var out []Event
-	for _, e := range events[start:] {
+	for _, e := range LatestRun(events) {
 		if e.Seq > cursor {
 			out = append(out, e)
 		}

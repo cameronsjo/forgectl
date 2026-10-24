@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,8 +29,9 @@ func newResumeRestartCmd(deps module.Deps) *cobra.Command {
 		Short: "Restart outdated Claude Code sessions in their herdr panes, once each is idle",
 		Long: `restart --outdated moves every session ` + "`forgectl resume outdated`" + ` lists onto the
 installed claude: it stops each one and resumes it in the same herdr pane with
-` + "`forgectl resume <id>`" + `, so the configured launch profile and cwd apply and the
-conversation comes back. --outdated is required; it is the only selector today.
+` + "`forgectl resume --keep-permission-mode <id>`" + `, so the configured launch
+profile and cwd apply, the conversation comes back, and the session returns in
+the permission mode it was last in (the posture's when that is unknown). --outdated is required; it is the only selector today.
 
 Each session's pane is found by session id: one ` + "`herdr pane list`" + ` per run, and
 the pane herdr labels "claude" with that session id is the one checked and
@@ -182,6 +184,7 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 		_, err := fmt.Fprintln(out, "no outdated sessions")
 		return err
 	}
+	printRestartSummary(out, restartSummary(res))
 	if res.Incomplete() {
 		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting, %d with no herdr pane — each is listed above with the command to resume it by hand", res.Failed, res.Left, res.PaneGone), exitFailed)
 	}
@@ -203,6 +206,38 @@ func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	// is ignored for the run) must not stop the run, and a run mid-restart is
 	// still bound to relaunch and confirm whether anyone reads the line.
 	_, _ = fmt.Fprintln(out, safeText(line))
+}
+
+// restartSummary is one line counting a finished run's final states, or ""
+// when the run had no sessions. Every state is counted, so the line adds up to
+// the number of sessions the run selected.
+func restartSummary(res resume.RestartResult) string {
+	if len(res.Finals) == 0 {
+		return ""
+	}
+	counts := map[resume.RestartState]int{}
+	for _, ev := range res.Finals {
+		counts[ev.State]++
+	}
+	var parts []string
+	for _, st := range []resume.RestartState{
+		resume.StateResumed, resume.StateSkipped, resume.StateFailed,
+		resume.StateLeft, resume.StatePaneGone,
+	} {
+		if n := counts[st]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, st))
+		}
+	}
+	return fmt.Sprintf("%d session(s): %s", len(res.Finals), strings.Join(parts, ", "))
+}
+
+// printRestartSummary writes the summary line, if any, in the progress lines'
+// column layout. Dropped on error, like printRestartEvent.
+func printRestartSummary(out io.Writer, summary string) {
+	if summary == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(out, safeText(fmt.Sprintf("%-10s %s", "summary", summary)))
 }
 
 // printRestartPreview renders --dry-run.

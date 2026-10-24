@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -499,8 +500,11 @@ func TestResumeHooksRestartFailureNotifies(t *testing.T) {
 	env := &cliRestartEnv{relaunchErr: errors.New("herdr call timed out")}
 	restartFixture(t, env)
 	var posted []string
+	var mu sync.Mutex // the start notice posts on its own goroutine
 	prev := hookNotify
 	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
+		mu.Lock()
+		defer mu.Unlock()
 		posted = append(posted, title+" | "+body)
 		return nil
 	}
@@ -515,6 +519,13 @@ func TestResumeHooksRestartFailureNotifies(t *testing.T) {
 	if _, err := f.run(t, cfg, "run"); err == nil {
 		t.Fatal("a failed relaunch must make the run incomplete")
 	}
+	var failures []string
+	for _, p := range posted {
+		if strings.Contains(p, "not restarted") {
+			failures = append(failures, p)
+		}
+	}
+	posted = failures
 	if len(posted) != 1 || !strings.Contains(posted[0], "not restarted") || !strings.Contains(posted[0], "Run: forgectl resume ") || !strings.Contains(posted[0], "herdr call timed out") {
 		t.Fatalf("notifications = %q; want one naming the by-hand command", posted)
 	}
@@ -545,5 +556,66 @@ func TestNotifyRestartFailureSurvivesACancelledRun(t *testing.T) {
 	notifyRestartFailure(ctx, module.Deps{}, resume.RestartEvent{State: resume.StateFailed, Manual: "forgectl resume x", Detail: "d"})
 	if !live {
 		t.Fatal("the notifier got a cancelled context; osascript would never start")
+	}
+}
+
+// The watcher announces each restart before the signal, and sums the run up
+// once it ends (forgectl#1332): a pane that restarts with no notice looks like
+// a session that died and came back on its own.
+func TestResumeHooksRestartAnnouncesEachRestart(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	type post struct{ title, body string }
+	var posted []post
+	var mu sync.Mutex // the start notice posts on its own goroutine
+	prev := hookNotify
+	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		posted = append(posted, post{title, body})
+		return nil
+	}
+	t.Cleanup(func() { hookNotify = prev })
+	f := newHooksFixture(t)
+	cfg := "[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n"
+	f.version = "2.1.99"
+	if _, err := f.run(t, cfg, "run"); err != nil {
+		t.Fatal(err)
+	}
+	if len(posted) != 0 {
+		t.Fatalf("the baseline run posted %v", posted)
+	}
+	f.version = "2.1.100"
+	out, err := f.run(t, cfg, "run")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(posted) != 2 {
+		t.Fatalf("notifications = %+v, want a start notice and a summary", posted)
+	}
+	start, summary := posted[0], posted[1]
+	if start.title != "forgectl: restarting a session" || !strings.Contains(start.body, restartSID) || !strings.Contains(start.body, restartPane) {
+		t.Errorf("start notice = %+v, want it to name the session and pane", start)
+	}
+	if !strings.Contains(summary.body, "1 session(s): 1 resumed") {
+		t.Errorf("summary = %+v", summary)
+	}
+	if !strings.Contains(out, "summary    1 session(s): 1 resumed") {
+		t.Errorf("watcher log has no summary line:\n%s", out)
+	}
+}
+
+func TestNotifyRestartStartIgnoresOtherStates(t *testing.T) {
+	called := 0
+	prev := hookNotify
+	hookNotify = func(context.Context, module.Deps, string, string) error { called++; return nil }
+	t.Cleanup(func() { hookNotify = prev })
+	for _, st := range []resume.RestartState{resume.StateWaiting, resume.StateResumed, resume.StateSkipped, resume.StateFailed, resume.StateLeft, resume.StatePaneGone, resume.StateNote} {
+		var wg sync.WaitGroup
+		notifyRestartStart(context.Background(), module.Deps{}, resume.RestartEvent{State: st}, &wg)
+		wg.Wait()
+	}
+	if called != 0 {
+		t.Fatalf("posted %d start notices for states other than restarting", called)
 	}
 }

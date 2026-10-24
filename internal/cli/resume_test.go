@@ -465,7 +465,7 @@ func TestRunResume_AmbiguousDryRunPrintsCandidatesNotPicker(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true, theme.Theme{})
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: false, dryRun: true}, theme.Theme{})
 
 	if *calls != 0 {
 		t.Errorf("the picker was reached %d time(s) under --dry-run", *calls)
@@ -483,7 +483,7 @@ func TestRunResume_AmbiguousWithoutTTYPrintsCandidates(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, false, theme.Theme{})
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: false, dryRun: false}, theme.Theme{})
 
 	if *calls != 0 {
 		t.Errorf("the picker was reached %d time(s) with no terminal to draw on", *calls)
@@ -506,7 +506,7 @@ func TestRunResume_AmbiguousSanitizesCandidates(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, _ := newTestCmd()
-	if err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true, theme.Theme{}); err == nil {
+	if err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: false, dryRun: true}, theme.Theme{}); err == nil {
 		t.Fatal("an ambiguous filter returned nil")
 	}
 	// Both assertions are load-bearing. assertInert on an empty string passes
@@ -534,7 +534,7 @@ func TestRunResume_AmbiguousOnTTYStillPicks(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, false, theme.Theme{})
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: false, dryRun: false}, theme.Theme{})
 
 	if *calls != 1 {
 		t.Fatalf("the picker ran %d time(s), want exactly 1 — an interactive ambiguous resume still prompts", *calls)
@@ -560,7 +560,7 @@ func TestRunResume_ForkDryRunAmbiguousSkipsPicker(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, nil, "cc", 0, true, true, theme.Theme{})
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: true, dryRun: true}, theme.Theme{})
 
 	if *calls != 0 {
 		t.Errorf("--fork --dry-run reached the picker %d time(s)", *calls)
@@ -582,7 +582,7 @@ func TestRunResume_SingleMatchDryRunUnchanged(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, errOut := newTestCmd()
-	if err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true, theme.Theme{}); err != nil {
+	if err := runResume(cmd, config.Config{}, nil, "cc", 0, resumeFlags{fork: false, dryRun: true}, theme.Theme{}); err != nil {
 		t.Fatalf("single-match --dry-run returned %v, want nil", err)
 	}
 	if *calls != 0 {

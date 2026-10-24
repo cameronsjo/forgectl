@@ -3,11 +3,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"syscall"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
 )
 
@@ -43,6 +45,11 @@ func TestResumeHooksSIGTERMLeavesUnrecorded(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { restartOverride = prev })
+	// hookNotify is a no-op off macOS, so count its calls here: on macOS each
+	// one is an osascript run, which the assertion below would catch.
+	prevNotify, notices := hookNotify, 0
+	hookNotify = func(context.Context, module.Deps, string, string) error { notices++; return nil }
+	t.Cleanup(func() { hookNotify = prevNotify })
 
 	out, err := f.run(t, cfg, "run")
 	if !errors.Is(err, resume.ErrHooksInterrupted) || ExitCode(err) != 1 {
@@ -53,6 +60,9 @@ func TestResumeHooksSIGTERMLeavesUnrecorded(t *testing.T) {
 	}
 	if len(f.commandCalls()) != 0 {
 		t.Fatal("the command hook ran after the SIGTERM")
+	}
+	if notices != 0 {
+		t.Fatalf("%d notice(s) posted after the SIGTERM", notices)
 	}
 	st, _, lerr := resume.FileHookStore{Dir: f.state}.Load("claude")
 	if lerr != nil || st.Version != "2.1.99" {

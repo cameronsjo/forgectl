@@ -25,6 +25,8 @@ func TestParseRemoteURL(t *testing.T) {
 		{"garbage", "not-a-url", "", "", ""},
 		{"git:// scheme with creds — colon only before @, must not panic", "git://user:pass@github.com/owner/repo", "", "", ""},
 		{"host only, no owner/name", "ssh://git@git.sjo.lol:222/", "git.sjo.lol", "", ""},
+		{"https .git then trailing slash", "https://github.com/acme/widget.git/", "github.com", "acme", "widget"},
+		{"ssh .git then trailing slash", "ssh://git@git.sjo.lol:222/cameron/homeclaw.git/", "git.sjo.lol", "cameron", "homeclaw"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

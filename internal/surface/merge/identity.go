@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // IdentityQuery reads a repository's canonical nameWithOwner and numeric
@@ -48,7 +49,11 @@ type graphQLError struct {
 func firstError(errs []graphQLError) string {
 	msg := errs[0].Message
 	if len(msg) > maxErrorText {
-		msg = msg[:maxErrorText]
+		cut := maxErrorText
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
+		}
+		msg = msg[:cut]
 	}
 	return fmt.Sprintf("GitHub returned %d error(s), the first %q", len(errs), msg)
 }

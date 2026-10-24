@@ -32,6 +32,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
+	"github.com/cameronsjo/forgectl/internal/workstate"
 )
 
 // deskRun runs `desk ARGS` against a fresh command tree and returns stdout,
@@ -365,6 +366,14 @@ func TestDeskStatus(t *testing.T) {
 	if len(snap.Pending) != 1 || snap.Pending[0].SHA256 != sha || len(snap.Done) != 1 || snap.Done[0].ExitCode == nil || *snap.Done[0].ExitCode != 3 {
 		t.Errorf("status --json = %+v", snap)
 	}
+	// A done item that exited 3 did not meet its goal: it is blocked on the
+	// operator, not resolved.
+	if len(snap.Pending) == 1 && snap.Pending[0].Work != (workstate.Work{Status: workstate.Blocked, On: workstate.Operator, Reason: "approve or skip"}) {
+		t.Errorf("waiting item work = %+v", snap.Pending[0].Work)
+	}
+	if len(snap.Done) == 1 && snap.Done[0].Work != (workstate.Work{Status: workstate.Blocked, On: workstate.Operator, Reason: "failed: exit 3"}) {
+		t.Errorf("done item work = %+v", snap.Done[0].Work)
+	}
 
 	out, _, err = deskRun(t, deskDeps(), "status", waiting)
 	wantExit(t, err, 0)
@@ -495,8 +504,7 @@ func TestDeskWatch_ClosedPipeExits141(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	cmd := osexec.CommandContext(ctx, os.Args[0], "-test.run=^TestDeskCLIHelperProcess$") //nolint:gosec // G204: the test binary itself
-	cmd.Env = append(os.Environ(), deskWatchHelperEnv+"="+string(args))
+	cmd := reExecTest(ctx, "TestDeskCLIHelperProcess", deskWatchHelperEnv+"="+string(args))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

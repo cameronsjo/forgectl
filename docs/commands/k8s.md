@@ -19,7 +19,8 @@ it does not invoke a shell, choose a pod, define a deployment manifest, or add
 an `inspect` abstraction. forgectl consumes only `--log-level` and `--color`
 before the first `--`. A separator lets kubectl receive a same-named flag.
 
-Recognized top-level JSON `level` or `severity` strings use the
+Recognized top-level JSON `level` or `severity` strings (exactly those
+lower-case keys; `Level` is not recognized) use the
 trace/debug/info/warn/error/fatal ordering. A floor suppresses only recognized
 JSON below it: startup banners, malformed JSON, and unknown severity shapes
 still print. Output is transformed line-by-line with a fixed memory bound;

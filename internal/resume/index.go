@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/claudeproject"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -321,9 +322,9 @@ func Matches(s Session, filter string) bool {
 // scanHistory folds history.jsonl into one record per session id, keeping the
 // newest prompt and timestamp for each.
 //
-// It decodes as a JSON *stream* rather than scanning lines: a history entry
-// embeds pasted content verbatim, so single lines run to megabytes and a
-// bufio.Scanner would need an arbitrary buffer ceiling to match.
+// It reads line by line, skipping a corrupt record, and keeps lines up to
+// historyLineMax whole: a history entry embeds pasted content verbatim, so
+// single lines run to megabytes and each is a session.
 func scanHistory(path string) (map[string]*Session, error) {
 	f, err := os.Open(path) // #nosec G304 -- a fixed name under the caller's own ~/.claude
 	if err != nil {
@@ -342,7 +343,10 @@ func scanHistory(path string) (map[string]*Session, error) {
 	// the whole read — and since history.jsonl is append-only, what that
 	// silently discards is everything AFTER the bad line: the newest
 	// sessions, which are exactly the ones the picker exists to show.
-	forEachLine(f, func(line []byte) bool {
+	// Unlike a transcript, the fields we want are ON the long lines (a
+	// pasted prompt is the record), so the cap is a sanity bound, not the
+	// transcript's 64 KiB skip.
+	forEachLineUpTo(f, historyLineMax, func(line []byte) bool {
 		var rec historyRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return false
@@ -401,7 +405,10 @@ func firstLine(s string) string {
 	if r := []rune(s); len(r) > promptWidth {
 		return strings.TrimSpace(string(r[:promptWidth])) + "…"
 	}
-	return s
+	// A copy, not a substring: s can be the first line of a pasted prompt
+	// megabytes long, and a substring would keep all of it alive for as long
+	// as the session row lives.
+	return strings.Clone(s)
 }
 
 // enrich fills in what only the transcript and the per-repo lane file know:
@@ -433,11 +440,20 @@ type transcriptRecord struct {
 	AITitle   string `json:"aiTitle"`
 }
 
-// transcriptBufSize is the read buffer for a transcript line. Transcript lines
-// embed whole message bodies and pasted blocks, so some run far past this; a
-// longer line is skipped (see forEachLine) rather than buffered, since neither
-// field we want lives on one.
+// transcriptBufSize is the read buffer for a transcript line (and the piece
+// size forEachLineUpTo reads history in). Transcript lines embed whole message
+// bodies and pasted blocks, so some run far past this; a longer transcript
+// line is skipped (see forEachLine) rather than buffered, since neither field
+// we want lives on one.
 const transcriptBufSize = 64 << 10 // 64 KiB
+
+// historyLineMax bounds one history.jsonl line. A history record carries its
+// pasted prompt inline, so lines run to megabytes and each one is a session we
+// must not drop. The bound caps how much of one line is buffered: a longer
+// line is still read through (drained) but never held, so a corrupt file
+// cannot grow the buffer without limit. Decoding a line just under the bound
+// briefly needs a few times its size.
+const historyLineMax = 32 << 20 // 32 MiB
 
 // forEachLine calls fn for every line in r that fits the read buffer, skipping
 // any longer one and continuing.
@@ -466,6 +482,33 @@ func forEachLine(r io.Reader, fn func(line []byte) (stop bool)) {
 		if len(line) > 0 && fn(line) {
 			return
 		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// forEachLineUpTo is forEachLine for lines longer than the read buffer: it
+// joins a line's pieces and calls fn when the whole line, its '\n' included,
+// is at most limit bytes, skipping (and draining) any longer one. The slice fn
+// gets is reused for the next line, so fn must copy anything it keeps.
+func forEachLineUpTo(r io.Reader, limit int, fn func(line []byte) (stop bool)) {
+	br := bufio.NewReaderSize(r, transcriptBufSize)
+	var long []byte
+	skipping := false
+	for {
+		piece, err := br.ReadSlice('\n')
+		if !skipping {
+			long = append(long, piece...)
+			skipping = len(long) > limit
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue // the line goes on
+		}
+		if !skipping && len(long) > 0 && fn(long) {
+			return
+		}
+		long, skipping = long[:0], false
 		if err != nil {
 			return
 		}
@@ -532,7 +575,7 @@ func transcriptPath(p Paths, id, cwd string, idx *projectIndex) string {
 	}
 	name := id + ".jsonl"
 	if cwd != "" {
-		guess := filepath.Join(p.projectsDir(), ProjectSlug(cwd), name)
+		guess := filepath.Join(p.projectsDir(), claudeproject.Slug(cwd), name)
 		if _, err := os.Stat(guess); err == nil {
 			return guess
 		}
@@ -548,19 +591,6 @@ func transcriptPath(p Paths, id, cwd string, idx *projectIndex) string {
 		}
 	}
 	return ""
-}
-
-// ProjectSlug reproduces Claude Code's project-directory encoding: every byte
-// outside [A-Za-z0-9] becomes '-', so /Users/x/.dotfiles is -Users-x--dotfiles.
-func ProjectSlug(cwd string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		default:
-			return '-'
-		}
-	}, cwd)
 }
 
 // laneFile is the per-repo session lane record some tooling writes into

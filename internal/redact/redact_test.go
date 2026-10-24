@@ -410,6 +410,8 @@ func TestUserArgs_TokenShapedFlagName(t *testing.T) {
 	for _, in := range []string{
 		"--ghp_abc123", "--github_pat_X", "--xoxb-1", "--sk-live=X", "--GLPAT-x",
 		"--AIzaSyA1b2", "--npm_abc123", "--pypi-AgEIcHlwaS5vcmc", "--hf_abc123", "--glptt-abc123", "--shpat_abc123=X",
+		"--rk_live_51Habc", "--RK_TEST_51Habc=X", "--eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
+		"---rk_live_51Habc", "--_ghp_abc123", "--.ghp_abc123=X",
 	} {
 		if got := UserArgs([]string{in})[0]; got != UserArgMarker {
 			t.Errorf("UserArgs(%q) = %q, want %q", in, got, UserArgMarker)

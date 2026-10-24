@@ -263,9 +263,9 @@ func (c *Concordance) SearchRunbooks(ctx context.Context, query, project string,
 		       0::float4 AS rank,
 		       left(full_text, 160) AS snippet
 		FROM runbooks
-		WHERE full_text ILIKE '%' || $1 || '%' AND ($2 = '' OR project = $2)
+		WHERE full_text ILIKE '%' || $1 || '%' ESCAPE '\' AND ($2 = '' OR project = $2)
 		ORDER BY updated_at DESC
-		LIMIT $3`, query, project, limit)
+		LIMIT $3`, likeEscape(query), project, limit)
 }
 
 func (c *Concordance) scanHits(ctx context.Context, sql string, args ...any) ([]SearchHit, error) {
@@ -366,7 +366,7 @@ func (c *Concordance) WhySessions(ctx context.Context, query, project string, li
 // escape char itself) so a caller-supplied string matches as a literal
 // substring under an `ESCAPE '\'` clause — otherwise a bare `%` dumps the whole
 // corpus and `foo_bar` matches `fooXbar`, contradicting the documented
-// literal-substring behavior of the `why` fallback.
+// literal-substring behavior of the `search` and `why` fallbacks.
 func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

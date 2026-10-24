@@ -313,7 +313,7 @@ func MissingResumeExport(plan Plan, resumeFrom int, registry StepRegistry) (name
 
 	available := make(map[string]bool)
 	for i := resumeFrom; i < len(plan.Steps); i++ {
-		for _, ref := range stepVarRefs(plan.Steps[i]) {
+		for _, ref := range stepVarRefs(plan.stepTemplate(i)) {
 			if isExport[ref] && !available[ref] {
 				return ref, i, true
 			}

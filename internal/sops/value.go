@@ -46,15 +46,30 @@ func NormalizeValue(raw string) (string, error) {
 	}
 
 	for _, r := range value {
-		// Tab is the one C0 byte YAML permits in a scalar, and a real
-		// credential never carries it; DEL is not C0 but is equally
-		// unrenderable, so it refuses alongside them.
-		if (r < 0x20 && r != '\t') || r == 0x7F {
+		if isControl(r) {
 			return "", errors.New("value contains a control character")
 		}
 	}
 
 	return value, nil
+}
+
+// isControl reports whether r is a character a YAML scalar cannot carry
+// unchanged. Tab is the one C0 byte YAML permits in a scalar, and a real
+// credential never carries it; DEL is not C0 but is equally unrenderable.
+// The C1 block (U+0080 to U+009F) and the noncharacters U+FFFE and U+FFFF
+// fall outside YAML's printable set, so yaml.v3 refuses the document, which
+// is the same editor-loop trigger as a C0 byte. NEL (U+0085) is the one C1
+// character YAML accepts, but it reads it as a line break and the value
+// comes back changed, so it refuses with the rest of the block.
+func isControl(r rune) bool {
+	switch {
+	case r < 0x20:
+		return r != '\t'
+	case r >= 0x7F && r <= 0x9F:
+		return true
+	}
+	return r == 0xFFFE || r == 0xFFFF
 }
 
 // stripOneTrailingNewline removes exactly one trailing "\n" or "\r\n" — what a

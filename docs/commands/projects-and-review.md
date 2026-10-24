@@ -36,6 +36,8 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
+A `projects list --json` row that has `sshUrl` or `localPath` also carries `ssh_url` or `local_path` with the same value, in snake_case, the spelling most forgectl JSON uses; a row without the camelCase key has neither spelling. The camelCase keys stay, because ADR-0008 allows only additive changes, so a reader can use either (forgectl#1095). `--fields` accepts both spellings.
+
 `projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. When no source can be read at all (the projects root is missing, GitHub fails, and Gitea is absent or fails), `list`, `pick`, `clone` and `worktree` exit 1 with `no project source could be read`, after printing the notes that say why; an empty list is never reported as an account with no projects. Each GitHub note names its cause and fix where gh's exit status or output shows one, for example `github(acme): query failed (gh is not signed in to github.com; run gh auth login)`; anything unrecognized says `run forgectl doctor for the cause`. gh's own text is never printed. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
 
 On a terminal, `pick`, `clone`, and `worktree` show `Querying local, GitHub, and Gitea…` while they ask. After 3 seconds it becomes `Still querying… (Ctrl+C cancels)`, and the line is erased before the picker draws or when you cancel. The picker carries any degradation notes in its description instead of printing them around it. With stderr redirected there is no status line, and the notes go to the redirect at once.
@@ -220,6 +222,7 @@ forgectl review releases --json --fail-on-stall  # exit 1 on any stalled or unkn
 | human gates | count, and for `manual-cut` how long a cut has been due: the oldest uncut commit or upstream commit, never earlier than the last cut. App Store release has no age visible from GitHub |
 | endpoints | the `version` in each tap formula or cask, or Scoop manifest, against the last release |
 | gate copy | sha256 of `.github/scripts/ship-gate.sh` on the branch against the canonical copy |
+| lint copy | sha256 of `.github/scripts/lint-release-env.sh` on the branch against the canonical copy |
 
 A repo is **stalled** when:
 
@@ -229,7 +232,8 @@ A repo is **stalled** when:
   than `go`, `no-pr`, or `paused` (`uploaded` and `no-change` for testflight);
 - its last run reports `half-shipped`;
 - an endpoint still trails a release more than 24h old;
-- its gate copy is missing or its hash differs from the canonical one;
+- its gate copy or lint copy is missing or its hash differs from the
+  canonical one;
 - `no-release-pr` (`release-pr` repos, toggle on or off): the unreleased commits
   include a releasable one, no release PR is open, and the oldest releasable
   commit is more than 24h old; or
@@ -263,7 +267,12 @@ Inputs:
   than 64 keys is refused.
 - Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
   sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
-  those, every `release-pr` row reads `unknown`.
+  those, every `release-pr` row that has a gate copy reads `unknown`. A missing
+  gate copy still stalls its row as `missing`.
+- Canonical lint hash: `--lint-sha256`, else `$FORGECTL_LINT_SHA256`, else the
+  sha256 of `../scripts/release/lint-release-env.sh` beside the registry. With
+  none of those, every `release-pr` row that has a lint copy reads `unknown`. A
+  missing lint copy still stalls its row as `missing`.
 - Auth: gh's own (`GH_TOKEN`, `GITHUB_TOKEN`, or its stored login), pinned to
   `[github] host`. The token needs read access to contents, pull requests,
   actions, and checks (the gate's annotations) on every tracked repo, and to

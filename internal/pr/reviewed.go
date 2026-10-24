@@ -86,16 +86,23 @@ func (s *ReviewedStore) keys(ref Ref) (qualified, legacy string) {
 	if !ok {
 		return "", ""
 	}
-	qualified = host + "/" + ref.String()
+	qualified = foldKey(host + "/" + ref.String())
 	def := s.defaultHost
 	if def == "" {
 		def = defaultGitHubHost
 	}
 	if host == strings.ToLower(def) {
-		legacy = ref.String()
+		legacy = foldKey(ref.String())
 	}
 	return qualified, legacy
 }
+
+// foldKey is the store's spelling of a key. GitHub and Gitea owner and repo
+// names are case-insensitive, and a typed ref keeps the case it was typed in
+// while a listing returns the forge's, so every key is ASCII-lowercased (as
+// sessionkey already does). A local ref's key is "local/<oid>#N" with a
+// lowercase hex oid, so folding leaves it as it was.
+func foldKey(key string) string { return asciiLower(key) }
 
 // lookup returns the newest mark among a ref's qualified and legacy keys.
 func (s *ReviewedStore) lookup(ref Ref) (time.Time, bool) {
@@ -144,8 +151,13 @@ func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
 		slog.Warn("Ignoring unreadable pr-reviewed store; starting empty.", "path", path, "error", err)
 		return s // malformed → empty
 	}
-	if at != nil {
-		s.at = at
+	// Keys written before case folding may differ only in owner/repo case;
+	// fold them and keep the newest mark of each.
+	for k, t := range at {
+		k = foldKey(k)
+		if prev, ok := s.at[k]; !ok || t.After(prev) {
+			s.at[k] = t
+		}
 	}
 	slog.Debug("Successfully loaded reviewed store.", "path", path, "count", len(s.at))
 	return s
@@ -196,6 +208,7 @@ func (s *ReviewedStore) Mark(ref Ref) error {
 // string (internal/review's host-qualified "host/owner/repo#N" keys) rather
 // than a Ref. The Ref methods delegate here — one write path, two key shapes.
 func (s *ReviewedStore) MarkKey(key string) error {
+	key = foldKey(key)
 	slog.Debug("Preparing to mark reviewed.", "key", key)
 	s.at[key] = s.now()
 	if err := s.persist(); err != nil {
@@ -234,6 +247,7 @@ func (s *ReviewedStore) Unmark(ref Ref) error {
 
 // UnmarkKey is Unmark for string-keyed callers (see MarkKey).
 func (s *ReviewedStore) UnmarkKey(key string) error {
+	key = foldKey(key)
 	slog.Debug("Preparing to unmark reviewed.", "key", key)
 	if _, ok := s.at[key]; !ok {
 		slog.Debug("Skipping unmark: entry was not marked reviewed.", "key", key)
@@ -261,7 +275,7 @@ func (s *ReviewedStore) IsReviewed(ref Ref, latestActivity time.Time) bool {
 // identical timestamp comparison, so issues and PRs share the auto-un-dim
 // semantics exactly.
 func (s *ReviewedStore) IsReviewedKey(key string, latestActivity time.Time) bool {
-	at, ok := s.at[key]
+	at, ok := s.at[foldKey(key)]
 	if !ok {
 		return false
 	}
@@ -328,7 +342,7 @@ func (s *ReviewedStore) SyncKeys(openKeys []string) error {
 	slog.Debug("Preparing to sync reviewed store.", "storeSize", len(s.at), "openCount", len(openKeys))
 	open := make(map[string]bool, len(openKeys))
 	for _, k := range openKeys {
-		open[k] = true
+		open[foldKey(k)] = true
 	}
 	changed := false
 	pruned := 0
@@ -366,11 +380,11 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 	slog.Debug("Preparing to sync reviewed store (host-scoped).", "storeSize", len(s.at), "openCount", len(openKeys), "activeHosts", activeHosts)
 	active := make(map[string]bool, len(activeHosts))
 	for _, h := range activeHosts {
-		active[h] = true
+		active[foldKey(h)] = true // a configured host may carry capitals; stored keys are folded
 	}
 	open := make(map[string]bool, len(openKeys))
 	for _, k := range openKeys {
-		open[k] = true
+		open[foldKey(k)] = true
 	}
 	changed := false
 	pruned := 0

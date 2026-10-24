@@ -404,6 +404,26 @@ func TestSafeWriter_CRLFSplitAcrossWrites(t *testing.T) {
 	}
 }
 
+// A blank line survives CRLF output the way it survives LF output, while a
+// bare \r on an empty line (a progress bar redrawing) still prints nothing.
+func TestSafeWriter_CRLFBlankLineKept(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"a\r\n\r\nb\r\n", "a\n\nb\n"},
+		{"a\n\nb\n", "a\n\nb\n"},
+		{"a\r\rb\n", "a\nb\n"},
+		{"a\r\r\r\nb\n", "a\n\nb\n"},
+	} {
+		var out bytes.Buffer
+		w := newSafeWriter(&out)
+		for i := range len(tc.in) {
+			_, _ = w.Write([]byte{tc.in[i]})
+		}
+		if got := out.String(); got != tc.want {
+			t.Errorf("%q: out = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // A line past the cap is withheld whole, so a credential-shaped word cannot be
 // split across two separately redacted chunks.
 func TestSafeWriter_OverlongLineWithheld(t *testing.T) {

@@ -72,7 +72,7 @@ A `--json` verb that reports a problem as its result SHALL write the full JSON v
 - **THEN** the full report is on stdout, nothing error-shaped is on stderr, and the exit status is 1
 
 ### Requirement: JSON failure object on stderr
-When a `--json` verb fails before emitting its verdict, stdout MUST stay empty and stderr MUST carry exactly one JSON object on one line, `{"error","code","path"}`, with all three keys present. `code` SHALL be `usage_error` when nothing was attempted and `failed` otherwise; `path` is `""` unless one resolved file is to blame.
+When a `--json` verb fails before emitting its verdict, stdout MUST stay empty and stderr MUST carry exactly one JSON object on one line, `{"error","code","path"}`, with all three keys present. `code` SHALL be `usage_error` when nothing was attempted (`unknown_command` when the verb named does not exist) and `failed` otherwise; `path` is `""` unless one resolved file is to blame.
 
 #### Scenario: Bad flag with --json
 - **WHEN** `forgectl status --json --bogus` is run
@@ -110,3 +110,43 @@ Payload SHALL go to stdout and diagnostics to stderr. Styled output MUST carry n
 #### Scenario: Help into a pipe under NO_COLOR
 - **WHEN** `NO_COLOR=yes CLICOLOR_FORCE=1 forgectl --help | cat` is run
 - **THEN** the output contains no escape sequences
+
+### Requirement: The binary prints its own agent skill
+`forgectl --skill` SHALL print the embedded SKILL.md to stdout and exit 0, so an agent's instructions match the binary it runs.
+
+#### Scenario: Print the skill
+- **WHEN** `forgectl --skill` is run
+- **THEN** stdout is the embedded SKILL.md and the exit status is 0
+
+### Requirement: The binary prints one skill reference by name
+`forgectl --skill <reference>` SHALL print one file from the skill's `references/`, named by its file name or by `references/<name>`, and exit 0. An unknown name, a second name, or a name with `--install` MUST exit 2 with nothing on stdout. The unknown-name error MUST list every valid name.
+
+#### Scenario: Print one reference
+- **WHEN** `forgectl --skill desk.md` is run
+- **THEN** stdout is the embedded `references/desk.md` and the exit status is 0
+
+#### Scenario: Unknown reference
+- **WHEN** `forgectl --skill nope.md` is run
+- **THEN** the exit status is 2, stdout is empty, and the error names `board-tasks.md` and `desk.md`
+
+### Requirement: The binary installs its own agent skill
+`forgectl --skill --install <dir>` SHALL write SKILL.md and `references/` into an existing absolute directory. It MUST exit 2 for a relative, missing or empty directory, and for `--install` without `--skill`.
+
+#### Scenario: Install the whole skill
+- **WHEN** `forgectl --skill --install /abs/dir` is run and `/abs/dir` exists
+- **THEN** `/abs/dir/SKILL.md` and `/abs/dir/references/desk.md` are written and the exit status is 0
+
+#### Scenario: Relative install directory
+- **WHEN** `forgectl --skill --install rel/dir` is run
+- **THEN** the exit status is 2 and nothing is written
+
+### Requirement: Unknown command under --json
+When `--json` is passed and the verb or subverb named does not exist, stderr MUST carry exactly one `{"error","code","path"}` object with `code` `unknown_command` and `path` `""`, and no styled error frame. The exit status MUST equal the one the same call gets without `--json`.
+
+#### Scenario: Unknown top-level verb
+- **WHEN** `forgectl zzbogus --json` is run
+- **THEN** stderr is one object with `code` `unknown_command` naming `zzbogus`, and the exit status is 2
+
+#### Scenario: Unknown subverb under tasks
+- **WHEN** `forgectl tasks zzbogus --json` is run
+- **THEN** stderr is one object with `code` `unknown_command`, and the exit status is 1, as without `--json`

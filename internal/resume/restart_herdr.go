@@ -22,7 +22,8 @@ var processIdentity = readProcessIdentity
 // signal.
 //
 // It drives herdr directly rather than through internal/surface's herdr
-// adapter, and it types `forgectl resume <id>`, not a harness command line.
+// adapter, and it types `forgectl resume --keep-permission-mode <id>`, not a
+// harness command line.
 // The surface barrier exists so an adapter never sees the harness invocation;
 // here herdr sees only forgectl's own resume verb, which resolves the launch
 // profile and argv itself, in the pane.
@@ -114,7 +115,11 @@ func (e SystemRestartEnv) relaunchLine(sessionID string) (string, error) {
 	if e.forgectl == "" || !filepath.IsAbs(e.forgectl) {
 		return "", errors.New("no absolute forgectl path to relaunch with")
 	}
-	line, err := surface.QuoteCommand([]string{e.forgectl, "resume", sessionID})
+	// KeepPermissionModeFlag: the resumed session comes back in the mode its
+	// transcript last recorded, not the launch posture's (forgectl#1332). The
+	// flag is a constant, so no transcript text reaches this line; the resume
+	// reads and validates the mode itself.
+	line, err := surface.QuoteCommand([]string{e.forgectl, "resume", KeepPermissionModeFlag, sessionID})
 	if err != nil {
 		return "", fmt.Errorf("render the relaunch line: %w", err)
 	}

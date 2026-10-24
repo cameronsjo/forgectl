@@ -66,7 +66,14 @@ func TestResumeCommand_RefusedCapturedFIFOIsPrompt(t *testing.T) {
 		if !strings.Contains(out.String(), "--model opus") {
 			t.Errorf("resume output = %q, want built-in model after FIFO refusal", out.String())
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(10 * time.Second):
+		// The timer is a hang detector, not a speed bar: a correct run returns
+		// in milliseconds, but one that blocks in open(2) never returns at all.
+		// It was 500 ms, which a slow but correct run on a loaded host could
+		// outlast (forgectl#1120). It cannot be an event instead: the correct
+		// code opens the FIFO too, nonblocking, to refuse it, so "a reader has
+		// the FIFO open" does not tell a blocked open from a brief safe one.
+		//
 		// Release an unsafe implementation without risking a second blocking
 		// open: O_NONBLOCK reports ENXIO if no reader is actually waiting.
 		fd, releaseErr := unix.Open(legacyPath, unix.O_WRONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)

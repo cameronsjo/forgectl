@@ -129,6 +129,18 @@ A `.manifest` item SHALL hold one step per line as `<step> [after=a,b] [timeout=
 - **THEN** `stage` is skipped
 - **AND** the batch ends with rc 1
 
+### Requirement: Repeated manifest options
+Repeated `after=` options on one manifest step SHALL add up, and `timeout=` MUST appear at most once per step.
+
+#### Scenario: Repeated after= options
+- **WHEN** a manifest step reads `c after=a after=b -- <command>`
+- **THEN** `c` waits on both `a` and `b`
+- **AND** a failure of either one skips `c`
+
+#### Scenario: Repeated timeout
+- **WHEN** a manifest step gives `timeout=` twice
+- **THEN** the manifest is refused with an error naming the line and the step
+
 ### Requirement: Operator signal on add
 When an item is queued, `add` SHALL notify the operator inside a herdr pane (a notification plus the pane's blocked state) and on macOS (a desktop notification), each switchable off under `[desk]` `notify_herdr` and `notify_macos`. A signal that fails MUST be reported as a `warning: operator signal failed:` line and MUST NOT fail the add.
 
@@ -136,3 +148,10 @@ When an item is queued, `add` SHALL notify the operator inside a herdr pane (a n
 - **WHEN** `desk add` queues an item and the herdr notification call fails
 - **THEN** the item is still queued and the exit code is 0
 - **AND** stderr carries a `warning: operator signal failed:` line naming the setting that turns it off
+
+### Requirement: Manifest timeout bound
+A manifest step's `timeout=` MUST be at most 9223372036 seconds, the largest whose deadline fits a duration. A larger value SHALL be refused as a manifest error, never run with a deadline that has already passed.
+
+#### Scenario: Timeout too large
+- **WHEN** a manifest step reads `a timeout=9223372037 -- sleep 1`
+- **THEN** the manifest is refused with a bad timeout error naming the line and the step

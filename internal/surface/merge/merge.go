@@ -771,7 +771,11 @@ func whyNotPassing(p markerPost, head string) string {
 	case !ok:
 		line, _, _ := strings.Cut(p.body, "\n")
 		if len(line) > maxQuotedLine {
-			line = line[:maxQuotedLine] + "..."
+			cut := maxQuotedLine
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = line[:cut] + "..."
 		}
 		why = append(why, fmt.Sprintf("its first line %s is not an exact marker", strconv.Quote(line)))
 	case m.Crit > 0 || m.Imp > 0:

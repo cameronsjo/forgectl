@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/claudeproject"
 )
 
 // The fixture $HOME is built programmatically rather than checked in as
@@ -89,7 +92,7 @@ func (f *fixture) transcript(id, cwd, branch, title string) {
 		`{"type":"user","gitBranch":"` + branch + `","cwd":"` + cwd + `"}`,
 		`{"type":"ai-title","aiTitle":"` + title + `","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), claudeproject.Slug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 }
 
@@ -685,7 +688,7 @@ func TestReadTranscript_SurvivesAnOverlongLine(t *testing.T) {
 		`{"type":"user","gitBranch":"feat/after-the-blob"}`,
 		`{"type":"ai-title","aiTitle":"found-after-the-blob","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), claudeproject.Slug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 
 	branch, title := readTranscript(f.Paths, id, cwd, nil)
@@ -853,6 +856,103 @@ func TestScanHistory_SurvivesACorruptMiddleLine(t *testing.T) {
 	}
 }
 
+// TestScanHistory_KeepsALongPastedPrompt: a history record carries its pasted
+// prompt inline, so a session's only record can be far longer than the
+// transcript read buffer. Skipping it, as a transcript line is skipped, dropped
+// the session and left an older prompt as another session's latest.
+func TestScanHistory_KeepsALongPastedPrompt(t *testing.T) {
+	const a = "beef0001-0000-0000-0000-000000000001"
+	const b = "beef0002-0000-0000-0000-000000000002"
+	f := newFixture(t)
+	now := time.Now()
+	paste := strings.Repeat("x", transcriptBufSize+6<<10)
+	f.history(a, "/repo/a", "short prompt", now.Add(-2*time.Hour))
+	f.history(b, "/repo/b", "b "+paste, now.Add(-time.Hour))
+	f.history(a, "/repo/a", "a again "+paste, now)
+
+	got, err := scanHistory(f.Paths.historyPath())
+	if err != nil {
+		t.Fatalf("scanHistory: %v", err)
+	}
+	if _, ok := got[b]; !ok {
+		t.Errorf("session %s with a long pasted prompt is missing", b)
+	}
+	if s := got[a]; s == nil || !strings.HasPrefix(s.LastPrompt, "a again ") {
+		t.Errorf("session %s = %+v, want its latest prompt from the long line", a, s)
+	}
+}
+
+// TestForEachLineUpTo_SkipsOnlyLinesOverTheLimit pins the line splitting: a
+// line longer than the read buffer arrives whole, a line over the limit is
+// skipped without swallowing the next one, and a last line with no newline
+// still arrives.
+func TestForEachLineUpTo_SkipsOnlyLinesOverTheLimit(t *testing.T) {
+	long := strings.Repeat("L", transcriptBufSize*2)
+	over := strings.Repeat("O", transcriptBufSize*4)
+	in := "one\n" + long + "\n" + over + "\nafter\nlast"
+	var got []string
+	forEachLineUpTo(strings.NewReader(in), transcriptBufSize*3, func(line []byte) bool {
+		got = append(got, strings.TrimSuffix(string(line), "\n"))
+		return false
+	})
+	want := []string{"one", long, "after", "last"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %.20q (len %d), want %.20q (len %d)", i, got[i], len(got[i]), want[i], len(want[i]))
+		}
+	}
+}
+
+// TestForEachLineUpTo_LimitCountsTheNewline pins the boundary: a line of
+// exactly limit bytes, its newline included, is kept and one byte more is
+// skipped.
+func TestForEachLineUpTo_LimitCountsTheNewline(t *testing.T) {
+	const limit = transcriptBufSize + 100
+	at := strings.Repeat("a", limit-1)
+	over := strings.Repeat("b", limit)
+	var got []int
+	forEachLineUpTo(strings.NewReader(at+"\n"+over+"\nend\n"), limit, func(line []byte) bool {
+		got = append(got, len(line))
+		return false
+	})
+	if len(got) != 2 || got[0] != limit || got[1] != len("end\n") {
+		t.Fatalf("line lengths = %v, want [%d %d]", got, limit, len("end\n"))
+	}
+}
+
+// TestFirstLine_DoesNotPinTheWholePrompt: LastPrompt is a short first line, but
+// as a substring it kept the whole (possibly megabytes-long) display alive for
+// every session row.
+func TestFirstLine_DoesNotPinTheWholePrompt(t *testing.T) {
+	const size = 64 << 20
+	var m runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	before := m.HeapAlloc
+	got := firstLineOfLongPrompt(size)
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	if got != "hi" {
+		t.Fatalf("firstLine = %q, want hi", got)
+	}
+	// A substring would keep the whole 64 MiB prompt reachable through got.
+	if m.HeapAlloc > before+size/2 {
+		t.Errorf("heap grew by %d MiB after the prompt went out of scope; firstLine kept it alive", (m.HeapAlloc-before)>>20)
+	}
+	runtime.KeepAlive(got)
+}
+
+// firstLineOfLongPrompt builds the prompt in its own frame, so nothing but
+// firstLine's result can keep it reachable once it returns.
+//
+//go:noinline
+func firstLineOfLongPrompt(size int) string {
+	return firstLine("hi\n" + strings.Repeat("x", size))
+}
+
 // TestRestore_WillNotFollowADanglingSymlink covers the specific hole in a
 // Stat-then-WriteFile pair: os.Stat on a DANGLING symlink errors, so the
 // already-present skip is missed and the write follows the link to create its
@@ -886,21 +986,6 @@ func TestScan_TolerantOfMissingHome(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("Scan returned %d sessions from an empty home, want 0", len(got))
-	}
-}
-
-// TestSlugify pins the project-directory encoding against the real names
-// observed on disk.
-func TestSlugify(t *testing.T) {
-	cases := map[string]string{
-		"/Users/cameron/Projects/claude-configurations/forgectl": "-Users-cameron-Projects-claude-configurations-forgectl",
-		"/Users/cameron/.dotfiles":                               "-Users-cameron--dotfiles",
-		"/private/tmp/drill-396-proj":                            "-private-tmp-drill-396-proj",
-	}
-	for cwd, want := range cases {
-		if got := ProjectSlug(cwd); got != want {
-			t.Errorf("ProjectSlug(%q) = %q, want %q", cwd, got, want)
-		}
 	}
 }
 

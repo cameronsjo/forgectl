@@ -81,7 +81,7 @@ func TestPrune_RemoteDelete_VerifyEscapesTheBranchName(t *testing.T) {
 				return "", nil
 			}}
 			item := Classification{
-				Info:  Info{Name: name, RemoteExists: true, MergedOnServer: true},
+				Info:  Info{Name: name, RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
 			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})

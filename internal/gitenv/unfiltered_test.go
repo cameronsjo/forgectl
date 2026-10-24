@@ -545,3 +545,31 @@ func TestRunUnfilteredRunsNoSubmoduleFilterDriver(t *testing.T) {
 		t.Errorf("status = %q, want a clean tree", out)
 	}
 }
+
+// RunUnfilteredPinned reads its repository only through the git dir it is
+// given: with the filter canary's .git moved out of the working tree, the
+// listings find the drivers there and the status runs none of them (#1304).
+// Mutations: point a listing or the call at dir alone (git finds no
+// repository and the call fails).
+func TestRunUnfilteredPinnedReadsOnlyThePinnedGitDir(t *testing.T) {
+	gitenvtest.NewFilterCanary(t).AssertLive(t)
+
+	c := gitenvtest.NewFilterCanary(t)
+	moved := filepath.Join(t.TempDir(), "moved.git")
+	if err := os.Rename(filepath.Join(c.Dir, ".git"), moved); err != nil {
+		t.Fatal(err)
+	}
+	out, err := gitenv.RunUnfilteredPinned(t.Context(), exec.OSRunner{}, gitenv.Bin, c.Dir, moved, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("RunUnfilteredPinned status: %v", err)
+	}
+	if c.Ran(t) {
+		t.Fatal("a filter driver the pinned repository defines ran during an unfiltered status")
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("status = %q, want a clean tree", out)
+	}
+	if _, err := gitenv.RunUnfilteredPinned(t.Context(), exec.OSRunner{}, gitenv.Bin, c.Dir, "moved.git", "status"); err == nil {
+		t.Error("a relative git dir was accepted")
+	}
+}

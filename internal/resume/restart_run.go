@@ -30,7 +30,8 @@ type RestartEnv interface {
 	// operator typed after the stop, or bytes claude left unread in the tty
 	// queue — so they cannot merge into the relaunch line.
 	ClearInput(ctx context.Context, pane string) error
-	// Relaunch types `forgectl resume <id>` into a pane and presses Enter.
+	// Relaunch types `forgectl resume --keep-permission-mode <id>` into a pane
+	// and presses Enter.
 	// An error wrapping ErrHerdrTimeout means the line may or may not have
 	// been delivered; any other error means it was not.
 	Relaunch(ctx context.Context, pane, sessionID string) error

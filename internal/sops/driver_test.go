@@ -464,3 +464,16 @@ func assertNoWorkDirLeft(t *testing.T, dir string) {
 		}
 	}
 }
+
+// An editor error longer than maxEditorErrorBytes is cut without splitting
+// the "é" that straddles the limit.
+func TestReadEditorErrorCutsOnACharacter(t *testing.T) {
+	w := &workDir{dir: t.TempDir()}
+	msg := strings.Repeat("a", maxEditorErrorBytes-1) + "é tail"
+	if err := os.WriteFile(filepath.Join(w.dir, "error"), []byte(msg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := w.readEditorError(), strings.Repeat("a", maxEditorErrorBytes-1); got != want {
+		t.Errorf("readEditorError = %d bytes ending %q, want %d bytes of a", len(got), got[max(0, len(got)-4):], len(want))
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
@@ -175,7 +176,11 @@ func (n gqlPR) facts(viewer string) (PRFacts, bool) {
 		line, _, _ := strings.Cut(rv.Body, "\n")
 		line = strings.TrimSpace(line)
 		if len(line) > maxFirstLine {
-			line = line[:maxFirstLine]
+			cut := maxFirstLine
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = line[:cut]
 		}
 		if line != "" {
 			f.Reviews = append(f.Reviews, line)

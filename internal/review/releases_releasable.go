@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -79,7 +80,13 @@ func NewCommitFact(message string, at time.Time) CommitFact {
 	subject, body, _ := strings.Cut(message, "\n")
 	const maxSubject = 200
 	if len(subject) > maxSubject {
-		subject = subject[:maxSubject]
+		// Cut on a rune boundary: a split character is invalid UTF-8, which
+		// reaches the JSON as U+FFFD.
+		cut := maxSubject
+		for cut > 0 && !utf8.RuneStart(subject[cut]) {
+			cut--
+		}
+		subject = subject[:cut]
 	}
 	return CommitFact{At: at, Subject: strings.TrimSpace(subject), BreakingFooter: reBreakingFooter.MatchString(body)}
 }

@@ -102,7 +102,7 @@ func (c *Client) Teardown(ctx context.Context, path string) error {
 	// non-reentrant: Cleanup takes it ONCE and calls auditedTeardownLocked per
 	// candidate rather than re-entering here.
 	return c.withLifecycleLock(ctx, "teardown", func() error {
-		return c.auditedTeardownLocked(ctx, auditVerbTeardown, path, newTmuxBudget())
+		return c.auditedTeardownLocked(ctx, auditVerbTeardown, path, c.newTmuxBudget())
 	})
 }
 
@@ -193,7 +193,7 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	return c.executeTeardownLocked(ctx, plan, newTmuxBudget())
+	return c.executeTeardownLocked(ctx, plan, c.newTmuxBudget())
 }
 
 // auditedTeardownLocked is the teardown core plus the write-ahead pair, for the
@@ -720,7 +720,7 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 	resolved, err := c.resolveReviewWindow(tctx, ref)
 	if err != nil {
 		if tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-			slog.Warn("Timed out resolving the review window under the lifecycle lock.", "budget", lockedTmuxBudget)
+			slog.Warn("Timed out resolving the review window under the lifecycle lock.", "budget", budget.limit)
 			return true, unknownWindow(ref, ""), nil
 		}
 		if errors.Is(err, tmux.ErrAmbiguousWindow) {
@@ -739,7 +739,7 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 	if err := c.tmuxClient.KillWindow(tctx, resolved); err != nil {
 		if tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("Timed out killing the review window under the lifecycle lock.",
-				"window_id", resolved.ID, "budget", lockedTmuxBudget)
+				"window_id", resolved.ID, "budget", budget.limit)
 			return true, unknownWindow(ref, resolved.ID), nil
 		}
 		if windowGoneAtKill(err) {
@@ -935,7 +935,7 @@ func (c *Client) Cleanup(ctx context.Context, date string) (CleanupReport, error
 				"unreadable", len(unreadable), "first", unreadable[0].path)
 		}
 		var firstErr error
-		budget := newTmuxBudget()
+		budget := c.newTmuxBudget()
 		warnedSkip := false
 		for _, sum := range summaries {
 			if sum.CreatedAt().UTC().Format("2006-01-02") != date {
@@ -945,7 +945,7 @@ func (c *Client) Cleanup(ctx context.Context, date string) (CleanupReport, error
 				if errors.Is(err, ErrTmuxBudgetSpent) {
 					if !warnedSkip {
 						slog.Warn("tmux stopped answering during cleanup; skipping the remaining live sessions.",
-							"budget", lockedTmuxBudget)
+							"budget", budget.limit)
 						warnedSkip = true
 					}
 				} else {

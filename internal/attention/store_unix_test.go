@@ -257,6 +257,29 @@ func TestListSkipsMalformedRecords(t *testing.T) {
 	}
 }
 
+func TestListKeepsQuestionsBehindManyOptions(t *testing.T) {
+	s, dir := openTestSpool(t)
+	r := testRecord(testSession)
+	r.Items = nil
+	for range 25 {
+		r.Items = append(r.Items, Item{Kind: KindOption, Tag: "A", Text: "choice"})
+	}
+	for n := 1; n <= MaxItems; n++ {
+		r.Items = append(r.Items, Item{Kind: KindQuestion, N: n, Text: "q"})
+	}
+	data, _ := json.Marshal(r)
+	if err := os.WriteFile(filepath.Join(dir, testSession+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, skipped, err := s.List(time.Now(), DefaultTTL, Liveness{})
+	if err != nil || skipped != 0 || len(recs) != 1 {
+		t.Fatalf("List = %+v, %d, %v", recs, skipped, err)
+	}
+	if n := len(recs[0].Items); n != 25+MaxItems {
+		t.Errorf("items = %d, want %d: options must not use up the question cap", n, 25+MaxItems)
+	}
+}
+
 func TestListCleansAndCapsText(t *testing.T) {
 	s, dir := openTestSpool(t)
 	r := testRecord(testSession)

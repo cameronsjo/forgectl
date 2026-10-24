@@ -511,6 +511,29 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 	return RunUnfilteredAlso(ctx, r, bin, dir, nil, args...)
 }
 
+// RunUnfilteredPinned is RunUnfiltered for the working tree dir with its
+// repository pinned to gitDir: the listings and the call run with
+// --git-dir=gitDir --work-tree=., so none of them reads dir/.git. A caller
+// that has validated a worktree's gitfile passes the directory it named, and
+// a gitfile swapped after that check is never read (#1304). Submodules below
+// dir are still found through their own .git, as RunUnfiltered finds them.
+// gitDir must be absolute and dir non-empty.
+func RunUnfilteredPinned(ctx context.Context, r Runner, bin, dir, gitDir string, args ...string) (string, error) {
+	if dir == "" || !filepath.IsAbs(gitDir) {
+		return "", fmt.Errorf("gitenv: a pinned call needs a directory and an absolute git dir, got %q and %q", dir, gitDir)
+	}
+	return runUnfilteredBounded(ctx, r, bin, tree{dir: dir, gitDir: gitDir}, nil, args...)
+}
+
+// PinnedArgs are the global options that run git in the working tree dir
+// against the repository gitDir, without reading dir/.git: -C dir
+// --git-dir=gitDir --work-tree=. (the work tree resolves after -C). As with
+// RunUnfilteredPinned, dir must be non-empty and gitDir absolute; it does
+// not check, so an empty dir would make the work tree the process's cwd.
+func PinnedArgs(dir, gitDir string) []string {
+	return tree{dir: dir, gitDir: gitDir}.at()
+}
+
 // RunUnfilteredAlso is RunUnfiltered for a call that reaches working trees
 // besides dir's. worktree remove is one: its dirty check runs status in the
 // working tree it removes, under that worktree's own config.worktree, which
@@ -521,9 +544,15 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
 	// Status and worktree remove are non-interactive, so each git may leave
 	// the terminal's process group; at the deadline its whole group dies.
+	return runUnfilteredBounded(ctx, r, bin, tree{dir: dir}, also, args...)
+}
+
+// runUnfilteredBounded is runUnfilteredAlso under Bounded, with the
+// deadline's error named.
+func runUnfilteredBounded(ctx context.Context, r Runner, bin string, start tree, also []string, args ...string) (string, error) {
 	dctx, cancel := Bounded(ctx)
 	defer cancel()
-	out, err := runUnfilteredAlso(dctx, r, bin, dir, also, args...)
+	out, err := runUnfilteredAlso(dctx, r, bin, start, also, args...)
 	if err != nil && ctx.Err() == nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
 		return "", fmt.Errorf("%w within %s", errUnfilteredDeadline, repoDeadline)
 	}
@@ -531,27 +560,28 @@ func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 }
 
 // runUnfilteredAlso is RunUnfilteredAlso without its deadline.
-func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
+func runUnfilteredAlso(ctx context.Context, r Runner, bin string, start tree, also []string, args ...string) (string, error) {
 	type repo struct {
-		dir   string
+		tree
 		depth int
 	}
-	queue := []repo{{dir: dir}}
+	queue := []repo{{tree: start}}
 	for _, d := range also {
 		if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		queue = append(queue, repo{dir: d})
+		queue = append(queue, repo{tree: tree{dir: d}})
 	}
 	// The starting repositories are keyed when their .git can be read, so a
 	// submodule that leads back to one of them is refused as a revisit. One
 	// that cannot be is left to git: dir may be a subdirectory of its
 	// working tree, or a worktree whose layout the listing need not model.
 	// A .git that is neither a directory nor a regular file is refused, and
-	// so is a HEAD that is neither a regular file nor a symbolic link.
+	// so is a HEAD that is neither a regular file nor a symbolic link. A
+	// pinned repository is keyed by its pinned git dir, never its .git.
 	visited := map[string]bool{}
 	for _, q := range queue {
-		key, err := gitDirKey(q.dir)
+		key, err := q.key()
 		if errors.Is(err, errGitfileNotRegular) || errors.Is(err, errHeadNotRegular) {
 			return "", err
 		}
@@ -566,7 +596,7 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 		}
 		cur := queue[0]
 		queue = queue[1:]
-		found, foundHooks, err := listDriversAndHooks(ctx, r, bin, cur.dir)
+		found, foundHooks, err := listDriversAndHooks(ctx, r, bin, cur.tree)
 		if err != nil {
 			return "", err
 		}
@@ -580,7 +610,7 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 				hooks = append(hooks, name)
 			}
 		}
-		subs, err := populatedSubmodules(ctx, r, bin, cur.dir)
+		subs, err := populatedSubmodules(ctx, r, bin, cur.tree)
 		if err != nil {
 			return "", err
 		}
@@ -592,12 +622,12 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 				return "", errSubmoduleRevisit
 			}
 			visited[sub.key] = true
-			queue = append(queue, repo{dir: sub.dir, depth: cur.depth + 1})
+			queue = append(queue, repo{tree: tree{dir: sub.dir}, depth: cur.depth + 1})
 		}
 	}
 	slices.Sort(names)
 	slices.Sort(hooks)
-	at := atDir(dir)
+	at := start.at()
 	off := NoHookArgs(hooks)
 	for _, name := range names {
 		for _, v := range filterDriverVars {
@@ -605,6 +635,29 @@ func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 		}
 	}
 	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
+}
+
+// tree is a working tree git is pointed at: dir, and, when gitDir is set,
+// the repository pinned for it in place of dir/.git.
+type tree struct {
+	dir, gitDir string
+}
+
+// at is the global options that point git at t.
+func (t tree) at() []string {
+	if t.gitDir == "" {
+		return atDir(t.dir)
+	}
+	return []string{"-C", t.dir, "--git-dir=" + t.gitDir, "--work-tree=."}
+}
+
+// key is t's repository as gitDirKey keys it; a pinned one is keyed by its
+// git dir.
+func (t tree) key() (string, error) {
+	if t.gitDir == "" {
+		return gitDirKey(t.dir)
+	}
+	return repoKey(t.gitDir)
 }
 
 // atDir is the -C option that points git at dir, or none for "".
@@ -617,8 +670,8 @@ func atDir(dir string) []string {
 
 // listDriversAndHooks returns every filter driver and every configured hook
 // dir's configuration defines, in any scope, from one listing.
-func listDriversAndHooks(ctx context.Context, r Runner, bin, dir string) ([]string, []string, error) {
-	out, err := listConfig(ctx, r, bin, dir, listedKeys, "filter drivers and hooks")
+func listDriversAndHooks(ctx context.Context, r Runner, bin string, t tree) ([]string, []string, error) {
+	out, err := listConfig(ctx, r, bin, t, listedKeys, "filter drivers and hooks")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -633,9 +686,10 @@ type submodule struct {
 
 // populatedSubmodules returns every submodule in dir's index that status
 // would enter: a gitlink entry whose path holds a .git.
-func populatedSubmodules(ctx context.Context, r Runner, bin, dir string) ([]submodule, error) {
+func populatedSubmodules(ctx context.Context, r Runner, bin string, t tree) ([]submodule, error) {
+	dir := t.dir
 	// ":/" covers the whole tree when dir is below its top, as status does.
-	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "ls-files", "-z", "--stage", "--", ":/")...)
+	out, err := RunBin(ctx, r, bin, Local, append(t.at(), "ls-files", "-z", "--stage", "--", ":/")...)
 	if err != nil {
 		return nil, fmt.Errorf("list the submodules git status would enter: %w", err)
 	}
@@ -722,6 +776,13 @@ func gitDirKey(sub string) (string, error) {
 		}
 		gitDir = target
 	}
+	return repoKey(gitDir)
+}
+
+// repoKey is gitDirKey's check of the repository directory gitDir itself:
+// its resolved path, once it holds a HEAD that is a regular file or a
+// symbolic link.
+func repoKey(gitDir string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(gitDir)
 	if err != nil {
 		return "", errInvalidSubmoduleGit

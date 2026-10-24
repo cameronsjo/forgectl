@@ -4,6 +4,9 @@ package cli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
@@ -39,12 +42,28 @@ func TestTrampoline_SurvivesATerminalSignalAndStillReaps(t *testing.T) {
 	// load. A timer in the test raced Run's setup: on a loaded host it could
 	// fire before the handling was installed and kill the test binary with
 	// no failing test named (forgectl#1120).
+	//
+	// The harness then exits only once Run's handling has taken the signal
+	// (the seen file), not after a fixed sleep. kill returns when the signal
+	// is queued; this process handles it later, on its main thread. A harness
+	// that exited first let Run return and release the handling before a
+	// late signal arrived, and the signal then killed the test binary. The
+	// 30 s cap only keeps the harness from waiting forever.
+	seen := filepath.Join(t.TempDir(), "seen")
+	var once sync.Once
+	prev := reaperSignalSeen
+	reaperSignalSeen = func(os.Signal) {
+		once.Do(func() { _ = os.WriteFile(seen, nil, 0o600) })
+	}
+	t.Cleanup(func() { reaperSignalSeen = prev })
 	committed := serviceOn(t, listener, nonce, launch.Invocation{
 		Harness: "test",
 		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
-		Args:    []string{"-c", `trap '' INT; kill -INT "$PPID"; sleep 0.4; exit 7`},
-		Env:     []string{"PATH=/usr/bin:/bin"},
-		CWD:     "/",
+		Args: []string{"-c", `trap '' INT; kill -INT "$PPID"; i=0
+while [ ! -e "$SEEN" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+exit 7`},
+		Env: []string{"PATH=/usr/bin:/bin", "SEEN=" + seen},
+		CWD: "/",
 	})
 
 	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))

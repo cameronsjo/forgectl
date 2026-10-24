@@ -26,6 +26,12 @@ package branch
 //       documented
 //   [x] Prune uses `-D` (force), not `-d`, for the local delete
 //   [x] Enumerate skips a gone-but-unconfirmed branch unless IncludeGone
+//   [x] A merged PR confirms a branch only when its head commit contains
+//       every tip of the branch (local and remote): a fork PR or a reused
+//       branch with the same name is not merged; a tip behind the head is
+//       still merged
+//   [x] The remote delete leases the remote tip the merge was checked on,
+//       and is refused when there is no valid tip to lease
 
 import (
 	"context"
@@ -36,6 +42,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
+
+// mainTip, squashedTip and reusedTip are branch tip commits in the
+// Enumerate fixtures.
+const (
+	mainTip     = "1111111111111111111111111111111111111111"
+	squashedTip = "2222222222222222222222222222222222222222"
+	reusedTip   = "3333333333333333333333333333333333333333"
 )
 
 // githubRemoteURL is `git remote get-url origin` output for a github.com
@@ -142,7 +156,7 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 	client := New(fake)
 
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := client.Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -191,7 +205,7 @@ func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 	client := New(fake)
 
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := client.Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -244,7 +258,7 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 				},
 			}
 			item := Classification{
-				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
 			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "upstream", Remote: true})
@@ -304,7 +318,7 @@ func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 				},
 			}
 			item := Classification{
-				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
 			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -342,7 +356,7 @@ func TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -463,14 +477,14 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
-				return "main\t\t\nfeat/squashed\t\t\n", nil
+				return "main\t\t\t" + mainTip + "\nfeat/squashed\t\t\t" + squashedTip + "\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/remotes/origin"):
 				// Includes the origin/HEAD symref row, exactly as real git emits
 				// it (see TestRemoteBranches_ExcludesHeadSymref) — its
 				// %(refname:short) is the bare "origin", not "origin/HEAD".
-				return "refs/remotes/origin/HEAD\torigin\n" +
-					"refs/remotes/origin/main\torigin/main\n" +
-					"refs/remotes/origin/feat/squashed\torigin/feat/squashed\n", nil
+				return "refs/remotes/origin/HEAD\torigin\t" + mainTip + "\n" +
+					"refs/remotes/origin/main\torigin/main\t" + mainTip + "\n" +
+					"refs/remotes/origin/feat/squashed\torigin/feat/squashed\t" + squashedTip + "\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "worktree":
 				return "worktree /repo\nHEAD deadbeef\nbranch refs/heads/main\n", nil
 			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
@@ -481,7 +495,7 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "open"):
 				return "[]", nil
 			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
-				return `[{"number":7,"headRefName":"feat/squashed"}]`, nil
+				return `[{"number":7,"headRefName":"feat/squashed","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`, nil
 			}
 			return "", nil
 		},
@@ -527,6 +541,204 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 	}
 }
 
+// mergedNameFixture answers Enumerate's git and gh calls for one local
+// branch feat/x at localTip with no remote, where the merged-PR query
+// returns mergedJSON. isAncestor answers `git merge-base --is-ancestor`.
+func mergedNameFixture(localTip, mergedJSON string, isAncestor bool) *exec.FakeRunner {
+	return &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
+				return "main\t\t\t" + mainTip + "\nfeat/x\t\t\t" + localTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "merge-base":
+				if isAncestor {
+					return "", nil
+				}
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
+			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
+				return "main\n", nil
+			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
+				return mergedJSON, nil
+			case name == "gh":
+				return "[]", nil
+			}
+			return "", nil
+		},
+	}
+}
+
+func groupOf(t *testing.T, report Report, name string) (Group, bool) {
+	t.Helper()
+	for _, g := range []struct {
+		group Group
+		items []Classification
+	}{{SafeToDelete, report.SafeToDelete}, {Blocked, report.Blocked}, {NeedsAttention, report.NeedsAttention}} {
+		for _, c := range g.items {
+			if c.Info.Name == name {
+				return g.group, c.Info.MergedOnServer
+			}
+		}
+	}
+	t.Fatalf("%s missing from report %+v", name, report)
+	return "", false
+}
+
+// TestEnumerate_MergedNameMatchAloneIsNotMerged covers the PR rows that
+// share a branch's name without holding its commits: a fork PR, PRs merged
+// before the branch was reused, and rows whose head commit is missing or
+// not an object id. None may mark the branch MergedOnServer, because Prune
+// deletes it with `-D`. The non-hex head must also never reach git argv.
+func TestEnumerate_MergedNameMatchAloneIsNotMerged(t *testing.T) {
+	cases := []struct {
+		name       string
+		mergedJSON string
+		isAncestor bool
+	}{
+		{"fork PR with the same head name", `[{"number":8,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"}]`, false},
+		{"reused branch past both merged heads", `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"},{"number":11,"headRefName":"feat/x","headRefOid":"` + mainTip + `"}]`, false},
+		{"merged row without a head commit", `[{"number":10,"headRefName":"feat/x"}]`, true},
+		{"merged row with a non-hex head", `[{"number":12,"headRefName":"feat/x","headRefOid":"--upload-pack=x"}]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := mergedNameFixture(reusedTip, tc.mergedJSON, tc.isAncestor)
+			client := New(fake, WithDefaultBranch("main"))
+			report, err := client.Enumerate(context.Background(), EnumerateOptions{Local: true})
+			if err != nil {
+				t.Fatalf("Enumerate: %v", err)
+			}
+			group, merged := groupOf(t, report, "feat/x")
+			if merged || group == SafeToDelete {
+				t.Fatalf("feat/x group = %v, MergedOnServer = %v; a name match alone must not confirm a merge", group, merged)
+			}
+			for _, call := range fake.Calls {
+				if contains(call.Args, "--upload-pack=x") {
+					t.Fatalf("a non-hex head reached argv: %+v", call)
+				}
+			}
+		})
+	}
+}
+
+// TestEnumerate_TipBehindMergedHeadIsMerged: a local branch whose tip is an
+// ancestor of the merged head (someone pushed to the PR from elsewhere) has
+// nothing the PR lacks, so it is still SafeToDelete.
+func TestEnumerate_TipBehindMergedHeadIsMerged(t *testing.T) {
+	mergedJSON := `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `","isCrossRepository":false}]`
+	fake := mergedNameFixture(reusedTip, mergedJSON, true)
+	report, err := New(fake, WithDefaultBranch("main")).Enumerate(context.Background(), EnumerateOptions{Local: true})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if group, merged := groupOf(t, report, "feat/x"); group != SafeToDelete || !merged {
+		t.Fatalf("feat/x group = %v, MergedOnServer = %v; want SafeToDelete", group, merged)
+	}
+	var sawAncestry bool
+	for _, call := range fake.Calls {
+		args := gitenvtest.Strip(call.Args)
+		if call.Name == "git" && len(args) == 4 && args[0] == "merge-base" && args[1] == "--is-ancestor" && args[2] == reusedTip && args[3] == squashedTip {
+			sawAncestry = true
+		}
+	}
+	if !sawAncestry {
+		t.Fatalf("expected `git merge-base --is-ancestor %s %s`, calls: %+v", reusedTip, squashedTip, fake.Calls)
+	}
+}
+
+// TestEnumerate_RemoteTipAheadOfMergedHeadIsNotMerged: the local branch is
+// the merged head, but its remote has commits pushed after the merge. Every
+// tip must be contained, so the branch is not MergedOnServer.
+func TestEnumerate_RemoteTipAheadOfMergedHeadIsNotMerged(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
+				return "main\t\t\t" + mainTip + "\nfeat/x\torigin/feat/x\t[ahead 0, behind 1]\t" + squashedTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/remotes/origin"):
+				return "refs/remotes/origin/main\torigin/main\t" + mainTip + "\n" +
+					"refs/remotes/origin/feat/x\torigin/feat/x\t" + reusedTip + "\n", nil
+			case name == "git" && len(args) > 0 && args[0] == "merge-base":
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
+			case name == "git" && len(args) > 0 && args[0] == "branch" && contains(args, "--merged"):
+				return "main\n", nil
+			case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "list" && contains(args, "merged"):
+				return `[{"number":9,"headRefName":"feat/x","headRefOid":"` + squashedTip + `"}]`, nil
+			case name == "gh":
+				return "[]", nil
+			}
+			return "", nil
+		},
+	}
+	report, err := New(fake, WithDefaultBranch("main")).Enumerate(context.Background(), EnumerateOptions{Local: true, Remote: true})
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if group, merged := groupOf(t, report, "feat/x"); merged || group == SafeToDelete {
+		t.Fatalf("feat/x group = %v, MergedOnServer = %v; a remote tip past the merged head must block the merge", group, merged)
+	}
+}
+
+// TestPrune_RemoteDelete_LeasesTheCheckedTip: the remote delete carries a
+// lease on the tip the merge was confirmed against, so the server refuses
+// it if the branch moved after this machine last fetched.
+func TestPrune_RemoteDelete_LeasesTheCheckedTip(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
+			switch {
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
+			case name == "gh":
+				return "", ghNotFound(args)
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("results = %+v, want one success", results)
+	}
+	want := []string{"push", "--force-with-lease=refs/heads/feat/done:" + squashedTip, "origin", "--delete", "--", "feat/done"}
+	for _, call := range fake.Calls {
+		args := gitenvtest.Strip(call.Args)
+		if call.Name == "git" && len(args) > 0 && args[0] == "push" {
+			if strings.Join(args, " ") != strings.Join(want, " ") {
+				t.Fatalf("push argv = %q, want %q", args, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("no git push call: %+v", fake.Calls)
+}
+
+// TestPrune_RemoteDelete_RefusedWithoutACheckedTip: an item with no valid
+// RemoteTip has nothing to lease on, so Prune refuses the remote delete
+// instead of running an unconditional `push --delete`.
+func TestPrune_RemoteDelete_RefusedWithoutACheckedTip(t *testing.T) {
+	for _, tip := range []string{"", "not-a-sha"} {
+		fake := &exec.FakeRunner{}
+		item := Classification{
+			Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: tip, MergedOnServer: true},
+			Group: SafeToDelete,
+		}
+		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+		if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+			t.Fatalf("tip %q: results = %+v, want one refusal", tip, results)
+		}
+		for _, call := range fake.Calls {
+			if args := gitenvtest.Strip(call.Args); call.Name == "git" && len(args) > 0 && args[0] == "push" {
+				t.Fatalf("tip %q: push ran without a lease: %+v", tip, call)
+			}
+		}
+	}
+}
+
 // TestRemoteBranches_ExcludesHeadSymref is a direct regression test for a bug
 // caught via a manual dry-run against this repo's own origin remote:
 // refs/remotes/<remote>/HEAD is a symref, and git's %(refname:short) renders
@@ -549,9 +761,13 @@ func TestRemoteBranches_ExcludesHeadSymref(t *testing.T) {
 	}
 	client := New(fake, WithRemoteName("origin"))
 
-	names, err := client.remoteBranches(context.Background(), "origin")
+	rows, err := client.remoteBranches(context.Background(), "origin")
 	if err != nil {
 		t.Fatalf("remoteBranches: %v", err)
+	}
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.name)
 	}
 	for _, n := range names {
 		if n == "origin" || n == "HEAD" {
@@ -651,7 +867,7 @@ func TestPrune_RemoteDeleteFailure_DoesNotEchoGitStderr(t *testing.T) {
 		return "", nil
 	}}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -683,7 +899,7 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 		return "", nil
 	}}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -745,7 +961,7 @@ func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 			return "", nil
 		}}
 		item := Classification{
-			Info:  Info{Name: "fix-404", RemoteExists: true, MergedOnServer: true},
+			Info:  Info{Name: "fix-404", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 			Group: SafeToDelete,
 		}
 		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -786,7 +1002,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 				}
 				return "", nil
 			}},
-		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				args = gitenvtest.Strip(args)
 				if name == "git" && args[0] == "push" {
@@ -794,21 +1010,21 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 				}
 				return "", nil
 			}},
-		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				if isGetURL(name, args) {
 					return "", subprocessFailure(name, args)
 				}
 				return "", nil
 			}},
-		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				if isGetURL(name, args) {
 					return githubRemoteURL, nil
 				}
 				return "", nil
 			}},
-		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true, RemoteTip: squashedTip},
 			func(name string, args []string) (string, error) {
 				switch {
 				case isGetURL(name, args):
@@ -870,7 +1086,7 @@ func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
@@ -903,7 +1119,7 @@ func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
 		},
 	}
 	item := Classification{
-		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Info:  Info{Name: "feat/done", RemoteExists: true, RemoteTip: squashedTip, MergedOnServer: true},
 		Group: SafeToDelete,
 	}
 	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})

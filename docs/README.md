@@ -11,6 +11,9 @@ operated.
   usage summary.
 - **[`json-contract.md`](json-contract.md)** — what a `--json` verb writes to
   stderr when it exits non-zero, and the failure object's `code` strings.
+- **[`status-vocabulary.md`](status-vocabulary.md)** — the shared `work`
+  object (`status`, `on`, `reason`, `evidence`) that queue, drain and desk
+  `--json` rows carry beside their native state, and how each state maps.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
 - **[`prompts.md`](prompts.md)** — how a cancelled picker or confirm ends: the line it prints and exit code 130.
