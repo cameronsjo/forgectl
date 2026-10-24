@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 
 	"github.com/cameronsjo/forgectl/internal/claudeproject"
 )
@@ -927,15 +927,30 @@ func TestForEachLineUpTo_LimitCountsTheNewline(t *testing.T) {
 // as a substring it kept the whole (possibly megabytes-long) display alive for
 // every session row.
 func TestFirstLine_DoesNotPinTheWholePrompt(t *testing.T) {
-	display := "hi\n" + strings.Repeat("x", 1<<20)
-	got := firstLine(display)
+	const size = 64 << 20
+	var m runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	before := m.HeapAlloc
+	got := firstLineOfLongPrompt(size)
+	runtime.GC()
+	runtime.ReadMemStats(&m)
 	if got != "hi" {
 		t.Fatalf("firstLine = %q, want hi", got)
 	}
-	// #nosec G103 -- compares the two strings' data pointers; nothing is dereferenced
-	if unsafe.StringData(got) == unsafe.StringData(display) {
-		t.Error("firstLine returned a substring of the display, which keeps the whole display alive")
+	// A substring would keep the whole 64 MiB prompt reachable through got.
+	if m.HeapAlloc > before+size/2 {
+		t.Errorf("heap grew by %d MiB after the prompt went out of scope; firstLine kept it alive", (m.HeapAlloc-before)>>20)
 	}
+	runtime.KeepAlive(got)
+}
+
+// firstLineOfLongPrompt builds the prompt in its own frame, so nothing but
+// firstLine's result can keep it reachable once it returns.
+//
+//go:noinline
+func firstLineOfLongPrompt(size int) string {
+	return firstLine("hi\n" + strings.Repeat("x", size))
 }
 
 // TestRestore_WillNotFollowADanglingSymlink covers the specific hole in a
