@@ -142,10 +142,11 @@ homebrew_casks:
     repository:
       owner: cameronsjo
       name: homebrew-tap
-      # PAT with contents:write on the tap repo — the default GITHUB_TOKEN only
-      # reaches the current repo, so the cross-repo cask push needs this.
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Casks
+    # GoReleaser only writes the cask to dist/homebrew/Casks/forgectl.rb. The
+    # release workflow's `tap` job pushes it, so the tap credential never sits
+    # in the job that runs this file's hooks (#780).
+    skip_upload: true
     homepage: "https://github.com/cameronsjo/forgectl"
     description: "Personal tmux/dev-experience CLI for the headless workbench (supersedes the bash `s` script)"
     # Both binaries are linked into the Homebrew bin: forgectl shells out to
