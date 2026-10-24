@@ -189,3 +189,22 @@ func TestMergedBotDetectionUsesTheBotFlagOrSuffix(t *testing.T) {
 		t.Errorf("merged = %+v err = %v", got, err)
 	}
 }
+
+// The first line of the viewer's review is cut to maxFirstLine without
+// splitting the "é" that straddles the limit.
+func TestFactsCutsReviewLineOnACharacter(t *testing.T) {
+	body := strings.Repeat("a", maxFirstLine-1) + "é tail"
+	var n gqlPR
+	raw := fmt.Sprintf(`{"number": 1, "repository": {"nameWithOwner": "acme/widget"},
+		"reviews": {"nodes": [{"body": %q, "author": {"login": "me"}}]}}`, body)
+	if err := json.Unmarshal([]byte(raw), &n); err != nil {
+		t.Fatal(err)
+	}
+	f, ok := n.facts("me")
+	if !ok || len(f.Reviews) != 1 {
+		t.Fatalf("facts = %+v, %v; want one review line", f, ok)
+	}
+	if want := strings.Repeat("a", maxFirstLine-1); f.Reviews[0] != want {
+		t.Errorf("review line = %q (%d bytes), want the %d bytes before the character", f.Reviews[0], len(f.Reviews[0]), len(want))
+	}
+}

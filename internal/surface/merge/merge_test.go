@@ -950,3 +950,16 @@ func TestDecodersRefuse(t *testing.T) {
 		t.Errorf("discovery page: %v", err)
 	}
 }
+
+// A non-marker first line is quoted cut to maxQuotedLine without splitting
+// the "é" that straddles the limit.
+func TestWhyNotPassingCutsQuotedLineOnACharacter(t *testing.T) {
+	body := strings.Repeat("a", maxQuotedLine-1) + "é tail"
+	got := whyNotPassing(markerPost{kind: "comment", body: body}, "")
+	if strings.Contains(got, `\x`) {
+		t.Errorf("reason quotes a split character: %s", got)
+	}
+	if !strings.Contains(got, strconv.Quote(strings.Repeat("a", maxQuotedLine-1)+"...")) {
+		t.Errorf("reason lost the text before the character: %s", got)
+	}
+}
