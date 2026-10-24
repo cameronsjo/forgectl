@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/cameronsjo/forgectl/internal/claudeproject"
 )
@@ -902,6 +903,38 @@ func TestForEachLineUpTo_SkipsOnlyLinesOverTheLimit(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("line %d = %.20q (len %d), want %.20q (len %d)", i, got[i], len(got[i]), want[i], len(want[i]))
 		}
+	}
+}
+
+// TestForEachLineUpTo_LimitCountsTheNewline pins the boundary: a line of
+// exactly limit bytes, its newline included, is kept and one byte more is
+// skipped.
+func TestForEachLineUpTo_LimitCountsTheNewline(t *testing.T) {
+	const limit = transcriptBufSize + 100
+	at := strings.Repeat("a", limit-1)
+	over := strings.Repeat("b", limit)
+	var got []int
+	forEachLineUpTo(strings.NewReader(at+"\n"+over+"\nend\n"), limit, func(line []byte) bool {
+		got = append(got, len(line))
+		return false
+	})
+	if len(got) != 2 || got[0] != limit || got[1] != len("end\n") {
+		t.Fatalf("line lengths = %v, want [%d %d]", got, limit, len("end\n"))
+	}
+}
+
+// TestFirstLine_DoesNotPinTheWholePrompt: LastPrompt is a short first line, but
+// as a substring it kept the whole (possibly megabytes-long) display alive for
+// every session row.
+func TestFirstLine_DoesNotPinTheWholePrompt(t *testing.T) {
+	display := "hi\n" + strings.Repeat("x", 1<<20)
+	got := firstLine(display)
+	if got != "hi" {
+		t.Fatalf("firstLine = %q, want hi", got)
+	}
+	// #nosec G103 -- compares the two strings' data pointers; nothing is dereferenced
+	if unsafe.StringData(got) == unsafe.StringData(display) {
+		t.Error("firstLine returned a substring of the display, which keeps the whole display alive")
 	}
 }
 
