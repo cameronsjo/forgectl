@@ -36,6 +36,7 @@
     "applied": [],
     "blocked": [],
     "not_run": [],
+    "warnings": [],
     "error": ""
   }
 }

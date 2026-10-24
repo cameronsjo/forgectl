@@ -63,7 +63,7 @@ When moves are pending the report says `tab order will be rechecked after the mo
 5. orders the workspaces, then the tabs inside each;
 6. puts your focus back: every workspace's active tab first, then the tab you were in, last.
 
-Focus is restored to the tab, not the pane: herdr cannot focus a pane by id, so a focused pane inside a split tab is not put back to pane grain. A tab that left its workspace is not restored as that workspace's active tab.
+Focus is restored to the tab, not the pane: herdr cannot focus a pane by id, so a focused pane inside a split tab is not put back to pane grain. A tab that left its workspace is not restored as that workspace's active tab. When every move landed and only the focus restore fails, the run still exits 0 and prints `warning: could not restore focus: <why>`.
 
 When herdr declines a move, the run goes on with the moves and stages that do not depend on it (the next tab for a label whose creation was declined tries to create it), then exits 1 naming each refused move. Any other herdr failure stops the run, restores focus, and prints four lines:
 
@@ -76,7 +76,7 @@ the plan is recomputed on every run; re-run forgectl herdr organize --apply to f
 
 Nothing is rolled back. The plan is recomputed from the live session on every run, so re-running finishes the job.
 
-With `--json`, `result` carries `applied`, `blocked`, `not_run`, and `error`, including on exit 1.
+With `--json`, `result` carries `applied`, `blocked`, `not_run`, `warnings`, and `error`, including on exit 1. `warnings` lists what the run reported without failing, such as a focus restore that did not succeed.
 
 ### Exit codes
 
