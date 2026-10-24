@@ -417,7 +417,9 @@ func TestNoCommandSetsItsOwnHelpFunc(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range files {
-		if f == "trimwriter.go" || strings.HasSuffix(f, "_test.go") {
+		// fang_noprobe.go installs fang's own help function on the root, as
+		// fang.Execute does; trimHelpFrames leaves the root's alone.
+		if f == "trimwriter.go" || f == "fang_noprobe.go" || strings.HasSuffix(f, "_test.go") {
 			continue
 		}
 		src, err := os.ReadFile(f) //nolint:gosec // f comes from Glob("*.go") in the package dir

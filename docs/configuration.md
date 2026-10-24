@@ -123,20 +123,17 @@ query, so **everything renders dark inside tmux** regardless of the terminal
 behind it. On a light terminal inside tmux, set `mode = "light"` explicitly —
 that is the case auto-detection cannot see.
 
-**Help and errors still query the terminal.** The policy above governs
-forgectl's own detection. `--help`, `--version` and error output are rendered by
-[fang](https://github.com/charmbracelet/fang) v1.0.0, which asks the terminal
-for its background (an OSC 11 query plus a DA1 request) whenever stdout is a
-TTY. It does this even where forgectl's policy refuses to probe: inside
-tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
-ignores the answer in those cases (it resolves the palette from `mode` or the
-dark default instead), so the colours are right; only the query itself is sent.
-On a terminal that answers, the cost is under 50 ms. On one that never answers
-(some multiplexer, ssh, and mosh setups, and agent harnesses that run a bare pty),
-each help or error render waits about 4.5 s for the reply. A cancelled prompt
-(Esc or Ctrl+C) skips the renderer, so it does not pay that wait (#1099). Piped
-output never queries. There is no fang option to turn the query off, so this is accepted
-until upstream adds one (tracked in #546).
+**Help and errors follow the same policy.** `--help`, `--version` and error
+output are rendered by [fang](https://github.com/charmbracelet/fang) v1.0.0,
+which asks the terminal for its background (an OSC 11 query plus a DA1 request)
+whenever stdout is a TTY, and has no option to skip it. Where forgectl's policy
+refuses a probe (inside tmux/screen, with `NO_COLOR` set, with `TERM=dumb`, or
+with a forced `[theme] mode`), forgectl renders fang's frames with stdin
+detached from the terminal, so no query is sent and nothing waits for a reply
+(#546). Where the policy allows a probe, fang still sends it: under 50 ms on a
+terminal that answers, about 4.5 s per render on a bare pty that never answers
+(some agent harnesses). A cancelled prompt (Esc or Ctrl+C) skips the renderer
+(#1099). Piped output never queries.
 
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and
 `launch doctor`, and the default palette is used. Run `forgectl theme show` to
