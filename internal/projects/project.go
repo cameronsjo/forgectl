@@ -222,8 +222,9 @@ func parseRemoteURL(raw, gitHubHost string) (host, owner, name string) {
 		return "", "", ""
 	}
 
-	path = strings.TrimSuffix(path, ".git")
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	// Trim the slashes first, so "widget.git/" loses its ".git" too.
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	parts := strings.Split(path, "/")
 	if len(parts) < 2 || parts[0] == "" || parts[len(parts)-1] == "" {
 		return canonicalHost(hostname, gitHubHost), "", ""
 	}
