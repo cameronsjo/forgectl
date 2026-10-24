@@ -129,6 +129,7 @@ func TestFangTrustsProbeFor(t *testing.T) {
 		{"tmux", true, theme.Env{StdinTTY: true, StdoutTTY: true, Term: "tmux-256color"}, false},
 		{"screen", true, theme.Env{StdinTTY: true, StdoutTTY: true, Term: "screen"}, false},
 		{"stdout not a tty in env", true, theme.Env{StdinTTY: true, Term: "xterm"}, false},
+		{"TERM=dumb", true, theme.Env{StdinTTY: true, StdoutTTY: true, Term: "dumb"}, false},
 	}
 	for _, c := range cases {
 		if got := fangTrustsProbeFor(c.probed, c.env); got != c.want {

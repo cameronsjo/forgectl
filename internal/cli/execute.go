@@ -64,20 +64,12 @@ var errHubDumbTerminal = tui.DumbTerminalError("the menu", "forgectl menu for it
 // can pin either answer. It reads os.Stdout, not root.OutOrStdout(): fang
 // checks os.Stdout even when SetOut redirects its writer.
 var fangTrustsProbe = func() bool {
-	return fangTrustsProbeFor(
-		cterm.IsTerminal(os.Stdout.Fd()),
-		theme.Env{
-			StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
-			StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
-			Term:      os.Getenv("TERM"),
-			NoColor:   os.Getenv("NO_COLOR") != "",
-		},
-	)
+	return fangTrustsProbeFor(cterm.IsTerminal(os.Stdout.Fd()), currentProbeEnv())
 }
 
 // fangTrustsProbeFor is the pure decision behind fangTrustsProbe.
 func fangTrustsProbeFor(fangProbed bool, env theme.Env) bool {
-	return fangProbed && theme.ShouldProbe(theme.ModeAuto, env)
+	return fangProbed && probeAllowed(theme.ModeAuto, env)
 }
 
 // The startup steps Execute runs, behind package-level seams so the entry
@@ -341,7 +333,7 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	root.SetArgs(args)
 	trimHelpFrames(root)
 	run := func() error {
-		return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
+		return fangExecute(ctx, root, th, fangOptions(meta.Version, meta.Commit, th)...)
 	}
 	// The root's own page (bare forgectl, --help, help, --version) comes from fang
 	// directly, so trim that stream for the whole run. The lazy builtins other
@@ -424,10 +416,9 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 		// this the most-seen surface in the binary is the only one not drawing
 		// from the palette.
 		// fang v1.0.0 has no option to skip its terminal-background query
-		// (mustColorscheme, theme.go:115-118, runs on any stdout TTY, so an OSC
-		// 11 and DA1 request are sent even where theme.ShouldProbe refuses). We
-		// only ignore the answer here. Documented in docs/configuration.md;
-		// blocked on an upstream opt-out (#546).
+		// (mustColorscheme, theme.go:115-118, runs on any stdout TTY). Where
+		// forgectl's policy refuses a probe, fangExecute keeps the query from
+		// being sent (#546), and the answer is ignored here either way.
 		fang.WithColorSchemeFunc(th.Fang(fangTrustsProbe())),
 	}
 }
