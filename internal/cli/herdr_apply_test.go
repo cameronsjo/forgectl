@@ -454,6 +454,56 @@ func TestApply_FocusRestoreFailureIsReportedWithoutMaskingTheRunError(t *testing
 	}
 }
 
+// focusBroke fails every `tab focus` call and lets the rest of the run through.
+func focusBroke(args []string) (string, error, bool) {
+	if len(args) >= 2 && args[0] == "tab" && args[1] == "focus" {
+		return "", &exec.CommandError{Name: "herdr", ExitCode: 1, Stderr: `{"error":{"code":"focus_broke","message":"no"}}`}, true
+	}
+	return "", nil, false
+}
+
+// A run whose every move landed exits 0 when only the focus restore fails,
+// and says so as a warning (#732).
+func TestApply_FocusRestoreFailureAfterACleanRunWarnsAndExitsZero(t *testing.T) {
+	w := threeMoveWorld()
+	w.intercept = focusBroke
+	a := runApply(t, inSession, w)
+	if a.err != nil {
+		t.Fatalf("err = %v, want nil: every move landed, so a focus failure must not fail the run", a.err)
+	}
+	if !strings.Contains(a.stdout, "applied: 3 moves") {
+		t.Errorf("stdout = %q, want the three moves reported as applied", a.stdout)
+	}
+	if !strings.Contains(a.stdout, "warning: could not restore focus:") || !strings.Contains(a.stdout, "focus_broke") {
+		t.Errorf("stdout = %q, want a warning naming the focus failure", a.stdout)
+	}
+}
+
+func TestApply_JSONCarriesTheFocusWarningAndExitsZero(t *testing.T) {
+	w := threeMoveWorld()
+	w.intercept = focusBroke
+	a := runApply(t, inSession, w, "--json")
+	if a.err != nil {
+		t.Fatalf("err = %v, want nil", a.err)
+	}
+	var doc struct {
+		Result struct {
+			Applied  []map[string]any `json:"applied"`
+			Warnings []string         `json:"warnings"`
+			Error    string           `json:"error"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(a.stdout), &doc); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, a.stdout)
+	}
+	if doc.Result.Error != "" || len(doc.Result.Applied) != 3 {
+		t.Errorf("result = %+v, want three applied moves and no error", doc.Result)
+	}
+	if len(doc.Result.Warnings) != 1 || !strings.Contains(doc.Result.Warnings[0], "could not restore focus") {
+		t.Errorf("warnings = %q, want the focus failure", doc.Result.Warnings)
+	}
+}
+
 func TestApply_TabOrderMovesOnlyWhatDiffers(t *testing.T) {
 	w := newWorld(hws("w1", "forge", 1)).
 		tab("w1", "t1", "term1", "/r/forge/b", "b").
@@ -577,9 +627,10 @@ func TestApply_JSONResult(t *testing.T) {
 	}
 	var doc struct {
 		Result struct {
-			Applied []map[string]any `json:"applied"`
-			NotRun  []map[string]any `json:"not_run"`
-			Error   string           `json:"error"`
+			Applied  []map[string]any `json:"applied"`
+			NotRun   []map[string]any `json:"not_run"`
+			Warnings *[]string        `json:"warnings"`
+			Error    string           `json:"error"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(a.stdout), &doc); err != nil {
@@ -587,6 +638,9 @@ func TestApply_JSONResult(t *testing.T) {
 	}
 	if len(doc.Result.Applied) != 2 || len(doc.Result.NotRun) != 0 || doc.Result.Error != "" {
 		t.Errorf("result = %+v, want two applied moves and no error", doc.Result)
+	}
+	if doc.Result.Warnings == nil || len(*doc.Result.Warnings) != 0 {
+		t.Errorf("warnings = %v, want an empty array, never null or absent", doc.Result.Warnings)
 	}
 }
 
