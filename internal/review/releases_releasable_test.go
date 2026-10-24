@@ -6,6 +6,7 @@ package review
 //   [x] feat, fix, perf and any `!` marker are releasable; chore, ci, docs,
 //       test, refactor, style, build and non-conventional subjects are not
 //   [x] a BREAKING CHANGE footer makes any type releasable
+//   [x] a subject over 200 bytes is cut on a rune boundary, never mid-character
 //
 // noReleasePRStall (Classification: stall rule)
 //   [x] 23h no stall, exactly 24h no stall, 25h stall
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func commit(subject string, h float64) CommitFact {
@@ -391,5 +393,17 @@ func TestScrubCommit_KeepsTheVerdict(t *testing.T) {
 		if out.Releasable() != in.Releasable() || strings.Contains(out.Subject, "secret") || strings.Contains(out.Subject, "private") {
 			t.Errorf("scrubCommit(%q) = %q (releasable %v, was %v)", subject, out.Subject, out.Releasable(), in.Releasable())
 		}
+	}
+}
+
+func TestNewCommitFact_CutsALongSubjectOnARuneBoundary(t *testing.T) {
+	// "é" is two bytes and starts at byte 199, so a 200-byte cut splits it.
+	subject := "feat: " + strings.Repeat("a", 193) + "é more"
+	f := NewCommitFact(subject, time.Time{})
+	if !utf8.ValidString(f.Subject) {
+		t.Fatalf("Subject = %q, not valid UTF-8", f.Subject)
+	}
+	if want := "feat: " + strings.Repeat("a", 193); f.Subject != want {
+		t.Errorf("Subject = %q, want the 199 bytes before the é", f.Subject)
 	}
 }
