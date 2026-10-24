@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -1472,5 +1473,24 @@ func TestDefaultTargets_NoEntryIsPathPrefixOfAnother(t *testing.T) {
 		if _, err := ExpandTargets(t.TempDir(), scheme, DefaultTargets); err != nil {
 			t.Errorf("DefaultTargets violate the runtime move-graph classifier for scheme %v: %v", scheme, err)
 		}
+	}
+}
+
+// TestFoldPattern_TitleCaseLetterMatchesItself: the four title-case letters
+// differ from both their lower and upper case, so a class of just those two
+// stopped matching the pattern's own text, a dropped match in a quarantine
+// control. Each now matches itself and both other cases.
+func TestFoldPattern_TitleCaseLetterMatchesItself(t *testing.T) {
+	for _, c := range []rune{'ǅ', 'ǈ', 'ǋ', 'ǲ'} {
+		pattern := foldPattern(string(c) + ".json")
+		for _, name := range []rune{c, unicode.ToLower(c), unicode.ToUpper(c)} {
+			ok, err := filepath.Match(pattern, string(name)+".json")
+			if err != nil || !ok {
+				t.Errorf("foldPattern(%q) = %q does not match %q (err %v)", string(c)+".json", pattern, string(name)+".json", err)
+			}
+		}
+	}
+	if got := foldPattern("mcp.json"); got != "[mM][cC][pP].[jJ][sS][oO][nN]" {
+		t.Errorf("foldPattern(mcp.json) = %q, want the ASCII fold unchanged", got)
 	}
 }
