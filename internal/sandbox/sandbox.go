@@ -299,8 +299,8 @@ func resolveExisting(p string) string {
 	p = filepath.Clean(p)
 	rest := ""
 	for {
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(real, rest)
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(resolved, rest)
 		}
 		parent := filepath.Dir(p)
 		if parent == p {

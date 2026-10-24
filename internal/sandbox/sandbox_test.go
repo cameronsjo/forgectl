@@ -584,9 +584,9 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 // /var to /private/var) still holds a dangling link or a file not created yet;
 // a missing file beneath a link that leaves the workspace is still outside.
 func TestWithinWorkspace_UnresolvedTargetUnderSymlinkedRoot(t *testing.T) {
-	real := t.TempDir()
+	realDir := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")
-	if err := os.Symlink(real, alias); err != nil {
+	if err := os.Symlink(realDir, alias); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 	ws := filepath.Join(alias, WorkspacePrefix+"1")
