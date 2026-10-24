@@ -129,7 +129,9 @@ func TestParseRegistryRefusesAWideMapping(t *testing.T) {
 // top-level keys costs about what one with the same bytes in a list costs
 // (perftest.Within, process CPU time). The whole decode compared every pair
 // of keys and formatted an error for each repeat. Measured with the fix:
-// about 1. Without it, at 8 KiB: well over 20.
+// about 2, since a repeated key is two nodes where a list item is one. A
+// macOS runner has read 4.6 on the same code, so the limit is 8. Without the
+// fix, at 8 KiB: about 500.
 //
 // Mutation that turns it red: skip CheckTree in ParseRegistry.
 func TestParseRegistryRepeatedKeysCostLikeAList(t *testing.T) {
@@ -140,5 +142,5 @@ func TestParseRegistryRepeatedKeysCostLikeAList(t *testing.T) {
 		return func() { _, _ = ParseRegistry(raw) }
 	}
 	baseRun, shapeRun := perftest.Amortize(work(base), work(repeated))
-	perftest.Within(t, "registry with repeated keys", 4, baseRun, shapeRun)
+	perftest.Within(t, "registry with repeated keys", 8, baseRun, shapeRun)
 }
