@@ -15,6 +15,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubapp"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/resume"
 )
@@ -797,4 +798,59 @@ func TestCheckGitleaks(t *testing.T) {
 			t.Errorf("%s: a warn row must carry a hint: %+v", c.name, check)
 		}
 	}
+}
+
+func TestCheckIdentity(t *testing.T) {
+	ctx := context.Background()
+	if c := checkIdentity(ctx, Deps{}); c.State != StateSkip {
+		t.Fatalf("no table: %+v", c)
+	}
+	cfg, err := config.DecodeStrict([]byte("[surface.identity]\napp_id = 1\ninstallation_id = 2\nbot_login = \"w[bot]\"\nbot_user_id = 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func(err error) func(context.Context, config.IdentitySettings) error {
+		return func(context.Context, config.IdentitySettings) error { return err }
+	}
+	for name, c := range map[string]struct {
+		err   error
+		state State
+		hint  string
+	}{
+		"ok":         {nil, StateOK, ""},
+		"no key":     {githubapp.ErrKeyNotFound, StateFail, "forgectl-worker-app"},
+		"offline":    {fmt.Errorf("%w: %w", githubapp.ErrInstallation, githubapp.ErrUnreachable), StateWarn, "network"},
+		"5xx":        {fmt.Errorf("%w: %w", githubapp.ErrInstallation, &githubapp.StatusError{Code: 502}), StateWarn, "network"},
+		"bad sig":    {fmt.Errorf("%w: %w", githubapp.ErrInstallation, &githubapp.StatusError{Code: 401}), StateFail, "clock"},
+		"no install": {fmt.Errorf("%w: %w", githubapp.ErrInstallation, &githubapp.StatusError{Code: 404}), StateFail, "installation_id"},
+		"wrong bot":  {fmt.Errorf("%w: x", githubapp.ErrIdentityMismatch), StateFail, "bot_user_id"},
+	} {
+		got := checkIdentity(ctx, Deps{Cfg: cfg, IdentityProbe: probe(c.err)})
+		if got.State != c.state || !strings.Contains(got.Hint, c.hint) {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	// The default probe reads the key through the runner; a failed read is a
+	// key failure, not a GitHub call.
+	runner := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New("exit 44") }}
+	if got := checkIdentity(ctx, Deps{Cfg: cfg, Runner: runner}); got.State != StateFail || !strings.Contains(got.Hint, "keychain") {
+		t.Fatalf("default probe, no key: %+v", got)
+	}
+	bad, _ := config.DecodeStrict([]byte("[surface.identity]\napp_id = 1\n"))
+	if c := checkIdentity(ctx, Deps{Cfg: bad}); c.State != StateFail || !strings.Contains(c.Detail, "installation_id") {
+		t.Fatalf("bad table: %+v", c)
+	}
+	broken := config.LoadPath(writeTempConfig(t, "[surface.identity\napp_id = "))
+	if c := checkIdentity(ctx, Deps{Cfg: broken}); c.State != StateFail || !strings.Contains(c.Detail, "did not load") {
+		t.Fatalf("unparsable config: %+v", c)
+	}
+}
+
+func writeTempConfig(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

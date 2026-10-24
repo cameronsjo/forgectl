@@ -138,3 +138,13 @@ This does not restore the 2026-10-05 isolation. A worker still loads the operato
 Every claude worker's `--settings` now carries one deny rule, `Bash(forgectl tasks done:*)`, in every permission mode. A board close cannot be undone, and the operator or the coordinator closes a task once its work lands. The `FORGECTL_DRAIN_WORKER` refusal (2026-10-09 amendment) already stops `tasks done` in a worker, but a worker can unset the variable. A deny rule holds over the operator's own allow rules, so it backs that refusal up. Before this, chief-of-staff's own `launch-workers.sh` added the rule, and drain workers went without it.
 
 This narrows the 2026-10-08 amendment's "nothing is denied" by one rule. A worker is otherwise still a full harness. The rule covers the shell command only: a board MCP tool (`complete_task` and the like) is still asked against in words, in the worker rule.
+
+## Amendment 2026-10-20: workers get a GitHub App identity
+
+Cameron's decision (cameronsjo/forgectl#1309): workers stop acting on GitHub as the operator and use a GitHub App, `forgectl-worker`, not a machine user. A machine user's fine-grained token cannot reach repositories another personal account owns, so it would need a classic `repo` token, broad and valid for up to a year. An App token is scoped to one repository and a fixed permission set, and expires in an hour.
+
+- With `[surface.identity]` configured, each launch mints a token for the worker's one repository (Contents and Pull requests write, Issues and Metadata read) and hands it over through a private `gh` config directory. `git` pushes over HTTPS with it and commits as the bot; `SSH_AUTH_SOCK` leaves the allowlist. The drain refreshes the token; close and reap revoke it.
+- Intake refuses a candidate the bot authored or labeled. Terminal confirmation stays, because a worker can still write `queue.json` directly.
+- A mint failure refuses the launch rather than falling back to the operator.
+
+What it does not change: a worker still runs as the operator's uid, so it can read the operator's keychain `gh` login and the App key on purpose. This fixes attribution and accidents, not adversaries (cameronsjo/cadence-ecosystem ADR-0046). The sandbox in forgectl#1134 §4 remains the path to containment. Behavior: `openspec/changes/worker-github-app/`.

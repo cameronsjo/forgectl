@@ -28,6 +28,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubapp"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -116,6 +117,9 @@ type Deps struct {
 	// gitleaks row refuses a binary inside it as the scan does. Nil skips
 	// that check.
 	ProjectsRoot func() (string, error)
+	// IdentityProbe reads the worker App key and asks GitHub for the
+	// installation, minting no token. Nil uses the keychain and GitHub.
+	IdentityProbe func(context.Context, config.IdentitySettings) error
 }
 
 // NewDeps wires Deps with production seams: os/exec.LookPath, the real
@@ -150,6 +154,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkSops(ctx, d))
 	checks = append(checks, checkGitleaks(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
+	checks = append(checks, checkIdentity(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
 	checks = append(checks, checkTrustStore(d))
 	checks = append(checks, checkResumeTasks(d))
@@ -538,4 +543,52 @@ func checkForgectlVersion(ctx context.Context, d Deps) Check {
 		return Check{Name: "forgectl version", State: StateWarn, Detail: selfupdate.OutdatedDetail(detail), Hint: "run `forgectl upgrade`"}
 	}
 	return Check{Name: "forgectl version", State: StateOK, Detail: "up to date"}
+}
+
+// checkIdentity reports the drain workers' GitHub App identity
+// ([surface.identity]). It reads the App key and asks GitHub whether the
+// App, the installation, the bot login and the bot user id agree, minting no
+// token. It never prints key or token material.
+func checkIdentity(ctx context.Context, d Deps) Check {
+	const name = "worker identity"
+	if d.Cfg.DecodeDegraded() {
+		return Check{Name: name, State: StateFail, Detail: "config.toml did not load, so [surface.identity] is unknown", Hint: "fix the config error the config check reports"}
+	}
+	s, err := d.Cfg.Surface.Identity.Resolve()
+	if err != nil {
+		return Check{Name: name, State: StateFail, Detail: err.Error(), Hint: "fix [surface.identity] in config.toml, or remove the table to run workers as you"}
+	}
+	if !s.Configured {
+		return Check{Name: name, State: StateSkip, Detail: "[surface.identity] not set; drain workers act on GitHub as you"}
+	}
+	probe := d.IdentityProbe
+	if probe == nil {
+		probe = func(ctx context.Context, s config.IdentitySettings) error {
+			key, err := githubapp.ReadKey(ctx, d.Runner, s.KeychainService)
+			if err != nil {
+				return err
+			}
+			c := &githubapp.Client{AppID: s.AppID, Key: key}
+			_, err = c.VerifyIdentity(ctx, s.InstallationID, s.BotLogin, s.BotUserID)
+			return err
+		}
+	}
+	err = probe(ctx, s)
+	if err == nil {
+		return Check{Name: name, State: StateOK, Detail: fmt.Sprintf("App %d, installation %d and %s agree with GitHub", s.AppID, s.InstallationID, s.BotLogin)}
+	}
+	var se *githubapp.StatusError
+	switch {
+	case errors.Is(err, githubapp.ErrKeyNotFound), errors.Is(err, githubapp.ErrKeyMalformed):
+		return Check{Name: name, State: StateFail, Detail: err.Error(),
+			Hint: "store the App key base64-encoded in the login keychain under " + s.KeychainService + " (docs/configuration.md, Worker GitHub identity); a locked keychain reads the same way"}
+	case errors.Is(err, githubapp.ErrUnreachable), errors.As(err, &se) && se.Code >= 500:
+		return Check{Name: name, State: StateWarn, Detail: err.Error(), Hint: "GitHub did not answer; check the network and run doctor again"}
+	case errors.Is(err, githubapp.ErrIdentityMismatch):
+		return Check{Name: name, State: StateFail, Detail: err.Error(), Hint: "set bot_login and bot_user_id to the App's bot (gh api '/users/<slug>%5Bbot%5D' --jq .id)"}
+	case errors.As(err, &se) && se.Code == 401:
+		return Check{Name: name, State: StateFail, Detail: err.Error(), Hint: "GitHub refused the App's signature: check app_id matches the key, and that this machine's clock is right"}
+	default:
+		return Check{Name: name, State: StateFail, Detail: err.Error(), Hint: "check installation_id against the App's installation page, and that the App is installed"}
+	}
 }

@@ -1261,6 +1261,7 @@ func DecodeStrict(data []byte) (Config, error) {
 	cfg.launchSet = meta.IsDefined("launch")
 	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
 	cfg.mergeSet = meta.IsDefined("surface", "merge")
+	cfg.Surface.Identity.set = meta.IsDefined("surface", "identity")
 	for _, k := range meta.Undecoded() {
 		// A top-level on_update table is collected too, so Validate can point
 		// at [[resume.on_update]] instead of the table being silently ignored.
@@ -1276,6 +1277,11 @@ func DecodeStrict(data []byte) (Config, error) {
 		// zero value, so Resolve refuses it and the mode resolves to off.
 		if len(k) > 2 && k[0] == "surface" && k[1] == "merge" {
 			cfg.Surface.Merge.unknown = append(cfg.Surface.Merge.unknown, k.String())
+		}
+		// A misspelled [surface.identity] key would leave a field at zero,
+		// so Resolve refuses it rather than guess.
+		if len(k) > 2 && k[0] == "surface" && k[1] == "identity" {
+			cfg.Surface.Identity.unknown = append(cfg.Surface.Identity.unknown, k.String())
 		}
 	}
 	if err != nil {
@@ -1329,6 +1335,12 @@ func DecodeStrict(data []byte) (Config, error) {
 	if err := cfg.Surface.Merge.Validate(); err != nil && invalid == nil {
 		invalid = invalidValueError{message: err.Error()}
 	}
+	// [surface.identity] decides which GitHub identity a worker acts as. A
+	// bad value is refused at load and kept, so a worker launch resolves it
+	// again and refuses instead of falling back to the operator.
+	if err := cfg.Surface.Identity.Validate(); err != nil && invalid == nil {
+		invalid = invalidValueError{message: err.Error()}
+	}
 	return cfg, invalid
 }
 
@@ -1346,7 +1358,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [surface.identity], [resume], and [theme]. [tasks] and log_level are checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
@@ -1380,6 +1392,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Surface.Merge.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Surface.Identity.Validate(); err != nil {
 		return err
 	}
 	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {
