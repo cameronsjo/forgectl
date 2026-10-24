@@ -18,6 +18,8 @@ type SurfaceConfig struct {
 	Intake SurfaceIntakeConfig `toml:"intake"`
 	// Merge is the worker PR merge policy (ADR-0011).
 	Merge SurfaceMergeConfig `toml:"merge"`
+	// Identity is the GitHub App workers act as; absent means the operator.
+	Identity SurfaceIdentityConfig `toml:"identity"`
 	// Profiles are the named Claude config directories a worker can run
 	// under (`--profile <name>`), keyed by name.
 	Profiles map[string]SurfaceProfile `toml:"profiles"`

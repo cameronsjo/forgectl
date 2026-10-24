@@ -40,8 +40,8 @@ The drain SHALL refresh a live worker's App token before it expires. `surface cl
 - **THEN** the worker's environment matches the allowlist, including `SSH_AUTH_SOCK`, and `--json` reports `identity: "operator"`
 
 ### Requirement: Intake refuses worker-applied labels
-`surface intake gh` MUST refuse a candidate whose issue author or whose queue-label labeler is `bot_login` or has id `bot_user_id`, with reason `worker-labeled` in `--json` `reasons`, before the candidate is shown for confirmation. The terminal confirmation SHALL still apply to every other candidate.
+`surface intake gh` MUST refuse a candidate whose author, or the latest adder of an eligible label, is a bot account, whatever its login. This covers the worker App's bot, so a label a worker applies never admits an issue. The refusal reason names the bot.
 
 #### Scenario: Bot-labeled issue refused
-- **WHEN** an issue's `queue:drain` label was applied by `bot_login`
-- **THEN** intake does not show or queue it, and reports `worker-labeled`
+- **WHEN** an issue's `queue:drain` label was last added by the worker App's bot
+- **THEN** intake does not queue it, and its reason says the label was added by a bot not on `[surface.intake] authors`

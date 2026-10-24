@@ -13,6 +13,11 @@ Every check runs independently, so one failure never hides another. A check's
 configured on this machine). A machine that never set up blessed workflows (no
 trust anchor and no trust store) reports the `trust store` check as `skip`; a
 present-but-insecure anchor, or a store whose anchor is gone, is still `fail`.
+The `worker identity` check is `skip` with no `[surface.identity]` table. With
+one, it reads the App key from the login keychain and asks GitHub whether the
+App, the installation, `bot_login` and `bot_user_id` agree, minting no token.
+GitHub not answering is `warn`; a bad table, a missing key or any mismatch is
+`fail`.
 With no `config.toml`, the `config` check is `skip` (built-in defaults in use,
 hint `forgectl init`); a file that exists and parses is `ok`. When any check
 fails, the closing line names the failed checks, for example
@@ -47,7 +52,7 @@ forgectl doctor --json \
 pipe: the shell reports `jq`'s status, not `doctor`'s, which is what you want
 here. Check names are the ones in the `name` field of the output (`claude`,
 `config`, `log path`, `tmux`, `ghostty`, `cmux`, `mdroll`, `sops`, `gitleaks`, `gh`,
-`hearth`, `chronicle`, `trust store`, `forgectl version`, and others); run
+`worker identity`, `hearth`, `chronicle`, `trust store`, `forgectl version`, and others); run
 `forgectl doctor --json | jq -r '.checks[].name'` to see the current list. A
 name that no check carries matches nothing, so the `all(...)` passes vacuously:
 misspelling a name silently drops that gate.

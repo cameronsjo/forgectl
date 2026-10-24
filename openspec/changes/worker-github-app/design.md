@@ -24,16 +24,7 @@ A worker is a full harness session running as the operator (ADR-0010, 2026-10-06
    - Repository permissions: Contents read and write, Pull requests read and write, Issues read-only, Metadata read-only. Nothing else. No Workflows, so a worker cannot push a change under `.github/workflows/`; that is intended.
    - "Where can this GitHub App be installed?": Only on this account.
 2. Install it on the repositories the drain works in, by "Only select repositories". Note the installation id from the installation page URL.
-3. Generate a private key. Store it base64-encoded, because `security find-generic-password -w` prints a multi-line secret as hex. A trailing `-w` with no value makes `security` prompt for it, so the key never sits in argv:
-
-   ```bash
-   base64 -i forgectl-worker.pem | tr -d '\n' | pbcopy
-   security add-generic-password -U -s forgectl-worker-app -a forgectl -w
-   # paste at the prompt, twice
-   pbcopy < /dev/null
-   rm -P forgectl-worker.pem
-   ```
-
+3. Generate a private key and store it base64-encoded with the recipe in `docs/configuration.md` § Worker GitHub identity, which keeps the key out of every process's argv. Task 1.1 confirms `forgectl doctor` reads it back.
 4. Read the bot's user id: `gh api '/users/forgectl-worker%5Bbot%5D' --jq .id`.
 5. Add to the forgectl config:
 
@@ -46,11 +37,11 @@ A worker is a full harness session running as the operator (ADR-0010, 2026-10-06
    ```
 
 6. Apply the `update` rule from #1134 §5 so the App cannot move `main`, and run its proof: the App token's merge of a test PR fails, and an admin merge still works. Until this is done, Pull requests write lets the App merge through the API.
-7. Run `forgectl doctor` and check the `identity` line reads `ok`.
+7. Run `forgectl doctor` and check the `worker identity` row reads `ok`. It proves the key, App, installation, bot login and bot user id agree, without minting a token.
 
 ## Decisions
 
-**Mint per launch, scoped to one repository.** `POST /app/installations/{id}/access_tokens` with `repositories: [<repo>]` and `permissions: {contents: write, pull_requests: write, issues: read, metadata: read}`. The JWT is RS256, `iat` 60 s in the past, `exp` 9 minutes out, signed with the stdlib. Requesting fewer permissions than the installation holds is allowed, so a later App permission added by hand does not widen workers.
+**Mint per launch, scoped to one repository.** GitHub resolves the repository name inside the installation's account, so `Mint` reads back the repository GitHub scoped the token to, and revokes and refuses a token scoped to anything but the one asked for, or one with no readable expiry. `POST /app/installations/{id}/access_tokens` with `repositories: [<repo>]` and `permissions: {contents: write, pull_requests: write, issues: read, metadata: read}`. The JWT is RS256, `iat` 60 s in the past, `exp` 9 minutes out, signed with the stdlib. Requesting fewer permissions than the installation holds is allowed, so a later App permission added by hand does not widen workers.
 
 **Deliver through a private `gh` config directory, not `GH_TOKEN`.** An environment variable cannot change inside a running session, and the token expires in an hour. `gh` reads `hosts.yml` on every invocation, so the drain can refresh the file under a live worker. Layout: `$XDG_STATE_HOME/forgectl/surface/identity/<worker>/` (0700), holding `hosts.yml` (0600):
 
@@ -69,7 +60,7 @@ The worker gets `GH_CONFIG_DIR` pointing there. The keyring lookup is keyed by u
 
 **Revoke on close and reap.** `DELETE /installation/token` with the worker's own token, then remove the directory. A failed revoke is logged and the directory still goes; the token dies within the hour.
 
-**Intake trusts labels by author.** A candidate whose issue author or `queue:drain` labeler equals `bot_login` (or whose user id equals `bot_user_id`) is refused with reason `worker-labeled`, before the confirmation prompt shows it. With Issues read-only, the App cannot label at all, so this check is the backstop for a later permission change.
+**Intake trusts labels by author, and already refuses bots.** `intake.Admit` refuses an author or latest labeler whose GraphQL type is `Bot`, or whose login ends in `[bot]`, whatever the login. The worker App's bot is one, so no new check is needed. With Issues read-only the App cannot label at all; the bot refusal is the backstop if that permission is ever widened.
 
 **Fail closed for workers, open for the operator.** With `[surface.identity]` set, a mint failure refuses the launch (exit 1, message naming the failed step). Falling back to the operator identity would silently undo the change. With no table, nothing is minted.
 
