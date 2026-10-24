@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -203,7 +204,11 @@ func versionFromLink(binPath string) (string, error) {
 func truncateForError(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 80 {
-		return s[:80] + "..."
+		cut := 80
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }

@@ -496,3 +496,23 @@ func TestRowName(t *testing.T) {
 		}
 	}
 }
+
+// A GraphQL error message cut to maxErrorText keeps whole characters: an "é"
+// straddling the limit is dropped, not split into a stray byte.
+func TestDecodePageCutsErrorTextOnACharacter(t *testing.T) {
+	msg := strings.Repeat("a", maxErrorText-1) + "é" + strings.Repeat("b", 10)
+	body, err := json.Marshal(map[string]any{"errors": []map[string]string{{"message": msg}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = DecodePage(body)
+	if err == nil {
+		t.Fatal("DecodePage accepted an errors array")
+	}
+	if strings.Contains(err.Error(), `\x`) {
+		t.Errorf("error quotes a split character: %v", err)
+	}
+	if !strings.Contains(err.Error(), strings.Repeat("a", maxErrorText-1)+`"`) {
+		t.Errorf("error lost the text before the character: %v", err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // The frame types and their validators are unexported, so these tests live
@@ -641,5 +642,17 @@ func TestWriteFrame_RefusesToSendAnInvalidFrame(t *testing.T) {
 	valid.Path = "/bin/true"
 	if err := writeFrame(&buf, valid); err != nil {
 		t.Errorf("writeFrame refused a valid frame: %v", err)
+	}
+}
+
+// truncate keeps whole characters: a "é" straddling the limit is dropped, not
+// split into a stray byte.
+func TestTruncateCutsOnACharacter(t *testing.T) {
+	got := truncate(strings.Repeat("a", 9)+"é"+"tail", 10)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate split a character: %q", got)
+	}
+	if want := strings.Repeat("a", 9) + "… (truncated)"; got != want {
+		t.Errorf("truncate = %q, want %q", got, want)
 	}
 }

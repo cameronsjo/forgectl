@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Query reads one page of open issues carrying any of $labels, oldest first,
@@ -164,7 +165,11 @@ func DecodePage(data []byte) (Page, error) {
 	if len(resp.Errors) > 0 {
 		msg := resp.Errors[0].Message
 		if len(msg) > maxErrorText {
-			msg = msg[:maxErrorText]
+			cut := maxErrorText
+			for cut > 0 && !utf8.RuneStart(msg[cut]) {
+				cut--
+			}
+			msg = msg[:cut]
 		}
 		return Page{}, fmt.Errorf("%w: GitHub returned %d error(s), the first %q", ErrResponse, len(resp.Errors), msg)
 	}
