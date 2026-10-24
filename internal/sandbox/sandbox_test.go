@@ -610,6 +610,14 @@ func TestWithinWorkspace_UnresolvedTargetUnderSymlinkedRoot(t *testing.T) {
 	if target := filepath.Join(ws, "out", "new.txt"); WithinWorkspace(ws, target) {
 		t.Errorf("WithinWorkspace(%q) = true, want false: its parent links outside", target)
 	}
+	// A dangling link above the leaf could point anywhere once its target
+	// appears, so it is refused; a dangling leaf (above) is not.
+	if err := os.Symlink(filepath.Join(external, "missing"), filepath.Join(ws, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	if target := filepath.Join(ws, "gone", "new.txt"); WithinWorkspace(ws, target) {
+		t.Errorf("WithinWorkspace(%q) = true, want false: its parent is a dangling link", target)
+	}
 }
 
 // TestSandbox_CloneFailure_DoesNotEchoURLOrStderr: the repo can be an https
