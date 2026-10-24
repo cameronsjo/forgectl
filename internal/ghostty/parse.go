@@ -10,7 +10,10 @@
 // produces is what's pinned — not a guess at one.
 package ghostty
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Theme is one entry from `ghostty +list-themes --plain`. Custom discriminates
 // Cameron's own themes (~/.config/ghostty/themes/) from the ~460 built-ins
@@ -86,10 +89,12 @@ const keybindPrefix = "keybind = "
 // that shape implies, because the trigger itself can contain one — verified
 // against a live 116-binding listing, which has exactly two such lines:
 // "keybind = super+==increase_font_size:1" (super, plus the "=" key) and
-// "keybind = super+ctrl+==equalize_splits". No action in that listing
-// contains a literal "=", so the trigger/action split is on the LAST "=" in
-// the remainder after the "keybind = " prefix — not the first. Blank lines
-// and any line missing the prefix or a "=" in its remainder are skipped.
+// "keybind = super+ctrl+==equalize_splits". An action can contain one too: a
+// "text:" or "csi:" binding sends arbitrary bytes, so "text:\x00=" (a tmux
+// prefix, then "=") is a real action. So neither the first nor the last "="
+// is the separator; trigger/action splits on the first "=" that is not itself
+// the "=" key — see triggerEnd. Blank lines and any line missing the prefix or
+// a "=" in its remainder are skipped.
 func ParseKeybinds(output string) []Keybind {
 	var binds []Keybind
 	for _, line := range strings.Split(output, "\n") {
@@ -109,13 +114,35 @@ func parseKeybindLine(line string) (Keybind, bool) {
 	if !ok {
 		return Keybind{}, false
 	}
-	idx := strings.LastIndex(rest, "=")
+	idx := triggerEnd(rest)
 	if idx < 0 {
 		return Keybind{}, false
 	}
 	trigger := rest[:idx]
 	action, comment := splitTrailingComment(rest[idx+1:])
 	return Keybind{Trigger: trigger, Action: action, Comment: comment}, true
+}
+
+// triggerEnd returns the index of the "=" that ends the trigger, or -1.
+//
+// It walks the trigger key by key. A key's first character is taken as-is,
+// because that is where the "=" key (and "+", ">" or ":") appears: "super+=",
+// "super++", "==". After it, "+" or ">" starts the next key of a chord or
+// sequence, ":" ends a prefix such as "global:", and "=" is the separator.
+func triggerEnd(rest string) int {
+	i := 0
+	for i < len(rest) {
+		_, size := utf8.DecodeRuneInString(rest[i:])
+		i += size
+		for i < len(rest) && strings.IndexByte("+>:=", rest[i]) < 0 {
+			i++
+		}
+		if i < len(rest) && rest[i] == '=' {
+			return i
+		}
+		i++
+	}
+	return -1
 }
 
 // splitTrailingComment peels a trailing "# ..." annotation off an action —
