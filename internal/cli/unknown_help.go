@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -178,5 +177,5 @@ func renderCommandError(ctx context.Context, root *cobra.Command, th theme.Theme
 	shim.SetErr(root.ErrOrStderr())
 	// Empty, not nil: nil makes cobra read os.Args.
 	shim.SetArgs([]string{})
-	return fang.Execute(ctx, shim, fangOptions(root.Version, "", th)...)
+	return fangExecute(ctx, shim, th, fangOptions(root.Version, "", th)...)
 }
