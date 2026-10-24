@@ -2,6 +2,8 @@ package sweep
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,9 +152,10 @@ func opinions(in Input, briefs []Brief, workers []Worker, prs []PR, merged []Mer
 			add("sweep:churn", ToneNote, fmt.Sprintf("%s carries the most churn: %d of %d merges (%.0f%%).", top[0].Repo, top[0].Count, n, float64(top[0].Count)/float64(n)*100), ActionNone, nil)
 		}
 		var untouched []string
+		names := displayNames(slices.Collect(maps.Keys(sweepRepos)))
 		for r := range sweepRepos {
-			if perRepo[shortName(r)] == 0 {
-				untouched = append(untouched, shortName(r))
+			if perRepo[r] == 0 {
+				untouched = append(untouched, names[r])
 			}
 		}
 		sort.Strings(untouched)

@@ -2,6 +2,7 @@ package sweep
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -399,5 +400,41 @@ func TestPaneIsValidatedBeforeItIsWritten(t *testing.T) {
 	in.Agents = []Agent{{Pane: "bad pane\x1b", Status: "idle", Names: []string{"cos-a"}}}
 	if p := workerOf(t, Build(in), "cos-a").Pane; p != "" {
 		t.Errorf("pane = %q", p)
+	}
+}
+
+// Two swept repos can share a name under different owners; each keeps its
+// own merge count, and the shared name is shown with its owner.
+func TestBuild_SameNameUnderTwoOwnersCountsSeparately(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	briefs := []Brief{
+		{Name: "cos-a", Repos: []string{"alice/tools"}, Phase: PhaseLaunched, Marks: map[string]time.Time{}},
+		{Name: "cos-b", Repos: []string{"bob/tools"}, Phase: PhaseLaunched, Marks: map[string]time.Time{}},
+	}
+	l := Build(Input{Now: now, Since: now.Add(-24 * time.Hour), Briefs: briefs,
+		Merged: []MergedPR{{Repo: "alice/tools", Number: 1, ClosedAt: now.Add(-time.Hour)}},
+	})
+	var untouched string
+	for _, o := range l.Opinions {
+		if o.ID == "sweep:untouched" {
+			untouched = o.Text
+		}
+	}
+	if untouched != "1 swept repos have no merge yet: bob/tools." {
+		t.Errorf("untouched = %q, want bob/tools untouched", untouched)
+	}
+	if l.ReposTouched != 1 || len(l.TopRepos) != 1 || l.TopRepos[0].Repo != "tools" {
+		t.Errorf("ReposTouched = %d, TopRepos = %+v, want 1 and tools", l.ReposTouched, l.TopRepos)
+	}
+
+	l = Build(Input{Now: now, Since: now.Add(-24 * time.Hour), Briefs: briefs,
+		Merged: []MergedPR{
+			{Repo: "alice/tools", Number: 1, ClosedAt: now.Add(-2 * time.Hour)},
+			{Repo: "bob/tools", Number: 2, ClosedAt: now.Add(-time.Hour)},
+		},
+	})
+	want := []RepoCount{{Repo: "alice/tools", Count: 1}, {Repo: "bob/tools", Count: 1}}
+	if l.ReposTouched != 2 || !reflect.DeepEqual(l.TopRepos, want) {
+		t.Errorf("ReposTouched = %d, TopRepos = %+v, want 2 and %+v", l.ReposTouched, l.TopRepos, want)
 	}
 }

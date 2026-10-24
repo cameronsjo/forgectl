@@ -124,9 +124,10 @@ func Build(in Input) Ledger {
 		Sources:       in.Sources,
 		Merged:        len(merged),
 	}
+	// Keyed by owner/repo: two swept repos can share a name.
 	perRepo := map[string]int{}
 	for _, m := range merged {
-		perRepo[shortName(m.Repo)]++
+		perRepo[m.Repo]++
 		if m.Bot {
 			l.DependencyBumps++
 		}
@@ -218,8 +219,10 @@ func mergedInScope(in Input, sweepRepos map[string]bool) []MergedPR {
 
 func topRepos(perRepo map[string]int, n int) []RepoCount {
 	out := make([]RepoCount, 0, len(perRepo))
+	full := make([]string, 0, len(perRepo))
 	for r, c := range perRepo {
 		out = append(out, RepoCount{Repo: r, Count: c})
+		full = append(full, r)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count != out[j].Count {
@@ -227,6 +230,10 @@ func topRepos(perRepo map[string]int, n int) []RepoCount {
 		}
 		return out[i].Repo < out[j].Repo
 	})
+	names := displayNames(full)
+	for i := range out {
+		out[i].Repo = names[out[i].Repo]
+	}
 	if len(out) > n {
 		out = out[:n]
 	}
@@ -251,6 +258,24 @@ func shortName(repo string) string {
 		return name
 	}
 	return repo
+}
+
+// displayNames maps each owner/repo to its bare name, or keeps owner/repo
+// when another repo in the set shares that name.
+func displayNames(repos []string) map[string]string {
+	seen := map[string]int{}
+	for _, r := range repos {
+		seen[shortName(r)]++
+	}
+	out := make(map[string]string, len(repos))
+	for _, r := range repos {
+		if seen[shortName(r)] > 1 {
+			out[r] = r
+		} else {
+			out[r] = shortName(r)
+		}
+	}
+	return out
 }
 
 func shortNames(repos []string) []string {
