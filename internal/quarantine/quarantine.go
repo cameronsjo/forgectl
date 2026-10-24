@@ -673,6 +673,12 @@ func foldPattern(seg string) string {
 			b.WriteRune('[')
 			b.WriteRune(lower)
 			b.WriteRune(upper)
+			if c != lower && c != upper {
+				// A title-case letter (ǅ, ǈ, ǋ, ǲ) is neither its own lower
+				// nor upper case; without it the class would not match the
+				// pattern's own text.
+				b.WriteRune(c)
+			}
 			b.WriteRune(']')
 		}
 	}
