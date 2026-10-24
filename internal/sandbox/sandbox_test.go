@@ -580,6 +580,38 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+// A workspace reached through a symlinked parent (macOS's $TMPDIR resolves
+// /var to /private/var) still holds a dangling link or a file not created yet;
+// a missing file beneath a link that leaves the workspace is still outside.
+func TestWithinWorkspace_UnresolvedTargetUnderSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	ws := filepath.Join(alias, WorkspacePrefix+"1")
+	if err := os.Mkdir(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(ws, ".mcp.json")
+	if err := os.Symlink("does-not-exist", dangling); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{dangling, filepath.Join(ws, "new.txt"), filepath.Join(ws, "a", "b", "new.txt")} {
+		if !WithinWorkspace(ws, target) {
+			t.Errorf("WithinWorkspace(%q) = false, want true", target)
+		}
+	}
+
+	external := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(ws, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if target := filepath.Join(ws, "out", "new.txt"); WithinWorkspace(ws, target) {
+		t.Errorf("WithinWorkspace(%q) = true, want false: its parent links outside", target)
+	}
+}
+
 // TestSandbox_CloneFailure_DoesNotEchoURLOrStderr: the repo can be an https
 // URL carrying a token, and the CommandError renders it in its argv; git's
 // stderr relays the remote's sideband (#658).

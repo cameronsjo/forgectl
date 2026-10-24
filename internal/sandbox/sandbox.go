@@ -280,20 +280,35 @@ func checkTeardownTarget(workspace string) error {
 // inside workspace. filepath.Glob can match a symlink whose target escapes the
 // sandbox; deleting through it would reach outside workspace, so every match
 // should be re-checked here before removal.
+//
+// A path that does not resolve whole (a dangling link, a file not created yet)
+// is judged by its longest existing prefix, resolved, plus the rest: so a
+// workspace under a symlinked temp dir (macOS's /var -> /private/var) still
+// holds it, and a missing file under a link that leaves the workspace does not.
 func WithinWorkspace(workspace, target string) bool {
-	realWS, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		realWS = workspace
-	}
-	realTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		realTarget = target
-	}
-	rel, err := filepath.Rel(realWS, realTarget)
+	rel, err := filepath.Rel(resolveExisting(workspace), resolveExisting(target))
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting resolves the symlinks in p's longest existing prefix and
+// rejoins the unresolved rest. With no prefix resolvable it returns p cleaned.
+func resolveExisting(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // RejectOptionLike guards a value that becomes a positional argument in an
