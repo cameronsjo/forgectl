@@ -57,7 +57,7 @@ Several command groups own their own config section, documented alongside that c
 - [`desk`](commands/desk.md#forgectl-desk-add-file) — `[desk]`, `notify_herdr` and `notify_macos`: whether `desk add` signals the operator through herdr and macOS (both default on)
 - [`attention`](commands/attention.md#config) — `[attention]`, `ttl_hours` (1 to 720, default 24): how long a record no visible herdr pane vouches for is kept; `worker_prefix` (default `cos-`): sessions whose names start with it are tagged `origin: worker`. An out-of-range value exits 2 and names the key
 - [`sweep`](commands/sweep.md#config) — `[sweep]`, `owner`, `since` (YYYY-MM-DD), `briefs` (absolute path) and `reviewers` (cadence-review marker names that count, a claim filter): nothing is defaulted, and a missing key exits 2 and names it; `--owner`, `--since` and `--briefs` override the first three
-- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default. `[surface.profiles]`, the named Claude config directories a worker can run under; see [Worker profiles](#worker-profiles). `[surface.intake]`, which GitHub issues `surface intake gh` may queue: `authors` (default: the repository owner, when that owner is the `gh` account), `labels` (default `["queue:drain"]`), `max_per_run`; an unknown key makes the file invalid; see [Intake](herdr.md#intake). `[surface.merge]`, the worker PR merge policy (ADR-0011): `mode` (`off`; `manual`, where a person at a terminal confirms each `surface merge`; `auto`, which also lets the drain's autopilot merge, the only unattended merge path), `machine` (the value `forgectl surface merge-machine` prints), `approvers` (`cadence-review` is the one accepted; any other entry makes the file invalid), `marker_author_id` (required when `mode` is not `off`), `required_reviewers`, `method`, `repos`, and per-repository `workflow`, `required_checks` and `paths` tables (`paths` can reach no Go package: the built-in refusals cover every top-level file and the whole Go tree, `internal/**` and `cmd/**`, so for this repository a useful value is `["docs/**"]`). A missing table, any error, a machine mismatch, or a config file that is a symlink, not a regular file, not owned by you, not mode `0600` or with more than one hard link resolves the mode to `off`; an unknown key also makes the file invalid; see [Status and merge policy](herdr.md#status-and-merge-policy)
+- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default. `[surface.profiles]`, the named Claude config directories a worker can run under; see [Worker profiles](#worker-profiles). `[surface.intake]`, which GitHub issues `surface intake gh` may queue: `authors` (default: the repository owner, when that owner is the `gh` account), `labels` (default `["queue:drain"]`), `max_per_run`; an unknown key makes the file invalid; see [Intake](herdr.md#intake). `[surface.merge]`, the worker PR merge policy (ADR-0011): `mode` (`off`; `manual`, where a person at a terminal confirms each `surface merge`; `auto`, which also lets the drain's autopilot merge, the only unattended merge path), `machine` (the value `forgectl surface merge-machine` prints), `approvers` (`cadence-review` is the one accepted; any other entry makes the file invalid), `marker_author_id` (required when `mode` is not `off`), `required_reviewers`, `method`, `repos`, and per-repository `workflow`, `required_checks` and `paths` tables (`paths` can reach no Go package: the built-in refusals cover every top-level file and the whole Go tree, `internal/**` and `cmd/**`, so for this repository a useful value is `["docs/**"]`). A missing table, any error, a machine mismatch, or a config file that is a symlink, not a regular file, not owned by you, not mode `0600` or with more than one hard link resolves the mode to `off`; an unknown key also makes the file invalid; see [Status and merge policy](herdr.md#status-and-merge-policy). `[surface.identity]`, the GitHub App drain workers will act as instead of you; see [Worker GitHub identity](#worker-github-identity)
 
   A complete `[surface.merge]` table looks like this; replace the machine value, the user id and the repository with your own:
 
@@ -99,6 +99,32 @@ config_dir = "~/.claude-work"   # absolute, or starting with "~/"
 - That pause stops the whole drain, rows with no profile included, so removing a profile while rows still name it holds every queued row until you dequeue those rows and run `drain start` again.
 - A profile applies to claude workers only, and sets only `CLAUDE_CONFIG_DIR`; it adds nothing else to the worker's environment.
 - `forgectl config` shows each profile's name and `config_dir` (in `--json`, `surface.profiles` is a list of `{name, config_dir}`), so you can check which accounts workers run under without a launch.
+
+## Worker GitHub identity
+
+`[surface.identity]` names the GitHub App drain workers will act as instead of you (cameronsjo/forgectl#1309, ADR-0010 2026-10-20 amendment). **Today only `forgectl doctor` reads it**: worker launches still act as you until the launch wiring in `openspec/changes/worker-github-app/` lands.
+
+```toml
+[surface.identity]
+app_id = 123456                  # the App's settings page
+installation_id = 7890123        # the number at the end of the installation page URL
+bot_login = "forgectl-worker[bot]"
+bot_user_id = 987654321          # gh api '/users/forgectl-worker%5Bbot%5D' --jq .id
+# keychain_service = "forgectl-worker-app"   # the default
+```
+
+- Every key but `keychain_service` is required once the table exists. A missing key, a bad value or an unknown key makes the file invalid, and the table is kept so a worker launch refuses rather than falls back to you.
+- `bot_login` is the App's slug followed by `[bot]`; the slug is lowercase letters, digits and `-`.
+- The App's private key lives in the login keychain under `keychain_service`, base64-encoded, because `security find-generic-password -w` prints a multi-line secret as hex. Store it without the key reaching any process's argv (`printf` is a shell builtin, so the key stays inside the shell):
+
+  ```bash
+  printf 'add-generic-password -U -s forgectl-worker-app -a forgectl -w %s\n' \
+    "$(base64 -i forgectl-worker.pem | tr -d '\n')" | security -i
+  rm -P forgectl-worker.pem
+  forgectl doctor   # the worker identity row should read ok
+  ```
+
+- The `worker identity` doctor row reads the key and asks GitHub whether the App, the installation, `bot_login` and `bot_user_id` agree. It mints no token. A network failure is `warn`; anything else that does not agree is `fail`, with a hint naming the key to fix.
 
 ## Theme
 
