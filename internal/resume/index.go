@@ -322,9 +322,9 @@ func Matches(s Session, filter string) bool {
 // scanHistory folds history.jsonl into one record per session id, keeping the
 // newest prompt and timestamp for each.
 //
-// It decodes as a JSON *stream* rather than scanning lines: a history entry
-// embeds pasted content verbatim, so single lines run to megabytes and a
-// bufio.Scanner would need an arbitrary buffer ceiling to match.
+// It reads line by line, skipping a corrupt record, and keeps lines up to
+// historyLineMax whole: a history entry embeds pasted content verbatim, so
+// single lines run to megabytes and each is a session.
 func scanHistory(path string) (map[string]*Session, error) {
 	f, err := os.Open(path) // #nosec G304 -- a fixed name under the caller's own ~/.claude
 	if err != nil {
@@ -343,7 +343,10 @@ func scanHistory(path string) (map[string]*Session, error) {
 	// the whole read — and since history.jsonl is append-only, what that
 	// silently discards is everything AFTER the bad line: the newest
 	// sessions, which are exactly the ones the picker exists to show.
-	forEachLine(f, func(line []byte) bool {
+	// Unlike a transcript, the fields we want are ON the long lines (a
+	// pasted prompt is the record), so the cap is a sanity bound, not the
+	// transcript's 64 KiB skip.
+	forEachLineUpTo(f, historyLineMax, func(line []byte) bool {
 		var rec historyRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return false
@@ -440,6 +443,11 @@ type transcriptRecord struct {
 // field we want lives on one.
 const transcriptBufSize = 64 << 10 // 64 KiB
 
+// historyLineMax bounds one history.jsonl line. A history record carries its
+// pasted prompt inline, so lines run to megabytes and each one is a session we
+// must not drop; the bound only stops a corrupt file from being read whole.
+const historyLineMax = 32 << 20 // 32 MiB
+
 // forEachLine calls fn for every line in r that fits the read buffer, skipping
 // any longer one and continuing.
 //
@@ -467,6 +475,32 @@ func forEachLine(r io.Reader, fn func(line []byte) (stop bool)) {
 		if len(line) > 0 && fn(line) {
 			return
 		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// forEachLineUpTo is forEachLine for lines longer than the read buffer: it
+// joins a line's pieces and calls fn when the whole line is at most limit
+// bytes, skipping (and draining) any longer one.
+func forEachLineUpTo(r io.Reader, limit int, fn func(line []byte) (stop bool)) {
+	br := bufio.NewReaderSize(r, transcriptBufSize)
+	var long []byte
+	skipping := false
+	for {
+		piece, err := br.ReadSlice('\n')
+		if !skipping {
+			long = append(long, piece...)
+			skipping = len(long) > limit
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue // the line goes on
+		}
+		if !skipping && len(long) > 0 && fn(long) {
+			return
+		}
+		long, skipping = long[:0], false
 		if err != nil {
 			return
 		}
