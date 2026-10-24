@@ -12,7 +12,9 @@ package ghostty
 // ParseKeybinds (Classification: pure parser)
 //   [x] Happy: an ordinary "keybind = trigger=action" line parses
 //   [x] Happy: a trigger containing "=" ("super+=") still splits correctly —
-//       the LAST "=" in the remainder is the trigger/action separator
+//       the "=" key is not taken for the trigger/action separator
+//   [x] Happy: an action containing "=" ("text:\x00=") keeps it, and "+",
+//       ">" and ":" keys and prefixes in the trigger still split right
 //   [x] Happy: a trailing "# comment" on the action is peeled into Comment
 //   [x] Happy: an action arg with ":" args is preserved whole
 //   [x] Happy: blank lines are skipped
@@ -138,8 +140,8 @@ func TestParseKeybinds_LiveFixture(t *testing.T) {
 		t.Errorf("super+shift+,: Action = %q, want reload_config", kb.Action)
 	}
 
-	// The trigger itself contains "=" (the equals key) — the LAST "=" in the
-	// remainder must be the trigger/action separator, not the first.
+	// The trigger itself contains "=" (the equals key), so the first "=" in
+	// the remainder is not the trigger/action separator.
 	kb, ok := byTrigger["super+="]
 	if !ok {
 		t.Fatalf("expected trigger %q to parse, got triggers: %v", "super+=", triggerNames(binds))
@@ -238,5 +240,32 @@ func TestConfig_Theme_AbsentReturnsEmpty(t *testing.T) {
 	cfg := ParseConfig("font-size = 14\n")
 	if got := cfg.Theme(); got != "" {
 		t.Errorf("Theme() = %q, want empty", got)
+	}
+}
+
+// The separator is the "=" that ends the trigger, wherever else "=" appears:
+// in an action that sends text, or as the "=" or "+" key in the trigger.
+func TestParseKeybinds_EqualsInTriggerOrAction(t *testing.T) {
+	cases := []struct {
+		line, trigger, action string
+	}{
+		{`keybind = super+ctrl+b=text:\x00=`, "super+ctrl+b", `text:\x00=`},
+		{`keybind = ctrl+a=csi:1;5=x`, "ctrl+a", "csi:1;5=x"},
+		{`keybind = super+==text:a=b`, "super+=", "text:a=b"},
+		{`keybind = super++=increase_font_size:1`, "super++", "increase_font_size:1"},
+		{`keybind = ==ignore`, "=", "ignore"},
+		{`keybind = ctrl+a>==text:=`, "ctrl+a>=", "text:="},
+		{`keybind = global:super+==toggle_quick_terminal`, "global:super+=", "toggle_quick_terminal"},
+		{`keybind = super+ö=text:ö=`, "super+ö", "text:ö="},
+	}
+	for _, tc := range cases {
+		binds := ParseKeybinds(tc.line)
+		if len(binds) != 1 {
+			t.Errorf("%s: got %d keybinds, want 1", tc.line, len(binds))
+			continue
+		}
+		if binds[0].Trigger != tc.trigger || binds[0].Action != tc.action {
+			t.Errorf("%s: got trigger %q action %q, want %q and %q", tc.line, binds[0].Trigger, binds[0].Action, tc.trigger, tc.action)
+		}
 	}
 }
