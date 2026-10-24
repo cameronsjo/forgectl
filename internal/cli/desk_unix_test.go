@@ -502,7 +502,11 @@ func TestDeskWatch_ClosedPipeExits141(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	// The waits below are on events (the first line, the exit). This context
+	// only stops a hung child. A re-exec of the test binary on a loaded host
+	// has taken over 20 s to print its first line (#1120), so the bound is
+	// generous.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	cmd := reExecTest(ctx, "TestDeskCLIHelperProcess", deskWatchHelperEnv+"="+string(args))
 	stdout, err := cmd.StdoutPipe()
