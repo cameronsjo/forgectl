@@ -362,7 +362,7 @@ jobs:
           [[ -f "$CASK" && ! -L "$CASK" ]] || fail "no cask file in the artifact"
           size="$(wc -c < "$CASK")"
           (( size > 0 && size <= 8192 )) || fail "cask is ${size} bytes; expected 1 to 8192"
-          [[ "$(LC_ALL=C tr -d '\n -~' < "$CASK" | wc -c)" == 0 ]] || fail "cask holds a byte outside printable ASCII"
+          (( $(LC_ALL=C tr -d '\n -~' < "$CASK" | wc -c) == 0 )) || fail "cask holds a byte outside printable ASCII"
           grep -qxF 'cask "forgectl" do' "$CASK" || fail "cask does not declare forgectl"
           grep -qxF "  version \"${version}\"" "$CASK" || fail "cask version is not ${version}"
           [[ "$(grep -cE '^[[:space:]]*url ' "$CASK")" == 2 ]] || fail "cask must carry exactly two url lines"

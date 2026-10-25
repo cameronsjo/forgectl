@@ -162,7 +162,11 @@ func TestReleaseWorkflowCaskCheckAcceptsGoReleaserCask(t *testing.T) {
 	if tampered == string(fixture) {
 		t.Fatal("fixture no longer carries the arm64 digest the control edits")
 	}
-	if out, err := run(t, tampered); err == nil {
+	out, err := run(t, tampered)
+	if err == nil {
 		t.Fatalf("cask check accepted a cask whose arm64 sha256 does not match the release:\n%s", out)
+	}
+	if !strings.Contains(out, "arm64 sha256 does not match") {
+		t.Fatalf("cask check rejected the tampered cask for another reason:\n%s", out)
 	}
 }
