@@ -312,7 +312,7 @@ jobs:
           name: cask
           path: dist/homebrew/Casks/forgectl.rb
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
       # The ephemeral keychain holds the Developer ID private key with a partition
       # list that lets codesign use it unattended. Delete it whether or not the
@@ -416,7 +416,11 @@ jobs:
           [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the tap's current Casks/forgectl.rb"; exit 1; }
           ours="${TAG#v}"
           theirs="$(jq -r .content <<< "$tap" | base64 -d | sed -n 's/^  version "\(.*\)"$/\1/p')"
-          if [[ -n "$theirs" && "$theirs" != "$ours" && "$(printf '%s\n%s\n' "$ours" "$theirs" | sort -V | tail -n1)" == "$theirs" ]]; then
+          # Compare the x.y.z cores only, so a prerelease in the tap never
+          # blocks its own stable release.
+          ours_core="${ours%%[-+]*}"
+          theirs_core="${theirs%%[-+]*}"
+          if [[ -n "$theirs_core" && "$theirs_core" != "$ours_core" && "$(printf '%s\n%s\n' "$ours_core" "$theirs_core" | sort -V | tail -n1)" == "$theirs_core" ]]; then
             echo "::error::the tap already has forgectl ${theirs}, newer than ${ours}; not pushing an older cask"
             exit 1
           fi
