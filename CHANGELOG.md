@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.56.0](https://github.com/cameronsjo/forgectl/compare/v0.55.0...v0.56.0) (2026-10-24)
+
+
+### Features
+
+* **doctor:** add a `worker identity` row and the `[surface.identity]` config table for the drain workers' GitHub App ([0c5c12a](https://github.com/cameronsjo/forgectl/commit/0c5c12ae9fb77b7f2eb42b8d2874be3d79c6c396))
+
+
+### Bug Fixes
+
+* **cli:** help and error output no longer queries the terminal inside tmux/screen, with NO_COLOR, TERM=dumb, or a forced theme mode ([59c8066](https://github.com/cameronsjo/forgectl/commit/59c8066162146067d8688f59b40335e76d76a336))
+* **herdr:** organize --apply exits 0 with a warning when only the focus restore fails ([c02304e](https://github.com/cameronsjo/forgectl/commit/c02304e021a3b4a1e6174bfa21d360f39765a50e))
+
 ## [0.55.0](https://github.com/cameronsjo/forgectl/compare/v0.54.0...v0.55.0) (2026-10-24)
 
 
