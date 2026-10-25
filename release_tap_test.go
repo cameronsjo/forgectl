@@ -15,8 +15,9 @@ type releaseWorkflow struct {
 }
 
 type releaseJob struct {
-	Environment yaml.Node     `yaml:"environment"`
-	Steps       []releaseStep `yaml:"steps"`
+	Environment yaml.Node         `yaml:"environment"`
+	Env         map[string]string `yaml:"env"`
+	Steps       []releaseStep     `yaml:"steps"`
 }
 
 type releaseStep struct {
@@ -64,6 +65,11 @@ func TestReleaseWorkflowAppKeyStaysAwayFromRepoCode(t *testing.T) {
 	holders := 0
 	for name, job := range wf.Jobs {
 		holds := false
+		for _, v := range job.Env {
+			if strings.Contains(v, "RELEASE_APP_PRIVATE_KEY") {
+				holds = true
+			}
+		}
 		for _, s := range job.Steps {
 			text := s.Run
 			for _, v := range s.With {
@@ -91,6 +97,13 @@ func TestReleaseWorkflowAppKeyStaysAwayFromRepoCode(t *testing.T) {
 	}
 	if holders == 0 {
 		t.Fatal("no job in release.yml references RELEASE_APP_PRIVATE_KEY; the guard matched nothing")
+	}
+	// Each job must name its environment, or its secrets resolve from the
+	// repository with no deployment policy in front of them.
+	for job, want := range map[string]string{"tap": "release", "goreleaser": "signing"} {
+		if got := environmentName(wf.Jobs[job].Environment); got != want {
+			t.Errorf("job %q runs in environment %q; want %q", job, got, want)
+		}
 	}
 }
 

@@ -416,8 +416,9 @@ jobs:
           [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the tap's current Casks/forgectl.rb"; exit 1; }
           ours="${TAG#v}"
           theirs="$(jq -r .content <<< "$tap" | base64 -d | sed -n 's/^  version "\(.*\)"$/\1/p')"
-          # Compare the x.y.z cores only, so a prerelease in the tap never
-          # blocks its own stable release.
+          # Best effort, against an accidental re-run: it compares x.y.z cores
+          # only, so a prerelease in the tap never blocks its own stable
+          # release, and it is skipped when the tap's version is unreadable.
           ours_core="${ours%%[-+]*}"
           theirs_core="${theirs%%[-+]*}"
           if [[ -n "$theirs_core" && "$theirs_core" != "$ours_core" && "$(printf '%s\n%s\n' "$ours_core" "$theirs_core" | sort -V | tail -n1)" == "$theirs_core" ]]; then
