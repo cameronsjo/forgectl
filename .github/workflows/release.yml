@@ -135,8 +135,8 @@ jobs:
           # standard-library security fixes arrive in patch releases, and the
           # Vulncheck workflow scans against the newest patch too.
           check-latest: true
-          # No restored module or build cache in a job that holds the App
-          # private key and signs the release. A cache entry is written by
+          # No restored module or build cache in a job that holds the signing
+          # identity and a contents: write token. A cache entry is written by
           # other runs, so restoring one would run their output here
           # (zizmor cache-poisoning).
           cache: false
@@ -290,7 +290,8 @@ jobs:
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           # An exact version, not `~> v2`: the action downloads this binary at
-          # run time, in a job that holds the App private key. A range would
+          # run time, in a job that holds the signing identity and a
+          # contents: write token. A range would
           # run whatever GoReleaser publishes next without review
           # (cadence-ecosystem release-rhythm security review I-1).
           version: 'v2.18.2'
@@ -372,7 +373,9 @@ jobs:
             digest="$(jq -r --arg n "$asset" '[.assets[] | select(.name == $n) | .digest // ""] | if length == 1 then .[0] else "" end' <<< "$release")"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "release ${TAG} has no single sha256 digest for ${asset}"
             # The line directly above this arch's url must be its sha256.
-            url="url \"https://github.com/${REPO}/releases/download/${TAG}/forgectl_#{version}_darwin_${arch}.tar.gz\""
+            # GoReleaser writes the tag segment as v#{version}, not the literal
+            # tag; the version line checked above ties #{version} to this tag.
+            url="url \"https://github.com/${REPO}/releases/download/v#{version}/forgectl_#{version}_darwin_${arch}.tar.gz\""
             above="$(awk -v want="$url" '{ line = $0; sub(/^[ \t]+/, "", line) } line == want { print prev; n++ } { prev = line } END { exit n == 1 ? 0 : 1 }' "$CASK")" \
               || fail "cask does not carry exactly one ${arch} url for ${TAG}"
             [[ "$above" == "sha256 \"${digest#sha256:}\"" ]] || fail "cask ${arch} sha256 does not match the release asset digest"
@@ -398,7 +401,8 @@ jobs:
       # Through the contents API rather than a git push, so GitHub signs the
       # commit and no git credential is written anywhere. The current blob sha
       # is required: the cask already exists in the tap, and a missing one is a
-      # failure here rather than a silent create.
+      # failure here rather than a silent create. A re-run for an older tag is
+      # refused, so it cannot put an older version over a newer one.
       - name: Push cask
         env:
           GH_TOKEN: ${{ steps.tap-token.outputs.token }}
@@ -407,8 +411,15 @@ jobs:
           TAP_PATH: repos/cameronsjo/homebrew-tap/contents/Casks/forgectl.rb
         run: |
           set -euo pipefail
-          current="$(gh api "$TAP_PATH" --jq .sha)"
+          tap="$(gh api "$TAP_PATH")"
+          current="$(jq -r .sha <<< "$tap")"
           [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the tap's current Casks/forgectl.rb"; exit 1; }
+          ours="${TAG#v}"
+          theirs="$(jq -r .content <<< "$tap" | base64 -d | sed -n 's/^  version "\(.*\)"$/\1/p')"
+          if [[ -n "$theirs" && "$theirs" != "$ours" && "$(printf '%s\n%s\n' "$ours" "$theirs" | sort -V | tail -n1)" == "$theirs" ]]; then
+            echo "::error::the tap already has forgectl ${theirs}, newer than ${ours}; not pushing an older cask"
+            exit 1
+          fi
           gh api -X PUT "$TAP_PATH" \
             -f message="Brew cask update for forgectl version ${TAG}" \
             -f content="$(base64 -w0 < "$CASK")" \
