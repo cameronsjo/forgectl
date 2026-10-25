@@ -11,6 +11,7 @@ import (
 )
 
 type releaseWorkflow struct {
+	Env  map[string]string     `yaml:"env"`
 	Jobs map[string]releaseJob `yaml:"jobs"`
 }
 
@@ -62,6 +63,12 @@ func environmentName(n yaml.Node) string {
 // code, and is not the signing job.
 func TestReleaseWorkflowAppKeyStaysAwayFromRepoCode(t *testing.T) {
 	wf := parseReleaseWorkflow(t)
+	// Workflow-level env reaches every job, the signing job included.
+	for k, v := range wf.Env {
+		if strings.Contains(v, "RELEASE_APP_PRIVATE_KEY") {
+			t.Errorf("workflow-level env %s hands RELEASE_APP_PRIVATE_KEY to every job", k)
+		}
+	}
 	holders := 0
 	for name, job := range wf.Jobs {
 		holds := false
