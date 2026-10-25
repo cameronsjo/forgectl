@@ -100,14 +100,15 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
-    # RELEASE_APP_PRIVATE_KEY (the tap-token mint below) belongs only in the
-    # `release` environment, with a deployment policy of branch `main` plus
-    # tag `v*` and no repo-level copy. With that in place, and the `v*` tag
-    # ruleset limiting who can create a tag, a copy of this workflow on
-    # another ref cannot read the key (cadence-ecosystem ADR-0044 (i)).
-    # This job holds the key, so its actions are SHA-pinned, GoReleaser is
-    # an exact version, and the Apple CA download is hash-checked.
-    environment: release
+    # This job runs repository code: `swift build` evaluates Package.swift, and
+    # GoReleaser runs the hooks in .goreleaser.yaml. So it must never hold
+    # RELEASE_APP_PRIVATE_KEY, which mints tokens for every repo the App is
+    # installed on (#780). It names the `signing` environment, which holds
+    # only the Apple signing secrets, and leaves the tap push to the `tap` job
+    # below. Its actions are still SHA-pinned, GoReleaser is an exact version,
+    # and the Apple CA download is hash-checked, because it holds the signing
+    # identity.
+    environment: signing
     env:
       # HAS_CERT selects Developer-ID signing over the ad-hoc fallback across the
       # job. It is derived from a secret (secrets aren't usable directly in a step
@@ -134,8 +135,8 @@ jobs:
           # standard-library security fixes arrive in patch releases, and the
           # Vulncheck workflow scans against the newest patch too.
           check-latest: true
-          # No restored module or build cache in a job that holds the App
-          # private key and signs the release. A cache entry is written by
+          # No restored module or build cache in a job that holds the signing
+          # identity and a contents: write token. A cache entry is written by
           # other runs, so restoring one would run their output here
           # (zizmor cache-poisoning).
           cache: false
@@ -285,10 +286,104 @@ jobs:
       - name: Restore stamped version (clean tree for goreleaser)
         run: git checkout -- helper/forgectl-bless-helper/Sources/BlessHelperCore/Version.swift
 
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          # An exact version, not `~> v2`: the action downloads this binary at
+          # run time, in a job that holds the signing identity and a
+          # contents: write token. A range would
+          # run whatever GoReleaser publishes next without review
+          # (cadence-ecosystem release-rhythm security review I-1).
+          version: 'v2.18.2'
+          args: release --clean
+        env:
+          # Publishes this repo's release only. The cask is written to dist/
+          # (homebrew_casks skip_upload) and pushed by the `tap` job.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Arms the darwin build's post-hook codesign. A SECRET (following
+          # cameronsjo/minute), empty until set, so the hook is a no-op until then.
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # The tap job pushes this file. It gets the cask and nothing else from
+      # this job, and checks it against the release's own asset digests.
+      - name: Upload cask
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cask
+          path: dist/homebrew/Casks/forgectl.rb
+          if-no-files-found: error
+          retention-days: 7
+
+      # The ephemeral keychain holds the Developer ID private key with a partition
+      # list that lets codesign use it unattended. Delete it whether or not the
+      # release succeeded, rather than leaving it in $RUNNER_TEMP until the next
+      # job start clears it. Guarded on HAS_CERT: with no cert there is no keychain.
+      - name: Delete signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  # The App key is used here, away from the build: this job checks out
+  # nothing and runs no repository code, only pinned actions, jq and gh (#780).
+  # It takes the cask GoReleaser generated, checks it against the digests
+  # GitHub recorded for this release's darwin archives, and pushes it to the
+  # tap with a token scoped to the tap alone.
+  tap:
+    name: Update Homebrew tap
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # RELEASE_APP_PRIVATE_KEY lives only in the `release` environment, whose
+    # deployment policy allows `main` and `v*` tags (cadence-ecosystem
+    # ADR-0044 (i)).
+    environment: release
+    permissions:
+      contents: read # read this release's asset digests
+    steps:
+      - name: Download cask
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cask
+          path: ${{ runner.temp }}/cask
+
+      # The build job ran repository code, so its output is checked rather than
+      # trusted: one cask for this tag's version, printable ASCII, and each
+      # arch's sha256 equal to the digest GitHub recorded for that archive.
+      - name: Check cask against the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          CASK: ${{ runner.temp }}/cask/forgectl.rb
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || fail "tag ${TAG} is not v<semver>"
+          version="${TAG#v}"
+          [[ -f "$CASK" && ! -L "$CASK" ]] || fail "no cask file in the artifact"
+          size="$(wc -c < "$CASK")"
+          (( size > 0 && size <= 8192 )) || fail "cask is ${size} bytes; expected 1 to 8192"
+          (( $(LC_ALL=C tr -d '\n -~' < "$CASK" | wc -c) == 0 )) || fail "cask holds a byte outside printable ASCII"
+          grep -qxF 'cask "forgectl" do' "$CASK" || fail "cask does not declare forgectl"
+          grep -qxF "  version \"${version}\"" "$CASK" || fail "cask version is not ${version}"
+          [[ "$(grep -cE '^[[:space:]]*url ' "$CASK")" == 2 ]] || fail "cask must carry exactly two url lines"
+          [[ "$(grep -cE '^[[:space:]]*sha256 ' "$CASK")" == 2 ]] || fail "cask must carry exactly two sha256 lines"
+          release="$(gh api "repos/${REPO}/releases/tags/${TAG}")"
+          for arch in arm64 amd64; do
+            asset="forgectl_${version}_darwin_${arch}.tar.gz"
+            digest="$(jq -r --arg n "$asset" '[.assets[] | select(.name == $n) | .digest // ""] | if length == 1 then .[0] else "" end' <<< "$release")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "release ${TAG} has no single sha256 digest for ${asset}"
+            # The line directly above this arch's url must be its sha256.
+            # GoReleaser writes the tag segment as v#{version}, not the literal
+            # tag; the version line checked above ties #{version} to this tag.
+            url="url \"https://github.com/${REPO}/releases/download/v#{version}/forgectl_#{version}_darwin_${arch}.tar.gz\""
+            above="$(awk -v want="$url" '{ line = $0; sub(/^[ \t]+/, "", line) } line == want { print prev; n++ } { prev = line } END { exit n == 1 ? 0 : 1 }' "$CASK")" \
+              || fail "cask does not carry exactly one ${arch} url for ${TAG}"
+            [[ "$above" == "sha256 \"${digest#sha256:}\"" ]] || fail "cask ${arch} sha256 does not match the release asset digest"
+          done
+          echo "cask matches release ${TAG}."
+
       # Mint a short-lived token scoped to the tap repo via the GitHub App
       # (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY), instead of a long-lived PAT.
-      # GoReleaser uses the default GITHUB_TOKEN for the forgectl release and
-      # this app token only for the cross-repo cask push.
       - name: Mint tap token
         id: tap-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -303,30 +398,38 @@ jobs:
           repositories: homebrew-tap
           permission-contents: write
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with:
-          # An exact version, not `~> v2`: the action downloads this binary at
-          # run time, in a job that holds the App private key. A range would
-          # run whatever GoReleaser publishes next without review
-          # (cadence-ecosystem release-rhythm security review I-1).
-          version: 'v2.18.2'
-          args: release --clean
+      # Through the contents API rather than a git push, so GitHub signs the
+      # commit and no git credential is written anywhere. The current blob sha
+      # is required: the cask already exists in the tap, and a missing one is a
+      # failure here rather than a silent create. A re-run for an older tag is
+      # refused, so it cannot put an older version over a newer one.
+      - name: Push cask
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # App-minted, tap-scoped, short-lived — read by the homebrew_casks block.
-          HOMEBREW_TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
-          # Arms the darwin build's post-hook codesign. A SECRET (following
-          # cameronsjo/minute), empty until set, so the hook is a no-op until then.
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      # The ephemeral keychain holds the Developer ID private key with a partition
-      # list that lets codesign use it unattended. Delete it whether or not the
-      # release succeeded, rather than leaving it in $RUNNER_TEMP until the next
-      # job start clears it. Guarded on HAS_CERT: with no cert there is no keychain.
-      - name: Delete signing keychain
-        if: always() && env.HAS_CERT == 'true'
-        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          TAG: ${{ github.ref_name }}
+          CASK: ${{ runner.temp }}/cask/forgectl.rb
+          TAP_PATH: repos/cameronsjo/homebrew-tap/contents/Casks/forgectl.rb
+        run: |
+          set -euo pipefail
+          tap="$(gh api "$TAP_PATH")"
+          current="$(jq -r .sha <<< "$tap")"
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot read the tap's current Casks/forgectl.rb"; exit 1; }
+          ours="${TAG#v}"
+          theirs="$(jq -r .content <<< "$tap" | base64 -d | sed -n 's/^  version "\(.*\)"$/\1/p')"
+          # Best effort, against an accidental re-run: it compares x.y.z cores
+          # only, so a prerelease in the tap never blocks its own stable
+          # release, and it is skipped when the tap's version is unreadable.
+          ours_core="${ours%%[-+]*}"
+          theirs_core="${theirs%%[-+]*}"
+          if [[ -n "$theirs_core" && "$theirs_core" != "$ours_core" && "$(printf '%s\n%s\n' "$ours_core" "$theirs_core" | sort -V | tail -n1)" == "$theirs_core" ]]; then
+            echo "::error::the tap already has forgectl ${theirs}, newer than ${ours}; not pushing an older cask"
+            exit 1
+          fi
+          gh api -X PUT "$TAP_PATH" \
+            -f message="Brew cask update for forgectl version ${TAG}" \
+            -f content="$(base64 -w0 < "$CASK")" \
+            -f sha="$current" \
+            --jq '.commit.html_url'
 
   image:
     # ubuntu, not the macOS job above: this publishes a linux/amd64 container
