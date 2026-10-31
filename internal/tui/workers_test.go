@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func workersFixture() workerwatch.Snapshot {
 			},
 			{
 				Name: "cos-beta-docs", Address: "t1y", State: "live", Status: workerwatch.StatusBlocked, AgeSeconds: 7200, Model: "sonnet",
-				BriefDir: "/b/b", Worktree: "/wt/b", Source: "file", PRNote: "no PR yet", PRAt: workersNow,
+				BriefDir: "/b/b", Worktree: "/wt/b", Source: "file", PRIssue: workerwatch.PRIssueNoPR, PRNote: "no PR yet", PRAt: workersNow,
 			},
 			{
 				Name: "cos-gamma", Address: "t20", State: "live", Status: workerwatch.StatusDone, AgeSeconds: 40,
@@ -324,5 +325,63 @@ func TestWorkersEmpty(t *testing.T) {
 	out, _ := m.Update(workersSnapMsg{snap: workerwatch.Snapshot{Taken: workersNow}})
 	if !strings.Contains(ansi.Strip(out.(workersModel).View().Content), "no workers") {
 		t.Error("an empty snapshot should say there are no workers")
+	}
+}
+
+func TestWorkersSelectionFollowsTheWorkerAcrossRefreshes(t *testing.T) {
+	f := &workersFakes{}
+	m := loadedWorkers(t, f)
+	m = feed(t, m, key("j")) // cos-beta-docs
+	grown := workersFixture()
+	grown.Workers = append([]workerwatch.Worker{{Name: "cos-aaa-new", Address: "t9", State: "live", Status: workerwatch.StatusWorking}}, grown.Workers...)
+	out, _ := m.Update(workersSnapMsg{snap: grown})
+	if w, _ := out.(workersModel).selected(); w.Name != "cos-beta-docs" {
+		t.Errorf("after a row was added above, the selection moved to %s", w.Name)
+	}
+}
+
+func TestWorkersBannerIsCapped(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	many := workersFixture()
+	for i := range 6 {
+		many.Workers = append(many.Workers, workerwatch.Worker{Name: fmt.Sprintf("cos-blk-%d", i), Address: fmt.Sprintf("t%d", 50+i), State: "live", Status: workerwatch.StatusBlocked})
+	}
+	out, _ := m.Update(workersSnapMsg{snap: many})
+	lines := out.(workersModel).bannerLines()
+	if len(lines) != workersMaxBanners {
+		t.Fatalf("banner has %d lines, want %d", len(lines), workersMaxBanners)
+	}
+	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "5 more blocked workers") {
+		t.Errorf("last banner line = %q, want a count of the rest", ansi.Strip(lines[len(lines)-1]))
+	}
+	view := out.(workersModel).View().Content
+	if n := strings.Count(view, "\n") + 1; n > 30 {
+		t.Errorf("view is %d lines on a 30-line terminal", n)
+	}
+}
+
+func TestWorkersStalePRAfterGHError(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	stale := workersFixture()
+	stale.Workers[0].PRIssue, stale.Workers[0].PRNote = workerwatch.PRIssueGH, "the PR could not be read: rate limited"
+	stale.Workers[2].PR, stale.Workers[2].PRIssue = nil, workerwatch.PRIssueGH
+	out, _ := m.Update(workersSnapMsg{snap: stale})
+	plain := ansi.Strip(out.(workersModel).View().Content)
+	if !strings.Contains(plain, "#1384 37af206 !") {
+		t.Errorf("a kept PR after a failed read is not marked stale\n%s", plain)
+	}
+	if !strings.Contains(plain, "gh error") {
+		t.Errorf("a failed first read does not say gh error\n%s", plain)
+	}
+}
+
+func TestWorkersFinishedBlockedIsNotNeedsYou(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	snap := workersFixture()
+	snap.Workers[1].State = "finished"
+	out, _ := m.Update(workersSnapMsg{snap: snap})
+	plain := ansi.Strip(out.(workersModel).View().Content)
+	if strings.Contains(plain, "NEEDS YOU") || strings.Contains(plain, "need you") {
+		t.Errorf("an exited terminal whose last report was blocked raised NEEDS YOU\n%s", plain)
 	}
 }

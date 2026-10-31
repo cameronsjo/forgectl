@@ -41,36 +41,68 @@ type Entry struct {
 // cannot be used is reported in problems and skipped, so one bad line does
 // not hide the others. A name seen twice keeps its first line.
 func ParseWorkers(r io.Reader) (entries []Entry, problems []string, err error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 4096), maxWorkersLineBytes)
+	br := bufio.NewReader(r)
 	seen := map[string]bool{}
-	n := 0
-	for sc.Scan() {
-		n++
+	for n := 1; ; n++ {
+		raw, tooLong, rerr := readLine(br)
+		if rerr != nil && rerr != io.EOF {
+			return entries, problems, fmt.Errorf("read the workers file: %w", rerr)
+		}
+		if rerr == io.EOF && raw == "" && !tooLong {
+			return entries, problems, nil
+		}
 		if n > maxWorkersLines {
 			problems = append(problems, fmt.Sprintf("only the first %d lines were read", maxWorkersLines))
-			break
+			return entries, problems, nil
 		}
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		line := strings.TrimSpace(raw)
+		switch {
+		case tooLong:
+			problems = append(problems, fmt.Sprintf("line %d: longer than %d bytes", n, maxWorkersLineBytes))
+		case line == "" || strings.HasPrefix(line, "#"):
+		default:
+			e, why := parseWorkersLine(line)
+			switch {
+			case why != "":
+				problems = append(problems, fmt.Sprintf("line %d: %s", n, why))
+			case seen[e.Name]:
+				problems = append(problems, fmt.Sprintf("line %d: %s is listed twice; the first line is used", n, e.Name))
+			default:
+				seen[e.Name] = true
+				entries = append(entries, e)
+			}
 		}
-		e, why := parseWorkersLine(line)
-		if why != "" {
-			problems = append(problems, fmt.Sprintf("line %d: %s", n, why))
-			continue
+		if rerr == io.EOF {
+			return entries, problems, nil
 		}
-		if seen[e.Name] {
-			problems = append(problems, fmt.Sprintf("line %d: %s is listed twice; the first line is used", n, e.Name))
-			continue
-		}
-		seen[e.Name] = true
-		entries = append(entries, e)
 	}
-	if err := sc.Err(); err != nil {
-		return entries, problems, fmt.Errorf("read the workers file: %w", err)
+}
+
+// readLine reads one line without its newline. A line longer than
+// maxWorkersLineBytes is consumed to its end and reported as tooLong, so one
+// bad line costs only itself.
+func readLine(br *bufio.Reader) (line string, tooLong bool, err error) {
+	var b strings.Builder
+	for {
+		chunk, isPrefix, rerr := br.ReadLine()
+		if rerr != nil {
+			return b.String(), tooLong, rerr
+		}
+		if !tooLong {
+			if b.Len()+len(chunk) > maxWorkersLineBytes {
+				tooLong = true
+				b.Reset()
+			} else {
+				b.Write(chunk)
+			}
+		}
+		if !isPrefix {
+			if tooLong {
+				return "", true, nil
+			}
+			return b.String(), false, nil
+		}
 	}
-	return entries, problems, nil
 }
 
 func parseWorkersLine(line string) (Entry, string) {

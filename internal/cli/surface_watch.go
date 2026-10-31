@@ -169,7 +169,11 @@ func readWorkersFile(path string) ([]workerwatch.Entry, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open the workers file %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
-	entries, notes, err := workerwatch.ParseWorkers(io.LimitReader(f, maxWorkersFileBytes))
+	lr := &io.LimitedReader{R: f, N: maxWorkersFileBytes + 1}
+	entries, notes, err := workerwatch.ParseWorkers(lr)
+	if lr.N <= 0 {
+		notes = append(notes, fmt.Sprintf("the workers file is over %d bytes; only its start was read, and its last line may be cut", maxWorkersFileBytes))
+	}
 	if cerr := f.Close(); err == nil && cerr != nil {
 		err = cerr
 	}
@@ -209,6 +213,9 @@ func writeWatchPlain(out io.Writer, snap workerwatch.Snapshot) error {
 					at = "head"
 				}
 				pr += fmt.Sprintf(" %s crit=%d imp=%d @%s", m.Reviewer, m.Crit, m.Imp, at)
+			}
+			if w.PRIssue == workerwatch.PRIssueGH {
+				pr += " (stale: " + w.PRNote + ")"
 			}
 		} else if w.PRNote != "" {
 			pr = w.PRNote

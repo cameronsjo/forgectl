@@ -17,12 +17,12 @@ func TestParsePR(t *testing.T) {
 	body := func(reviews ...string) string {
 		var nodes []string
 		for _, r := range reviews {
-			nodes = append(nodes, fmt.Sprintf(`{"body":%q}`, r))
+			nodes = append(nodes, fmt.Sprintf(`{"body":%q,"author":{"login":"octo"}}`, r))
 		}
-		return `{"data":{"repository":{"pullRequests":{"nodes":[{"number":12,"state":"OPEN","isDraft":true,"headRefOid":"` + sha +
+		return `{"data":{"repository":{"pullRequests":{"nodes":[{"number":12,"state":"OPEN","isDraft":true,"headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha +
 			`","commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]},"reviews":{"nodes":[` + strings.Join(nodes, ",") + `]}}]}}}}`
 	}
-	p, err := parsePR("o/r", body(
+	p, err := parsePR("o/r", "octo", body(
 		"<!-- cadence-review: pr-reviewer head="+sha+" crit=1 imp=2 -->\nolder",
 		"<!-- cadence-review: security-reviewer head=ffffffffffffffffffffffffffffffffffffffff crit=0 imp=0 -->\nnewest, stale head",
 		"plain comment",
@@ -37,18 +37,18 @@ func TestParsePR(t *testing.T) {
 		t.Errorf("marker = %+v, want the newest (security-reviewer, stale)", p.Marker)
 	}
 
-	p, _ = parsePR("o/r", body("<!-- cadence-review: pr-reviewer head="+sha+" crit=0 imp=3 -->"))
+	p, _ = parsePR("o/r", "octo", body("<!-- cadence-review: pr-reviewer head="+sha+" crit=0 imp=3 -->"))
 	if p.Marker == nil || !p.Marker.AtHead || p.Marker.Imp != 3 {
 		t.Errorf("marker at head = %+v", p.Marker)
 	}
 
-	if _, err := parsePR("o/r", `{"data":{"repository":{"pullRequests":{"nodes":[]}}}}`); !errors.Is(err, workerwatch.ErrNoPR) {
+	if _, err := parsePR("o/r", "octo", `{"data":{"repository":{"pullRequests":{"nodes":[]}}}}`); !errors.Is(err, workerwatch.ErrNoPR) {
 		t.Errorf("no nodes: err = %v, want workerwatch.ErrNoPR", err)
 	}
-	if _, err := parsePR("o/r", `{"errors":[{"message":"x"}]}`); err == nil || errors.Is(err, workerwatch.ErrNoPR) {
+	if _, err := parsePR("o/r", "octo", `{"errors":[{"message":"x"}]}`); err == nil || errors.Is(err, workerwatch.ErrNoPR) {
 		t.Errorf("errors answer: err = %v, want an unusable-answer error", err)
 	}
-	bad, _ := parsePR("o/r", strings.Replace(strings.Replace(body(), "PENDING", "WEIRD", 1), sha, "not-a-sha", 1))
+	bad, _ := parsePR("o/r", "octo", strings.Replace(strings.Replace(body(), "PENDING", "WEIRD", 1), sha, "not-a-sha", 1))
 	if bad.Checks != "" || bad.Head != "" {
 		t.Errorf("unknown enum or bad sha kept: %+v", bad)
 	}
@@ -69,6 +69,31 @@ func TestRepoFromRemote(t *testing.T) {
 	}
 }
 
+func TestParsePRSkipsForksAndOtherAuthors(t *testing.T) {
+	answer := `{"data":{"repository":{"pullRequests":{"nodes":[
+		{"number":5,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `",
+		 "reviews":{"nodes":[
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=2 imp=0 -->","author":{"login":"OCTO"}},
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=0 -->","author":{"login":"outsider"}},
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=0 -->","author":null}]}},
+		{"number":9,"state":"OPEN","headRepository":{"nameWithOwner":"fork/r"},"headRefOid":"` + sha + `"},
+		{"number":10,"state":"OPEN","headRepository":null,"headRefOid":"` + sha + `"}]}}}}`
+	p, err := parsePR("o/r", "octo", answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Number != 5 {
+		t.Errorf("PR = #%d, want #5 (the newer #9 is a fork's, #10 has no head repo)", p.Number)
+	}
+	if p.Marker == nil || p.Marker.Crit != 2 {
+		t.Errorf("marker = %+v, want the viewer's crit=2; an outsider's clean marker must not count", p.Marker)
+	}
+	onlyFork := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":9,"state":"OPEN","headRepository":{"nameWithOwner":"fork/r"}}]}}}}`
+	if _, err := parsePR("o/r", "octo", onlyFork); !errors.Is(err, workerwatch.ErrNoPR) {
+		t.Errorf("only a fork's PR: err = %v, want ErrNoPR", err)
+	}
+}
+
 func TestPRForReadsViewerOnceAndRefusesBadInput(t *testing.T) {
 	var calls [][]string
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
@@ -76,7 +101,7 @@ func TestPRForReadsViewerOnceAndRefusesBadInput(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), "viewer { login }") {
 			return `{"data":{"viewer":{"login":"octo"}}}`, nil
 		}
-		return `{"data":{"repository":{"pullRequests":{"nodes":[{"number":7,"state":"OPEN","headRefOid":"` + sha + `"}]}}}}`, nil
+		return `{"data":{"repository":{"pullRequests":{"nodes":[{"number":7,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `"}]}}}}`, nil
 	}}
 	g := &GitHub{Run: fake}
 	for range 2 {

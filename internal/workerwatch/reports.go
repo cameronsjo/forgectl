@@ -70,7 +70,12 @@ func ScanReports(fsys fs.FS) Reports {
 	if err != nil {
 		return Reports{Error: readDirReason(err)}
 	}
-	var files []ReportFile
+	type candidate struct {
+		name string
+		size int64
+		mod  time.Time
+	}
+	var cands []candidate
 	for _, e := range entries {
 		if !reportNameRe.MatchString(e.Name()) || !e.Type().IsRegular() {
 			continue
@@ -79,20 +84,21 @@ func ScanReports(fsys fs.FS) Reports {
 		if err != nil {
 			continue
 		}
-		files = append(files, ReportFile{
-			Name:     e.Name(),
-			Complete: endsComplete(fsys, e.Name(), info.Size()),
-			Modified: info.ModTime().UTC(),
-		})
+		cands = append(cands, candidate{e.Name(), info.Size(), info.ModTime().UTC()})
 	}
-	slices.SortStableFunc(files, func(a, b ReportFile) int {
-		if c := b.Modified.Compare(a.Modified); c != 0 {
+	// Sort and cut before opening anything, so the cap bounds the reads too.
+	slices.SortStableFunc(cands, func(a, b candidate) int {
+		if c := b.mod.Compare(a.mod); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.Name, b.Name)
+		return cmp.Compare(a.name, b.name)
 	})
-	if len(files) > maxReportFiles {
-		files = files[:maxReportFiles]
+	if len(cands) > maxReportFiles {
+		cands = cands[:maxReportFiles]
+	}
+	files := make([]ReportFile, 0, len(cands))
+	for _, c := range cands {
+		files = append(files, ReportFile{Name: c.name, Complete: endsComplete(fsys, c.name, c.size), Modified: c.mod})
 	}
 	return Reports{Files: files}
 }

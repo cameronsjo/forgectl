@@ -24,18 +24,22 @@ const (
 	maxReviewLine = 300
 )
 
-// prQuery reads the newest PR from one head branch, its head commit's check
-// rollup, and the viewer's own last 20 reviews. Only the viewer's reviews are
-// read for markers, the rule sweep uses: anyone who can review a public PR
-// can post a marker line.
+// prQuery reads the newest PRs from one head branch name, each PR's head
+// repository, its head commit's check rollup, and the viewer's own last 20
+// reviews. A fork can open a PR from a branch of the same name, so parsePR
+// keeps only a PR whose head repository is the queried one. Only the
+// viewer's reviews are read for markers, the rule sweep uses: anyone who can
+// review a public PR can post a marker line. The author filter is checked
+// again on the client, as sweep does.
 const prQuery = `query($owner: String!, $name: String!, $head: String!, $author: String!) {
   repository(owner: $owner, name: $name) {
-    pullRequests(headRefName: $head, last: 1, states: [OPEN, MERGED, CLOSED]) {
+    pullRequests(headRefName: $head, last: 10, states: [OPEN, MERGED, CLOSED]) {
       nodes {
         number
         state
         isDraft
         headRefOid
+        headRepository { nameWithOwner }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
         reviews(last: 20, author: $author) { nodes { body author { login } } }
       }
@@ -77,7 +81,7 @@ func (g *GitHub) PRFor(ctx context.Context, repo, branch string) (workerwatch.PR
 	if err != nil {
 		return workerwatch.PR{}, ghFailure(ctx, "gh api graphql")
 	}
-	return parsePR(repo, out)
+	return parsePR(repo, viewer, out)
 }
 
 type gqlPRs struct {
@@ -89,7 +93,10 @@ type gqlPRs struct {
 					State      string `json:"state"`
 					IsDraft    bool   `json:"isDraft"`
 					HeadRefOid string `json:"headRefOid"`
-					Commits    struct {
+					HeadRepo   *struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					} `json:"headRepository"`
+					Commits struct {
 						Nodes []struct {
 							Commit struct {
 								StatusCheckRollup *struct {
@@ -100,7 +107,10 @@ type gqlPRs struct {
 					} `json:"commits"`
 					Reviews struct {
 						Nodes []struct {
-							Body string `json:"body"`
+							Body   string `json:"body"`
+							Author *struct {
+								Login string `json:"login"`
+							} `json:"author"`
 						} `json:"nodes"`
 					} `json:"reviews"`
 				} `json:"nodes"`
@@ -110,18 +120,26 @@ type gqlPRs struct {
 	Errors []json.RawMessage `json:"errors"`
 }
 
-// parsePR turns a prQuery answer into a PR. Enums are matched, the head must
-// be a full SHA, and only well-formed marker lines count.
-func parsePR(repo, out string) (workerwatch.PR, error) {
+// parsePR turns a prQuery answer into a PR: the newest one whose head
+// repository is repo. Enums are matched, the head must be a full SHA, and
+// only well-formed marker lines from viewer's own reviews count.
+func parsePR(repo, viewer, out string) (workerwatch.PR, error) {
 	var resp gqlPRs
 	if len(out) > maxGHOutput || json.Unmarshal([]byte(out), &resp) != nil || len(resp.Errors) > 0 || resp.Data.Repository == nil {
 		return workerwatch.PR{}, errors.New("GitHub returned an unusable PR answer")
 	}
 	nodes := resp.Data.Repository.PullRequests.Nodes
-	if len(nodes) == 0 {
+	found := -1
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if h := nodes[i].HeadRepo; h != nil && strings.EqualFold(h.NameWithOwner, repo) {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
 		return workerwatch.PR{}, workerwatch.ErrNoPR
 	}
-	n := nodes[len(nodes)-1]
+	n := nodes[found]
 	if n.Number <= 0 {
 		return workerwatch.PR{}, errors.New("GitHub returned a PR with no number")
 	}
@@ -143,7 +161,11 @@ func parsePR(repo, out string) (workerwatch.PR, error) {
 	}
 	// Reviews come oldest first; the newest marker wins.
 	for i := len(n.Reviews.Nodes) - 1; i >= 0; i-- {
-		line, _, _ := strings.Cut(n.Reviews.Nodes[i].Body, "\n")
+		rv := n.Reviews.Nodes[i]
+		if rv.Author == nil || !strings.EqualFold(rv.Author.Login, viewer) {
+			continue
+		}
+		line, _, _ := strings.Cut(rv.Body, "\n")
 		line = strings.TrimSpace(line)
 		if len(line) > maxReviewLine {
 			continue

@@ -34,6 +34,9 @@ const (
 	workersTailTimeout = 10 * time.Second
 	// workersMaxTailLines caps the screen lines kept for the tail.
 	workersMaxTailLines = 200
+	// workersMaxBanners caps the NEEDS YOU lines, so many blocked workers
+	// cannot push the table off the screen.
+	workersMaxBanners = 3
 	// workersMaxTailLineRunes caps one escaped screen line.
 	workersMaxTailLineRunes = 400
 
@@ -203,8 +206,19 @@ func (m workersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case workersSnapMsg:
 		prevAddr := m.tailAddr
+		prevName := ""
+		if w, ok := m.selected(); ok {
+			prevName = w.Name
+		}
 		m.snap, m.loaded, m.busy = t.snap, true, false
 		m.cursor = min(m.cursor, max(len(m.snap.Workers)-1, 0))
+		// Keep the operator's worker selected when rows are added or removed.
+		for i, w := range m.snap.Workers {
+			if prevName != "" && w.Name == prevName {
+				m.cursor = i
+				break
+			}
+		}
 		var cmds []tea.Cmd
 		if m.pending {
 			force := m.pendingForce
@@ -394,7 +408,12 @@ func (m workersModel) headerLine() string {
 // the command that shows its dialog. The view never answers it.
 func (m workersModel) bannerLines() []string {
 	var out []string
-	for _, w := range m.snap.NeedingYou() {
+	needing := m.snap.NeedingYou()
+	shown := needing
+	if len(needing) > workersMaxBanners {
+		shown = needing[:workersMaxBanners-1]
+	}
+	for _, w := range shown {
 		addr := w.Address
 		if addr == "" {
 			addr = w.Name
@@ -402,6 +421,9 @@ func (m workersModel) bannerLines() []string {
 		msg := fmt.Sprintf(" NEEDS YOU  %s is blocked: a dialog is waiting on its screen. See it: hc read %s · answer it: hc attach %s ",
 			capSafe(w.Name, wwName), capSafe(addr, 32), capSafe(addr, 32))
 		out = append(out, m.styles.Danger.Reverse(true).Render(msg))
+	}
+	if more := len(needing) - len(shown); more > 0 {
+		out = append(out, m.styles.Danger.Reverse(true).Render(fmt.Sprintf(" NEEDS YOU  %d more blocked workers: see the BLOCKED rows ", more)))
 	}
 	return out
 }
@@ -490,17 +512,21 @@ func (m workersModel) prCell(w workerwatch.Worker) string {
 	s := m.styles
 	if w.PR == nil {
 		note := "—"
-		switch {
-		case w.PRNote == "no PR yet":
+		switch w.PRIssue {
+		case workerwatch.PRIssueNoPR:
 			note = "no PR yet"
-		case strings.HasPrefix(w.PRNote, "the PR could not be read"):
-			note = "gh error"
-		case strings.HasPrefix(w.PRNote, "origin is not"):
+		case workerwatch.PRIssueGH:
+			return s.Warn.Render(padRight("gh error", wwPR))
+		case workerwatch.PRIssueNotGitHub:
 			note = "not GitHub"
-		case w.PRNote != "":
-			note = "no branch" // git found no branch or no origin; --json has the note
-		case w.Worktree != "" && w.PRAt.IsZero():
-			note = "…"
+		case workerwatch.PRIssueNoOrigin:
+			note = "no origin"
+		case workerwatch.PRIssueNoBranch:
+			note = "no branch"
+		case "":
+			if w.Worktree != "" && w.PRAt.IsZero() {
+				note = "…"
+			}
 		}
 		return s.Muted.Render(padRight(note, wwPR))
 	}
@@ -514,6 +540,10 @@ func (m workersModel) prCell(w workerwatch.Worker) string {
 		style = s.OK
 	case "CLOSED":
 		style = s.Muted
+	}
+	if w.PRIssue == workerwatch.PRIssueGH {
+		// The last good read, kept beside a failed one: say so.
+		return s.Warn.Render(padRight(text+" !", wwPR))
 	}
 	return style.Render(padRight(text, wwPR))
 }

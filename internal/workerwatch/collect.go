@@ -50,16 +50,31 @@ type Worker struct {
 
 	Branch string `json:"branch,omitempty"`
 	PR     *PR    `json:"pr,omitempty"`
-	// PRNote says why there is no PR row: no branch, no PR yet, or a failed
-	// read. A failed read keeps the last good PR beside the note.
+	// PRIssue says why PR is missing or stale, as one of the PRIssue*
+	// values; "" when PR is a fresh read. With PRIssueGH, PR is the last good
+	// read, kept beside the failure.
+	PRIssue string `json:"pr_issue,omitempty"`
+	// PRNote is PRIssue in words, for a person.
 	PRNote string `json:"pr_note,omitempty"`
-	// PRAt is when PR was read; zero before the first read.
+	// PRAt is when PR was last read successfully; zero before that.
 	PRAt time.Time `json:"pr_read_at,omitzero"`
 }
 
+// PRIssue values.
+const (
+	PRIssueNoBranch  = "no-branch"  // detached, or git could not read the branch
+	PRIssueNoOrigin  = "no-origin"  // no readable origin remote
+	PRIssueNotGitHub = "not-github" // origin is not on github.com
+	PRIssueNoPR      = "no-pr"      // no PR from this branch yet
+	PRIssueGH        = "gh-error"   // the GitHub read failed
+)
+
 // NeedsYou reports whether a person has to act: the agent says it is
-// blocked (a permission dialog or a question is on its screen).
-func (w Worker) NeedsYou() bool { return w.Status == StatusBlocked }
+// blocked (a permission dialog or a question is on its screen) and its
+// terminal is still live. A finished terminal keeps its last report.
+func (w Worker) NeedsYou() bool {
+	return w.Status == StatusBlocked && w.State == "live" && w.HCError == ""
+}
 
 // Snapshot is one collection.
 type Snapshot struct {
@@ -107,9 +122,11 @@ type Collector struct {
 }
 
 type prEntry struct {
-	at     time.Time
+	at     time.Time // the last attempt: what the TTL counts from
+	readAt time.Time // the last successful read of pr
 	branch string
 	pr     *PR
+	issue  string
 	note   string
 }
 
@@ -244,46 +261,49 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		if !ok {
 			continue
 		}
-		workers[i].Branch, workers[i].PR, workers[i].PRNote, workers[i].PRAt = e.branch, e.pr, e.note, e.at
+		w := &workers[i]
+		w.Branch, w.PR, w.PRIssue, w.PRNote, w.PRAt = e.branch, e.pr, e.issue, e.note, e.readAt
 	}
 }
 
 // readPR resolves the worktree's repo and branch, then its PR. A failed gh
-// read keeps the previous PR beside the note.
+// read keeps the previous PR and its read time beside the issue, so the row
+// shows stale data as stale; the attempt still restarts the TTL, so an
+// outage is not retried on every collect.
 func (c *Collector) readPR(ctx context.Context, worktree string, prev prEntry, now time.Time) prEntry {
 	ctx, cancel := context.WithTimeout(ctx, ghTimeout)
 	defer cancel()
 	e := prEntry{at: now}
 	branch, err := c.Git.Branch(ctx, worktree)
 	if err != nil {
-		e.note = "git could not read the worktree's branch"
+		e.issue, e.note = PRIssueNoBranch, "git could not read the worktree's branch"
 		return e
 	}
 	if branch == "" {
-		e.note = "the worktree has no branch checked out"
+		e.issue, e.note = PRIssueNoBranch, "the worktree has no branch checked out"
 		return e
 	}
 	e.branch = branch
 	repo, err := c.Git.Repo(ctx, worktree)
 	switch {
 	case errors.Is(err, ErrNotGitHub):
-		e.note = "origin is not a github.com repository"
+		e.issue, e.note = PRIssueNotGitHub, "origin is not a github.com repository"
 		return e
 	case err != nil:
-		e.note = "the worktree has no readable origin remote"
+		e.issue, e.note = PRIssueNoOrigin, "the worktree has no readable origin remote"
 		return e
 	}
 	p, err := c.GH.PRFor(ctx, repo, branch)
 	switch {
 	case errors.Is(err, ErrNoPR):
-		e.note = "no PR yet"
+		e.issue, e.note, e.readAt = PRIssueNoPR, "no PR yet", now
 	case err != nil:
-		e.note = "the PR could not be read: " + err.Error()
+		e.issue, e.note = PRIssueGH, "the PR could not be read: "+err.Error()
 		if prev.branch == branch {
-			e.pr = prev.pr
+			e.pr, e.readAt = prev.pr, prev.readAt
 		}
 	default:
-		e.pr = &p
+		e.pr, e.readAt = &p, now
 	}
 	return e
 }

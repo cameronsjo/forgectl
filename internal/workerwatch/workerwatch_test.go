@@ -342,3 +342,17 @@ func TestCollectorCos(t *testing.T) {
 		t.Errorf("cos find did not use hc's cwd as its worktree: %+v", s.Workers[1])
 	}
 }
+
+func TestParseWorkersSkipsAnOverlongLine(t *testing.T) {
+	in := "cos-a|/wt/a|/b/a\n" + strings.Repeat("x", maxWorkersLineBytes+10) + "\ncos-b|/wt/b|/b/b"
+	entries, problems, err := ParseWorkers(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("an overlong line failed the whole file: %v", err)
+	}
+	if len(entries) != 2 || entries[1].Name != "cos-b" {
+		t.Errorf("entries = %+v, want cos-a and cos-b (no trailing newline)", entries)
+	}
+	if len(problems) != 1 || !strings.HasPrefix(problems[0], "line 2: longer than") {
+		t.Errorf("problems = %q", problems)
+	}
+}
