@@ -55,7 +55,8 @@ func newSurfaceReadCmd(deps module.Deps) *cobra.Command {
 		Use:   "read <name>",
 		Short: "Print a worker's screen, or its REPORT line",
 		Long: `read prints the last --lines rows of the named worker's screen, with control
-characters escaped.
+characters escaped. With --surface hc the screen is hc read's screen and
+history, and a finished worker's last screen still prints.
 
 With --report it prints only the report for the worker's last brief: the
 text after "REPORT <marker>:" on a line below the last echo of that brief, so

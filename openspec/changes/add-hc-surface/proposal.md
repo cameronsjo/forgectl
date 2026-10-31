@@ -10,7 +10,7 @@ The estate moved from herdr 0.9 to herdr-core: `hc` runs persistent terminals an
 - Under hc, worker status comes from hc's OSC 7501 states (`idle`, `working`, `done`, `blocked`, `error`), never from screen text. `surface brief` sends with `hc send`, refuses when the status is anything but `idle` or `done`, and never passes `--force`. `surface close` runs `hc kill` then `hc rm`, only on a terminal whose label carries forgectl's ownership marker and whose creation time matches the ledger's reference.
 - `surface tag`, `status`, `usage`, `merge`, and the drain stay herdr-only for now.
 - The old herdr backend is unchanged.
-- `--inherit-mode <mode>` on worker launches: a claude worker follows the launching session's permission mode (taken when `[launch.worker]` sets none, capped at `auto`) and is never looser than it. Claude Code exposes no live mode to child processes, so the launcher states it. Added at the operator's request on 2026-10-30.
+- `--inherit-mode <mode>` on worker launches: a claude worker is never looser than the launching session's permission mode. The flag only tightens: auto workers still come from `[launch.worker] permission_mode = "auto"`. Claude Code exposes no live mode to child processes, so the launcher states it. Added at the operator's request on 2026-10-30.
 
 Tracked as CAM-522 (Linear).
 

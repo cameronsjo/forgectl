@@ -1,6 +1,6 @@
 ---
 name: forgectl
-description: Use when a session needs the workbench control plane — a .env edit without exposing values, a profiled Claude Code launch or one inside tmux/cmux/herdr, a workflow or recipe, the local bench, finding projects, closing a board task when work lands, or handing the operator a script to approve and run (a merge, sudo, a homelab change, a command a guard blocks) instead of a copy-paste. NOT for PR review.
+description: Use when a session needs the workbench control plane — a .env edit without exposing values, a profiled Claude Code launch or one inside tmux/cmux/herdr/hc, a workflow or recipe, the local bench, finding projects, closing a board task when work lands, or handing the operator a script to approve and run (a merge, sudo, a homelab change, a command a guard blocks) instead of a copy-paste. NOT for PR review.
 license: Apache-2.0 WITH Commons-Clause
 ---
 

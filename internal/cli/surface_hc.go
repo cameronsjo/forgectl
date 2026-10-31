@@ -91,6 +91,15 @@ func goneReason(err error) string {
 	return "the worker's herdr workspace is gone"
 }
 
+// surfaceNoun names what a reference points at, for messages: an hc
+// terminal, or another backend's workspace.
+func surfaceNoun(ref backend.Ref) string {
+	if ref.Kind() == backend.KindHc {
+		return "terminal"
+	}
+	return "workspace"
+}
+
 // hcScreenReader reads an hc worker as a ready.Screen. Status and agent come
 // from hc's OSC 7501 report, text from `hc read`. With live set, a worker
 // whose program has exited reads as gone, which ends ready, wait and brief at

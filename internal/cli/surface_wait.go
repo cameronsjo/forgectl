@@ -72,6 +72,7 @@ A worker can sit at its prompt before its turn starts, so wait also needs one
 of: herdr reported it working during the wait, the last brief's REPORT line
 is on screen, or it has sat at its prompt for --quiet. The screen text itself
 is not compared for stability: a harness's status line changes every second.
+With --surface hc, "working" and the ready verdict are hc's reported status.
 
 A blocking screen (a permission prompt, the plan-approval dialog) ends the
 wait at once with exit 1, naming it; answer it in the worker's pane. wait

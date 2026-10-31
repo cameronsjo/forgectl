@@ -178,10 +178,11 @@ func (a *Adapter) command(kind exec.CommandKind, args ...exec.Arg) exec.Sensitiv
 		Kind: kind,
 		Path: exec.Secret(a.hcPath),
 		// --json first on every verb that takes it is the caller's job; this
-		// only fixes the binary and the caps. HC_SESSION and HC_TERMINAL_ID are
-		// inherited: the first selects the core, and the second makes a worker
-		// started from inside hc a child of the launcher's terminal, so hc's
-		// own notes about a blocked or exited worker reach the coordinator.
+		// only fixes the binary and the caps. The environment is inherited so
+		// HC_SESSION selects the core. A worker started from inside hc is a
+		// child of the launcher's terminal, but Start passes --outlive-parent
+		// and --no-notify, so it neither dies with that terminal nor sends it
+		// notes.
 		Args:      args,
 		Env:       nil,
 		StdoutCap: stdoutCap,

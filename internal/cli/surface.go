@@ -185,12 +185,13 @@ process arguments, where any local process can list it, so it must not hold
 a secret; point the worker at a file in the worktree instead.
 
 --inherit-mode <mode> passes the launching Claude Code session's permission
-mode (plan, default, acceptEdits, auto, ...) to a claude worker. With no
-[launch.worker] permission_mode, the worker takes that mode, capped at auto:
-a launcher in dontAsk or bypassPermissions still launches auto workers. Either
-way the worker is never looser than the launcher, so a launcher in plan starts
-plan workers even under [launch.worker] permission_mode = "auto". Claude Code
-does not tell a child process its live mode, so the launcher says it.
+mode (plan, default, acceptEdits, auto, ...) to a claude worker as a ceiling:
+the worker is never looser than it, so a launcher in plan starts plan workers
+even under [launch.worker] permission_mode = "auto". It never raises a
+worker: the value is the caller's claim, which nothing can check (Claude Code
+does not tell a child process its live mode). Auto workers come from
+[launch.worker] permission_mode = "auto", and an auto launcher passing
+--inherit-mode auto keeps them auto.
 
 --profile <name> runs a claude worker with CLAUDE_CONFIG_DIR set to the
 config_dir of [surface.profiles.<name>] (see docs/configuration.md), so it
@@ -291,7 +292,7 @@ readiness is hc's reported status, never screen text.
 	cmd.Flags().StringVar(&model, "model", "",
 		"run the worker on this model instead of the launch profile's (--worktree only)")
 	cmd.Flags().StringVar(&inheritMode, "inherit-mode", "",
-		"the launching Claude Code session's permission mode: a claude worker with no [launch.worker] permission_mode takes it (capped at auto), and is never looser than it (--worktree only)")
+		"the launching Claude Code session's permission mode, as a ceiling: a claude worker is never looser than it, and it never raises one (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,

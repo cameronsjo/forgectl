@@ -109,6 +109,10 @@ close then looks for forgectl's ownership marker on the new server: none
 means the workspace is already gone, and one at the recorded id (a workspace
 herdr restored) is closed.
 
+With --surface hc, close runs hc kill (while the program still runs) and then
+hc rm, only on a terminal whose forgectl.surface label, creation time and hc
+core all match the ledger's reference. Anything else is refused.
+
 When the workspace is closed and no worktree remains, the ledger row is
 removed. A kept worktree keeps the row at stage "closed"; run close again
 once the work is saved.
@@ -332,9 +336,9 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 		case backend.CloseIdentityMismatch:
 			return refuse("the workspace cannot be proven to be forgectl's (" + causeText(cr) + ")")
 		case backend.CloseUnreadable:
-			return refuse("herdr could not be read (" + causeText(cr) + ")")
+			return refuse(ws.ref.Kind().String() + " could not be read (" + causeText(cr) + ")")
 		default:
-			return refuse("herdr did not close the workspace (" + causeText(cr) + ")")
+			return refuse(ws.ref.Kind().String() + " did not close the " + surfaceNoun(ws.ref) + " (" + causeText(cr) + ")")
 		}
 	} else {
 		res.Workspace = ws.state

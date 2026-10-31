@@ -6,9 +6,10 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// TestWorkerFollowsLauncherMode pins --inherit-mode: with no [launch.worker]
-// permission_mode the worker takes the launcher's mode capped at auto, and in
-// every case the launcher's mode is a ceiling.
+// TestWorkerFollowsLauncherMode pins --inherit-mode: the launcher's mode is a
+// ceiling over every source and never raises a worker. The flag is the
+// caller's unverifiable claim, so claiming auto must not lift the built-in
+// acceptEdits; [launch.worker] is the only way to auto workers.
 func TestWorkerFollowsLauncherMode(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -19,11 +20,12 @@ func TestWorkerFollowsLauncherMode(t *testing.T) {
 		source   string
 	}{
 		{name: "no launcher mode keeps the built-in value", want: "acceptEdits", source: PostureFromDefault},
-		{name: "auto launcher, nothing set: auto", launcher: "auto", want: "auto", source: PostureFromLauncher},
+		{name: "auto launcher does not raise the built-in value", launcher: "auto", want: "acceptEdits", source: PostureFromDefault},
+		{name: "auto launcher, worker set to auto: auto", launcher: "auto", worker: "auto", want: "auto", source: PostureFromWorker},
 		{name: "plan launcher, nothing set: plan", launcher: "plan", want: "plan", source: PostureFromLauncher},
 		{name: "default launcher, nothing set: default", launcher: "default", want: "default", source: PostureFromLauncher},
-		{name: "bypass launcher is capped at auto", launcher: "bypassPermissions", want: "auto", source: PostureFromLauncher},
-		{name: "dontAsk launcher is capped at auto", launcher: "dontAsk", want: "auto", source: PostureFromLauncher},
+		{name: "bypass launcher raises nothing", launcher: "bypassPermissions", want: "acceptEdits", source: PostureFromDefault},
+		{name: "bypass launcher, worker auto: capped at auto", launcher: "bypassPermissions", worker: "auto", want: "auto", source: PostureFromWorker},
 		{name: "explicit worker value overrides an auto launcher", launcher: "auto", worker: "acceptEdits", want: "acceptEdits", source: PostureFromWorker},
 		{name: "plan launcher caps an explicit auto worker", launcher: "plan", worker: "auto", want: "plan", source: PostureFromLauncher},
 		{name: "a stricter repo block still wins", launcher: "auto", repo: "plan", want: "plan", source: PostureFromRepo},

@@ -21,7 +21,7 @@ import (
 )
 
 // A worker launch (`surface launch --worktree <branch>`) starts one agent for
-// a coordinator: its own git worktree, its own herdr workspace, and a ledger
+// a coordinator: its own git worktree, its own herdr workspace or hc terminal, and a ledger
 // row that says what was created at each step.
 
 // maxLedgerFailureLen bounds the error text kept in a failed row.
@@ -231,7 +231,7 @@ type workerSetup struct {
 	unset    []string
 }
 
-// prepareWorker validates the name and resolves the herdr adapter, the repo
+// prepareWorker validates the name and resolves the herdr or hc adapter, the repo
 // top, its ledger, and the injected environment. warn takes the adapter's
 // setup warnings.
 func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec) (workerSetup, error) {
@@ -422,7 +422,7 @@ func launchWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec wo
 	return attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
 }
 
-// runWorkerLaunch wires the real steps: herdr only, a validated name, the repo
+// runWorkerLaunch wires the real steps: herdr or hc only, a validated name, the repo
 // top as the ledger key, and the worker posture floor on the invocation.
 func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
 	if opts.Backend != workerSurfaceHerdr && opts.Backend != workerSurfaceHc {

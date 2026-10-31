@@ -70,10 +70,9 @@ Not needed for this change. A worker started by hc stays hidden from the window 
 
 A coordinator in auto should start auto workers, and a stricter coordinator should not start looser ones. forgectl needs the launcher's mode to do that, and Claude Code exposes no documented signal to a child process: no environment variable carries it (checked on 2.1.314), the session's argv (`CLAUDE_PID`) shows only the starting mode and misses a Shift+Tab change, and the transcript's per-entry `permissionMode` is an undocumented format. So the launcher states it with `--inherit-mode <mode>`.
 
-The rule, for claude workers only:
+The rule, for claude workers only: whatever the worker resolves to (`[launch.worker]`, the built-in `acceptEdits`, or a stricter project block) is capped at the launcher's mode. `[launch.worker]` stays the explicit value; the launcher is a ceiling over it, never a floor.
 
-1. With no `[launch.worker] permission_mode`, the worker takes the launcher's mode, capped at `auto`. A launcher in `dontAsk` or `bypassPermissions` starts `auto` workers, which the worker floor allows.
-2. Whatever the worker resolves to (`[launch.worker]`, the built-in value, or a stricter project block) is then capped at the launcher's mode. `[launch.worker]` stays the explicit value; the launcher is a ceiling over it, never a floor.
+The flag never raises a worker. An earlier draft let a worker with no `[launch.worker]` value take the launcher's mode, which made `--inherit-mode auto` lift a worker from `acceptEdits` to `auto`. The security review flagged it: the value is the caller's unverifiable claim, so any session allowed to run `surface launch` could self-grant `auto` workers. Auto workers therefore come only from `[launch.worker] permission_mode = "auto"`, the operator's own config, and an auto coordinator passing `--inherit-mode auto` keeps them auto. Whether a config opt-in (for example `[launch.worker] inherit_launcher_mode = true`) should restore the raise is an open question for the operator.
 
 A later change could read the transcript's latest `permissionMode` when the flag is absent, if Claude Code documents that field or a hook writes the mode somewhere stable.
 

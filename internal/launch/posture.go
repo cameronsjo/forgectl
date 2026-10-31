@@ -123,8 +123,7 @@ const (
 	// it is stricter.
 	PostureFromRepo = "repo-profile"
 	// PostureFromLauncher is the launching session's permission mode
-	// (--inherit-mode): taken when [launch.worker] sets none, and a ceiling
-	// over every other source.
+	// (--inherit-mode), when it capped the value from every other source.
 	PostureFromLauncher = "launcher"
 )
 
@@ -172,10 +171,12 @@ type PostureValue struct {
 // floor afterwards refuses rather than lowers, so they are the final posture.
 //
 // launcherMode, when set, is the launching session's permission mode. A
-// claude worker with no [launch.worker] permission_mode takes it in place of
-// the built-in value, capped at auto, and whatever the worker resolves to is
-// then capped at it: a launcher in plan never starts a worker looser than
-// plan, even under an explicit [launch.worker] value.
+// claude worker's mode, whatever its source, is capped at it: a launcher in
+// plan never starts a worker looser than plan, even under an explicit
+// [launch.worker] value. It only ever tightens. The value is the caller's
+// claim, and nothing can check it (Claude Code exposes no live mode), so a
+// claim must never raise a worker above what the operator's config gives;
+// an operator who wants auto workers sets [launch.worker] permission_mode.
 func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject, launcherMode string) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
@@ -184,9 +185,6 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		var err error
 		if inherited, err = inheritedMode(launcherMode); err != nil {
 			return Profile{}, nil, nil, fmt.Errorf("launcher mode: %w", err)
-		}
-		if w.PermissionMode == "" {
-			wpm = inherited
 		}
 	}
 	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
@@ -212,11 +210,8 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 			return "", err
 		}
 		source := PostureFromDefault
-		switch {
-		case set != "":
+		if set != "" {
 			source = PostureFromWorker
-		case inherited != "" && field == "permission_mode":
-			source = PostureFromLauncher
 		}
 		if project != "" && got == project && got != worker {
 			source = PostureFromRepo

@@ -145,9 +145,8 @@ type InvocationRequest struct {
 	// Only a claude worker takes one.
 	ConfigDir string
 	// LauncherMode is the permission mode of the Claude Code session launching
-	// this worker (`surface launch --inherit-mode`), or "" when not given. A
-	// claude worker with no [launch.worker] permission_mode takes it, capped at
-	// auto, and no claude worker is ever looser than it. Only a worker takes
+	// this worker (`surface launch --inherit-mode`), or "" when not given. It
+	// caps a claude worker's mode and never raises it. Only a worker takes
 	// one; it must be a mode claudePermissionRank knows (CheckLauncherMode).
 	LauncherMode string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,

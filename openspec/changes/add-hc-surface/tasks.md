@@ -19,7 +19,7 @@
 
 ## 3b. Launcher permission mode
 
-- [x] 3b.1 `--inherit-mode` on worker launches; `LauncherMode` on the invocation request; take-then-cap rule in `applyWorkerProfile`; tests for every source and the auto cap.
+- [x] 3b.1 `--inherit-mode` on worker launches; `LauncherMode` on the invocation request; ceiling-only rule in `applyWorkerProfile`; tests for every source, including that a claim never raises.
 
 ## 4. Docs and checks
 

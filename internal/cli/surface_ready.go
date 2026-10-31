@@ -70,6 +70,11 @@ harness's own input prompt is visible. herdr's status alone is a hint, never
 proof. All three can be set from inside the worker's pane, so ready guards
 against accidents, not against a worker trying to look ready.
 
+With --surface hc the verdict is hc's reported status alone, never screen
+text: idle or done is ready, blocked is blocked, and anything else (working,
+error, or no status reported yet) is not ready. A worker whose program has
+exited is gone.
+
 ready never answers a dialog. A blocking screen (folder-trust dialog,
 plan-approval dialog, permission prompt, npm's "Ok to proceed?") ends the wait
 at once with exit 1, naming the screen; answer it in the worker's pane.
@@ -166,8 +171,9 @@ func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
 }
 
 // openWorker finds the launched worker name in repo's ledger and loads its
-// harness's predicates. Every failure is a usage or setup error (exit 2).
-// warn takes the herdr adapter's setup warnings.
+// harness's predicates (herdr only; an hc worker is judged by its status).
+// Every failure is a usage or setup error (exit 2). warn takes the herdr
+// adapter's setup warnings.
 func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, name, surfaceName string) (*openedWorker, error) {
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), exitUsage)

@@ -87,6 +87,13 @@ can still appear between the read-back and Enter; the readiness checks read
 signals the worker itself can set, so they guard against accidents, not a
 worker trying to look ready. A brief must never carry an approval.
 
+With --surface hc there is no read-back: hc send pastes and submits in one
+call. brief refuses unless hc reports the worker idle or done, records the
+brief, then sends (with --if idle when it was idle, so a turn that started
+in between refuses the send). It never passes --force, so hc itself refuses
+a blocked worker. hc's refusal reports refused; any other send failure
+reports unconfirmed. --readback-timeout has no step under hc.
+
 Each brief gets a new random marker and asks the worker to end its final
 message with a REPORT line naming it; read it with surface read --report.
 

@@ -94,6 +94,11 @@ each checked against herdr: present (its workspace is there and carries
 forgectl's ownership marker), gone, or unreadable. A herdr error is
 unreadable, never gone, and close refuses an unreadable worker.
 
+With --surface hc the workers are herdr-core (hc) terminals instead: the
+ledger is the hc session's (hc:<session>), present means the terminal is live
+and carries forgectl's forgectl.surface label at the recorded creation time,
+and a finished terminal is gone. --json's terminal_id is the hc address (t7).
+
 --orphans shows only the rows a coordinator should close: those whose
 workspace is gone, and those at any stage other than launched (failed,
 closed, or a launch that stopped at pending or worktree more than ten
@@ -318,11 +323,11 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 		}
 		return workerPresent, ""
 	case backend.ProbeGone:
-		return workerGone, "the herdr workspace is gone"
+		return workerGone, "the " + ref.Kind().String() + " " + surfaceNoun(ref) + " is gone"
 	case backend.ProbeIdentityMismatch:
 		return workerUnreadable, "the workspace cannot be proven to be forgectl's (" + causeText(res) + ")"
 	default:
-		return workerUnreadable, "herdr could not be read (" + causeText(res) + ")"
+		return workerUnreadable, ref.Kind().String() + " could not be read (" + causeText(res) + ")"
 	}
 }
 
