@@ -153,8 +153,8 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	if w.hc != nil {
 		res := sendBriefHC(ctx, hcBriefSteps{
 			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
-			send: func(ctx context.Context, s string) (hcadapter.SendResult, error) {
-				return w.hc.SendBrief(ctx, w.ref, s)
+			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
+				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
 			},
 			record: w.recordBrief,
 			now:    time.Now,

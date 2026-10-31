@@ -67,6 +67,7 @@ const (
 	kindBlocked        = "blocked"
 	kindStatusMismatch = "status_mismatch"
 	kindFinished       = "finished"
+	kindLive           = "live"
 )
 
 // ErrResolveSession reports that the hc session could not be chosen.
@@ -103,6 +104,10 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 	}
 	return &Adapter{run: run, hcPath: hcPath, session: session, source: source}, nil
 }
+
+// ValidSession reports whether s is an HC_SESSION value this package
+// accepts: 1-64 letters, digits, '-', '_' or '.'.
+func ValidSession(s string) bool { return validSession(s) }
 
 func validSession(s string) bool {
 	if s == "" || len(s) > maxSessionLen {

@@ -78,6 +78,11 @@ func (a *Adapter) WorkerScreen(ctx context.Context, ref backend.Ref) (Worker, er
 	if derr := decodeStdout(res.Stdout, &read); derr != nil {
 		return Worker{}, fmt.Errorf("%w: %v", ErrUnreadable, derr)
 	}
+	// hc says when it could not return the whole screen and history. A
+	// partial read could hide a REPORT line and read as "no report yet".
+	if !read.Complete {
+		return Worker{}, fmt.Errorf("%w: hc read returned an incomplete screen", ErrUnreadable)
+	}
 	return Worker{
 		Live:   t.State == stateLive,
 		Status: t.Status.State,
@@ -100,21 +105,27 @@ type SendResult struct {
 // It never passes --force: hc refuses a blocked terminal, and that refusal is
 // the operator's decision to make, not forgectl's. The caller checks the
 // status first; this re-checks that the terminal is forgectl's and live.
-func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string) (SendResult, error) {
+// With ifIdle, hc types only while the status is still idle (`--if idle`),
+// so a turn that started after the caller's check refuses the send instead
+// of receiving it mid-turn. hc's --if takes no "done", so a worker last seen
+// done is sent to without it.
+//
+// Every failure before hc is asked, the identity checks included, wraps
+// ErrSendRefused: nothing was typed.
+func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, ifIdle bool) (SendResult, error) {
 	t, err := a.owned(ctx, ref)
 	if err != nil {
-		return SendResult{}, err
+		return SendResult{}, fmt.Errorf("%w: %w", ErrSendRefused, err)
 	}
 	if t.State != stateLive {
 		return SendResult{}, fmt.Errorf("%w: the worker's program has exited", ErrSendRefused)
 	}
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
-		exec.MustFixed("send"),
-		exec.MustFixed("--json"),
-		exec.EndOfOptions(),
-		exec.Opaque(t.Address),
-		exec.Opaque(text),
-	))
+	args := []exec.Arg{exec.MustFixed("send"), exec.MustFixed("--json")}
+	if ifIdle {
+		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
+	}
+	args = append(args, exec.EndOfOptions(), exec.Opaque(t.Address), exec.Opaque(text))
+	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend, args...))
 	if runErr != nil {
 		switch kind := errorKind(res.Stderr); kind {
 		case kindBlocked, kindStatusMismatch, kindFinished:

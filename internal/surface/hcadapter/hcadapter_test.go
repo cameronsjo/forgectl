@@ -20,7 +20,9 @@ type fakeHC struct {
 	createExit  int
 	// sendKind, when set, is the error kind `hc send` fails with.
 	sendKind string
-	verbs    []string
+	// partialRead makes `hc read` report an incomplete screen.
+	partialRead bool
+	verbs       []string
 }
 
 func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
@@ -44,6 +46,9 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 		case "ls":
 			return ok(`{"hidden_finished":0,"terminals":[]}`), nil
 		case "read":
+			if f.partialRead {
+				return ok(`{"complete":false,"how":"screen","text":"hel"}`), nil
+			}
 			return ok(`{"complete":true,"how":"screen","text":"hello\nREPORT m1: done\n"}`), nil
 		case "send":
 			if f.sendKind != "" {
@@ -302,23 +307,62 @@ func TestWorkerScreenAndSend(t *testing.T) {
 	if err != nil || w.Status != StatusIdle || w.App != "claude-code" || w.Text != "hello\nREPORT m1: done" {
 		t.Fatalf("WorkerScreen = %+v, %v", w, err)
 	}
-	sent, err := a.SendBrief(context.Background(), ref, "next step")
+	sent, err := a.SendBrief(context.Background(), ref, "next step", false)
 	if err != nil || sent.Status != StatusWorking || sent.Turn != 2 {
 		t.Fatalf("SendBrief = %+v, %v", sent, err)
 	}
 	for _, kind := range []string{kindBlocked, kindStatusMismatch, kindFinished} {
 		f.sendKind = kind
-		if _, err := a.SendBrief(context.Background(), ref, "next step"); !errors.Is(err, ErrSendRefused) {
+		if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendRefused) {
 			t.Fatalf("%s SendBrief err = %v, want ErrSendRefused", kind, err)
 		}
 	}
 	f.sendKind = "internal"
-	if _, err := a.SendBrief(context.Background(), ref, "next step"); !errors.Is(err, ErrSendFailed) {
+	if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendFailed) {
 		t.Fatalf("failed SendBrief err = %v, want ErrSendFailed", err)
 	}
 	delete(f.terminals, "t1")
 	if _, err := a.WorkerScreen(context.Background(), ref); !errors.Is(err, ErrWorkerGone) {
 		t.Fatalf("gone WorkerScreen err = %v", err)
+	}
+	// A send to a gone worker typed nothing: refused, never unknown.
+	f.sendKind = ""
+	if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendRefused) {
+		t.Fatalf("gone SendBrief err = %v, want ErrSendRefused", err)
+	}
+}
+
+func TestSendBriefIfIdle(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := startWorker(t, f, a)
+	for _, ifIdle := range []bool{true, false} {
+		if _, err := a.SendBrief(context.Background(), ref, "go", ifIdle); err != nil {
+			t.Fatal(err)
+		}
+		last, _ := run.Last()
+		has := false
+		for i := 0; i+1 < len(last.Args); i++ {
+			if last.Args[i].Equal(exec.MustFixed("--if")) && last.Args[i+1].Equal(exec.MustFixed("idle")) {
+				has = true
+			}
+		}
+		if has != ifIdle {
+			t.Errorf("ifIdle=%v: --if idle present = %v", ifIdle, has)
+		}
+	}
+}
+
+func TestIncompleteReadIsUnreadable(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}, partialRead: true}
+	a := newTestAdapter(t, f, "")
+	ref := startWorker(t, f, a)
+	if _, err := a.WorkerScreen(context.Background(), ref); !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("err = %v, want ErrUnreadable", err)
 	}
 }
 

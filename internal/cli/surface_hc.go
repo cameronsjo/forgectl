@@ -132,7 +132,8 @@ func evaluateHcStatus(s ready.Screen) ready.Verdict {
 // without hc.
 type hcBriefSteps struct {
 	status func(context.Context) (hcadapter.Worker, error)
-	send   func(context.Context, string) (hcadapter.SendResult, error)
+	// send sends text; ifIdle asks hc to type only while still idle.
+	send   func(ctx context.Context, text string, ifIdle bool) (hcadapter.SendResult, error)
 	record func(worker.Brief) (int, error)
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) error
@@ -167,7 +168,7 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 		return refuse("record", "the brief could not be recorded in the worker ledger, so nothing was sent: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
-	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped))
+	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before.Status == hcadapter.StatusIdle)
 	switch {
 	case errors.Is(err, hcadapter.ErrSendRefused):
 		return refuse("send", "hc refused the send and typed nothing; the brief is recorded in the ledger: "+

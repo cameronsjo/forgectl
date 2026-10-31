@@ -47,15 +47,16 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	))
 	if runErr != nil {
 		// Only hc's own refusals before it spawned anything are definitive.
-		// spawn_failed was measured to leave no terminal behind (a missing
-		// cwd); any other failure may have created one.
+		// spawn_failed left no terminal behind in the one case measured (a
+		// missing cwd), but that is one cause, so it reconciles like any
+		// other failure that may have created one.
 		switch errorKind(res.Stderr) {
 		case kindNameTaken:
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureNameCollision, runErr))
 		case kindInvalidParams:
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureInternal, runErr))
 		case kindSpawnFailed:
-			return backend.NewNotMutated(backend.NewStartCause(backend.FailureUnavailable, runErr))
+			return a.reconcile(ctx, spec.Tag(), server, backend.NewStartCause(backend.FailureUnavailable, runErr))
 		}
 		return a.reconcile(ctx, spec.Tag(), server, classifyRunError(runErr))
 	}

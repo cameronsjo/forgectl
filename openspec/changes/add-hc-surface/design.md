@@ -87,5 +87,7 @@ A later change could read the transcript's latest `permissionMode` when the flag
 
 ## Risks
 
+- A core whose state was wiped reports a new `core.id`. Its old workers' rows then list as `unreadable` and `close` refuses them as an identity mismatch, by design: forgectl cannot prove the terminal it would act on is its own. herdr's `ForSessionLedger` recovery has no hc equivalent yet; such a row needs a follow-up (a ledger-only forget) rather than a looser check.
+
 - hc is 0.1.x. The JSON shapes above were measured on 0.1.15; the adapter reads them strictly and fails closed (unreadable, never gone) on anything else.
 - `hc server status` starts a core when none runs, so `surface list --surface hc` can start one. It never stops or restarts one.

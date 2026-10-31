@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -460,11 +461,11 @@ var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORK
 // CMUX_ set names the app, its shims, its socket or a port range, not a pane.
 var paneIdentityEnvByBackend = map[string][]string{
 	"herdr": herdrPaneIdentityEnv,
-	// hc sets HC_TERMINAL_ID (the terminal's address) and HC_SESSION in
-	// every terminal it starts. hc run does not forward the launcher's
-	// environment, so these are the worker terminal's own, read by the
-	// trampoline; the worker's own `hc send` needs both to reach its core.
-	"hc":   {"HC_TERMINAL_ID", "HC_SESSION"},
+	// hc sets HC_TERMINAL_ID, the terminal's address, in every terminal it
+	// starts. The launcher's own is stripped from every launch, as the other
+	// managers' pane ids are; HC_SESSION selects a core rather than naming a
+	// pane, so it is not listed here (hcSessionEnv).
+	"hc":   {"HC_TERMINAL_ID"},
 	"tmux": {"TMUX_PANE"},
 	"cmux": {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
 }
@@ -539,8 +540,24 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 		}
 		out = append(out, key+"="+value)
 	}
+	// hc run does not forward the launcher's environment, and the worker
+	// allowlist does not carry HC_SESSION, so an hc worker would otherwise
+	// lose the session its terminal runs in and its own `hc send` would reach
+	// the default core. The terminal's own value, which hc set, crosses.
+	if backend == "hc" {
+		if value := getenv(hcSessionEnv); hcadapter.ValidSession(value) && !slices.ContainsFunc(out, func(e string) bool {
+			k, _, _ := strings.Cut(e, "=")
+			return k == hcSessionEnv
+		}) {
+			out = append(out, hcSessionEnv+"="+value)
+		}
+	}
 	return out
 }
+
+// hcSessionEnv selects an hc core. It crosses into an hc worker from the
+// trampoline's own environment (paneIdentityEnv).
+const hcSessionEnv = "HC_SESSION"
 
 func validPaneIdentity(v string) bool {
 	if v == "" || len(v) > maxPaneIdentityLen {

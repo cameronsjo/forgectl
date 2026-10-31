@@ -106,8 +106,14 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		exec.Opaque(t.Address),
 	))
 	if err != nil {
-		if errorKind(res.Stderr) == kindNotFound {
+		switch errorKind(res.Stderr) {
+		case kindNotFound:
 			return backend.NewCloseClosed()
+		case kindLive:
+			// kill returned before the program finished exiting. A retry
+			// finds it finished and only removes it.
+			return backend.NewCloseFailed(backend.NewStartCause(backend.FailureTargetBusy,
+				errors.New("the worker's program is still stopping; run close again")))
 		}
 		return backend.NewCloseFailed(classifyRunError(err))
 	}

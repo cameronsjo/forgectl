@@ -43,11 +43,11 @@ func TestEvaluateHcStatus(t *testing.T) {
 }
 
 func TestHcPaneIdentityCrosses(t *testing.T) {
-	own := map[string]string{"HC_TERMINAL_ID": "t9", "HC_SESSION": "default", "HERDR_PANE_ID": "w1:p1"}
+	own := map[string]string{"HC_TERMINAL_ID": "t9", "HC_SESSION": "my.sess", "HERDR_PANE_ID": "w1:p1"}
 	// The launcher's own HC_TERMINAL_ID must not reach the worker.
 	env := markPane([]string{"PATH=/bin"}, "hc")
 	got := paneIdentityEnv(env, func(k string) string { return own[k] })
-	for _, want := range []string{"HC_TERMINAL_ID=t9", "HC_SESSION=default"} {
+	for _, want := range []string{"HC_TERMINAL_ID=t9", "HC_SESSION=my.sess"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("env %v lacks %s", got, want)
 		}
@@ -79,7 +79,7 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			}
 			return w, nil
 		},
-		send: func(_ context.Context, s string) (hcadapter.SendResult, error) {
+		send: func(_ context.Context, s string, _ bool) (hcadapter.SendResult, error) {
 			f.sent = append(f.sent, s)
 			return f.sendRes, f.sendErr
 		},
@@ -179,5 +179,20 @@ func TestInheritModeNeedsWorktree(t *testing.T) {
 	err := runSurfaceLaunch(cmd, module.Deps{}, surfaceLaunchOptions{Backend: "tmux", InheritMode: "auto"})
 	if code := ExitCode(err); code != 2 {
 		t.Fatalf("exit code = %d (err %v), want 2", code, err)
+	}
+}
+
+// TestHcSessionIsNotAPaneID: HC_SESSION selects a core, so a tmux, cmux or
+// herdr launch keeps the launcher's; only HC_TERMINAL_ID is stripped.
+func TestHcSessionIsNotAPaneID(t *testing.T) {
+	if isPaneIdentityKey("HC_SESSION") {
+		t.Error("HC_SESSION is stripped from every launch as if it named a pane")
+	}
+	if !isPaneIdentityKey("HC_TERMINAL_ID") {
+		t.Error("the launcher's HC_TERMINAL_ID would reach a worker")
+	}
+	got := paneIdentityEnv(markPane([]string{"HC_SESSION=work"}, "tmux"), func(string) string { return "" })
+	if !slices.Contains(got, "HC_SESSION=work") {
+		t.Errorf("tmux launch env %v lost HC_SESSION", got)
 	}
 }

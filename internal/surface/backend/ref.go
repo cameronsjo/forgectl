@@ -646,9 +646,6 @@ func NewHerdrRef(source ServerSource, server ServerID, tag RecoveryTag, id Herdr
 	return r, nil
 }
 
-// Validate reports whether this reference is complete and internally
-// consistent. It is the one gate every constructor and the decoder share, so
-// there is a single description of what a trustworthy reference is.
 // NewHcRef builds a reference to one hc terminal.
 func NewHcRef(source ServerSource, server ServerID, tag RecoveryTag, id HcIdentity) (Ref, error) {
 	r := Ref{kind: KindHc, source: source, server: server, tag: tag, hc: id}
@@ -658,6 +655,9 @@ func NewHcRef(source ServerSource, server ServerID, tag RecoveryTag, id HcIdenti
 	return r, nil
 }
 
+// Validate reports whether this reference is complete and internally
+// consistent. It is the one gate every constructor and the decoder share, so
+// there is a single description of what a trustworthy reference is.
 func (r Ref) Validate() error {
 	if !r.kind.Valid() {
 		return fmt.Errorf("%w: unknown backend", ErrInvalidRef)
