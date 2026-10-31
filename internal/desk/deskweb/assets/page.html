@@ -1,0 +1,69 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Desk</title>
+<link rel="stylesheet" href="/assets/artificer.css">
+<link rel="stylesheet" href="/assets/desk.css">
+</head>{{end}}
+{{define "login"}}{{template "head"}}
+<body>
+<main class="desk">
+<h1>Desk</h1>
+<p id="login-status">Open the address <code>forgectl desk serve</code> printed. It carries the key after the <code>#</code>.</p>
+</main>
+<script src="/assets/login.js"></script>
+</body>
+</html>{{end}}
+{{define "ask"}}
+<article class="ask" id="{{.ID}}">
+  <header>
+    <h3>{{.Title}}</h3>
+    <p class="meta">{{if .From}}from {{.From}} · {{end}}{{.Age}}{{if .Until}} · snoozed to {{.Until}}{{end}} · <code>{{.ID}}</code></p>
+  </header>
+  {{if .Steps}}<div class="steps">{{.Steps}}</div>{{end}}
+  {{if .Links}}<ul class="links">{{range .Links}}<li><a href="{{.URL}}" rel="noopener noreferrer nofollow" target="_blank">{{.Label}}</a></li>{{end}}</ul>{{end}}
+  {{if .Answer}}<p class="answer">{{.Answer}}</p>{{end}}
+</article>{{end}}
+{{define "forms"}}
+  <div class="respond">
+  {{if .I.Done}}<form method="post" action="/respond"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="ask" value="{{.I.ID}}"><input type="hidden" name="kind" value="done"><button type="submit" class="primary">Done</button></form>{{end}}
+  {{if .I.Snooze}}<form method="post" action="/respond" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="ask" value="{{.I.ID}}"><input type="hidden" name="kind" value="snooze"><select name="for" aria-label="Snooze for"><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="tomorrow">Tomorrow 9:00</option><option value="week">1 week</option></select><button type="submit">Snooze</button></form>{{end}}
+  {{if .I.Reply}}<form method="post" action="/respond" class="wide"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="ask" value="{{.I.ID}}"><input type="hidden" name="kind" value="reply"><textarea name="text" rows="2" maxlength="4000" placeholder="Reply" aria-label="Reply" required></textarea><button type="submit">Send reply</button></form>{{end}}
+  {{if .I.Link}}<form method="post" action="/respond" class="wide"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="ask" value="{{.I.ID}}"><input type="hidden" name="kind" value="link"><input type="url" name="url" placeholder="https://…" aria-label="Link" required><button type="submit">Send link</button></form>{{end}}
+  </div>{{end}}
+{{define "page"}}{{template "head"}}
+<body>
+<main class="desk" data-version="{{.Version}}">
+<h1>Desk <span class="count">{{.Open}} open</span></h1>
+{{if .Flash}}<p class="flash" role="status">{{.Flash}}</p>{{end}}
+{{if not .Buckets}}<p class="empty">Nothing needs you right now.</p>{{end}}
+{{$csrf := .CSRF}}
+{{range .Buckets}}
+<section class="bucket">
+<h2>{{.Label}}</h2>
+{{range .Items}}<div class="card">{{template "ask" .}}{{template "forms" (dict "I" . "CSRF" $csrf)}}</div>{{end}}
+</section>
+{{end}}
+{{if .Snoozed}}<section class="bucket snoozed"><h2>Snoozed</h2>
+{{range .Snoozed}}<div class="card">{{template "ask" .}}{{template "forms" (dict "I" . "CSRF" $csrf)}}</div>{{end}}
+</section>{{end}}
+<section class="bucket scripts"><h2>Scripts on the desk</h2>
+<p class="meta">Read-only. Run or skip these from the desk dashboard (<code>forgectl desk</code>).</p>
+{{if .ScriptsErr}}<p class="flash">{{.ScriptsErr}}</p>{{end}}
+{{if not .Scripts}}<p class="empty">No scripts queued.</p>{{end}}
+{{range .Scripts}}<div class="card script">
+<h3>{{.Name}} <span class="tag">{{.Kind}} · {{.State}}</span></h3>
+{{if .What}}<p>{{.What}}</p>{{end}}{{if .Why}}<p class="meta">why: {{.Why}}</p>{{end}}
+<p class="hash"><code>sha256={{.SHA256}}</code></p>
+</div>{{end}}
+</section>
+{{if .Answered}}<section class="bucket answered"><h2>Recently answered</h2>
+{{range .Answered}}<div class="card">{{template "ask" .}}</div>{{end}}
+</section>{{end}}
+</main>
+<script src="/assets/live.js"></script>
+</body>
+</html>{{end}}
