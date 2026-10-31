@@ -1,0 +1,30 @@
+[38;2;176;149;224m◆[m [1;38;2;219;187;111mforgectl surface watch[m  [38;2;90;122;138mq quit · ? help · 4 workers · [1;38;2;230;168;162m1 need you[m · polling every 5s · updated <1m ago[m                 
+[1;7;38;2;230;168;162m NEEDS YOU  cos-beta-docs is blocked: a dialog is waiting on its screen. See it: hc read t1y · answer it: hc attach t1y [m
+[38;2;90;122;138m  NAME                   STATUS*   REPORTS                    PR               CI     REVIEW*     [m [38;2;196;128;138m→ 3 more columns[m     
+[38;2;219;187;111m▸ [m[1;38;2;219;187;111mcos-alpha-fix         [m [38;2;196;128;138mworking  [m [38;2;196;128;138m0/1 report.md …           [m [38;2;219;187;111m#1384 37af206   [m [38;2;74;138;94m✓ pass[m [38;2;196;128;138mc0 i3 ×2    [m                      
+  [1;38;2;230;168;162mcos-beta-docs         [m [1;38;2;230;168;162mBLOCKED  [m [38;2;90;122;138mnone yet                  [m [38;2;90;122;138mno PR yet       [m [38;2;90;122;138m      [m [38;2;90;122;138m            [m                      
+  [38;2;232;230;225mcos-gamma             [m [38;2;74;138;94mdone     [m [38;2;74;138;94m2/2 report-round2.md ✓    [m [38;2;219;187;111m#1390 37af206   [m [1;38;2;230;168;162m✗ fail[m [38;2;90;122;138mnone        [m                      
+  [38;2;232;230;225mcos-gone              [m [38;2;196;128;138mgone     [m [38;2;102;102;102m—                         [m [38;2;90;122;138m—               [m [38;2;90;122;138m      [m [38;2;90;122;138m            [m                      
+[38;2;184;202;212m── screen: cos-alpha-fix (t1n) · hc read t1n · hc attach t1n to take over ──[m                                            
+Building internal/tui                                                                                                   
+✻ Cogitating… (12s · esc to interrupt)                                                                                  
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+[38;2;196;128;138mnote: line 7: want name|worktree|brief dir[m                                                                              
+[38;2;90;122;138m↑/↓ select · r refresh · ? help · q quit · * = a claim, see ?[m                                                           

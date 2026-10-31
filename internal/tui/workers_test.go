@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -28,7 +29,7 @@ func workersFixture() workerwatch.Snapshot {
 				BriefDir: "/b/a", Worktree: "/wt/a", Source: "file",
 				Reports: workerwatch.Reports{Files: []workerwatch.ReportFile{{Name: "report.md"}}},
 				PR: &workerwatch.PR{Repo: "o/r", Number: 1384, State: "OPEN", Draft: true, Head: workersHead, Checks: "SUCCESS",
-					Marker: &workerwatch.Marker{Reviewer: "pr-reviewer", Head: workersHead, Crit: 0, Imp: 3, AtHead: true}},
+					Review: &workerwatch.Review{AtHead: 2, Crit: 0, Imp: 3, Reviewers: []string{"pr-reviewer", "security-reviewer"}}},
 				PRAt: workersNow,
 			},
 			{
@@ -130,11 +131,19 @@ func loadedWorkers(t *testing.T, f *workersFakes) workersModel {
 	return feed(t, m, workersSnapMsg{snap: workersFixture()})
 }
 
+// The workers goldens store raw truecolor SGR, so a palette change reddens
+// them too. Regenerate with: go test ./internal/tui -run WorkersGolden -update
 func TestWorkersGolden(t *testing.T) {
 	forceTrueColor(t)
-	f := &workersFakes{screen: "\x1b[1mBuilding\x1b[0m internal/tui\n✻ Cogitating… (12s · esc to interrupt)\n\n"}
-	m := loadedWorkers(t, f)
-	assertGolden(t, "workers", m.View().Content)
+	for _, size := range []struct {
+		name string
+		w, h int
+	}{{"workers", 140, 30}, {"workers_120x30", 120, 30}, {"workers_80x24", 80, 24}} {
+		f := &workersFakes{screen: "\x1b[1mBuilding\x1b[0m internal/tui\n✻ Cogitating… (12s · esc to interrupt)\n\n"}
+		m := loadedWorkers(t, f)
+		out, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+		assertGolden(t, size.name, out.(workersModel).View().Content)
+	}
 }
 
 func TestWorkersRowsShowEveryField(t *testing.T) {
@@ -142,11 +151,11 @@ func TestWorkersRowsShowEveryField(t *testing.T) {
 	m := loadedWorkers(t, f)
 	plain := ansi.Strip(m.View().Content)
 	for _, want := range []string{
-		"cos-alpha-fix", "t1n", "working", "12m", "opus", "0/1 report.md …", "#1384 37af206", "✓ pass", "pr-reviewer crit=0 imp=3 @head",
+		"cos-alpha-fix", "t1n", "working", "12m", "opus", "0/1 report.md …", "#1384 37af206", "✓ pass", "c0 i3 ×2",
 		"BLOCKED", "no PR yet",
-		"2/2 report-round2.md ✓", "✗ fail", "no marker",
+		"2/2 report-round2.md ✓", "✗ fail", "none",
 		"gone",
-		"STATUS*", "REVIEW*", "status and review markers are claims",
+		"STATUS*", "REVIEW*", "* = a claim, see ?",
 		"note: line 7",
 		"── screen: cos-alpha-fix (t1n)", "hello from the worker",
 	} {
@@ -351,11 +360,11 @@ func TestWorkersBannerIsCapped(t *testing.T) {
 		many.Workers = append(many.Workers, workerwatch.Worker{Name: fmt.Sprintf("cos-blk-%d", i), Address: fmt.Sprintf("t%d", 50+i), State: "live", Status: workerwatch.StatusBlocked})
 	}
 	out, _ := m.Update(workersSnapMsg{snap: many})
-	lines := out.(workersModel).bannerLines()
+	lines := out.(workersModel).bannerLines(200, 30)
 	if len(lines) != workersMaxBanners {
 		t.Fatalf("banner has %d lines, want %d", len(lines), workersMaxBanners)
 	}
-	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "5 more blocked workers") {
+	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "5 more blocked: cos-blk-1, cos-blk-2, cos-blk-3, …") {
 		t.Errorf("last banner line = %q, want a count of the rest", ansi.Strip(lines[len(lines)-1]))
 	}
 	view := out.(workersModel).View().Content
@@ -410,5 +419,132 @@ func TestStopStreamWaitsForTheChild(t *testing.T) {
 	}
 	if stopStream(func() {}, make(chan struct{}), 20*time.Millisecond) {
 		t.Error("stopStream reported a child that never exits as reaped")
+	}
+}
+
+func sizedWorkers(t *testing.T, w, h int) workersModel {
+	t.Helper()
+	m := loadedWorkers(t, &workersFakes{screen: "s"})
+	out, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	return out.(workersModel)
+}
+
+func TestWorkersNarrowKeepsVerdictColumns(t *testing.T) {
+	for _, w := range []int{80, 60} {
+		plain := ansi.Strip(sizedWorkers(t, w, 24).View().Content)
+		for _, want := range []string{"STATUS*", "REVIEW*", "c0 i3", "BLOCKED", "→ ", "q quit", "hc read t1y"} {
+			if !strings.Contains(plain, want) {
+				t.Errorf("at %d columns the view lost %q\n%s", w, want, plain)
+			}
+		}
+		for i, line := range strings.Split(plain, "\n") {
+			if lw := lipgloss.Width(line); lw > w {
+				t.Errorf("at %d columns line %d is %d wide", w, i, lw)
+			}
+		}
+	}
+	wide := ansi.Strip(sizedWorkers(t, 200, 30).View().Content)
+	if strings.Contains(wide, "more columns") {
+		t.Errorf("a 200-column view still hides columns\n%s", wide)
+	}
+	for _, want := range []string{"MODEL", "HC", "report-round2.md"} {
+		if !strings.Contains(wide, want) {
+			t.Errorf("a wide view lost %q", want)
+		}
+	}
+}
+
+func TestWorkersLayoutDropsLowPriorityFirst(t *testing.T) {
+	cols, hidden := workersLayout(80)
+	kinds := map[int]bool{}
+	for _, c := range cols {
+		kinds[c.kind] = true
+	}
+	for _, k := range []int{colName, colStatus, colReview, colCI} {
+		if !kinds[k] {
+			t.Errorf("80 columns dropped a verdict column (kind %d): %+v", k, cols)
+		}
+	}
+	if kinds[colModel] || hidden == 0 {
+		t.Errorf("80 columns kept MODEL or hid nothing: %+v hidden=%d", cols, hidden)
+	}
+	used := 2
+	for _, c := range cols {
+		used += c.width + 1
+	}
+	if used+workersHintWidth > 80+1 {
+		t.Errorf("the kept columns (%d) leave no room for the hint", used)
+	}
+}
+
+func TestWorkersWideNamesKeepColumnsAligned(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	snap := workersFixture()
+	snap.Workers[0].Name = "cos-" + strings.Repeat("界", 30)         // 60 cells
+	snap.Workers[2].Name = "cos-" + strings.Repeat("long-name-", 5) // 54 runes
+	out, _ := m.Update(workersSnapMsg{snap: snap})
+	out, _ = out.(workersModel).Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+	lines := strings.Split(ansi.Strip(out.(workersModel).View().Content), "\n")
+	col := func(line, sub string) int {
+		i := strings.Index(line, sub)
+		if i < 0 {
+			return -1
+		}
+		return lipgloss.Width(line[:i])
+	}
+	var header string
+	for _, l := range lines {
+		if strings.Contains(l, "STATUS*") {
+			header = l
+		}
+	}
+	want := col(header, "STATUS*")
+	for _, l := range lines {
+		for _, st := range []string{"working", "done "} {
+			if c := col(l, st); c >= 0 && strings.Contains(l, "cos-") && c != want {
+				t.Errorf("status %q starts at cell %d, header at %d:\n%s", st, c, want, l)
+			}
+		}
+	}
+}
+
+func TestWorkersHelpAndEsc(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	out, cmd := m.Update(key("?"))
+	if cmd != nil {
+		t.Error("? returned a command")
+	}
+	plain := ansi.Strip(out.(workersModel).View().Content)
+	for _, want := range []string{"keys and what the columns mean", "summed the way forgectl sweep sums them", "only reads"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("help is missing %q", want)
+		}
+	}
+	out, cmd = out.(workersModel).Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("esc quit the watch")
+		}
+	}
+	if out.(workersModel).help {
+		t.Error("esc did not close help")
+	}
+	if !strings.Contains(ansi.Strip(out.(workersModel).headerLine()), "q quit") {
+		t.Error("the header does not carry the quit key")
+	}
+}
+
+func TestWorkersShortTerminal(t *testing.T) {
+	for _, h := range []int{11, 8} {
+		v := sizedWorkers(t, 120, h).View().Content
+		if n := strings.Count(v, "\n") + 1; n > h {
+			t.Errorf("a %d-row terminal got %d lines", h, n)
+		}
+		if !strings.Contains(ansi.Strip(v), "q quit") {
+			t.Errorf("a %d-row terminal lost the quit key", h)
+		}
+	}
+	if !strings.Contains(ansi.Strip(sizedWorkers(t, 120, 5).View().Content), "terminal too small") {
+		t.Error("a 5-row terminal does not say it is too small")
 	}
 }

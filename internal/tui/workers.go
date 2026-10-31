@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -37,6 +38,9 @@ const (
 	workersTailTimeout = 10 * time.Second
 	// workersMaxTailLines caps the screen lines kept for the tail.
 	workersMaxTailLines = 200
+	// workersMaxCellRunes caps one escaped table cell before it is cut to
+	// its column width.
+	workersMaxCellRunes = 200
 	// workersMaxBanners caps the NEEDS YOU lines, so many blocked workers
 	// cannot push the table off the screen.
 	workersMaxBanners = 3
@@ -49,8 +53,13 @@ const (
 	wwAge    = 4
 	wwModel  = 10
 	wwReport = 26
-	wwPR     = 14
-	wwCI     = 6
+	// wwReportShort is REPORTS without the file name ("1/2 ✓").
+	wwReportShort = 7
+	// wwNameMin is the narrowest NAME gets before other columns drop.
+	wwNameMin = 12
+	wwReview  = 12
+	wwPR      = 16
+	wwCI      = 6
 )
 
 // WorkersOptions configures RunWorkers.
@@ -129,6 +138,7 @@ type workersModel struct {
 
 	cursor        int
 	width, height int
+	help          bool
 
 	tailAddr  string
 	tailLines []string
@@ -302,8 +312,14 @@ func (m workersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m workersModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
-	case "ctrl+c", "q", "esc":
+	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "?":
+		m.help = !m.help
+		return m, nil
+	case "esc":
+		m.help = false // esc closes help; it never quits
+		return m, nil
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -357,21 +373,48 @@ func SanitizeScreen(text string) []string {
 
 // --- view ---
 
+// workersMinRows is the smallest terminal the view lays out in; below it
+// the view says so instead of cutting the header or keys off.
+const workersMinRows = 7
+
 func (m workersModel) View() tea.View {
-	height := max(m.height, 12)
-	var top []string
-	top = append(top, m.headerLine())
-	if banner := m.bannerLines(); len(banner) > 0 {
-		top = append(top, banner...)
+	width, height := m.width, m.height
+	if width <= 0 {
+		width = 200
 	}
-	top = append(top, m.styles.Muted.Render(workersColumns()))
-	rows := m.rowLines()
+	if height <= 0 {
+		height = 30
+	}
+	var content string
+	switch {
+	case height < workersMinRows:
+		content = m.styles.Warn.Render(fmt.Sprintf("terminal too small (%d rows; need %d) · q quit", height, workersMinRows))
+	case m.help:
+		content = strings.Join(clipLines(m.helpLines(), height), "\n")
+	default:
+		content = strings.Join(m.mainLines(width, height), "\n")
+	}
+	content = lipgloss.NewStyle().MaxWidth(width).Render(content)
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
+}
+
+func (m workersModel) mainLines(width, height int) []string {
+	cols, hidden := workersLayout(width)
+	top := []string{m.headerLine()}
+	top = append(top, m.bannerLines(width, height)...)
+	top = append(top, m.columnsLine(cols, hidden))
+	rows := make([]string, 0, len(m.snap.Workers))
+	for i, w := range m.snap.Workers {
+		rows = append(rows, m.rowLine(cols, i == m.cursor, w))
+	}
 	footer := m.footerLines()
 
 	// The table gets what it needs up to half the screen; the screen tail
 	// gets the rest.
-	room := height - len(top) - len(footer)
-	tableRoom := min(len(rows), max(room/2, 3))
+	room := max(height-len(top)-len(footer), 1)
+	tableRoom := min(len(rows), max(room/2, min(3, room)))
 	if len(rows) == 0 {
 		tableRoom = 1
 		rows = []string{m.styles.Muted.Render(m.emptyText())}
@@ -385,29 +428,29 @@ func (m workersModel) View() tea.View {
 	for len(rows)+len(tail) < room {
 		tail = append(tail, "")
 	}
+	return clipLines(append(append(append(top, rows...), tail...), footer...), height)
+}
 
-	lines := append(append(append(top, rows...), tail...), footer...)
-	content := strings.Join(lines, "\n")
-	if m.width > 0 {
-		content = lipgloss.NewStyle().MaxWidth(m.width).Render(content)
+// clipLines keeps at most n lines.
+func clipLines(lines []string, n int) []string {
+	if len(lines) > n {
+		return lines[:n]
 	}
-	v := tea.NewView(content)
-	v.AltScreen = true
-	return v
+	return lines
 }
 
 func (m workersModel) emptyText() string {
-	switch {
-	case !m.loaded:
+	if !m.loaded {
 		return "  reading workers…"
-	default:
-		return "  no workers: the workers file is empty and --cos found no cos-* terminal"
 	}
+	return "  no workers: the workers file is empty and --cos found no cos-* terminal"
 }
 
 func (m workersModel) headerLine() string {
 	brand := m.styles.Brand.Render("◆") + " " + m.styles.Header.Render(meta.AppName+" surface watch")
-	parts := []string{fmt.Sprintf("%d workers", len(m.snap.Workers))}
+	// The quit and help keys lead, so a narrow or short terminal that cuts
+	// the line's end or loses the footer still shows them.
+	parts := []string{"q quit · ? help", fmt.Sprintf("%d workers", len(m.snap.Workers))}
 	if n := len(m.snap.NeedingYou()); n > 0 {
 		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("%d need you", n)))
 	}
@@ -430,187 +473,315 @@ func (m workersModel) headerLine() string {
 }
 
 // bannerLines is the needs-you banner: one line per blocked worker, naming
-// the command that shows its dialog. The view never answers it.
-func (m workersModel) bannerLines() []string {
-	var out []string
+// the command that shows its dialog, at most workersMaxBanners lines (two
+// on a short terminal). The view never answers a dialog.
+func (m workersModel) bannerLines(width, height int) []string {
+	limit := workersMaxBanners
+	if height < 14 {
+		limit = 1
+	}
 	needing := m.snap.NeedingYou()
 	shown := needing
-	if len(needing) > workersMaxBanners {
-		shown = needing[:workersMaxBanners-1]
+	if len(needing) > limit {
+		shown = needing[:limit-1]
 	}
+	var out []string
 	for _, w := range shown {
 		addr := w.Address
 		if addr == "" {
 			addr = w.Name
 		}
-		msg := fmt.Sprintf(" NEEDS YOU  %s is blocked: a dialog is waiting on its screen. See it: hc read %s · answer it: hc attach %s ",
-			capSafe(w.Name, wwName), capSafe(addr, 32), capSafe(addr, 32))
+		a := capSafe(addr, 32)
+		msg := fmt.Sprintf(" NEEDS YOU  %s is blocked: a dialog is waiting on its screen. See it: hc read %s · answer it: hc attach %s ", capSafe(w.Name, wwName), a, a)
+		if lipgloss.Width(msg) > width {
+			msg = fmt.Sprintf(" NEEDS YOU  %s blocked · hc read %s ", capSafe(w.Name, wwName), a)
+		}
 		out = append(out, m.styles.Danger.Reverse(true).Render(msg))
 	}
-	if more := len(needing) - len(shown); more > 0 {
-		out = append(out, m.styles.Danger.Reverse(true).Render(fmt.Sprintf(" NEEDS YOU  %d more blocked workers: see the BLOCKED rows ", more)))
+	if rest := needing[len(shown):]; len(rest) > 0 {
+		names := make([]string, 0, 3)
+		for _, w := range rest[:min(len(rest), 3)] {
+			names = append(names, capSafe(w.Name, wwName))
+		}
+		more := ""
+		if len(rest) > 3 {
+			more = ", …"
+		}
+		out = append(out, m.styles.Danger.Reverse(true).Render(fmt.Sprintf(" NEEDS YOU  %d more blocked: %s%s (BLOCKED rows; ↑/↓ to reach them) ", len(rest), strings.Join(names, ", "), more)))
 	}
 	return out
 }
 
-func workersColumns() string {
-	return "  " + padRight("NAME", wwName) + " " + padRight("HC", wwAddr) + " " + padRight("STATUS*", wwStatus) + " " +
-		padRight("AGE", wwAge) + " " + padRight("MODEL", wwModel) + " " + padRight("REPORTS", wwReport) + " " +
-		padRight("PR", wwPR) + " " + padRight("CI", wwCI) + " REVIEW*"
+// workersCol is one table column. Columns are shown in kind order and
+// dropped by prio (highest number first) when the terminal is narrow.
+type workersCol struct {
+	kind  int
+	title string
+	width int
+	prio  int
 }
 
-func (m workersModel) rowLines() []string {
-	out := make([]string, 0, len(m.snap.Workers))
-	for i, w := range m.snap.Workers {
-		out = append(out, m.rowLine(i == m.cursor, w))
+const (
+	colName = iota
+	colStatus
+	colAge
+	colAddr
+	colModel
+	colReports
+	colReportsShort
+	colPR
+	colCI
+	colReview
+)
+
+var workersAllCols = []workersCol{
+	{colName, "NAME", wwName, 1},
+	{colStatus, "STATUS*", wwStatus, 2},
+	{colAge, "AGE", wwAge, 7},
+	{colAddr, "HC", wwAddr, 8},
+	{colModel, "MODEL", wwModel, 9},
+	{colReports, "REPORTS", wwReport, 5},
+	{colPR, "PR", wwPR, 6},
+	{colCI, "CI", wwCI, 4},
+	{colReview, "REVIEW*", wwReview, 3},
+}
+
+// workersVerdictPrio is the lowest priority NAME narrows for: NAME,
+// STATUS, REVIEW, CI and REPORTS.
+const workersVerdictPrio = 5
+
+// workersHintWidth is the room the "→ N more columns" hint takes.
+const workersHintWidth = 17
+
+// workersLayout picks the columns that fit width, by priority, and how many
+// were left out. REPORTS falls back to its short form before it is dropped.
+// NAME first gets its full width; if that would push out a verdict column
+// (STATUS, REVIEW, CI), NAME narrows to wwNameMin and takes back whatever
+// room is left.
+func workersLayout(width int) ([]workersCol, int) {
+	fit := func(avail, nameWidth int) ([]workersCol, bool) {
+		byPrio := slices.Clone(workersAllCols)
+		slices.SortStableFunc(byPrio, func(a, b workersCol) int { return a.prio - b.prio })
+		used := 2 // the selection pointer
+		var keep []workersCol
+		lostVerdict := false
+		for _, c := range byPrio {
+			if c.kind == colName {
+				c.width = nameWidth
+			}
+			if c.kind == colReports && used+c.width+1 > avail {
+				c = workersCol{colReportsShort, "REPORTS", wwReportShort, c.prio}
+			}
+			if used+c.width+1 > avail && c.kind != colName {
+				lostVerdict = lostVerdict || c.prio <= workersVerdictPrio
+				continue
+			}
+			keep = append(keep, c)
+			used += c.width + 1
+		}
+		// Give NAME any room left, up to its full width.
+		for i := range keep {
+			if keep[i].kind == colName {
+				keep[i].width = min(wwName, keep[i].width+max(avail-used, 0))
+			}
+		}
+		slices.SortStableFunc(keep, func(a, b workersCol) int { return a.kind - b.kind })
+		return keep, lostVerdict
 	}
-	return out
+	layout := func(avail int) []workersCol {
+		cols, lost := fit(avail, wwName)
+		if lost {
+			cols, _ = fit(avail, wwNameMin)
+		}
+		return cols
+	}
+	cols := layout(width)
+	if len(cols) < len(workersAllCols) {
+		cols = layout(width - workersHintWidth)
+	}
+	return cols, len(workersAllCols) - len(cols)
 }
 
-func (m workersModel) rowLine(selected bool, w workerwatch.Worker) string {
-	s := m.styles
+func (m workersModel) columnsLine(cols []workersCol, hidden int) string {
+	parts := make([]string, 0, len(cols))
+	for _, c := range cols {
+		parts = append(parts, fitCell(c.title, c.width))
+	}
+	line := m.styles.Muted.Render("  " + strings.Join(parts, " "))
+	if hidden > 0 {
+		line += " " + m.styles.Warn.Render(fmt.Sprintf("→ %d more columns", hidden))
+	}
+	return line
+}
+
+func (m workersModel) rowLine(cols []workersCol, selected bool, w workerwatch.Worker) string {
 	pointer := "  "
 	if selected {
-		pointer = s.Accent.Render("▸ ")
+		pointer = m.styles.Accent.Render("▸ ")
 	}
-	nameStyle := s.Fg
-	if selected {
-		nameStyle = s.Selected
-	}
-	if w.NeedsYou() {
-		nameStyle = s.Danger
-	}
-	cells := []string{
-		nameStyle.Render(padRight(capSafe(w.Name, wwName), wwName)),
-		s.Meta.Render(padRight(capSafe(dash(w.Address), wwAddr), wwAddr)),
-		m.statusCell(w),
-		s.Muted.Render(padRight(ageCell(w.AgeSeconds), wwAge)),
-		s.Muted.Render(padRight(capSafe(dash(w.Model), wwModel), wwModel)),
-		m.reportCell(w),
-		m.prCell(w),
-		m.ciCell(w),
-		m.reviewCell(w),
+	cells := make([]string, 0, len(cols))
+	for _, c := range cols {
+		text, style := m.cell(c.kind, selected, w)
+		cells = append(cells, style.Render(fitCell(text, c.width)))
 	}
 	return pointer + strings.Join(cells, " ")
 }
 
-func (m workersModel) statusCell(w workerwatch.Worker) string {
+// cell is one column's plain text and style for w. Worker text is escaped
+// here; fitCell then cuts it by display width.
+func (m workersModel) cell(kind int, selected bool, w workerwatch.Worker) (string, lipgloss.Style) {
 	s := m.styles
-	text, style := dash(w.Status), s.Muted
-	switch {
-	case w.HCError != "":
-		text, style = "gone", s.Warn
-	case w.State == "finished":
-		text, style = "exited", s.Muted
-	case w.Status == workerwatch.StatusWorking:
-		style = s.Active
-	case w.Status == workerwatch.StatusDone:
-		style = s.OK
-	case w.Status == workerwatch.StatusBlocked:
-		text, style = "BLOCKED", s.Danger
-	case w.Status == workerwatch.StatusError:
-		style = s.Danger
+	switch kind {
+	case colName:
+		style := s.Fg
+		switch {
+		case w.NeedsYou():
+			style = s.Danger
+		case selected:
+			style = s.Selected
+		}
+		return safeText(w.Name), style
+	case colStatus:
+		return m.statusCell(w)
+	case colAge:
+		return ageCell(w.AgeSeconds), s.Muted
+	case colAddr:
+		return dash(safeText(w.Address)), s.Meta
+	case colModel:
+		return dash(safeText(w.Model)), s.Muted
+	case colReports, colReportsShort:
+		return m.reportCell(w, kind == colReportsShort)
+	case colPR:
+		return m.prCell(w)
+	case colCI:
+		return m.ciCell(w)
+	case colReview:
+		return m.reviewCell(w)
 	}
-	return style.Render(padRight(text, wwStatus))
+	return "", s.Muted
 }
 
-func (m workersModel) reportCell(w workerwatch.Worker) string {
+func (m workersModel) statusCell(w workerwatch.Worker) (string, lipgloss.Style) {
+	s := m.styles
+	switch {
+	case w.HCError != "":
+		return "gone", s.Warn
+	case w.State == "finished":
+		return "exited", s.Muted
+	case w.Status == workerwatch.StatusWorking:
+		return w.Status, s.Active
+	case w.Status == workerwatch.StatusDone:
+		return w.Status, s.OK
+	case w.Status == workerwatch.StatusBlocked:
+		return "BLOCKED", s.Danger
+	case w.Status == workerwatch.StatusError:
+		return w.Status, s.Danger
+	}
+	return dash(w.Status), s.Muted
+}
+
+func (m workersModel) reportCell(w workerwatch.Worker, short bool) (string, lipgloss.Style) {
 	s := m.styles
 	r := w.Reports
 	newest, ok := r.Newest()
 	switch {
 	case w.BriefDir == "":
-		return s.Dim.Render(padRight("—", wwReport))
+		return "—", s.Dim
 	case r.Error != "":
-		return s.Warn.Render(padRight("unreadable", wwReport))
+		return "unreadable", s.Warn
+	case !ok && short:
+		return "none", s.Muted
 	case !ok:
-		return s.Muted.Render(padRight("none yet", wwReport))
+		return "none yet", s.Muted
 	}
-	text := fmt.Sprintf("%d/%d %s", r.CompleteCount(), len(r.Files), capSafe(newest.Name, wwReport-8))
+	text := fmt.Sprintf("%d/%d", r.CompleteCount(), len(r.Files))
+	if !short {
+		text += " " + safeText(newest.Name)
+	}
 	if newest.Complete {
-		return s.OK.Render(padRight(text+" ✓", wwReport))
+		return text + " ✓", s.OK
 	}
-	return s.Warn.Render(padRight(text+" …", wwReport))
+	return text + " …", s.Warn
 }
 
-func (m workersModel) prCell(w workerwatch.Worker) string {
+func (m workersModel) prCell(w workerwatch.Worker) (string, lipgloss.Style) {
 	s := m.styles
 	if w.PR == nil {
-		note := "—"
 		switch w.PRIssue {
 		case workerwatch.PRIssueNoPR:
-			note = "no PR yet"
+			return "no PR yet", s.Muted
 		case workerwatch.PRIssueGH:
-			return s.Warn.Render(padRight("gh error", wwPR))
+			return "gh error", s.Warn
 		case workerwatch.PRIssueNotGitHub:
-			note = "not GitHub"
+			return "not GitHub", s.Muted
 		case workerwatch.PRIssueNoOrigin:
-			note = "no origin"
+			return "no origin", s.Muted
 		case workerwatch.PRIssueNoBranch:
-			note = "no branch"
-		case "":
-			if w.Worktree != "" && w.PRAt.IsZero() {
-				note = "…"
-			}
+			return "no branch", s.Muted
 		}
-		return s.Muted.Render(padRight(note, wwPR))
+		if w.Worktree != "" && w.PRAt.IsZero() {
+			return "…", s.Muted
+		}
+		return "—", s.Muted
 	}
 	text := fmt.Sprintf("#%d", w.PR.Number)
 	if len(w.PR.Head) >= 7 {
 		text += " " + w.PR.Head[:7]
 	}
-	style := s.Accent
-	switch w.PR.State {
-	case "MERGED":
-		style = s.OK
-	case "CLOSED":
-		style = s.Muted
-	}
 	if w.PRIssue == workerwatch.PRIssueGH {
 		// The last good read, kept beside a failed one: say so.
-		return s.Warn.Render(padRight(text+" !", wwPR))
+		return text + " !", s.Warn
 	}
-	return style.Render(padRight(text, wwPR))
+	switch w.PR.State {
+	case "MERGED":
+		return text, s.OK
+	case "CLOSED":
+		return text, s.Muted
+	}
+	return text, s.Accent
 }
 
-func (m workersModel) ciCell(w workerwatch.Worker) string {
+func (m workersModel) ciCell(w workerwatch.Worker) (string, lipgloss.Style) {
 	s := m.styles
 	if w.PR == nil {
-		return padRight("", wwCI)
+		return "", s.Muted
 	}
 	switch w.PR.Checks {
 	case "SUCCESS":
-		return s.OK.Render(padRight("✓ pass", wwCI))
+		return "✓ pass", s.OK
 	case "FAILURE", "ERROR":
-		return s.Danger.Render(padRight("✗ fail", wwCI))
+		return "✗ fail", s.Danger
 	case "PENDING", "EXPECTED":
-		return s.Warn.Render(padRight("… run", wwCI))
+		return "… run", s.Warn
 	}
-	return s.Muted.Render(padRight("—", wwCI))
+	return "—", s.Muted
 }
 
-func (m workersModel) reviewCell(w workerwatch.Worker) string {
+// reviewCell is the compact verdict: sweep's sum over the markers at head,
+// "c<crit> i<imp>", with "×N" when N markers count. Reviewer names are in
+// --json and the help screen explains the rule.
+func (m workersModel) reviewCell(w workerwatch.Worker) (string, lipgloss.Style) {
 	s := m.styles
-	if w.PR == nil || w.PR.Marker == nil {
-		if w.PR != nil {
-			return s.Muted.Render("no marker")
-		}
-		return ""
+	switch {
+	case w.PR == nil:
+		return "", s.Muted
+	case w.PR.Review == nil:
+		return "none", s.Muted
+	case w.PR.Review.AtHead == 0:
+		return "stale", s.Muted
 	}
-	mk := w.PR.Marker
-	text := fmt.Sprintf("%s crit=%d imp=%d", capSafe(mk.Reviewer, 20), mk.Crit, mk.Imp)
-	if more := w.PR.MarkersAtHead - 1; mk.AtHead && more > 0 {
-		text += fmt.Sprintf(" +%d", more) // other reviewers at head, none worse
+	r := w.PR.Review
+	text := fmt.Sprintf("c%d i%d", r.Crit, r.Imp)
+	if r.AtHead > 1 {
+		text += fmt.Sprintf(" ×%d", r.AtHead)
 	}
 	switch {
-	case !mk.AtHead:
-		return s.Muted.Render(text + " stale")
-	case mk.Crit > 0:
-		return s.Danger.Render(text + " @head")
-	case mk.Imp > 0:
-		return s.Warn.Render(text + " @head")
+	case r.Crit > 0:
+		return text, s.Danger
+	case r.Imp > 0:
+		return text, s.Warn
 	}
-	return s.OK.Render(text + " @head")
+	return text, s.OK
 }
 
 // tailBlock is the selected worker's screen: a rule naming it, then the
@@ -625,14 +796,15 @@ func (m workersModel) tailBlock(room int) []string {
 	}
 	title := fmt.Sprintf("── screen: %s", capSafe(w.Name, wwName))
 	if w.Address != "" {
-		title += fmt.Sprintf(" (%s) · hc read %s · hc attach %s to take over", capSafe(w.Address, 32), capSafe(w.Address, 32), capSafe(w.Address, 32))
+		a := capSafe(w.Address, 32)
+		title += fmt.Sprintf(" (%s) · hc read %s · hc attach %s to take over", a, a, a)
 	}
 	out := []string{m.styles.Steel.Render(title + " ──")}
 	body := room - 1
 	var lines []string
 	switch {
 	case w.HCError != "":
-		lines = []string{m.styles.Warn.Render("  " + w.HCError)}
+		lines = []string{m.styles.Warn.Render("  " + safeText(w.HCError))}
 	case w.State == "finished":
 		lines = []string{m.styles.Muted.Render("  the terminal has exited")}
 	case m.tailErr != "" && m.tailAddr == w.Address:
@@ -649,7 +821,7 @@ func (m workersModel) tailBlock(room int) []string {
 }
 
 func (m workersModel) footerLines() []string {
-	keys := m.styles.Muted.Render("↑/↓ select · r refresh · q quit · * status and review markers are claims (the agent's own report; any session on your gh login can post a marker)")
+	keys := m.styles.Muted.Render("↑/↓ select · r refresh · ? help · q quit · * = a claim, see ?")
 	if len(m.snap.Notes) == 0 {
 		return []string{keys}
 	}
@@ -660,12 +832,45 @@ func (m workersModel) footerLines() []string {
 	return []string{m.styles.Warn.Render("note: " + note), keys}
 }
 
-// padRight pads plain text to n display cells. Text is already escaped and
-// capped, so its width is its rune count except for wide glyphs, which
-// lipgloss measures.
-func padRight(s string, n int) string {
+// helpLines is the ? screen.
+func (m workersModel) helpLines() []string {
+	s := m.styles
+	lines := []string{
+		s.Header.Render("surface watch: keys and what the columns mean"),
+		"",
+		"  ↑/↓ or j/k   select a worker; its screen shows below the table",
+		"  g / G        first / last worker",
+		"  r            refresh now (GitHub reads older than 15s too)",
+		"  ?            this help; ? or esc closes it",
+		"  q, ctrl+c    quit",
+		"",
+		"  STATUS*  the agent's own report through hc (OSC 7501), not an observation.",
+		"  REVIEW*  cadence-review markers summed the way forgectl sweep sums them:",
+		"           c<crit> i<imp> over every marker at the PR's head, ×N markers;",
+		"           only [sweep] reviewers count when that list is set. Markers are",
+		"           claims: any session on your gh login, a worker included, can post one.",
+		"  PR !     the last good read, kept because the newest GitHub read failed.",
+		"  → N more columns  widen the terminal to see the rest (or use --json).",
+		"",
+		"  The watch only reads: it never types into, kills, or briefs a worker.",
+	}
+	for _, n := range m.snap.Notes {
+		lines = append(lines, s.Warn.Render("  note: "+capSafe(n, 300)))
+	}
+	return lines
+}
+
+// safeText escapes worker-supplied text for one terminal line.
+func safeText(s string) string { return termsafe.SafeLineMax(strings.TrimSpace(s), workersMaxCellRunes) }
+
+// fitCell cuts s to n display cells (an ellipsis marks a cut) and pads it
+// to exactly n, so wide runes cannot shift the columns after it.
+func fitCell(s string, n int) string {
+	if lipgloss.Width(s) > n {
+		s = ansi.Truncate(s, n, "…")
+	}
 	if w := lipgloss.Width(s); w < n {
-		return s + strings.Repeat(" ", n-w)
+		s += strings.Repeat(" ", n-w)
 	}
 	return s
 }
