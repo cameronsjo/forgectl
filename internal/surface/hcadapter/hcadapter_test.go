@@ -22,7 +22,10 @@ type fakeHC struct {
 	sendKind string
 	// partialRead makes `hc read` report an incomplete screen.
 	partialRead bool
-	verbs       []string
+	// lsReply, when set, is what `hc ls` prints; lsFail makes it fail.
+	lsReply string
+	lsFail  bool
+	verbs   []string
 }
 
 func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
@@ -44,6 +47,12 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 			}
 			return fail(cmd.Kind, `{"error":{"kind":"not_found","message":"no terminal"}}`, 3)
 		case "ls":
+			if f.lsFail {
+				return fail(cmd.Kind, `{"error":{"kind":"internal","message":"?"}}`, 1)
+			}
+			if f.lsReply != "" {
+				return ok(f.lsReply), nil
+			}
 			return ok(`{"hidden_finished":0,"terminals":[]}`), nil
 		case "read":
 			if f.partialRead {
@@ -382,5 +391,91 @@ func TestNewRefusesOddSession(t *testing.T) {
 	_, err := New(&exec.FakeSensitiveRunner{}, "/hc", func(string) string { return "a b" })
 	if !errors.Is(err, ErrResolveSession) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestReconcileBranches covers the labeled listing that settles a create
+// whose outcome hc did not report.
+func TestReconcileBranches(t *testing.T) {
+	const created = 1793409108596
+	one := `{"hidden_finished":0,"terminals":[{"address":"t1","state":"live"}]}`
+	two := `{"hidden_finished":0,"terminals":[{"address":"t1","state":"live"},{"address":"t2","state":"live"}]}`
+	cases := []struct {
+		name    string
+		ls      string
+		lsFail  bool
+		label   string // the label `hc get t1` reports; "" means the launch's own marker
+		outcome backend.MutationOutcome
+	}{
+		{name: "one labeled terminal is a known ref the service closes", ls: one, outcome: backend.RefKnown},
+		{name: "two labeled terminals are unknown", ls: two, outcome: backend.OutcomeUnknown},
+		{name: "a terminal whose get shows another label is unknown", ls: one, label: "fc-surface-someoneelse", outcome: backend.OutcomeUnknown},
+		{name: "a failed listing is unknown", lsFail: true, outcome: backend.OutcomeUnknown},
+		{name: "an empty listing created nothing", outcome: backend.NotMutated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec(t)
+			label := tc.label
+			if label == "" {
+				label = spec.OwnershipName()
+			}
+			f := &fakeHC{coreID: "core1", terminals: map[string]string{
+				"t1": getReply("t1", label, created, "live", `null`),
+			}, createExit: 1, createErr: `{"error":{"kind":"internal","message":"?"}}`, lsReply: tc.ls, lsFail: tc.lsFail}
+			run := f.runner()
+			a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := a.Start(context.Background(), spec)
+			if res.Outcome() != tc.outcome {
+				t.Fatalf("outcome = %v, want %v", res.Outcome(), tc.outcome)
+			}
+			if tc.outcome == backend.RefKnown {
+				if !res.Failed() {
+					t.Error("a reconciled ref must carry the create's cause, so the service closes it")
+				}
+				ref, _ := res.Ref()
+				id, err := ref.HcIdentity()
+				if err != nil || id.Terminal() != "t1" || id.CreatedMS() != created {
+					t.Errorf("ref identity = %+v, %v", id, err)
+				}
+			}
+			// The listing filters on exactly this launch's marker.
+			want := exec.Opaque("forgectl.surface=" + spec.OwnershipName())
+			found := false
+			for _, c := range run.Calls() {
+				if c.Kind == exec.KindHcReconcile && c.Args[len(c.Args)-1].Equal(want) {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("no reconcile listing filtered on the launch's ownership label")
+			}
+		})
+	}
+}
+
+// TestDefaultSessionSpellingsMatch: HC_SESSION unset and HC_SESSION=default
+// select hc's one default core, so a worker launched under one spelling is
+// probed and closed under the other.
+func TestDefaultSessionSpellingsMatch(t *testing.T) {
+	for _, pair := range [][2]string{{"", "default"}, {"default", ""}} {
+		f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+		ref := startWorker(t, f, newTestAdapter(t, f, pair[0]))
+		other := newTestAdapter(t, f, pair[1])
+		if res := other.Probe(context.Background(), ref); res.State() != backend.ProbePresent {
+			t.Fatalf("launched with HC_SESSION=%q, probed with %q: %v", pair[0], pair[1], res)
+		}
+		if other.Session() != "hc:default" {
+			t.Errorf("Session = %q", other.Session())
+		}
+	}
+	// A named session is still its own selection.
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	ref := startWorker(t, f, newTestAdapter(t, f, ""))
+	if res := newTestAdapter(t, f, "work").Probe(context.Background(), ref); res.State() != backend.ProbeIdentityMismatch {
+		t.Fatalf("probe from a named session = %v, want identity-mismatch", res)
 	}
 }

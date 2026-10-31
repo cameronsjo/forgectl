@@ -96,7 +96,10 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 		return nil, fmt.Errorf("%w: hc path must be absolute", ErrResolveSession)
 	}
 	session, source := defaultSession, backend.HcDefaultSessionServer()
-	if s := getenv("HC_SESSION"); s != "" {
+	// "default" is hc's own name for the core an unset HC_SESSION selects, so
+	// both spellings are one selection: a worker launched under one is closed
+	// under the other.
+	if s := getenv("HC_SESSION"); s != "" && s != defaultSession {
 		if !validSession(s) {
 			return nil, fmt.Errorf("%w: HC_SESSION must be 1-%d letters, digits, hyphens, underscores or dots", ErrResolveSession, maxSessionLen)
 		}
