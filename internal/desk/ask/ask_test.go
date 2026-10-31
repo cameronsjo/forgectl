@@ -24,7 +24,7 @@ func TestSafeURL(t *testing.T) {
 		"https://user:pw@example.com": false,
 		"https://exa mple.com":        false,
 		"https://example.com/\x1b[2J": false,
-		"https://example.com/‮":       false,
+		"https://example.com/\u202e":  false,
 		"":                            false,
 		"file:///etc/passwd":          false,
 	}
@@ -48,7 +48,7 @@ func TestNormalize(t *testing.T) {
 		{Title: "", Bucket: BucketNow},
 		{Title: "two\nlines", Bucket: BucketNow},
 		{Title: "esc \x1b[31m", Bucket: BucketNow},
-		{Title: "bidi ‮", Bucket: BucketNow},
+		{Title: "bidi \u202e", Bucket: BucketNow},
 		{Title: strings.Repeat("x", MaxTitle+1), Bucket: BucketNow},
 		{Title: "t", Bucket: "later"},
 		{Title: "t", Bucket: BucketNow, Steps: "bell \a"},

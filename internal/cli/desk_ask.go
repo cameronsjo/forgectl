@@ -104,6 +104,6 @@ const deskWatchResponsesHelp = `
 With --responses, watch follows the asks log instead of a run. Given an
 ASK-ID it prints that ask's responses as JSON lines and exits 0 once the ask
 is answered (done, reply or link; a snooze is printed and the watch goes on),
-1 when there is no such ask. With no ASK-ID it prints every response as it
-arrives until the deadline. On the deadline it exits 75 with a resume= line
-whose --since is the log offset to continue from.`
+1 when there is no such ask. With no ASK-ID it prints each new response as
+it arrives (--since 0 replays the log first). On the deadline it exits 75
+with a resume= line whose --since is the log offset to continue from.`

@@ -451,14 +451,14 @@ It prints `id=`, `bucket=` and `watch=` lines and exits 0 only when the ask is r
 An answered ask refuses every later response. When the ask has a notify address, forgectl runs `hc send` to it (never with `--force`) with one line:
 
 ```text
-DESK-RESPONSE ask-1a2b3c4d reply: use the staging account (ask: Approve the new deploy key; full record: forgectl desk watch --responses ask-1a2b3c4d)
+DESK-RESPONSE ask-1a2b3c4d reply: use the staging account -- via web -- ask: Approve the new deploy key -- full record: forgectl desk watch --responses ask-1a2b3c4d
 ```
 
-A failed notify is logged and shown, and the response stands.
+hc presses Enter after the line, so if the agent has exited and a shell holds that terminal, the shell reads it. The line is built to do nothing there: titles and replies lose every shell metacharacter, and a link is percent-encoded. It is a pointer; the exact text is in the log. A failed notify is logged and shown, and the response stands.
 
 ### `forgectl desk watch --responses [ASK-ID]`
 
-With an ASK-ID: prints that ask's responses as JSON lines (`{"ask","title","response","offset","state"}`) and exits 0 once it is answered, at once if it already was; a snooze is printed and the watch goes on. Exit 1 when there is no such ask. With no ASK-ID: prints every response as it arrives. On the deadline (540 seconds with no terminal on stdin and no `--deadline`) it exits 75 after `resume=forgectl desk watch --responses [ID] --since OFFSET ...`.
+With an ASK-ID: prints that ask's responses as JSON lines (`{"ask","title","response","offset","state"}`) and exits 0 once it is answered, at once if it already was; a snooze is printed and the watch goes on. Exit 1 when there is no such ask. With no ASK-ID: prints each new response as it arrives (`--since 0` replays the log first). On the deadline (540 seconds with no terminal on stdin and no `--deadline`) it exits 75 after `resume=forgectl desk watch --responses [ID] --since OFFSET ...`.
 
 ### `forgectl desk asks [ASK-ID]`
 
@@ -491,7 +491,9 @@ forgectl desk serve --addr 127.0.0.1:PORT --allow-host <machine>.<tailnet>.ts.ne
 
 Open `https://<machine>.<tailnet>.ts.net/#k=TOKEN` once on the phone; the cookie keeps it signed in. `--allow-host` adds the name to the Host check, which otherwise accepts only loopback names (so a page that rebinds its DNS to `127.0.0.1` gets nothing).
 
-Every write needs the session cookie, a CSRF token bound to the session, and a same-origin request. Ask text from agents is shown as text: markdown with raw HTML off, links only for `http` and `https`, under a Content-Security-Policy with no inline script. The page never runs a script from the queue.
+Every write needs the session cookie, a CSRF token bound to the session, and a same-origin request.
+
+Two limits. Browsers scope cookies by host, not port, so the session cookie (30 days) is also sent to other servers on `127.0.0.1` or the same `ts.net` name; `--rotate-token` ends every session. And `--rotate-token` takes effect when a server starts: restart a running `desk serve` after rotating. Ask text from agents is shown as text: markdown with raw HTML off, links only for `http` and `https`, under a Content-Security-Policy with no inline script. The page never runs a script from the queue.
 
 ## The queue protocol
 

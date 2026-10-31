@@ -450,6 +450,9 @@ watch printed.` + deskWatchResponsesHelp,
 				if len(args) == 1 {
 					id = args[0]
 				}
+				if !cmd.Flags().Changed("since") {
+					since = -1
+				}
 				return runDeskWatchResponses(cmd, deps, *dir, id, deadline, since)
 			}
 			if cmd.Flags().Changed("since") {

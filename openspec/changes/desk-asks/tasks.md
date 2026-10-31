@@ -12,10 +12,16 @@
 
 ## 3. Front ends
 
-- [ ] 3.1 `desk ui` TUI with keyboard respond.
-- [ ] 3.2 `desk serve` web page: token login, Host allowlist, CSRF, CSP, inert agent text.
-- [ ] 3.3 Handler tests and a staged break for each web control.
+- [x] 3.1 `desk ui` TUI with keyboard respond.
+- [x] 3.2 `desk serve` web page: token login, Host allowlist, CSRF, CSP, inert agent text.
+- [x] 3.3 Handler tests and a staged break for each web control.
 
 ## 4. Docs
 
-- [ ] 4.1 `docs/commands/desk.md` and the bundled skill's desk reference.
+- [x] 4.1 `docs/commands/desk.md` and the bundled skill's desk reference.
+
+## 5. Review fixes
+
+- [x] 5.1 Referrer policy `same-origin` (header and meta): under `no-referrer` browsers send `Origin: null` and every web answer was refused.
+- [x] 5.2 Notify line is shell-inert; `SendLine` refuses control and format characters.
+- [x] 5.3 Append heals a torn last line; an unscoped `--responses` watch starts at the log's end and folds from 0.

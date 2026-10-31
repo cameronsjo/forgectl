@@ -129,6 +129,9 @@ func TestDeskWatchResponses_DeadlineAndUnknown(t *testing.T) {
 
 	_, _, err = deskRun(t, deskDeps(), "watch", "--responses", "ask-00000000", "--deadline", "1")
 	wantExit(t, err, 1)
+	if err == nil || !strings.Contains(err.Error(), "no ask ask-00000000") {
+		t.Fatalf("unknown ask err = %v", err)
+	}
 
 	_, _, err = deskRun(t, deskDeps(), "watch", "--responses", "not an id")
 	wantExit(t, err, deskExitUsage)
@@ -159,4 +162,61 @@ func deskDirFromEnv(t *testing.T) string {
 		t.Fatal("DESK_DIR not stubbed")
 	}
 	return d
+}
+
+// TestDeskWatchResponses_UnscopedStartsAtTheEndAndResumes pins the unscoped
+// watch: a fresh one prints only new responses, and a resume past an ask's
+// record still names its title and state.
+func TestDeskWatchResponses_UnscopedStartsAtTheEndAndResumes(t *testing.T) {
+	newDeskDir(t)
+	stubAskNotifier(t)
+	prev := deskWatchInterval
+	deskWatchInterval = 10 * time.Millisecond
+	t.Cleanup(func() { deskWatchInterval = prev })
+
+	out, _, err := deskRun(t, deskDeps(), "ask", "--title", "Old one")
+	wantExit(t, err, 0)
+	old := askID(t, out)
+	_, _, err = deskRun(t, deskDeps(), "respond", old, "done")
+	wantExit(t, err, 0)
+	out, _, err = deskRun(t, deskDeps(), "ask", "--title", "New one")
+	wantExit(t, err, 0)
+	fresh := askID(t, out)
+
+	// A fresh unscoped watch does not replay the old answer.
+	out, _, err = deskRun(t, deskDeps(), "watch", "--responses", "--deadline", "1")
+	wantExit(t, err, deskExitTempFail)
+	if strings.Contains(out, old) {
+		t.Fatalf("a fresh unscoped watch replayed history: %q", out)
+	}
+	var since string
+	for _, line := range strings.Split(out, "\n") {
+		if r, ok := strings.CutPrefix(line, "resume="); ok {
+			f := strings.Fields(r)
+			for i := range f {
+				if f[i] == "--since" && i+1 < len(f) {
+					since = f[i+1]
+				}
+			}
+		}
+	}
+	if since == "" {
+		t.Fatalf("no --since in %q", out)
+	}
+
+	// Answer after the resume point; the resumed watch names the ask.
+	_, _, err = deskRun(t, deskDeps(), "respond", fresh, "reply", "on it")
+	wantExit(t, err, 0)
+	out, _, err = deskRun(t, deskDeps(), "watch", "--responses", "--since", since, "--deadline", "1")
+	wantExit(t, err, deskExitTempFail)
+	var line askWatchLine
+	if err := json.Unmarshal([]byte(strings.SplitN(out, "\n", 2)[0]), &line); err != nil {
+		t.Fatalf("first line of %q: %v", out, err)
+	}
+	if line.Ask != fresh || line.Title != "New one" || line.State != "answered" {
+		t.Fatalf("resumed line = %+v", line)
+	}
+	if strings.Count(out, "\"response\"") != 1 {
+		t.Fatalf("resume printed more than the new response: %q", out)
+	}
 }

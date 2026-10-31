@@ -213,7 +213,7 @@ func TestStoreRefusesSymlinkedLogAndDir(t *testing.T) {
 	if _, err := s.Add(Ask{Title: "x", Bucket: BucketNow}); err == nil {
 		t.Fatal("appended through a symlinked log")
 	}
-	if data, _ := os.ReadFile(target); len(data) != 0 {
+	if data, _ := os.ReadFile(target); len(data) != 0 { //nolint:gosec // G304: a path this test created
 		t.Fatal("the symlink target was written")
 	}
 
@@ -246,10 +246,10 @@ func TestOpenReadOnlyCreatesNothing(t *testing.T) {
 
 func TestOpenNarrowsABroadDir(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, SubDir), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, SubDir), 0o755); err != nil { //nolint:gosec // G301: the test needs a broad directory to prove Open narrows it
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(dir, SubDir), 0o755); err != nil {
+	if err := os.Chmod(filepath.Join(dir, SubDir), 0o755); err != nil { //nolint:gosec // G302: the test needs a broad directory to prove Open narrows it
 		t.Fatal(err)
 	}
 	if _, err := Open(dir); err != nil {
@@ -258,5 +258,32 @@ func TestOpenNarrowsABroadDir(t *testing.T) {
 	fi, _ := os.Stat(filepath.Join(dir, SubDir))
 	if fi.Mode().Perm() != 0o700 {
 		t.Fatalf("mode = %v", fi.Mode().Perm())
+	}
+}
+
+// TestStoreAppendHealsATornLastLine pins the append's repair: a writer that
+// died mid-line must not take the next record down with it.
+func TestStoreAppendHealsATornLastLine(t *testing.T) {
+	s, _ := newTestStore(t, nil)
+	a, err := s.Add(Ask{Title: "one", Bucket: BucketNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(s.LogPath(), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"v":1,"response":{"id":"resp-dead`)
+	_ = f.Close()
+	it, _, _, err := s.Respond(t.Context(), Response{Ask: a.ID, Kind: KindDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.State != StateAnswered {
+		t.Fatalf("the answer was lost behind the torn line: state %s", it.State)
+	}
+	_, _, bad, err := s.ReadFrom(0)
+	if err != nil || bad != 1 {
+		t.Fatalf("bad = %d (want the torn line alone), err %v", bad, err)
 	}
 }

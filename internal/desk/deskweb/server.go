@@ -536,8 +536,15 @@ func (s *Server) version() (string, error) {
 	for _, sc := range scripts {
 		_, _ = fmt.Fprintf(h, "%s/%s/%s;", sc.Name, sc.State, sc.SHA256)
 	}
-	// Snoozes end with time, not with a write: include the minute.
-	_, _ = fmt.Fprintf(h, "%d", s.opts.Now().Unix()/60)
+	// Snoozes end with time, not with a write: include which asks are
+	// snoozed now, so the page reloads when one wakes and not otherwise.
+	if items, ierr := s.opts.Store.Items(); ierr == nil {
+		for _, it := range items {
+			if it.State == ask.StateSnoozed {
+				_, _ = fmt.Fprintf(h, "z:%s;", it.Ask.ID)
+			}
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil)[:8]), err
 }
 

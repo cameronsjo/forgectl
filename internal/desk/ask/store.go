@@ -163,7 +163,7 @@ func (s *Store) ReadFrom(off int64) (recs []Record, next int64, bad int, err err
 		return nil, off, 0, err
 	}
 	if fi.Size() > maxLogBytes {
-		return nil, off, 0, fmt.Errorf("ask: the log is larger than %d MiB; archive it", maxLogBytes>>20)
+		return nil, off, 0, fmt.Errorf("ask: %s is larger than %d MiB; move it aside to start a new log (answered asks in it will no longer show)", LogName, maxLogBytes>>20)
 	}
 	if off < 0 || off > fi.Size() {
 		return nil, off, 0, fmt.Errorf("ask: offset %d is outside the log (size %d)", off, fi.Size())
@@ -256,9 +256,17 @@ func (s *Store) appendRecord(rec Record) error {
 		return err
 	}
 	line = append(line, '\n')
-	f, err := s.openLog(os.O_WRONLY | os.O_APPEND | os.O_CREATE)
+	f, err := s.openLog(os.O_RDWR | os.O_APPEND | os.O_CREATE)
 	if err != nil {
 		return fmt.Errorf("ask: open the log for append: %w", err)
+	}
+	// A writer that died mid-line left a torn last line. Appending straight
+	// after it would glue this record onto it and lose both, so end it first.
+	if torn, err := endsTorn(f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("ask: check the log's last line: %w", err)
+	} else if torn {
+		line = append([]byte{'\n'}, line...)
 	}
 	if _, err := f.Write(line); err != nil {
 		_ = f.Close()
@@ -269,6 +277,19 @@ func (s *Store) appendRecord(rec Record) error {
 		return fmt.Errorf("ask: sync the log: %w", err)
 	}
 	return f.Close()
+}
+
+// endsTorn reports whether f is non-empty and its last byte is not a newline.
+func endsTorn(f *os.File) (bool, error) {
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		return false, err
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], fi.Size()-1); err != nil {
+		return false, err
+	}
+	return b[0] != '\n', nil
 }
 
 // newID returns prefix and 8 random hex digits not already used in items.

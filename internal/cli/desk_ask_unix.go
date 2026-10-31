@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -201,7 +202,7 @@ func writeAskList(out io.Writer, items []ask.Item, now time.Time) error {
 		shown = true
 		w.printf("Snoozed\n")
 		for _, it := range snoozed {
-			w.printf("  %s  %s  (until %s)\n", it.Ask.ID, safeText(it.Ask.Title), it.SnoozedUntil.Local().Format("Mon 15:04"))
+			w.printf("  %s  %s  (until %s)\n", it.Ask.ID, safeText(it.Ask.Title), it.SnoozedUntil.Local().Format("Mon Jan 2 15:04"))
 		}
 	}
 	if len(answered) > 0 {
@@ -284,6 +285,9 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 	if len(args) == 3 {
 		value = args[2]
 	}
+	if kind != ask.KindDone && value == "" && slices.Contains(ask.Kinds, kind) {
+		return deskUsage("desk respond: %s needs a value", kind)
+	}
 	switch kind {
 	case ask.KindDone:
 		if value != "" {
@@ -302,9 +306,6 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 		r.Until = &until
 	default:
 		return deskUsage("desk respond: %q is not done, reply, link or snooze", termsafe.SafeLineMax(args[1], deskQuoteMax))
-	}
-	if kind != ask.KindDone && value == "" {
-		return deskUsage("desk respond: %s needs a value", kind)
 	}
 	s, _, err := openAskStore(dirFlag)
 	if err != nil {
@@ -403,12 +404,13 @@ func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string
 	}
 	w := &stickyWriter{w: cmd.OutOrStdout()}
 
-	// An ask watch reads the whole log first: the ask must exist, and an
-	// answer given before the watch started still ends it.
-	off := since
-	if id != "" {
-		off = 0
-	}
+	// Every watch folds the whole log, so each line carries its ask's title
+	// and state; only responses past the start point are printed. An ask
+	// watch with no --since starts at 0 (an answer given before the watch
+	// started still ends it); an unscoped one starts at the log's end, so it
+	// prints responses as they arrive rather than replaying history.
+	var off int64
+	first := true
 	asks := map[string]ask.Ask{}
 	var recs []ask.Record
 	for {
@@ -422,14 +424,23 @@ func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string
 				asks[rec.Ask.ID] = *rec.Ask
 			}
 		}
-		if _, ok := asks[id]; id != "" && !ok && len(recs) == len(batch) {
-			// The first read covers the whole log; the ask must be in it.
-			return fmt.Errorf("desk watch: no ask %s", id)
+		if first {
+			first = false
+			if since < 0 {
+				since = 0
+				if id == "" {
+					since = next
+				}
+			}
+			if _, ok := asks[id]; id != "" && !ok {
+				// The first read covers the whole log; the ask must be in it.
+				return fmt.Errorf("desk watch: no ask %s", id)
+			}
 		}
 		items := ask.Fold(recs, deskNow())
 		for _, rec := range batch {
 			r := rec.Response
-			if r == nil || (id != "" && r.Ask != id) || (id != "" && rec.Offset <= since) {
+			if r == nil || (id != "" && r.Ask != id) || rec.Offset <= since {
 				continue
 			}
 			line := askWatchLine{Ask: r.Ask, Title: asks[r.Ask].Title, Response: *r, Offset: rec.Offset}

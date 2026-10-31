@@ -134,11 +134,15 @@ type deskAsksModel struct {
 	detail        bool
 	help          bool
 	mode          deskAsksMode
-	input         textinput.Model
-	inputErr      string
-	status        string
-	statusWarn    bool
-	busy          bool
+	// target is the ask a response prompt opened on. respond answers it, not
+	// whatever row the cursor sits on when the prompt is confirmed, which a
+	// re-read can move.
+	target     string
+	input      textinput.Model
+	inputErr   string
+	status     string
+	statusWarn bool
+	busy       bool
 }
 
 func newDeskAsksModel(ctx context.Context, opts DeskAsksOptions) deskAsksModel {
@@ -428,6 +432,7 @@ func (m deskAsksModel) startResponse(kind ask.Kind) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.status, m.inputErr = "", ""
+	m.target = it.Ask.ID
 	switch kind {
 	case ask.KindDone:
 		m.mode = deskAsksConfirmDone
@@ -484,8 +489,9 @@ func (m deskAsksModel) updateInput(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // respond records r against the selected ask, off the update loop: the
 // notify runs hc, which can take seconds.
 func (m deskAsksModel) respond(r ask.Response) (tea.Model, tea.Cmd) {
-	it, ok := m.selectedAsk()
+	it, ok := ask.Find(m.items, m.target)
 	if !ok || m.opts.Store == nil {
+		m.status, m.statusWarn = "that ask is no longer on the desk", true
 		return m, nil
 	}
 	r.Ask, r.Via = it.Ask.ID, "ui"

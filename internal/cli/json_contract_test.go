@@ -28,6 +28,7 @@ var jsonContractExempt = map[string]string{
 	"bench up":               "brings the bench services up; the exit code is the outcome and `bench status --json` reports the result",
 	"desk":                   "a bare `desk` runs the interactive dashboard (`--frame` prints one frame for the eye); `desk status --json` reports the queue",
 	"desk layout":            "splits herdr panes and starts the desk in one; the exit code is the outcome and the printed pane ids are informational",
+	"desk serve":             "a long-running local web server; it prints the URL to open and serves until interrupted, and `desk asks --json` reports the asks",
 	"desk ui":                "a bare `desk ui` runs the interactive asks view (`--frame` prints one frame for the eye); `desk asks --json` reports the asks",
 	"desk watch":             "streams the run's event lines, which are the payload a monitor reads; the exit code is the run's outcome",
 	"docker build":           "runs a build and streams docker's own output; the exit code is the outcome",
