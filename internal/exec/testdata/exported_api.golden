@@ -25,6 +25,13 @@ const KindCmuxProbe CommandKind
 const KindCmuxReadiness CommandKind
 const KindCmuxReconcile CommandKind
 const KindCmuxSnapshot CommandKind
+const KindHcCleanup CommandKind
+const KindHcCreate CommandKind
+const KindHcProbe CommandKind
+const KindHcRead CommandKind
+const KindHcReadiness CommandKind
+const KindHcReconcile CommandKind
+const KindHcSend CommandKind
 const KindHerdrBootstrap CommandKind
 const KindHerdrCleanup CommandKind
 const KindHerdrCreate CommandKind

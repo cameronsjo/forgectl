@@ -146,6 +146,20 @@ const (
 	// agent state.
 	KindHerdrMetadata
 
+	// KindHc* drive herdr-core's `hc`: readiness is `hc server status`,
+	// create is `hc run --bg`, reconcile is the labeled `hc ls` after an
+	// ambiguous create, probe is `hc get`, read is `hc read`, send is
+	// `hc send`, and cleanup is `hc kill` and `hc rm`. Create carries the
+	// sealed cwd, name and bootstrap; read and send carry worker screen text
+	// and brief text, which is why none of them goes through Runner.
+	KindHcReadiness
+	KindHcCreate
+	KindHcReconcile
+	KindHcProbe
+	KindHcRead
+	KindHcSend
+	KindHcCleanup
+
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
 	//
@@ -201,6 +215,14 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneAgent:   "herdr.pane-agent",
 	KindHerdrSendKeys:    "herdr.send-keys",
 	KindHerdrMetadata:    "herdr.report-metadata",
+
+	KindHcReadiness: "hc.readiness",
+	KindHcCreate:    "hc.create",
+	KindHcReconcile: "hc.reconcile",
+	KindHcProbe:     "hc.probe",
+	KindHcRead:      "hc.read",
+	KindHcSend:      "hc.send",
+	KindHcCleanup:   "hc.cleanup",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

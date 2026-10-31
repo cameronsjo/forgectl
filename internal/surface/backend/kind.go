@@ -38,6 +38,11 @@ const (
 	KindTmux
 	KindCmux
 	KindHerdr
+	// KindHc is herdr-core's terminal service, driven through `hc`. It is a
+	// separate backend from herdr 0.9 rather than a mode of it: the two
+	// binaries have different verbs, and a stored reference must name exactly
+	// one of them.
+	KindHc
 
 	kindCount
 )
@@ -47,6 +52,7 @@ var kindNames = [kindCount]string{
 	KindTmux:        "tmux",
 	KindCmux:        "cmux",
 	KindHerdr:       "herdr",
+	KindHc:          "hc",
 }
 
 // Valid reports whether k names a real backend. The zero value does not.
