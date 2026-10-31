@@ -706,7 +706,7 @@ func (m deskAsksModel) scriptRowLine(s DeskAskScript, sel bool, width int) strin
 	if sel {
 		name = m.styles.Selected.Render(name)
 	}
-	return m.marker(sel) + name + "  " + what + "  " + m.styles.Dim.Render(termsafe.SafeLine(s.State)+" "+termsafe.SafeLine(sha))
+	return m.marker(sel) + name + "  " + what + "  " + m.styles.Dim.Render(termsafe.SafeLineMax(s.State, 20)+" "+termsafe.SafeLineMax(sha, 64))
 }
 
 // detailLines describes the selected row.
@@ -723,7 +723,7 @@ func (m deskAsksModel) detailLines(width int) []string {
 			s.Header.Render(capSafe(sc.Name, width)),
 			capSafe(sc.What, width),
 			s.Muted.Render("sha256 ") + termsafe.SafeLineMax(sc.SHA256, 64),
-			s.Muted.Render("state  ") + termsafe.SafeLine(sc.State),
+			s.Muted.Render("state  ") + termsafe.SafeLineMax(sc.State, 20),
 			"",
 			s.Muted.Render("Read only here: run or skip it from the desk dashboard (forgectl desk)."),
 		}
@@ -737,7 +737,7 @@ func (m deskAsksModel) detailLines(width int) []string {
 	for _, l := range wrapSafe(a.Title, width)[1:] {
 		lines = append(lines, s.Header.Render(l))
 	}
-	meta := []string{termsafe.SafeLine(a.ID), termsafe.SafeLine(string(a.Bucket))}
+	meta := []string{termsafe.SafeLineMax(a.ID, 32), termsafe.SafeLineMax(string(a.Bucket), 16)}
 	if a.From != "" {
 		meta = append(meta, "from "+capSafe(a.From, 40))
 	}
@@ -756,7 +756,7 @@ func (m deskAsksModel) detailLines(width int) []string {
 		if label == "" {
 			label = "link"
 		}
-		lines = append(lines, s.Accent.Render(capSafe(label, 40))+" "+termsafe.SafeLineMax(l.URL, max(width-lipgloss.Width(label)-2, 20)))
+		lines = append(lines, s.Accent.Render(capSafe(label, 40))+" "+capSafe(l.URL, max(width-lipgloss.Width(label)-2, 20)))
 	}
 	if len(a.Links) > 0 {
 		lines = append(lines, "")
@@ -799,7 +799,9 @@ func answerText(r ask.Response) string {
 // returns at least one line.
 func wrapSafe(s string, width int) []string {
 	s = strings.ReplaceAll(s, "\t", "    ")
-	safe := termsafe.SafeLine(s)
+	// One steps line is at most ask.MaxSteps bytes; 4096 runes is far past
+	// any line a person reads, and the cap keeps the print bounded.
+	safe := termsafe.SafeLineMax(s, 4096)
 	wrapped := ansi.Wordwrap(safe, width, " ")
 	out := strings.Split(ansi.Hardwrap(wrapped, width, true), "\n")
 	if len(out) == 0 {
