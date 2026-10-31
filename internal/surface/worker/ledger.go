@@ -88,6 +88,11 @@ type Row struct {
 	// the harness, before the worker starts; a row from before the field
 	// existed has none.
 	Posture []PostureSetting `json:"posture,omitempty"`
+	// HcSelection is an hc worker's core selection digest
+	// (hcadapter.Adapter.SelectionDigest), written by Begin. `surface forget`
+	// calls a changed core id a wiped core only when the digest is the same
+	// now. Empty for a herdr worker and for a row from before the field.
+	HcSelection string `json:"hc_selection,omitempty"`
 }
 
 // PostureSetting is one resolved worker posture field and its source.
@@ -141,6 +146,12 @@ func decodeLedger(data []byte, repo, session string) (ledgerFile, error) {
 	dec.DisallowUnknownFields()
 	var f ledgerFile
 	if err := dec.Decode(&f); err != nil {
+		// Fields are added without a version change, so an unknown one is
+		// almost always a newer forgectl's row. Decoding stays strict: a
+		// rewrite by this build would drop that field.
+		if field, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
+			return ledgerFile{}, fmt.Errorf("%w: it holds field %s, which a newer forgectl wrote; upgrade every forgectl on this machine", ErrLedgerUnreadable, field)
+		}
 		return ledgerFile{}, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
 	}
 	if f.Version != ledgerVersion {

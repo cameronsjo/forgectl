@@ -109,9 +109,10 @@ type SendResult struct {
 // forgectl's, live, at the checked turn, and idle or done: a turn that started
 // since the check, or a dialog hc now reports as blocked, gets no text.
 //
-// When the re-read status is idle, hc also types only while it is still idle
-// (`--if idle`), which closes the window to the one hc call. hc's --if takes no
-// "done", so a worker still done is sent to without it, and the re-read is the
+// When either the checked or the re-read status is idle, hc also types only
+// while it is still idle (`--if idle`), which closes the window to the one hc
+// call. hc's --if takes no "done", so a worker checked and still done is sent
+// to without it, and the re-read is the
 // whole check: the window left is one hc round trip, the same as PressEscape's.
 // The re-read accepts idle where done was checked (and the reverse): the Escape
 // before the send may make a harness report again, and neither status means a
@@ -132,7 +133,10 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, c
 			ErrSendRefused, checked.Status, checked.Turn, t.Status.State, t.Turn)
 	}
 	args := []exec.Arg{exec.MustFixed("send"), exec.MustFixed("--json")}
-	if t.Status.State == StatusIdle {
+	// --if idle goes with the send when either read saw idle: a worker
+	// checked idle and re-read done keeps hc's own guard, which then refuses
+	// rather than typing into a worker whose status moved.
+	if t.Status.State == StatusIdle || checked.Status == StatusIdle {
 		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
 	}
 	args = append(args, exec.EndOfOptions(), exec.Opaque(t.Address), exec.Opaque(text))

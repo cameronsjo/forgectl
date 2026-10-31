@@ -17,10 +17,13 @@
 package hcadapter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -100,7 +103,36 @@ type Adapter struct {
 	// space, when set, is the herdr-app space Start labels a worker for, so
 	// the window shows it. Empty leaves the worker out of the window.
 	space string
+	// selection is the digest of what picks the core (SelectionDigest).
+	selection string
 }
+
+// selectionKeys are the variables that can choose which hc core a call
+// reaches, measured on hc 0.1.15: the core's socket lives under
+// $XDG_RUNTIME_DIR/herdr-core/<session>.sock, its state and config under the
+// XDG state and config homes (or HOME without them), and HC_SOCKET names a
+// socket outright. Over-inclusion only fails toward refusal: a value that
+// differs makes forget refuse rather than call a core wiped.
+var selectionKeys = []string{"HC_SOCKET", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "HOME"}
+
+// selectionDigest hashes the resolved session and selectionKeys' values, so
+// a ledger row records which core selection launched it without storing the
+// paths themselves.
+func selectionDigest(session string, getenv func(string) string) string {
+	var b strings.Builder
+	b.WriteString("hc-selection-v1\x00session=" + session + "\x00")
+	for _, k := range selectionKeys {
+		b.WriteString(k + "=" + getenv(k) + "\x00")
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:16])
+}
+
+// SelectionDigest is a digest of everything that picks this adapter's core:
+// the resolved HC_SESSION and selectionKeys, read at New. A launch records
+// it, and forget calls a changed core id a wiped core only when the digest is
+// the same now (Abandoned).
+func (a *Adapter) SelectionDigest() string { return a.selection }
 
 // ShowInSpace makes Start label each terminal it creates herdr.space=<id>,
 // so the herdr-app window shows it in that space. It refuses an id outside
@@ -148,7 +180,7 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 		}
 		session, source = s, backend.HcNamedSessionServer()
 	}
-	return &Adapter{run: run, hcPath: hcPath, session: session, source: source}, nil
+	return &Adapter{run: run, hcPath: hcPath, session: session, source: source, selection: selectionDigest(session, getenv)}, nil
 }
 
 // ValidSession reports whether s is an HC_SESSION value this package

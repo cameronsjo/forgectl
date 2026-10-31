@@ -37,7 +37,8 @@ func launchedHcRow(t *testing.T) worker.Row {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return worker.Row{Name: "w", Branch: "feat", Stage: worker.StageLaunched, Ref: encoded, StartedAt: time.Unix(1e9, 0)}
+	return worker.Row{Name: "w", Branch: "feat", Stage: worker.StageLaunched, Ref: encoded, StartedAt: time.Unix(1e9, 0),
+		HcSelection: "00112233445566778899aabbccddeeff"}
 }
 
 // TestForgetWorker is forgectl#1386: forget drops a row only when hc proves
@@ -58,6 +59,8 @@ func TestForgetWorker(t *testing.T) {
 			forgotten: true, asked: true, reason: "hc core is not"},
 		"still there": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", hcadapter.ErrStillThere },
 			asked: true, reason: "surface close"},
+		"selection unproven": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", hcadapter.ErrSelectionUnproven },
+			asked: true, reason: "run surface close under the environment"},
 		"unreadable": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", hcadapter.ErrUnreadable },
 			asked: true, reason: "could not prove"},
 		"row changed": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "gone", nil }, removeErr: worker.ErrRowChanged,
@@ -74,8 +77,11 @@ func TestForgetWorker(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			asked, removed := false, false
 			res := forgetWorker(context.Background(), tc.row(), now, forgetSteps{
-				abandoned: func(context.Context, backend.Ref) (string, error) {
+				abandoned: func(_ context.Context, _ backend.Ref, launched string) (string, error) {
 					asked = true
+					if launched != hcRow.HcSelection {
+						t.Errorf("abandoned was handed selection %q, want the row's %q", launched, hcRow.HcSelection)
+					}
 					if tc.abandoned == nil {
 						return "", errors.New("unscripted")
 					}

@@ -302,6 +302,9 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	}
 	count, err := s.record(worker.Brief{Marker: marker, SentAt: s.now().UTC(), Via: worker.ViaTyped})
 	if err != nil {
+		// The Escape went out and no record says when, so the next brief
+		// could not space from it: hold the spacing here instead.
+		_ = s.sleep(ctx, briefEscapeSpacing) // a canceled hold still refuses below
 		return refuse("record", "the brief could not be recorded in the worker ledger, so its text was not sent (the Escape before it was): "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}

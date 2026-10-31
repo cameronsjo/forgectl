@@ -127,9 +127,10 @@ func runSurfaceForget(cmd *cobra.Command, deps module.Deps, opts forgetOptions) 
 // forgetSteps are forget's I/O, injected so each refusal is testable without
 // hc.
 type forgetSteps struct {
-	// abandoned is hcadapter.Adapter.Abandoned: a reason when hc proves the
-	// terminal gone, an error otherwise.
-	abandoned func(context.Context, backend.Ref) (string, error)
+	// abandoned is hcadapter.Adapter.Abandoned with the row's recorded core
+	// selection: a reason when hc proves the terminal gone, an error
+	// otherwise.
+	abandoned func(ctx context.Context, ref backend.Ref, launched string) (string, error)
 	// remove drops the row, only if it is still the row forget read.
 	remove func() error
 }
@@ -157,10 +158,13 @@ func forgetWorker(ctx context.Context, row worker.Row, now time.Time, s forgetSt
 	if ref.Kind() != backend.KindHc {
 		return refuse("the row's reference is not an hc terminal")
 	}
-	reason, err := s.abandoned(ctx, ref)
+	reason, err := s.abandoned(ctx, ref, row.HcSelection)
 	switch {
 	case errors.Is(err, hcadapter.ErrStillThere):
-		return refuse("the worker's terminal is still on the core and still forgectl's; run surface close")
+		return refuse("the worker's terminal is still on the core, at its recorded address and creation time; run surface close: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+	case errors.Is(err, hcadapter.ErrSelectionUnproven):
+		return refuse("hc reaches a different core, which proves nothing about the worker's own: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen) +
+			"; run surface close under the environment the worker was launched in, or remove the row only once that core is known gone")
 	case err != nil:
 		return refuse("hc could not prove the worker's terminal gone: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 	}

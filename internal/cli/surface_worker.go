@@ -54,6 +54,9 @@ type workerSteps struct {
 	// the worker's name in herdr's sidebar (forgectl#1047). It is cosmetic
 	// and reports its own failure, so it returns nothing.
 	showName func(ctx context.Context, ref backend.Ref)
+	// hcSelection is an hc worker's core selection digest, written with the
+	// pending row; empty for herdr.
+	hcSelection string
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -77,7 +80,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		return workerLaunched{}, err
 	}
 	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID,
-		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID}); err != nil {
+		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID, HcSelection: s.hcSelection}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -189,6 +192,15 @@ type launchConfigError struct{ err error }
 func (e launchConfigError) Error() string        { return e.err.Error() }
 func (e launchConfigError) Unwrap() error        { return e.err }
 func (e launchConfigError) Is(target error) bool { return target == errLaunchConfig }
+
+// hcSelectionOf is an hc adapter's core selection digest, or "" for any
+// other backend.
+func hcSelectionOf(a backend.Adapter) string {
+	if hc, ok := a.(*hcadapter.Adapter); ok {
+		return hc.SelectionDigest()
+	}
+	return ""
+}
 
 // errHerdrSpaceNeedsHc refuses --herdr-space on a herdr worker: herdr 0.9
 // shows every workspace already, and the label is herdr-app's.
@@ -350,9 +362,10 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			}
 			return result.Ref(), nil
 		},
-		now:      time.Now,
-		brief:    brief,
-		launchID: spec.launchID,
+		now:         time.Now,
+		brief:       brief,
+		launchID:    spec.launchID,
+		hcSelection: hcSelectionOf(s.adapter),
 		showName: func(ctx context.Context, ref backend.Ref) {
 			showWorkerName(ctx, s.adapter, ref, spec.name, warn)
 		},

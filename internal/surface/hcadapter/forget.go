@@ -8,28 +8,45 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
-// ErrStillThere reports a reference whose terminal is still on the core and
-// still forgectl's, live or finished. `surface close` handles it.
-var ErrStillThere = errors.New("hc: the worker's terminal is still there")
+var (
+	// ErrStillThere reports a reference whose terminal is still on the core:
+	// the recorded address holds a terminal created at the recorded time,
+	// live or finished. `surface close` handles it.
+	ErrStillThere = errors.New("hc: the worker's terminal is still there")
+	// ErrSelectionUnproven reports a changed core id that forget cannot call
+	// a wiped core, because nothing shows the core selection is the one the
+	// worker was launched under.
+	ErrSelectionUnproven = errors.New("hc: the core differs, and nothing shows it is the same core selection the worker was launched under")
+)
 
-// Abandoned reports why ref provably names no terminal of forgectl's on the
-// core this process selects, so its ledger row can be dropped without asking
-// hc to act on anything (forgectl#1386). It runs locate's checks, in the same
-// order, but tells their mismatches apart:
+// Abandoned reports why ref provably names no terminal of forgectl's, so
+// its ledger row can be dropped without asking hc to act on anything
+// (forgectl#1386). launched is the SelectionDigest the launch recorded, or
+// "" for a row from before forgectl recorded one. It runs locate's checks, in
+// the same order, but tells their mismatches apart:
 //
-//   - The core's id differs from the one the reference was taken on. The id
-//     survives `hc server restart` and `hc update` and changes only when the
-//     core's state is wiped, and a terminal does not outlive its core's
-//     state, so the worker's terminal is gone.
+//   - The core's id differs from the one the reference was taken on, and the
+//     core selection (SelectionDigest) is the launch's. The id survives
+//     `hc server restart` and `hc update` and changes only when the core's
+//     state is wiped, and a terminal does not outlive that state. A differing
+//     or unrecorded selection proves nothing: HC_SOCKET or the XDG paths
+//     alone reach a different core, with its own id, while the worker's core
+//     may still run. That refuses with ErrSelectionUnproven.
 //   - `hc get` finds nothing at the recorded address on the matching core.
-//   - The address holds a terminal with another creation time or label: hc
-//     handed the address out again, so the one forgectl started is gone.
+//   - The address holds a terminal with another creation time: hc handed the
+//     address out again after `hc rm`, so the one forgectl started is gone.
 //
-// Anything else refuses: a reference taken under another HC_SESSION
-// selection, or a core or terminal hc cannot read, wraps ErrUnreadable, and
-// forgectl's own terminal still at its address wraps ErrStillThere. It never
-// kills, removes, or types anything.
-func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref) (string, error) {
+// Labels prove nothing either way here: any hc client, the worker included,
+// can rewrite a terminal's forgectl.surface label, so a terminal at the
+// recorded address and creation time is still the worker whatever its label
+// says (ErrStillThere). A reference taken under another HC_SESSION
+// selection, or a core or terminal hc cannot read, wraps ErrUnreadable.
+//
+// It never kills, removes, or types anything. Like every hc call, its
+// `hc server status` starts a core when none answers the selection
+// (measured on hc 0.1.15; hc has no read that does not); that core inherits
+// no launcher handles (command).
+func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched string) (string, error) {
 	id, err := ref.HcIdentity()
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrUnreadable, err)
@@ -42,7 +59,13 @@ func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref) (string, error
 		return "", fmt.Errorf("%w: hc server status: %v", ErrUnreadable, *cause)
 	}
 	if !ref.Server().Matches(server) {
-		return "the hc core is not the one the worker was started on: its state was wiped, and the worker's terminal with it", nil
+		switch {
+		case launched == "":
+			return "", fmt.Errorf("%w: the row records no core selection (it was launched before forgectl recorded one)", ErrSelectionUnproven)
+		case launched != a.selection:
+			return "", fmt.Errorf("%w: HC_SOCKET, the XDG paths or HOME differ from the launch's; run this with the environment the worker was launched under", ErrSelectionUnproven)
+		}
+		return "the hc core under the worker's own core selection has a new id: its state was wiped, and the worker's terminal with it", nil
 	}
 	t, state, gcause := a.get(ctx, id.Terminal())
 	switch state {
@@ -55,8 +78,11 @@ func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref) (string, error
 		return "", fmt.Errorf("%w: hc get failed", ErrUnreadable)
 	case getFound:
 	}
-	if t.Address != id.Terminal() || t.CreatedMS != id.CreatedMS() || t.Labels[ownerLabel] != ref.OwnershipName() {
-		return "the worker's recorded address now holds a terminal forgectl did not start", nil
+	if t.CreatedMS != id.CreatedMS() {
+		return "the worker's recorded address now holds a terminal created at another time", nil
+	}
+	if t.Labels[ownerLabel] != ref.OwnershipName() {
+		return "", fmt.Errorf("%w: it carries another forgectl.surface label, which any hc client can rewrite", ErrStillThere)
 	}
 	return "", ErrStillThere
 }

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: hc brief re-check at send
-`surface brief --surface hc` SHALL hand the status and turn it checked to the send, and the send MUST re-read the worker and type nothing unless the worker is still forgectl's, live, at the checked turn, and `idle` or `done`. The send SHALL pass `--if idle` when the re-read status is `idle`.
+`surface brief --surface hc` SHALL hand the status and turn it checked to the send, and the send MUST re-read the worker and type nothing unless the worker is still forgectl's, live, at the checked turn, and `idle` or `done`. The send SHALL pass `--if idle` when the checked or the re-read status is `idle`.
 
 #### Scenario: Turn started after the check
 - **WHEN** a worker checked `done` at turn 3 reports turn 4 at the send
@@ -12,21 +12,25 @@
 - **THEN** the brief is sent without `--if idle`
 
 ### Requirement: hc brief Escape spacing
-An hc brief SHALL wait until one second has passed since the worker's last typed brief was recorded before its checks and Escape. When the Escape's delivery is unknown, the refusal SHALL return no sooner than one second after it.
+An hc brief SHALL wait until one second has passed since the worker's last typed brief was recorded before its checks and Escape. When the Escape's delivery is unknown, or the Escape went out and the ledger record failed, the refusal SHALL return no sooner than one second after it.
 
 #### Scenario: Retry right after a brief
 - **WHEN** a brief follows a typed brief recorded 300 ms earlier
 - **THEN** it waits 700 ms before reading the worker
 
 ### Requirement: hc ledger-only forget
-`surface forget <name> --surface hc` SHALL remove the worker's ledger row, and nothing else, only when hc proves the worker's terminal gone: the core id differs from the one the worker started on, hc has no terminal at the recorded address, or that address holds a terminal with another creation time or label. It MUST NOT kill, remove, or type into any terminal, and MUST NOT run git. Any other `--surface` is a usage error.
+`surface forget <name> --surface hc` SHALL remove the worker's ledger row, and nothing else, only when hc proves the worker's terminal gone: the core id differs from the one the worker started on while the row's recorded core selection digest equals the current one, hc has no terminal at the recorded address, or that address holds a terminal with another creation time. It MUST NOT kill, remove, or type into any terminal, and MUST NOT run git. Any other `--surface` is a usage error.
 
 #### Scenario: Wiped core
 - **WHEN** the core under the worker's session reports a new id
 - **THEN** the row is removed, the worktree and branch are left, and the exit code is 0
 
 #### Scenario: Worker still there
-- **WHEN** the worker's terminal is still on the core with forgectl's label and creation time
+- **WHEN** the recorded address holds a terminal with the recorded creation time, whatever its label
+- **THEN** the row is unchanged, the reason names `surface close`, and the exit code is 1
+
+#### Scenario: Another core selection
+- **WHEN** the core id differs and the row records no core selection digest, or one that differs from the current environment's
 - **THEN** the row is unchanged, the reason names `surface close`, and the exit code is 1
 
 ### Requirement: hc forget refusals

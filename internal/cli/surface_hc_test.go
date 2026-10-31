@@ -77,6 +77,8 @@ type hcBriefFake struct {
 	sendRes     hcadapter.SendResult
 	sent        []string
 	recorded    []worker.Brief
+	// recordErr fails the ledger write.
+	recordErr error
 	// slept is every sleep the steps asked for, in order.
 	slept []time.Duration
 	// lastTyped is the steps' lastTyped.
@@ -115,6 +117,9 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			return f.sendRes, f.sendErr
 		},
 		record: func(b worker.Brief) (int, error) {
+			if f.recordErr != nil {
+				return 0, f.recordErr
+			}
 			f.recorded = append(f.recorded, b)
 			return len(f.recorded), nil
 		},
@@ -425,6 +430,15 @@ func TestSendBriefHCSpacesItsEscape(t *testing.T) {
 	}
 	if !slices.Equal(f.slept, []time.Duration{briefEscapeSpacing}) {
 		t.Fatalf("slept %v after an Escape of unknown delivery, want one spacing", f.slept)
+	}
+	// The Escape went out but the ledger write failed: nothing records the
+	// Escape's time, so the refusal holds the spacing itself.
+	f = hcBriefFake{statuses: []hcadapter.Worker{idle}, recordErr: errors.New("ledger locked")}
+	if res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1"); res.Outcome != briefRefused || res.Step != "record" || len(f.sent) != 0 {
+		t.Fatalf("outcome %q step %q sent %v, want refused at record with nothing sent", res.Outcome, res.Step, f.sent)
+	}
+	if !slices.Equal(f.slept, []time.Duration{briefEscapeSpacing}) {
+		t.Fatalf("slept %v after a sent Escape the ledger did not record, want one spacing", f.slept)
 	}
 	f = hcBriefFake{statuses: []hcadapter.Worker{idle}, escErr: fmt.Errorf("%w: changed", hcadapter.ErrSendRefused)}
 	sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")

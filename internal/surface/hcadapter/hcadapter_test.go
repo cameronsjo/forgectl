@@ -384,6 +384,30 @@ func TestSendBriefIfIdle(t *testing.T) {
 // gets no --if guard from hc, so SendBrief re-reads it and types nothing when
 // a turn started, a dialog blocked it, or its turn counter moved since the
 // check. Idle and done both still count as at the prompt.
+// TestSendBriefKeepsIfIdleForACheckedIdleWorker: a worker checked idle and
+// re-read done keeps hc's --if idle guard, which then refuses in hc rather
+// than typing into a worker whose status moved.
+func TestSendBriefKeepsIfIdleForACheckedIdleWorker(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := startWorker(t, f, a)
+	f.terminals["t1"] = strings.Replace(f.terminals["t1"], `"state":"idle"`, `"state":"done"`, 1)
+	if _, err := a.SendBrief(context.Background(), ref, "go", idleTurn1); err != nil {
+		t.Fatal(err)
+	}
+	last, _ := run.Last()
+	for i := 0; i+1 < len(last.Args); i++ {
+		if last.Args[i].Equal(exec.MustFixed("--if")) && last.Args[i+1].Equal(exec.MustFixed("idle")) {
+			return
+		}
+	}
+	t.Fatal("a worker checked idle and re-read done was sent to without --if idle")
+}
+
 func TestSendBriefRefusesAChangedWorker(t *testing.T) {
 	checked := Worker{Live: true, Status: StatusDone, Turn: 1}
 	for name, tc := range map[string]struct {
@@ -612,24 +636,33 @@ func TestEveryHcCallDropsTheLauncherHandles(t *testing.T) {
 }
 
 // TestAbandoned is forgectl#1386's ledger-only forget: a reference is
-// abandoned only when hc proves forgectl's terminal is not on the core (a
-// wiped core, nothing at the address, or the address reused), and never when
-// the terminal is still there or hc cannot be read. It asks hc nothing but
-// server status and get.
+// abandoned only when hc proves forgectl's terminal is not on the core (a new
+// core id under the launch's own core selection, nothing at the address, or
+// the address handed out again), and never when the terminal is still there,
+// whatever its label says, when the selection is unproven, or when hc cannot
+// be read. It asks hc nothing but server status and get.
 func TestAbandoned(t *testing.T) {
+	same := newTestAdapter(t, &fakeHC{}, "").SelectionDigest()
 	for name, tc := range map[string]struct {
-		mutate  func(*fakeHC, backend.Ref)
-		session string
-		want    error // nil: abandoned
+		mutate   func(*fakeHC, backend.Ref)
+		session  string
+		launched string
+		want     error // nil: abandoned
+		// msg, when set, must appear in the refusal.
+		msg string
 	}{
-		"core wiped":    {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }},
-		"terminal gone": {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
+		"core wiped":              {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: same},
+		"core differs, no record": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, want: ErrSelectionUnproven, msg: "records no core selection"},
+		"core differs, other env": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: "0123456789abcdef0123456789abcdef", want: ErrSelectionUnproven},
+		"terminal gone":           {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
 		"address reused": {mutate: func(f *fakeHC, ref backend.Ref) {
 			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409999999, "live", `null`)
 		}},
-		"foreign label": {mutate: func(f *fakeHC, _ backend.Ref) {
-			f.terminals["t1"] = getReply("t1", "fc-surface-other", 1793409108596, "live", `null`)
-		}},
+		// Any hc client can rewrite a label, so a relabeled terminal at the
+		// recorded address and creation time is still the worker.
+		"label rewritten": {mutate: func(f *fakeHC, _ backend.Ref) {
+			f.terminals["t1"] = getReply("t1", "", 1793409108596, "live", `null`)
+		}, want: ErrStillThere},
 		"still live": {mutate: func(*fakeHC, backend.Ref) {}, want: ErrStillThere},
 		"still finished": {mutate: func(f *fakeHC, ref backend.Ref) {
 			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409108596, "finished", `null`)
@@ -642,12 +675,14 @@ func TestAbandoned(t *testing.T) {
 			ref := startWorker(t, f, newTestAdapter(t, f, ""))
 			tc.mutate(f, ref)
 			f.verbs = nil
-			reason, err := newTestAdapter(t, f, tc.session).Abandoned(context.Background(), ref)
+			reason, err := newTestAdapter(t, f, tc.session).Abandoned(context.Background(), ref, tc.launched)
 			switch {
 			case tc.want == nil && (err != nil || reason == ""):
 				t.Fatalf("Abandoned = %q, %v; want a reason", reason, err)
 			case tc.want != nil && (!errors.Is(err, tc.want) || reason != ""):
 				t.Fatalf("Abandoned = %q, %v; want %v", reason, err, tc.want)
+			case tc.msg != "" && !strings.Contains(err.Error(), tc.msg):
+				t.Fatalf("Abandoned = %v; want it to say %q", err, tc.msg)
 			}
 			for _, v := range f.verbs {
 				if v != "server" && v != "get" {
@@ -655,6 +690,31 @@ func TestAbandoned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSelectionDigestCoversTheCoreSelection: every variable that can move hc
+// to another core (HC_SESSION, HC_SOCKET, the XDG paths, HOME) changes the
+// digest, and the two spellings of the default session do not.
+func TestSelectionDigestCoversTheCoreSelection(t *testing.T) {
+	digest := func(env map[string]string) string {
+		a, err := New((&fakeHC{}).runner(), "/usr/local/bin/hc", func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.SelectionDigest()
+	}
+	base := digest(nil)
+	if base == "" || digest(map[string]string{"HC_SESSION": "default"}) != base {
+		t.Fatalf("an unset HC_SESSION and HC_SESSION=default must give one digest")
+	}
+	for _, k := range []string{"HC_SESSION", "HC_SOCKET", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "HOME"} {
+		if digest(map[string]string{k: "x1"}) == base {
+			t.Errorf("%s does not change the selection digest", k)
+		}
+	}
+	if digest(map[string]string{"HC_TERMINAL_SOCKET": "/s"}) != base {
+		t.Error("HC_TERMINAL_SOCKET changed the digest, but hc calls drop it")
 	}
 }
 
