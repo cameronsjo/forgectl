@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -110,23 +109,28 @@ func ScanReportDir(dir string) Reports {
 	if dir == "" {
 		return Reports{}
 	}
-	// O_NOFOLLOW covers only a file's own name, so refuse a brief dir that
-	// is itself a symlink a worker could have swapped in.
-	if info, err := os.Lstat(dir); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return Reports{Error: "the brief dir is a symlink"}
+	// The dir is opened once, refusing a symlink a worker could have swapped
+	// in, and the listing and every report are read relative to that open.
+	d, err := openBriefDir(dir)
+	if errors.Is(err, errBriefDirSymlink) {
+		return Reports{Error: errBriefDirSymlink.Error()}
 	}
-	return ScanReports(briefDirFS{dir: dir})
+	if err != nil {
+		return Reports{Error: readDirReason(err)}
+	}
+	defer d.Close() //nolint:errcheck // read-only descriptor
+	return ScanReports(briefDirFS{dir: d})
 }
 
-// briefDirFS is the brief dir as an fs.FS whose Open never follows a
+// briefDirFS is an open brief dir as an fs.FS whose Open never follows a
 // symlink, never blocks, and refuses anything but a regular file.
-type briefDirFS struct{ dir string }
+type briefDirFS struct{ dir *os.File }
 
 func (b briefDirFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
-	f, err := openReport(filepath.Join(b.dir, name))
+	f, err := openReportAt(b.dir, name)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +146,12 @@ func (b briefDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if name != "." {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
 	}
-	return os.ReadDir(b.dir)
+	entries, err := b.dir.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) })
+	return entries, nil
 }
 
 func readDirReason(err error) string {

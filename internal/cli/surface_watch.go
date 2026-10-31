@@ -78,16 +78,31 @@ func productionWatchRuntime(deps module.Deps) watchRuntime {
 }
 
 // productionWatchHC builds the watch's hc client over the same adapter the
-// worker verbs use (newHcClient).
+// worker verbs use (newHcClient). With hc not on PATH it is not an error:
+// the client keeps looking hc up (lazyWatchSource) and reports it missing
+// until then.
 func productionWatchHC() (workerwatch.CLI, error) {
-	a, err := newHcClient()
+	src, err := findWatchSource()
 	switch {
-	case errors.Is(err, errHcNotOnPath):
-		return workerwatch.CLI{}, nil
+	case errors.Is(err, workerwatch.ErrNoHC):
+		return workerwatch.CLI{Source: &lazyWatchSource{find: findWatchSource}}, nil
 	case err != nil:
 		return workerwatch.CLI{}, fmt.Errorf("surface watch: %w", err)
 	}
-	return workerwatch.CLI{Source: hcWatchSource{a: a, stream: exec.OSRunner{}}}, nil
+	return workerwatch.CLI{Source: src}, nil
+}
+
+// findWatchSource looks hc up and builds the watch's source over it. hc
+// not on PATH is workerwatch.ErrNoHC.
+func findWatchSource() (workerwatch.Source, error) {
+	a, err := newHcClient()
+	if errors.Is(err, errHcNotOnPath) {
+		return nil, workerwatch.ErrNoHC
+	}
+	if err != nil {
+		return nil, err
+	}
+	return hcWatchSource{a: a, stream: exec.OSRunner{}}, nil
 }
 
 func newSurfaceWatchCmd(deps module.Deps) *cobra.Command {

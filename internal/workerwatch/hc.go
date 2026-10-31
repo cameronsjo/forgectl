@@ -49,6 +49,9 @@ type Terminal struct {
 	CreatedMS int64
 	Model     string // from --model in its argv, or ""
 	Cwd       string
+	// Turn is hc's count of the agent's turns. A lower turn at an address
+	// than seen before is another terminal there, or a restarted program.
+	Turn int64
 }
 
 // HC is the read-only part of hc the watch uses.
@@ -95,6 +98,7 @@ type hcGet struct {
 	State      string          `json:"state"`
 	Status     json.RawMessage `json:"status"`
 	CreatedMS  int64           `json:"created_ms"`
+	Turn       int64           `json:"turn"`
 	Argv       []string        `json:"argv"`
 	Cwd        string          `json:"cwd"`
 	Foreground *struct {
@@ -108,7 +112,7 @@ func (g hcGet) terminal() (Terminal, bool) {
 	if !addressRe.MatchString(g.Address) {
 		return Terminal{}, false
 	}
-	t := Terminal{Address: g.Address, State: g.State, CreatedMS: g.CreatedMS, Cwd: g.Cwd}
+	t := Terminal{Address: g.Address, State: g.State, CreatedMS: g.CreatedMS, Cwd: g.Cwd, Turn: g.Turn}
 	if g.Name != nil && checkName(*g.Name) == "" {
 		t.Name = *g.Name
 	}
@@ -246,6 +250,9 @@ func checkTarget(target string) error {
 func hcFailure(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
+	}
+	if errors.Is(err, ErrNoHC) {
+		return fmt.Errorf("%s: %w", what, ErrNoHC) // a Source that looks hc up on each call
 	}
 	if errors.Is(err, hcadapter.ErrNoTerminal) {
 		return fmt.Errorf("%s: %w", what, ErrGone)

@@ -25,6 +25,14 @@ const (
 	hcTimeout = 10 * time.Second
 	// ghTimeout bounds one PR read (git, then gh).
 	ghTimeout = 30 * time.Second
+	// gitTimeout bounds the branch checks of one collect.
+	gitTimeout = 5 * time.Second
+	// hcParallel caps how many hc or git calls one collect runs at once.
+	hcParallel = 8
+	// detailRetry is how long a failed `hc get` for a terminal's start
+	// time and model waits before it is tried again. The row shows without
+	// them meanwhile.
+	detailRetry = time.Minute
 )
 
 // Worker is one row of the watch.
@@ -129,11 +137,32 @@ type Collector struct {
 	// empty counts every reviewer.
 	Reviewers []string
 
-	mu      sync.Mutex
-	cache   map[string]prEntry
-	details map[string]Terminal // hc get by address: start time, model
-	cosSeen map[string]bool     // cos-* names seen live in this watch
+	mu         sync.Mutex
+	cache      map[string]prEntry
+	details    map[string]detail    // hc get by address: start time, model
+	detailFail map[string]time.Time // when a get for detailKey last failed
+	cosSeen    map[string]bool      // cos-* names seen live in this watch
 }
+
+// detail is one address's `hc get`, with what identifies the terminal it
+// was read from: its name and the highest turn `hc ls` has shown for it.
+type detail struct {
+	t    Terminal
+	name string
+	turn int64
+}
+
+// sameTerminal reports whether the `hc ls` record t is still the terminal d
+// was read from. hc reuses addresses after a core restart; `hc ls` carries
+// no start time, but a new terminal at the address has another name, or the
+// same name with its turn count started again.
+func (d detail) sameTerminal(t Terminal) bool {
+	return d.name == t.Name && t.Turn >= d.turn
+}
+
+// detailKey keys a failed get by address and name, so a failure on one
+// terminal does not hold back the get for a new one at the same address.
+func detailKey(t Terminal) string { return t.Address + "\x00" + t.Name }
 
 type prEntry struct {
 	at     time.Time // the last attempt: what the TTL counts from
@@ -149,9 +178,10 @@ type prEntry struct {
 //
 // hc is read with one `hc ls` per collect for every worker's address and
 // status. `hc ls` carries no start time or argv, so `hc get` runs once per
-// new address (those never change) and for a name `hc ls` does not list
-// (finished, or gone). If `hc ls` fails, every worker falls back to
-// `hc get`.
+// new terminal (an address is cached while `hc ls` shows the same terminal
+// there) and for a name `hc ls` does not list (finished, or gone). If
+// `hc ls` fails, every worker falls back to `hc get`. The gets run at once,
+// under one hcTimeout.
 func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -176,14 +206,39 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 			sources[e.Name] = "hc"
 		}
 	}
+	// Every hc get this collect needs runs at once under one deadline, so a
+	// few hung terminals cost one hcTimeout, not one each.
+	rows := make([]rowBuild, len(entries))
+	listed := make([]bool, len(entries))
+	var jobs []func(context.Context)
+	var gets []Terminal
+	for i, e := range entries {
+		rows[i] = rowBuild{Worker: Worker{Name: e.Name, Worktree: e.Worktree, BriefDir: e.BriefDir, Source: sources[e.Name]}}
+		if t, ok := live[e.Name]; ok && listErr == nil {
+			listed[i] = true
+			if c.needDetail(t, now) {
+				gets = append(gets, t)
+			}
+			continue
+		}
+		jobs = append(jobs, func(ctx context.Context) { c.readHC(ctx, &rows[i], now) })
+	}
+	got := make([]Terminal, len(gets))
+	gotErr := make([]error, len(gets))
+	for j, t := range gets {
+		jobs = append(jobs, func(ctx context.Context) { got[j], gotErr[j] = c.HC.Get(ctx, t.Address) })
+	}
+	runAll(ctx, hcTimeout, jobs)
+	if listErr == nil {
+		c.storeDetails(live, gets, got, gotErr, now)
+	}
+
 	workers := make([]Worker, 0, len(entries))
 	unreachable := 0
-	for _, e := range entries {
-		w := rowBuild{Worker: Worker{Name: e.Name, Worktree: e.Worktree, BriefDir: e.BriefDir, Source: sources[e.Name]}}
-		if t, ok := live[e.Name]; ok && listErr == nil {
-			c.fromList(ctx, &w, t, now)
-		} else {
-			c.readHC(ctx, &w, now)
+	for i := range rows {
+		w := &rows[i]
+		if listed[i] {
+			c.fromList(w, live[w.Name], now)
 		}
 		if w.HCError != "" && w.HCError != hcGoneText {
 			unreachable++
@@ -267,21 +322,61 @@ func (c *Collector) discover(live map[string]Terminal, have []Entry) []Entry {
 	return out
 }
 
-// fromList fills w from its `hc ls` record, reading the start time and model
-// with `hc get` only the first time an address is seen.
-func (c *Collector) fromList(ctx context.Context, w *rowBuild, t Terminal, now time.Time) {
-	if c.details == nil {
-		c.details = map[string]Terminal{}
+// needDetail reports whether the terminal t `hc ls` listed needs an `hc get`
+// for its start time and model: none is cached for it, and no get for it
+// failed within detailRetry.
+func (c *Collector) needDetail(t Terminal, now time.Time) bool {
+	if d, ok := c.details[t.Address]; ok && d.sameTerminal(t) {
+		return false
 	}
-	d, ok := c.details[t.Address]
-	if !ok {
-		gctx, cancel := context.WithTimeout(ctx, hcTimeout)
-		g, err := c.HC.Get(gctx, t.Address)
-		cancel()
-		if err == nil {
-			d = g
-			c.details[t.Address] = g
+	failed, ok := c.detailFail[detailKey(t)]
+	return !ok || now.Sub(failed) >= detailRetry
+}
+
+// storeDetails updates the detail cache after a collect whose `hc ls`
+// answered: an entry whose address `hc ls` no longer lists, or now lists
+// for another terminal, is dropped, so the cache holds only live addresses;
+// then the gets this collect ran are stored, or their failures recorded.
+func (c *Collector) storeDetails(live map[string]Terminal, gets, got []Terminal, gotErr []error, now time.Time) {
+	if c.details == nil {
+		c.details = map[string]detail{}
+		c.detailFail = map[string]time.Time{}
+	}
+	byAddr := make(map[string]Terminal, len(live))
+	keys := make(map[string]bool, len(live))
+	for _, t := range live {
+		byAddr[t.Address] = t
+		keys[detailKey(t)] = true
+	}
+	for addr, d := range c.details {
+		if t, ok := byAddr[addr]; !ok || !d.sameTerminal(t) {
+			delete(c.details, addr)
+		} else {
+			d.turn = t.Turn
+			c.details[addr] = d
 		}
+	}
+	for k := range c.detailFail {
+		if !keys[k] {
+			delete(c.detailFail, k)
+		}
+	}
+	for j, t := range gets {
+		if gotErr[j] != nil {
+			c.detailFail[detailKey(t)] = now
+			continue
+		}
+		delete(c.detailFail, detailKey(t))
+		c.details[t.Address] = detail{t: got[j], name: t.Name, turn: t.Turn}
+	}
+}
+
+// fromList fills w from its `hc ls` record and the cached `hc get` for its
+// address, when there is one for this terminal.
+func (c *Collector) fromList(w *rowBuild, t Terminal, now time.Time) {
+	var d Terminal
+	if cached, ok := c.details[t.Address]; ok && cached.sameTerminal(t) {
+		d = cached.t
 	}
 	w.Address, w.State, w.Status = t.Address, t.State, t.Status
 	w.Model = d.Model
@@ -297,9 +392,9 @@ func (c *Collector) fromList(ctx context.Context, w *rowBuild, t Terminal, now t
 	}
 }
 
+// readHC fills w from `hc get` by name. It runs beside the collect's other
+// hc calls and touches only w.
 func (c *Collector) readHC(ctx context.Context, w *rowBuild, now time.Time) {
-	ctx, cancel := context.WithTimeout(ctx, hcTimeout)
-	defer cancel()
 	t, err := c.HC.Get(ctx, w.Name)
 	if err != nil {
 		switch {
@@ -332,6 +427,7 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		i   int
 		age time.Duration
 	}
+	moved := c.branchesMoved(ctx, workers)
 	var due []stale
 	for i, w := range workers {
 		if w.Worktree == "" || c.GH == nil || c.Git == nil {
@@ -340,7 +436,7 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		e, ok := c.cache[w.Worktree]
 		age := now.Sub(e.at)
 		switch {
-		case !ok:
+		case !ok, moved[w.Worktree]:
 			due = append(due, stale{i, time.Duration(1<<62 - 1)})
 		case age >= ttl, force && age >= ForceMinAge:
 			due = append(due, stale{i, age})
@@ -359,6 +455,56 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		w := &workers[i]
 		w.Branch, w.PR, w.PRIssue, w.PRNote, w.PRAt = e.branch, e.pr, e.issue, e.note, e.readAt
 	}
+}
+
+// branchesMoved checks the branch of every worktree with a cached PR read,
+// and reports the worktrees now on another branch than the read was for: a
+// worker that switched branch is re-read at once, not after the TTL. A
+// branch git cannot read keeps the cached read.
+func (c *Collector) branchesMoved(ctx context.Context, workers []Worker) map[string]bool {
+	if c.Git == nil || c.GH == nil {
+		return nil
+	}
+	var trees []string
+	for _, w := range workers {
+		if _, ok := c.cache[w.Worktree]; ok && w.Worktree != "" && !slices.Contains(trees, w.Worktree) {
+			trees = append(trees, w.Worktree)
+		}
+	}
+	current := make([]string, len(trees))
+	errs := make([]error, len(trees))
+	jobs := make([]func(context.Context), len(trees))
+	for i, wt := range trees {
+		jobs[i] = func(ctx context.Context) { current[i], errs[i] = c.Git.Branch(ctx, wt) }
+	}
+	runAll(ctx, gitTimeout, jobs)
+	moved := map[string]bool{}
+	for i, wt := range trees {
+		if errs[i] == nil && current[i] != c.cache[wt].branch {
+			moved[wt] = true
+		}
+	}
+	return moved
+}
+
+// runAll runs jobs at once, at most hcParallel at a time, under one shared
+// timeout, and returns when every job has.
+func runAll(ctx context.Context, timeout time.Duration, jobs []func(context.Context)) {
+	if len(jobs) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	sem := make(chan struct{}, hcParallel)
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			job(ctx)
+		})
+	}
+	wg.Wait()
 }
 
 // readPR resolves the worktree's repo and branch, then its PR. A failed gh

@@ -327,6 +327,17 @@ func TestWorkersEventsCoalesceAndFallBack(t *testing.T) {
 	if !strings.Contains(ansi.Strip(m.View().Content), "polling every 5s") {
 		t.Error("header does not say it fell back to polling")
 	}
+
+	// The safety tick scheduled while events flowed belongs to the old
+	// chain: it is dropped, and the polling chain's tick collects.
+	m = feed(t, m, workersTickMsg{gen: 0})
+	if len(f.collects) != 2 {
+		t.Errorf("the safety tick from before the stream ended still collected; collects=%v", f.collects)
+	}
+	m = feed(t, m, workersTickMsg{gen: m.tickGen})
+	if len(f.collects) != 3 {
+		t.Errorf("the polling chain's tick did not collect; collects=%v", f.collects)
+	}
 }
 
 func TestWorkersEmpty(t *testing.T) {
@@ -698,6 +709,26 @@ func TestWorkersStatusCellTellsGoneFromUnread(t *testing.T) {
 	} {
 		if got, _ := m.statusCell(tt.w); got != tt.want {
 			t.Errorf("statusCell(%q) = %q, want %q", tt.w.HCError, got, tt.want)
+		}
+	}
+}
+
+// TestWorkersBannerOnAShortTerminalNamesAWorker: below 14 rows the banner is
+// one line, and with two workers blocked that line still names the first
+// and the command that shows its dialog, with a count of the other.
+func TestWorkersBannerOnAShortTerminalNamesAWorker(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	two := workersFixture()
+	two.Workers = append(two.Workers, workerwatch.Worker{Name: "cos-blk-2", Address: "t52", State: "live", Status: workerwatch.StatusBlocked})
+	out, _ := m.Update(workersSnapMsg{snap: two})
+	lines := out.(workersModel).bannerLines(200, 10)
+	if len(lines) != 1 {
+		t.Fatalf("short-terminal banner has %d lines, want 1", len(lines))
+	}
+	plain := ansi.Strip(lines[0])
+	for _, want := range []string{"cos-beta-docs is blocked", "hc read t1y", "+1 more blocked"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("short-terminal banner %q lacks %q", plain, want)
 		}
 	}
 }

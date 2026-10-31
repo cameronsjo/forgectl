@@ -119,8 +119,10 @@ func stopStream(cancel context.CancelFunc, done <-chan struct{}, grace time.Dura
 }
 
 type (
-	workersSnapMsg   struct{ snap workerwatch.Snapshot }
-	workersTickMsg   struct{}
+	workersSnapMsg struct{ snap workerwatch.Snapshot }
+	// workersTickMsg is one scheduled collect; gen is the tick chain it
+	// belongs to.
+	workersTickMsg   struct{ gen int }
 	workersKickMsg   struct{}
 	workersEventMsg  struct{}
 	workersEventsEnd struct{}
@@ -147,6 +149,9 @@ type workersModel struct {
 
 	events   <-chan struct{}
 	eventsUp bool
+	// tickGen is the live tick chain. A new chain (the switch to polling)
+	// bumps it, so the old chain's pending tick is dropped when it fires.
+	tickGen int
 
 	cursor        int
 	width, height int
@@ -202,7 +207,8 @@ func (m workersModel) scheduleTick() tea.Cmd {
 	if m.eventsUp {
 		every = WorkersSafetyPoll
 	}
-	return tea.Tick(every, func(time.Time) tea.Msg { return workersTickMsg{} })
+	gen := m.tickGen
+	return tea.Tick(every, func(time.Time) tea.Msg { return workersTickMsg{gen: gen} })
 }
 
 func (m workersModel) scheduleTail() tea.Cmd {
@@ -289,6 +295,9 @@ func (m workersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending, m.pendingForce = false, false
 		return m, m.requestCollect(force)
 	case workersTickMsg:
+		if t.gen != m.tickGen {
+			return m, nil // a tick from the chain the switch to polling replaced
+		}
 		return m, tea.Batch(m.requestCollect(false), m.scheduleTick())
 	case workersEventMsg:
 		var cmd tea.Cmd
@@ -302,8 +311,11 @@ func (m workersModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmd, waitEvent(m.events))
 	case workersEventsEnd:
+		// Polling starts now: the safety tick already scheduled could be
+		// WorkersSafetyPoll away, so a new chain at opts.Poll replaces it.
 		m.eventsUp, m.events = false, nil
-		return m, m.requestCollect(false)
+		m.tickGen++
+		return m, tea.Batch(m.requestCollect(false), m.scheduleTick())
 	case workersTailTickMsg:
 		return m, tea.Batch(m.readTail(), m.scheduleTail())
 	case workersTailMsg:
@@ -537,30 +549,21 @@ func plural(n int, one, many string) string {
 }
 
 // bannerLines is the needs-you banner: one line per blocked worker, naming
-// the command that shows its dialog, at most workersMaxBanners lines (two
-// on a short terminal). The view never answers a dialog.
+// the command that shows its dialog, at most workersMaxBanners lines. On a
+// short terminal it is one line: the first blocked worker in full, with a
+// count of the rest. The view never answers a dialog.
 func (m workersModel) bannerLines(width, height int) []string {
-	limit := workersMaxBanners
-	if height < 14 {
-		limit = 1
-	}
 	needing := m.snap.NeedingYou()
+	if height < 14 && len(needing) > 0 {
+		return []string{m.bannerLine(needing[0], width, len(needing)-1)}
+	}
 	shown := needing
-	if len(needing) > limit {
-		shown = needing[:limit-1]
+	if len(needing) > workersMaxBanners {
+		shown = needing[:workersMaxBanners-1]
 	}
 	var out []string
 	for _, w := range shown {
-		addr := w.Address
-		if addr == "" {
-			addr = w.Name
-		}
-		a := capSafe(addr, 32)
-		msg := fmt.Sprintf(" NEEDS YOU  %s is blocked: a dialog is waiting on its screen. See it: hc read %s · answer it: hc attach %s ", capSafe(w.Name, wwName), a, a)
-		if lipgloss.Width(msg) > width {
-			msg = fmt.Sprintf(" NEEDS YOU  %s blocked · hc read %s ", capSafe(w.Name, wwName), a)
-		}
-		out = append(out, m.styles.Danger.Reverse(true).Render(msg))
+		out = append(out, m.bannerLine(w, width, 0))
 	}
 	if rest := needing[len(shown):]; len(rest) > 0 {
 		names := make([]string, 0, 3)
@@ -574,6 +577,25 @@ func (m workersModel) bannerLines(width, height int) []string {
 		out = append(out, m.styles.Danger.Reverse(true).Render(fmt.Sprintf(" NEEDS YOU  %d more blocked: %s%s (BLOCKED rows; ↑/↓ to reach them) ", len(rest), strings.Join(names, ", "), more)))
 	}
 	return out
+}
+
+// bannerLine is one worker's NEEDS YOU line, with "+N more" when others
+// are blocked and have no line of their own.
+func (m workersModel) bannerLine(w workerwatch.Worker, width, more int) string {
+	addr := w.Address
+	if addr == "" {
+		addr = w.Name
+	}
+	a := capSafe(addr, 32)
+	extra := ""
+	if more > 0 {
+		extra = fmt.Sprintf(" · +%d more blocked", more)
+	}
+	msg := fmt.Sprintf(" NEEDS YOU  %s is blocked: a dialog is waiting on its screen. See it: hc read %s · answer it: hc attach %s%s ", capSafe(w.Name, wwName), a, a, extra)
+	if lipgloss.Width(msg) > width {
+		msg = fmt.Sprintf(" NEEDS YOU  %s blocked · hc read %s%s ", capSafe(w.Name, wwName), a, extra)
+	}
+	return m.styles.Danger.Reverse(true).Render(msg)
 }
 
 // workersCol is one table column. Columns are shown in kind order and
