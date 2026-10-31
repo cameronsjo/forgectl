@@ -237,12 +237,18 @@ type LaunchWorker struct {
 	// Unset keeps every built-in tool; internal/launch/workertools.go says
 	// which names it takes.
 	Tools []string `toml:"tools,omitempty"`
+	// InheritLauncherMode lets `surface launch --inherit-mode` raise a claude
+	// worker to the launching session's mode, capped at auto. Without it the
+	// flag only tightens. The operator sets it, because the flag is the
+	// caller's own unverifiable claim. It cannot be set with PermissionMode:
+	// a worker takes one or the other.
+	InheritLauncherMode bool `toml:"inherit_launcher_mode,omitempty"`
 }
 
 // isZero reports whether the [launch.worker] table set nothing. An empty
 // tools list is set (the launch refuses it), so only a nil one counts.
 func (w LaunchWorker) isZero() bool {
-	return w.PermissionMode == "" && w.Sandbox == "" && w.ApprovalPolicy == "" && w.Settings == "" && w.Tools == nil
+	return w.PermissionMode == "" && w.Sandbox == "" && w.ApprovalPolicy == "" && w.Settings == "" && w.Tools == nil && !w.InheritLauncherMode
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project

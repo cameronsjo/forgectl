@@ -259,7 +259,7 @@ func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 	// The one exception to "never inherit": the new pane's own ids. The
 	// launcher strips its ids (surfaceLaunchEnvironment), so without these the
 	// harness would not know which pane it is in. Only the marked backend's
-	// keys cross (paneIdentityEnvByBackend).
+	// keys cross (exec.PaneIdentityEnv).
 	cmd.Env = paneIdentityEnv(cmd.Env, os.Getenv)
 
 	// The harness is an interactive session and this process is standing in for

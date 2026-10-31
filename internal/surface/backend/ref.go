@@ -64,6 +64,8 @@ const (
 	sourceCmuxEnv
 	sourceHerdrDefaultSession
 	sourceHerdrNamedSession
+	sourceHcDefaultSession
+	sourceHcNamedSession
 	sourceCount
 )
 
@@ -75,6 +77,8 @@ var sourceNames = [sourceCount]string{
 	sourceCmuxEnv:             "cmux-env",
 	sourceHerdrDefaultSession: "herdr-default-session",
 	sourceHerdrNamedSession:   "herdr-named-session",
+	sourceHcDefaultSession:    "hc-default-session",
+	sourceHcNamedSession:      "hc-named-session",
 }
 
 var sourceKinds = [sourceCount]Kind{
@@ -85,6 +89,8 @@ var sourceKinds = [sourceCount]Kind{
 	sourceCmuxEnv:             KindCmux,
 	sourceHerdrDefaultSession: KindHerdr,
 	sourceHerdrNamedSession:   KindHerdr,
+	sourceHcDefaultSession:    KindHc,
+	sourceHcNamedSession:      KindHc,
 }
 
 // ServerSource names *how* an endpoint was selected, never the endpoint
@@ -128,6 +134,14 @@ func HerdrDefaultSessionServer() ServerSource {
 // these strings are serialized into every reference and no herdr reference
 // exists yet. See forgectl#364.
 func HerdrNamedSessionServer() ServerSource { return ServerSource{code: sourceHerdrNamedSession} }
+
+// HcDefaultSessionServer selects hc's default core: no HC_SESSION set.
+func HcDefaultSessionServer() ServerSource { return ServerSource{code: sourceHcDefaultSession} }
+
+// HcNamedSessionServer selects the hc core HC_SESSION names. The session name
+// itself is not recorded here; it goes into the server fingerprint, so a
+// reference taken under one session does not match a core selected by another.
+func HcNamedSessionServer() ServerSource { return ServerSource{code: sourceHcNamedSession} }
 
 // Valid reports whether s names a real selection chain.
 func (s ServerSource) Valid() bool { return s.code > sourceInvalid && s.code < sourceCount }
@@ -313,6 +327,31 @@ func Fingerprint(in IncarnationInput) (ServerID, error) {
 	return ServerID{digest: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
+// hcCoreDomain separates an hc core fingerprint from every Fingerprint
+// digest, so no IncarnationInput can be chosen to collide with one.
+const hcCoreDomain = "forgectl-hc-core\x00"
+
+// FingerprintHcCore binds a reference to one hc core: the session that
+// selected it and the core id `hc server status` reports.
+//
+// It is separate from Fingerprint because hc has no socket this process can
+// stat, and because what turns over is different. hc keeps terminals and their
+// addresses across `hc server restart` and `hc update`, and core.id stays the
+// same across both (measured on hc 0.1.15), so a restart is not a new
+// incarnation and must not orphan a worker. A different session, or a core
+// whose state was wiped, reports a different id, and that is the case this
+// refuses. The version is deliberately left out for the same reason.
+func FingerprintHcCore(session, coreID string) (ServerID, error) {
+	if session == "" || coreID == "" {
+		return ServerID{}, ErrInvalidServerID
+	}
+	h := sha256.New()
+	writeField(h, []byte(hcCoreDomain))
+	writeField(h, []byte(session))
+	writeField(h, []byte(coreID))
+	return ServerID{digest: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
 func writeField(w io.Writer, b []byte) {
 	writeUint(w, uint64(len(b)))
 	_, _ = w.Write(b)
@@ -450,6 +489,56 @@ func (i HerdrIdentity) Tab() string { return i.tab }
 // string.
 func (i HerdrIdentity) Pane() string { return i.pane }
 
+// maxHcAddressLen bounds an hc terminal address. Real ones are short ("t7",
+// "t1r"); a machine-qualified one ("vps/t3") is refused below, because a
+// worker launch never targets another machine.
+const maxHcAddressLen = 32
+
+// HcIdentity names one hc terminal: its address and the time hc created it.
+//
+// The address alone is not an identity. hc can hand an address out again after
+// `hc rm`, so a reference that recorded only "t7" could authorize killing the
+// next terminal to get it. The creation time is what tells them apart; the
+// ownership label is checked on top of both.
+type HcIdentity struct {
+	terminal  string
+	createdMS int64
+}
+
+// NewHcIdentity validates an hc address ("t" followed by lowercase letters or
+// digits) and a positive creation time in milliseconds.
+func NewHcIdentity(terminal string, createdMS int64) (HcIdentity, error) {
+	if !validHcAddress(terminal) {
+		return HcIdentity{}, fmt.Errorf("%w: hc terminal address", ErrInvalidIdentity)
+	}
+	if createdMS <= 0 {
+		return HcIdentity{}, fmt.Errorf("%w: hc terminal creation time", ErrInvalidIdentity)
+	}
+	return HcIdentity{terminal: terminal, createdMS: createdMS}, nil
+}
+
+// Terminal is the hc address, such as "t7".
+func (i HcIdentity) Terminal() string { return i.terminal }
+
+// CreatedMS is the terminal's creation time, in Unix milliseconds.
+func (i HcIdentity) CreatedMS() int64 { return i.createdMS }
+
+// validHcAddress accepts hc's local address shape: a "t" and then one or more
+// lowercase letters or digits. A name is not an address, so a name never
+// reaches a reference.
+func validHcAddress(s string) bool {
+	if len(s) < 2 || len(s) > maxHcAddressLen || s[0] != 't' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
 // Ref is a closeable handle on exactly one manager object.
 //
 // Every field is private and every path into the type validates, so an
@@ -468,6 +557,7 @@ type Ref struct {
 	tmux  TmuxIdentity
 	cmux  CMuxIdentity
 	herdr HerdrIdentity
+	hc    HcIdentity
 
 	// endpoint is a digest of the socket path the selection chain resolved
 	// to when the reference was taken, or zero for a reference from before
@@ -556,6 +646,15 @@ func NewHerdrRef(source ServerSource, server ServerID, tag RecoveryTag, id Herdr
 	return r, nil
 }
 
+// NewHcRef builds a reference to one hc terminal.
+func NewHcRef(source ServerSource, server ServerID, tag RecoveryTag, id HcIdentity) (Ref, error) {
+	r := Ref{kind: KindHc, source: source, server: server, tag: tag, hc: id}
+	if err := r.Validate(); err != nil {
+		return Ref{}, err
+	}
+	return r, nil
+}
+
 // Validate reports whether this reference is complete and internally
 // consistent. It is the one gate every constructor and the decoder share, so
 // there is a single description of what a trustworthy reference is.
@@ -592,6 +691,9 @@ func (r Ref) Validate() error {
 	if r.herdr != (HerdrIdentity{}) {
 		set++
 	}
+	if r.hc != (HcIdentity{}) {
+		set++
+	}
 	if set != 1 {
 		return fmt.Errorf("%w: expected exactly one backend identity, found %d", ErrInvalidRef, set)
 	}
@@ -614,6 +716,10 @@ func (r Ref) Validate() error {
 	case KindHerdr:
 		if r.herdr == (HerdrIdentity{}) {
 			return fmt.Errorf("%w: herdr reference has no workspace", ErrInvalidRef)
+		}
+	case KindHc:
+		if r.hc == (HcIdentity{}) {
+			return fmt.Errorf("%w: hc reference has no terminal", ErrInvalidRef)
 		}
 	case KindUnspecified:
 		return fmt.Errorf("%w: unknown backend", ErrInvalidRef)
@@ -676,6 +782,14 @@ func (r Ref) HerdrIdentity() (HerdrIdentity, error) {
 	return r.herdr, nil
 }
 
+// HcIdentity returns the hc terminal identity, or ErrRefKindMismatch.
+func (r Ref) HcIdentity() (HcIdentity, error) {
+	if r.kind != KindHc {
+		return HcIdentity{}, fmt.Errorf("%w: want hc, have %s", ErrRefKindMismatch, r.kind)
+	}
+	return r.hc, nil
+}
+
 // String renders the safe operator-facing form: what to look for, and where.
 func (r Ref) String() string {
 	if !r.Valid() {
@@ -711,6 +825,11 @@ type refWire struct {
 	// refuses a reference carrying it (unknown fields are refused), which is
 	// the fail-closed direction.
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// Terminal and CreatedMS are an hc reference's identity, also added
+	// without a version change: an older build refuses kind "hc" outright.
+	Terminal  string `json:"terminal,omitempty"`
+	CreatedMS int64  `json:"created_ms,omitempty"`
 }
 
 // MarshalJSON encodes a validated reference. An invalid reference refuses to
@@ -737,6 +856,9 @@ func (r Ref) MarshalJSON() ([]byte, error) {
 		w.Tab = r.herdr.tab
 		w.Pane = r.herdr.pane
 		w.Endpoint = r.endpoint.digest
+	case KindHc:
+		w.Terminal = r.hc.terminal
+		w.CreatedMS = r.hc.createdMS
 	case KindUnspecified:
 		return nil, ErrInvalidRef
 	}
@@ -798,7 +920,7 @@ func DecodeRef(data []byte) (Ref, error) {
 	// it did not expect is the same defect as one that ignores an unknown key.
 	switch kind {
 	case KindTmux:
-		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
+		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" || w.Terminal != "" || w.CreatedMS != 0 {
 			return Ref{}, fmt.Errorf("%w: tmux reference carries workspace fields", ErrInvalidRef)
 		}
 		id, err := NewTmuxIdentity(w.Session)
@@ -807,7 +929,7 @@ func DecodeRef(data []byte) (Ref, error) {
 		}
 		return NewTmuxRef(source, server, tag, id)
 	case KindCmux:
-		if w.Session != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
+		if w.Session != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" || w.Terminal != "" || w.CreatedMS != 0 {
 			return Ref{}, fmt.Errorf("%w: cmux reference carries foreign fields", ErrInvalidRef)
 		}
 		id, err := NewCMuxIdentity(w.Workspace)
@@ -816,8 +938,8 @@ func DecodeRef(data []byte) (Ref, error) {
 		}
 		return NewCmuxRef(source, server, tag, id)
 	case KindHerdr:
-		if w.Session != "" {
-			return Ref{}, fmt.Errorf("%w: herdr reference carries a session field", ErrInvalidRef)
+		if w.Session != "" || w.Terminal != "" || w.CreatedMS != 0 {
+			return Ref{}, fmt.Errorf("%w: herdr reference carries a session or hc field", ErrInvalidRef)
 		}
 		id, err := NewHerdrIdentity(w.Workspace, w.Tab, w.Pane)
 		if err != nil {
@@ -828,6 +950,15 @@ func DecodeRef(data []byte) (Ref, error) {
 			return ref, err
 		}
 		return ref.WithEndpoint(EndpointID{digest: w.Endpoint})
+	case KindHc:
+		if w.Session != "" || w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" {
+			return Ref{}, fmt.Errorf("%w: hc reference carries foreign fields", ErrInvalidRef)
+		}
+		id, err := NewHcIdentity(w.Terminal, w.CreatedMS)
+		if err != nil {
+			return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
+		}
+		return NewHcRef(source, server, tag, id)
 	case KindUnspecified:
 	}
 	return Ref{}, fmt.Errorf("%w: unknown backend", ErrInvalidRef)

@@ -58,6 +58,9 @@ const (
 	EnvOpReplace
 	// EnvOpUnset removes the key and carries no value.
 	EnvOpUnset
+	// EnvOpUnsetSessionHandles names no key and carries no value: the runner
+	// drops every inherited key that names the launching session's handles.
+	EnvOpUnsetSessionHandles
 )
 
 // KeySopsTmpdir is the one key New restricts by command: it is permitted only
@@ -150,6 +153,8 @@ func (m Env) valid() bool {
 		return m.Key != "" && m.Value.Present()
 	case EnvOpUnset:
 		return m.Key != "" && !m.Value.Set()
+	case EnvOpUnsetSessionHandles:
+		return m.Key == "" && !m.Value.Set()
 	default:
 		return false
 	}

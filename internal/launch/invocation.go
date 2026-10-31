@@ -144,6 +144,11 @@ type InvocationRequest struct {
 	// path. It is set last, over the inherited value and the profile's env.
 	// Only a claude worker takes one.
 	ConfigDir string
+	// LauncherMode is the permission mode of the Claude Code session launching
+	// this worker (`surface launch --inherit-mode`), or "" when not given. It
+	// caps a claude worker's mode and never raises it. Only a worker takes
+	// one; it must be a mode claudePermissionRank knows (CheckLauncherMode).
+	LauncherMode string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -244,14 +249,20 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // permission mode, even over the operator's own allow rules (ADR-0010,
 // 2026-10-20 amendment). It backs up the FORGECTL_DRAIN_WORKER refusal, which
 // a worker can unset.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+//
+// editorMode is pinned to "normal" so a worker's prompt is never in vim mode,
+// where one Escape would switch it to NORMAL and the next typed text would be
+// read as vim commands. `surface brief --surface hc` sends one Escape before
+// it pastes, to close any dialog that is open; that is safe only at a
+// non-vim prompt.
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
 	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
 // every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
 // allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
-const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
 	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
 	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
@@ -458,7 +469,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if len(req.Args) > 0 {
 			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
 		}
-		if profile, workerPosture, notes, err = applyWorkerProfile(profile, req.Config, proj); err != nil {
+		if profile, workerPosture, notes, err = applyWorkerProfile(profile, req.Config, proj, req.LauncherMode); err != nil {
 			return BuiltInvocation{}, fmt.Errorf("%w: %w", ErrWorkerPosture, err)
 		}
 		if profile, err = applyWorkerFloor(profile); err != nil {

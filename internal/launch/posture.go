@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -122,7 +123,34 @@ const (
 	// PostureFromRepo is the matched project block's value, which won because
 	// it is stricter.
 	PostureFromRepo = "repo-profile"
+	// PostureFromLauncher is the launching session's permission mode
+	// (--inherit-mode): it capped the value from every other source, or, with
+	// [launch.worker] inherit_launcher_mode, replaced the built-in value.
+	PostureFromLauncher = "launcher"
 )
+
+// launcherModeCap is the loosest mode a launcher's mode passes to a worker.
+// A launcher in dontAsk or bypassPermissions launches auto workers: the
+// worker floor refuses anything looser (applyWorkerFloor), and inheriting a
+// mode must never be the way past it.
+const launcherModeCap = "auto"
+
+// ErrInheritConflict refuses [launch.worker] with both inherit_launcher_mode
+// and permission_mode: a worker takes its mode from one of them. The text
+// names the fix, because an operator who already had permission_mode and
+// added the opt-in has every worker launch refused until they pick one.
+var ErrInheritConflict = errors.New("[launch.worker] sets both inherit_launcher_mode and permission_mode: remove permission_mode (the worker then takes the launcher's mode, up to auto), or set inherit_launcher_mode = false")
+
+// CheckLauncherMode refuses a launcher mode Claude Code does not have.
+func CheckLauncherMode(mode string) error {
+	return claudePermissionRank.check(mode)
+}
+
+// inheritedMode is the mode a launcher in mode passes on: itself, capped at
+// launcherModeCap.
+func inheritedMode(mode string) (string, error) {
+	return claudePermissionRank.stricter(mode, launcherModeCap)
+}
 
 // PostureValue is one resolved worker posture field and where it came from.
 type PostureValue struct {
@@ -149,9 +177,32 @@ type PostureValue struct {
 //
 // The returned values name each field the harness takes, with its source. The
 // floor afterwards refuses rather than lowers, so they are the final posture.
-func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) (Profile, []PostureValue, []string, error) {
+//
+// launcherMode, when set, is the launching session's permission mode. A
+// claude worker's mode, whatever its source, is capped at it: a launcher in
+// plan never starts a worker looser than plan, even under an explicit
+// [launch.worker] value. By default it only tightens. The value is the
+// caller's claim, and nothing can check it (Claude Code exposes no live
+// mode), so a claim raises a worker only when the operator opted in with
+// [launch.worker] inherit_launcher_mode = true: the worker then takes the
+// launcher's mode, capped at auto, in place of the built-in value. A codex or
+// pi worker ignores it, with a note.
+func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject, launcherMode string) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
+	if w.InheritLauncherMode && w.PermissionMode != "" {
+		return Profile{}, nil, nil, ErrInheritConflict
+	}
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
+	var inherited string
+	if launcherMode != "" && p.Harness == "claude" {
+		var err error
+		if inherited, err = inheritedMode(launcherMode); err != nil {
+			return Profile{}, nil, nil, fmt.Errorf("launcher mode: %w", err)
+		}
+		if w.InheritLauncherMode {
+			wpm = inherited
+		}
+	}
 	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
 	wap := firstNonEmpty(w.ApprovalPolicy, workerDefaultApproval)
 	for _, c := range []struct {
@@ -175,16 +226,41 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 			return "", err
 		}
 		source := PostureFromDefault
-		if set != "" {
+		switch {
+		case set != "":
 			source = PostureFromWorker
+		case field == "permission_mode" && inherited != "" && w.InheritLauncherMode:
+			source = PostureFromLauncher
 		}
 		if project != "" && got == project && got != worker {
 			source = PostureFromRepo
+		}
+		// The launcher's mode is a ceiling over every source, the repo's
+		// included. On a tie the value already chosen keeps its source.
+		if inherited != "" && field == "permission_mode" {
+			capped, err := r.stricter(got, inherited)
+			if err != nil {
+				return "", err
+			}
+			if capped != got {
+				got, source = capped, PostureFromLauncher
+			}
 		}
 		values = append(values, PostureValue{Field: field, Value: got, Source: source})
 		return got, nil
 	}
 	var notes []string
+	if launcherMode != "" && p.Harness != "claude" {
+		notes = append(notes, fmt.Sprintf("--inherit-mode applies to claude workers only; this %s worker keeps its own posture", p.Harness))
+	}
+	// The opt-in does nothing without the flag, and nothing else would say
+	// so: a coordinator that never passes --inherit-mode gets the built-in
+	// value. With the opt-in on, any caller that passes --inherit-mode auto
+	// gets an auto worker, a sub-worker launched by a worker included.
+	if launcherMode == "" && w.InheritLauncherMode && p.Harness == "claude" {
+		notes = append(notes, "[launch.worker] inherit_launcher_mode is on, but no --inherit-mode was given, so this worker gets the built-in "+
+			workerDefaultPermissionMode+"; a launch passing --inherit-mode <mode> gets that mode, up to auto")
+	}
 	note := func(r postureRank, field, defaults, got string) {
 		if defaults == "" {
 			return
@@ -263,7 +339,19 @@ func DefaultWorkerPosture(lc config.LaunchConfig) WorkerPosture {
 
 func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) WorkerPosture {
 	w := WorkerPosture{Harness: p.Harness}
-	p, values, notes, err := applyWorkerProfile(p, lc, proj)
+	orig := p
+	p, values, notes, err := applyWorkerProfile(p, lc, proj, "")
+	if errors.Is(err, ErrInheritConflict) {
+		// Still show what the worker would get from permission_mode, so the
+		// preview stays readable while it names the conflict to fix.
+		w.Refused = err.Error()
+		alt := lc
+		alt.Worker.InheritLauncherMode = false
+		if _, values, notes, aerr := applyWorkerProfile(orig, alt, proj, ""); aerr == nil {
+			w.Values, w.Notes = values, notes
+		}
+		return w
+	}
 	if err != nil {
 		w.Refused = err.Error()
 		return w

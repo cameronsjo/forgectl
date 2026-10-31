@@ -59,6 +59,12 @@ const terminalReadTimeout = 10 * time.Second
 // read it, the pane's terminal_id. A failed read leaves terminal_id out.
 func newLaunchResult(ctx context.Context, adapter any, ref backend.Ref, surfaceName, name, target, harness string) launchResult {
 	res := launchResult{Surface: surfaceName, Name: name, Target: target, Harness: harness, Ref: ref.String()}
+	// An hc reference already holds the terminal's address, which is its
+	// terminal_id: nothing more to read.
+	if hc, err := ref.HcIdentity(); err == nil {
+		res.TerminalID = hc.Terminal()
+		return res
+	}
 	id, err := ref.HerdrIdentity()
 	if err != nil {
 		return res
@@ -95,7 +101,8 @@ func workerLaunchResult(ctx context.Context, adapter any, attempt workerAttempt,
 			w.Marker = r.Brief.Marker
 		}
 	}
-	res := newLaunchResult(ctx, adapter, ref, "herdr", name, top, harness)
+	// The surface is the backend the reference names (herdr or hc).
+	res := newLaunchResult(ctx, adapter, ref, ref.Kind().String(), name, top, harness)
 	res.Worker = w
 	return res, err
 }
