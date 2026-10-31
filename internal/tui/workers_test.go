@@ -69,11 +69,15 @@ func (f *workersFakes) read(_ context.Context, addr string) (string, error) {
 	return f.screen, nil
 }
 
-func newWorkersTest(t *testing.T, f *workersFakes, events func(context.Context) <-chan struct{}) workersModel {
+func newWorkersTest(t *testing.T, f *workersFakes, wake <-chan struct{}) workersModel {
 	t.Helper()
+	var stream *workerwatch.EventStream
+	if wake != nil {
+		stream = &workerwatch.EventStream{Wake: wake}
+	}
 	m := newWorkersModel(context.Background(), WorkersOptions{
-		Collect: f.collect, Read: f.read, Events: events, Poll: 5 * time.Second, Theme: theme.Default(),
-	})
+		Collect: f.collect, Read: f.read, Poll: 5 * time.Second, Theme: theme.Default(),
+	}, stream)
 	m.now = func() time.Time { return workersNow }
 	out, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
 	return out.(workersModel)
@@ -272,7 +276,7 @@ func TestWorkersRefreshKeyForces(t *testing.T) {
 func TestWorkersEventsCoalesceAndFallBack(t *testing.T) {
 	ch := make(chan struct{}, 1)
 	f := &workersFakes{}
-	m := newWorkersTest(t, f, func(context.Context) <-chan struct{} { return ch })
+	m := newWorkersTest(t, f, ch)
 	if !m.busy {
 		t.Fatal("a new model should be busy with its first collect")
 	}
@@ -383,5 +387,28 @@ func TestWorkersFinishedBlockedIsNotNeedsYou(t *testing.T) {
 	plain := ansi.Strip(out.(workersModel).View().Content)
 	if strings.Contains(plain, "NEEDS YOU") || strings.Contains(plain, "need you") {
 		t.Errorf("an exited terminal whose last report was blocked raised NEEDS YOU\n%s", plain)
+	}
+}
+
+func TestStopStreamWaitsForTheChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	reaped := make(chan struct{})
+	go func() { // a child that only exits once its context is cancelled
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		close(reaped)
+		close(done)
+	}()
+	if !stopStream(cancel, done, time.Second) {
+		t.Fatal("stopStream gave up on a child that exits after cancel")
+	}
+	select {
+	case <-reaped:
+	default:
+		t.Fatal("stopStream returned before the child was reaped")
+	}
+	if stopStream(func() {}, make(chan struct{}), 20*time.Millisecond) {
+		t.Error("stopStream reported a child that never exits as reaped")
 	}
 }

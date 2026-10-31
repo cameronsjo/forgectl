@@ -240,19 +240,32 @@ func hcFailure(ctx context.Context, what string, err error) error {
 // wakeEvents are the hc event types that can change a row.
 var wakeEvents = []string{"created", "lost", "restarted", "finished", "removed", "status", "turn"}
 
-// Events subscribes to `hc events` and sends on the returned channel each
-// time an event that can change a row arrives, coalescing bursts: the
-// channel holds at most one pending wake. The channel closes when the stream
-// ends, for any reason, so the caller can fall back to polling. A
-// subscription takes nothing from anyone else's `hc wait`.
-func (c CLI) Events(ctx context.Context) <-chan struct{} {
+// EventStream is a running `hc events` subscription.
+type EventStream struct {
+	// Wake receives each time an event that can change a row arrives,
+	// coalescing bursts: it holds at most one pending wake. It closes when
+	// the stream ends, for any reason, so the caller can fall back to
+	// polling.
+	Wake <-chan struct{}
+	// Done closes once the hc child has exited and been waited for. Cancel
+	// the context, then wait on Done, so no `hc events` outlives the caller.
+	Done <-chan struct{}
+}
+
+// Events subscribes to `hc events`. A subscription takes nothing from
+// anyone else's `hc wait`. With no Stream runner, Wake and Done are closed
+// at once.
+func (c CLI) Events(ctx context.Context) EventStream {
 	wake := make(chan struct{}, 1)
+	done := make(chan struct{})
 	if c.Stream == nil {
 		close(wake)
-		return wake
+		close(done)
+		return EventStream{Wake: wake, Done: done}
 	}
 	pr, pw := io.Pipe()
 	go func() {
+		defer close(done)
 		err := c.Stream.RunStreaming(ctx, nil, pw, io.Discard, hcBin, "events", "--json")
 		_ = pw.CloseWithError(errors.Join(err, io.EOF)) // the reader only needs to know the stream ended
 	}()
@@ -261,7 +274,7 @@ func (c CLI) Events(ctx context.Context) <-chan struct{} {
 		ScanEvents(pr, wake)
 		_ = pr.Close() // unblocks the writer if the scan stopped early
 	}()
-	return wake
+	return EventStream{Wake: wake, Done: done}
 }
 
 // ScanEvents reads an hc events stream from r and signals wake (never

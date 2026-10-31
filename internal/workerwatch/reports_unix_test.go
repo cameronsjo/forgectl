@@ -3,11 +3,17 @@
 package workerwatch
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // A worker can swap report.md for a FIFO between the directory read and the
@@ -64,5 +70,46 @@ func TestScanReportDirRefusesASymlinkedDir(t *testing.T) {
 	}
 	if r := ScanReportDir(link); r.Error != "the brief dir is a symlink" || len(r.Files) != 0 {
 		t.Errorf("a symlinked brief dir was read: %+v", r)
+	}
+}
+
+// A stub hc first on PATH stands in for `hc events`: it records its pid,
+// prints a snapshot and one event, then sleeps like an idle subscription.
+// Once Done closes after cancel, that process must be gone.
+func TestEventsChildIsReapedAfterCancel(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	stub := "#!/bin/sh\necho $$ > " + pidFile + "\necho '{\"terminals\":[]}'\necho '{\"params\":{\"type\":\"status\"}}'\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte(stub), 0o700); err != nil { //nolint:gosec // G306: a test stub that must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	es := CLI{Stream: exec.OSRunner{}}.Events(ctx)
+	select {
+	case <-es.Wake:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("the stub hc events never woke the watch")
+	}
+	raw, err := os.ReadFile(pidFile) //nolint:gosec // G304: the test's own temp file
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-es.Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after cancel")
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("the hc events child (pid %d) is still alive after Done: kill(0) = %v", pid, err)
 	}
 }

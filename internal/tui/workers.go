@@ -30,6 +30,9 @@ const (
 	workersEventGap = time.Second
 	// workersTailEvery is how often the selected worker's screen is re-read.
 	workersTailEvery = 2 * time.Second
+	// workersStopGrace bounds the wait for the hc events child on quit; it
+	// covers exec's 2s stream cancel grace.
+	workersStopGrace = 3 * time.Second
 	// workersTailTimeout bounds one screen read.
 	workersTailTimeout = 10 * time.Second
 	// workersMaxTailLines caps the screen lines kept for the tail.
@@ -56,20 +59,42 @@ type WorkersOptions struct {
 	Collect func(ctx context.Context, force bool) workerwatch.Snapshot
 	// Read returns a terminal's screen; its text is untrusted.
 	Read func(ctx context.Context, address string) (string, error)
-	// Events, when set, signals each time hc reports a change, and closes
-	// when the stream ends.
-	Events func(ctx context.Context) <-chan struct{}
+	// Events, when set, starts the hc event subscription. RunWorkers
+	// cancels it and waits for its Done before returning.
+	Events func(ctx context.Context) workerwatch.EventStream
 	// Poll is the collect interval when there is no event stream.
 	Poll  time.Duration
 	Theme theme.Theme
 }
 
-// RunWorkers runs the worker watch until the operator quits.
+// RunWorkers runs the worker watch until the operator quits. It returns
+// only after the hc event subscription has stopped (or workersStopGrace has
+// passed), so quitting never leaves an `hc events` child behind.
 func RunWorkers(ctx context.Context, opts WorkersOptions) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	_, err := tea.NewProgram(newWorkersModel(ctx, opts), keymap.ProgramOptions(ctx)...).Run()
+	var stream *workerwatch.EventStream
+	if opts.Events != nil {
+		es := opts.Events(ctx)
+		stream = &es
+	}
+	_, err := tea.NewProgram(newWorkersModel(ctx, opts, stream), keymap.ProgramOptions(ctx)...).Run()
+	if stream != nil {
+		stopStream(cancel, stream.Done, workersStopGrace)
+	}
 	return err
+}
+
+// stopStream cancels the subscription and waits for its child to be
+// reaped, at most grace. It reports whether the child was reaped in time.
+func stopStream(cancel context.CancelFunc, done <-chan struct{}, grace time.Duration) bool {
+	cancel()
+	select {
+	case <-done:
+		return true
+	case <-time.After(grace):
+		return false
+	}
 }
 
 type (
@@ -111,15 +136,15 @@ type workersModel struct {
 	tailBusy  bool
 }
 
-func newWorkersModel(ctx context.Context, opts WorkersOptions) workersModel {
+func newWorkersModel(ctx context.Context, opts WorkersOptions, stream *workerwatch.EventStream) workersModel {
 	if opts.Poll <= 0 {
 		opts.Poll = 5 * time.Second
 	}
 	// Init always starts the first collect, so the model starts busy.
 	m := workersModel{ctx: ctx, opts: opts, styles: opts.Theme.Styles(), now: time.Now, busy: true}
 	m.lastStart = m.now()
-	if opts.Events != nil {
-		m.events = opts.Events(ctx)
+	if stream != nil {
+		m.events = stream.Wake
 		m.eventsUp = true
 	}
 	return m

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strings"
 	"sync"
@@ -148,8 +149,9 @@ func TestScanEventsWakesOnRowEventsOnly(t *testing.T) {
 }
 
 func TestEventsWithoutStreamCloses(t *testing.T) {
-	ch := CLI{}.Events(context.Background())
-	if _, ok := <-ch; ok {
+	es := CLI{}.Events(context.Background())
+	<-es.Done
+	if _, ok := <-es.Wake; ok {
 		t.Fatal("Events with no stream runner should close at once, so the view polls")
 	}
 }
@@ -354,5 +356,61 @@ func TestParseWorkersSkipsAnOverlongLine(t *testing.T) {
 	}
 	if len(problems) != 1 || !strings.HasPrefix(problems[0], "line 2: longer than") {
 		t.Errorf("problems = %q", problems)
+	}
+}
+
+// blockingStream stands in for `hc events`: it writes a snapshot and one
+// event, then blocks until its context ends, like an idle subscription.
+type blockingStream struct {
+	mu       sync.Mutex
+	args     []string
+	returned bool
+}
+
+func (b *blockingStream) RunStreaming(ctx context.Context, _ io.Reader, stdout, _ io.Writer, name string, args ...string) error {
+	b.mu.Lock()
+	b.args = append([]string{name}, args...)
+	b.mu.Unlock()
+	_, _ = io.WriteString(stdout, `{"terminals":[]}`+"\n"+`{"params":{"type":"status"}}`+"\n")
+	<-ctx.Done()
+	b.mu.Lock()
+	b.returned = true
+	b.mu.Unlock()
+	return ctx.Err()
+}
+
+func TestEventsDoneClosesOnlyAfterTheStreamReturns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	st := &blockingStream{}
+	es := CLI{Stream: st}.Events(ctx)
+	select {
+	case <-es.Wake:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no wake for the status event")
+	}
+	select {
+	case <-es.Done:
+		t.Fatal("Done closed while the stream was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-es.Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done never closed after cancel")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.returned {
+		t.Error("Done closed before the stream runner returned")
+	}
+	if strings.Join(st.args, " ") != "hc events --json" {
+		t.Errorf("ran %q, want hc events --json", st.args)
+	}
+	if _, ok := <-es.Wake; ok {
+		// drain a pending wake, then it must close
+		if _, ok := <-es.Wake; ok {
+			t.Error("Wake did not close after the stream ended")
+		}
 	}
 }
