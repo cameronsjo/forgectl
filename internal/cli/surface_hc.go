@@ -181,7 +181,7 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	}
 
 	start := s.now()
-	last := "no status read yet"
+	var last string
 	for {
 		w, err := s.status(ctx)
 		switch {

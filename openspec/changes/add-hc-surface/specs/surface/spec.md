@@ -25,21 +25,21 @@
 ## ADDED Requirements
 
 ### Requirement: hc backend
-`--surface hc` SHALL start the trampoline with `hc run --bg --outlive-parent`, naming the terminal after the display name and labeling it `forgectl_surface=<ownership marker>`. A display name outside hc's name rules MUST be refused before anything is created. forgectl MUST NOT stop or restart an hc core.
+`--surface hc` SHALL start the trampoline with `hc run --bg --outlive-parent --no-notify`, naming the terminal after the display name and labeling it `forgectl.surface=<ownership marker>`. A display name outside hc's name rules MUST be refused before anything is created. forgectl MUST NOT stop or restart an hc core.
 
 #### Scenario: Name hc refuses
 - **WHEN** `surface launch --surface hc --name T7` runs
 - **THEN** the launch is refused before any worktree, ledger row, or terminal exists
 
 ### Requirement: hc terminal ownership
-A reference to an hc terminal SHALL record its address, its creation time, and a fingerprint of the hc core's id. Close, probe, read, and brief MUST act only on a terminal whose `forgectl_surface` label, creation time, and core fingerprint all match the reference.
+A reference to an hc terminal SHALL record its address, its creation time, and a fingerprint of the hc core's id. Close, probe, read, and brief MUST act only on a terminal whose `forgectl.surface` label, creation time, and core fingerprint all match the reference.
 
 #### Scenario: Address reused
 - **WHEN** an hc worker's terminal was removed and a new terminal took its address
 - **THEN** `surface close` refuses with an identity mismatch and kills nothing
 
 ### Requirement: hc worker verbs
-`list`, `read`, `ready`, `wait`, `brief`, `close`, `status`, and `usage` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, readiness MUST come from hc's reported status (`idle` or `done` is ready, `blocked` is blocked), never from screen text. `surface tag` MUST refuse an hc worker.
+`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, readiness MUST come from hc's reported status (`idle` or `done` is ready, `blocked` is blocked), never from screen text. `surface tag` MUST refuse an hc worker.
 
 #### Scenario: Blocked hc worker
 - **WHEN** an hc worker reports status `blocked`

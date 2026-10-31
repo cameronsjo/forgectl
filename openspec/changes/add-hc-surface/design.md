@@ -6,10 +6,12 @@ Measured against a scratch `HC_SESSION` with scratch XDG paths on 2026-10-30:
 
 - `hc run --bg --json ... -- '<one string>'` runs the string under `sh -c` and returns `{"address","agent","cwd","name","state","turn"}` at once, with its pipes closed.
 - `--name` must be 1-32 of `a-z 0-9 - _ .`, start with a letter or digit, and not look like an address (`t7`). A taken name fails with `{"error":{"kind":"name_taken"}}`, exit 1; a bad one with `invalid_params`, exit 6. forgectl's `fc-surface-<32 hex>` marker is 43 characters, so it cannot be the name.
-- Labels take that marker as a value (`--label forgectl_surface=fc-surface-…`), and `hc get` returns them.
+- Labels take that marker as a value (`--label forgectl.surface=fc-surface-…`), and `hc get` returns them. Labels are a namespace shared with herdr-app (it writes `where` and `herdr.*`) and are not authenticated: any client can write one.
 - `hc server status --json` reports `core.id`. It is stable across `hc server restart` (terminals and addresses survive a restart) and differs between sessions. It starts a core when none runs.
 - `hc get` reports `created_ms`, `state` (`live`/`finished`), `labels`, and `status` as an object `{app, msg, state}`. `hc ls` reports `status` as a bare string. A missing terminal is `not_found`, exit 3.
-- `hc kill` on a finished terminal exits 0. `hc rm` on a live one fails with `kind: "live"`. `hc send` to a finished terminal fails with exit 11; to a blocked one with exit 9 unless `--force`.
+- `hc kill` on a finished terminal exits 0. `hc rm` on a live one fails with `kind: "live"`. `hc send` to a finished terminal fails with kind `finished`; to a blocked one with kind `blocked` unless `--force`. Several kinds share exit code 1, so the adapter maps errors on `kind`, never on the exit code.
+- `hc run` does not forward the caller's environment: a program gets the core's environment plus `HC_TERMINAL_ID`, `HC_SESSION`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE`.
+- A child dies with its parent terminal unless started with `--outlive-parent`, and its parent gets notes about it unless `--no-notify`.
 
 ## Decisions
 
@@ -17,14 +19,14 @@ Measured against a scratch `HC_SESSION` with scratch XDG paths on 2026-10-30:
 
 `--surface hc` is a new backend. `--surface herdr` keeps driving herdr 0.9 unchanged. The surface command already refuses to detect a backend ("no default and no detection"), and two binaries with different verbs behind one flag would make a stored reference ambiguous. A new Kind is also the more reversible choice: removing it later touches nothing herdr users rely on.
 
-The worker verbs (`list`, `read`, `ready`, `wait`, `brief`, `close`, `status`, `usage`) take `--surface herdr|hc` with default `herdr`, so today's commands behave exactly as before. Whether the default should move to `hc` is left to the operator.
+The worker verbs (`list`, `read`, `ready`, `wait`, `brief`, `close`) take `--surface herdr|hc` with default `herdr`, so today's commands behave exactly as before. Whether the default should move to `hc` is left to the operator.
 
 ### Verb mapping
 
 | forgectl | hc |
 |---|---|
-| launch (Start) | `hc server status` (readiness, core id), then `hc run --bg --json --outlive-parent --name <name> --cwd <dir> --label forgectl_surface=<marker> -- <bootstrap>` |
-| reconcile after an ambiguous start | `hc ls --json --label forgectl_surface=<marker>` |
+| launch (Start) | `hc server status` (readiness, core id), then `hc run --bg --json --outlive-parent --no-notify --name <name> --cwd <dir> --label forgectl.surface=<marker> -- <bootstrap>` |
+| reconcile after an ambiguous start | `hc ls --all --json --label forgectl.surface=<marker>` |
 | probe / list | `hc server status`, `hc get <address>` |
 | read | `hc get` for status, then `hc read --json --lines N <address>` |
 | ready / wait | the OSC 7501 status from `hc get`: `idle` or `done` is ready, `blocked` is blocked, anything else is not ready |
@@ -40,7 +42,7 @@ A reference names the terminal by address and `created_ms`, and the server by a 
 
 1. the reference's source matches the session this process selects (`HC_SESSION` set or not);
 2. the fingerprint of `core.id` matches, so a reference from another session or a wiped core state is refused;
-3. `hc get <address>` returns a terminal whose `forgectl_surface` label equals the reference's ownership marker and whose `created_ms` equals the reference's.
+3. `hc get <address>` returns a terminal whose `forgectl.surface` label equals the reference's ownership marker and whose `created_ms` equals the reference's.
 
 An address alone is not enough: hc can reuse one after `hc rm`. A `not_found` answer from a core whose id matches proves the terminal is gone.
 
@@ -56,18 +58,20 @@ The ledger is keyed by repo and session. An hc worker's session key is `hc:<sess
 
 ### Environment
 
-`HC_SESSION` joins the worker allowlist so a worker's own `hc send` reaches the same core. The trampoline passes the worker's own `HC_TERMINAL_ID` through the existing pane-identity path (`FORGECTL_SURFACE_PANE=hc`), never the launcher's.
+hc does not forward the launcher's environment, and the worker allowlist is unchanged. The harness still gets its built environment over the trampoline socket. The trampoline adds the worker terminal's own `HC_TERMINAL_ID` and `HC_SESSION`, which hc set in that terminal, through the existing pane-identity path (`FORGECTL_SURFACE_PANE=hc`), never the launcher's. With both, a worker's own `hc send` reaches its core.
 
-The worker terminal's parent is the launcher's terminal when the launcher runs inside hc, so hc's own notes about a blocked or exited child reach the coordinator. `--outlive-parent` keeps the worker running when that coordinator ends.
+When the launcher runs inside hc, the worker terminal's parent is the launcher's terminal. `--outlive-parent` keeps the worker running when that coordinator ends, and `--no-notify` keeps hc from typing notes about the worker into the coordinator's terminal: the coordinator follows its workers through forgectl.
 
 ### herdr-app
 
-Not needed for this change. A worker started by hc stays hidden from the window unless it carries `herdr.space=<id>`. Showing workers in the person's window is a follow-up: a `--show` option that labels the terminal with a space id from `herdr-app ls`.
+Not needed for this change. A worker started by hc stays hidden from the window unless it carries `herdr.space=<id>`. Showing workers in the person's window is a follow-up: label the terminal with a space id from `herdr-app ls`, or call `herdr-app do terminal.keep`.
 
 ## Out of scope
 
 - `surface tag`: it writes herdr sidebar metadata, which has no hc equivalent yet.
+- `surface status`, `usage`, and `merge`: they read the ledger through seams that do not take a surface yet, so they reach herdr workers only.
 - The drain (`surface drain`): it launches herdr workers and posts herdr notifications.
+- A `forgectl.worker=<name>` label: the adapter cannot read the sealed display name to write it. The terminal's hc name is the worker name.
 - `surface launch --surface hc` without `--worktree` works, but its display name must fit hc's name rules; the launch refuses otherwise.
 
 ## Risks

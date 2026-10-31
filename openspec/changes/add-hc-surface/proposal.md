@@ -4,12 +4,14 @@ The estate moved from herdr 0.9 to herdr-core: `hc` runs persistent terminals an
 
 ## What Changes
 
-- New surface backend `hc`. `surface launch --surface hc` starts the trampoline with `hc run --bg --outlive-parent --name <name> --cwd <dir> --label forgectl_surface=<ownership marker> -- <bootstrap>`. The harness invocation still reaches the terminal only through the trampoline socket, so hc never sees the harness path, args, env, or prompt.
+- New surface backend `hc`. `surface launch --surface hc` starts the trampoline with `hc run --bg --outlive-parent --no-notify --name <name> --cwd <dir> --label forgectl.surface=<ownership marker> -- <bootstrap>`. The harness invocation still reaches the terminal only through the trampoline socket, so hc never sees the harness path, args, env, or prompt.
 - `--worktree` accepts `--surface hc` as well as `--surface herdr`, with the same ledger, `[launch.worker]` posture, environment allowlist, folder-trust preflight, and name rules.
-- The worker verbs `list`, `read`, `ready`, `wait`, `brief`, `close`, `status`, and `usage` take `--surface herdr|hc`, default `herdr`. Each backend keeps its own ledger per repo and session.
+- The worker verbs `list`, `read`, `ready`, `wait`, `brief`, and `close` take `--surface herdr|hc`, default `herdr`. Each backend keeps its own ledger per repo and session.
 - Under hc, worker status comes from hc's OSC 7501 states (`idle`, `working`, `done`, `blocked`, `error`), never from screen text. `surface brief` sends with `hc send`, refuses when the status is anything but `idle` or `done`, and never passes `--force`. `surface close` runs `hc kill` then `hc rm`, only on a terminal whose label carries forgectl's ownership marker and whose creation time matches the ledger's reference.
-- `surface tag` and the drain stay herdr-only for now.
+- `surface tag`, `status`, `usage`, `merge`, and the drain stay herdr-only for now.
 - The old herdr backend is unchanged.
+
+Tracked as CAM-522 (Linear).
 
 ## Capabilities
 
@@ -19,7 +21,7 @@ The estate moved from herdr 0.9 to herdr-core: `hc` runs persistent terminals an
 
 ## Impact
 
-- Flag values: `surface launch --surface hc`; `--surface herdr|hc` on `list`, `read`, `ready`, `wait`, `brief`, `close`, `status`, `usage`.
+- Flag values: `surface launch --surface hc`; `--surface herdr|hc` on `list`, `read`, `ready`, `wait`, `brief`, `close`, `tag` (which refuses hc).
 - Reference wire: a `kind: "hc"` reference carries `terminal` and `created_ms`. Older binaries refuse it (unknown backend), as they should.
-- Worker environment: `HC_SESSION` joins the allowlist, and an hc worker gets its own `HC_TERMINAL_ID`.
+- Worker environment: an hc worker gets its own terminal's `HC_TERMINAL_ID` and `HC_SESSION`, read by the trampoline.
 - Docs: `docs/herdr.md`, `README.md`, the shipped skill.

@@ -97,7 +97,7 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 	session, source := defaultSession, backend.HcDefaultSessionServer()
 	if s := getenv("HC_SESSION"); s != "" {
 		if !validSession(s) {
-			return nil, fmt.Errorf("%w: HC_SESSION must be 1-%d of a-z A-Z 0-9 - _ .", ErrResolveSession, maxSessionLen)
+			return nil, fmt.Errorf("%w: HC_SESSION must be 1-%d letters, digits, hyphens, underscores or dots", ErrResolveSession, maxSessionLen)
 		}
 		session, source = s, backend.HcNamedSessionServer()
 	}
