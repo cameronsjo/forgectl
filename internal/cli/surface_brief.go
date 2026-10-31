@@ -94,7 +94,7 @@ empty, with no dialog. Both checks read the worker's own terminal output,
 so they catch an honest dialog but not a forged screen. So, right before it
 pastes, brief sends one Escape, which closes or declines any dialog open at
 that moment (Claude Code, Codex and pi all treat Escape as cancel), and a
-worker's prompt is never in vim mode (a screen showing a vim mode line is
+worker's prompt is never in vim mode (a vim mode line under the input box is
 refused). Escape also interrupts a running turn, so brief re-reads the
 worker first and sends no key if its status or turn moved. The limit: a
 dialog drawn after that Escape and before the paste is not covered. It

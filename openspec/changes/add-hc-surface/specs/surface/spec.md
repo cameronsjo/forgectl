@@ -69,7 +69,7 @@ Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `d
 - **THEN** its terminal is killed and removed, and `hc get` no longer finds it
 
 ### Requirement: hc brief Escape
-Under hc, `surface brief` MUST send one Escape to the worker immediately before `hc send`, so a dialog open at that moment is declined. It MUST NOT send that Escape when the worker's status or turn changed since the brief's checks, or when its screen shows a vim mode line. A claude worker's prompt MUST NOT be in vim editor mode.
+Under hc, `surface brief` MUST send one Escape to the worker immediately before `hc send`, so a dialog open at that moment is declined. It MUST NOT send that Escape when the worker's status or turn changed since the brief's checks, or when its prompt area shows a vim mode line. A claude worker's prompt MUST NOT be in vim editor mode.
 
 #### Scenario: A turn starts before the Escape
 - **WHEN** an hc worker passed the brief's checks and then started a turn before the Escape

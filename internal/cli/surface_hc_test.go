@@ -329,6 +329,25 @@ func TestSendBriefHCEscapeGetsTheCheckedState(t *testing.T) {
 	}
 }
 
+// TestSendBriefHCIgnoresAModeLineInScrollback: a mode string in older output
+// (a vim help page, a diff of this check), or inside a longer row, is not the
+// prompt's mode line, so the brief still goes.
+func TestSendBriefHCIgnoresAModeLineInScrollback(t *testing.T) {
+	ready := hcFixture("claude-ready-acceptedits")
+	for name, screen := range map[string]string{
+		"scrollback":   "  -- INSERT --\n" + strings.Repeat("output line\n", 20) + ready,
+		"inside a row": ready + "\n  the footer says -- NORMAL -- here\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, screen: screen,
+				sendRes: hcadapter.SendResult{Status: "working", Turn: 4}}
+			if res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1"); res.Outcome != briefSent {
+				t.Fatalf("outcome %q reason %q, want sent", res.Outcome, res.Reason)
+			}
+		})
+	}
+}
+
 // TestSendBriefHCRefusesAVimModeLine: an Escape in vim mode switches modes
 // instead of closing a dialog, so a screen showing a mode line gets no key.
 func TestSendBriefHCRefusesAVimModeLine(t *testing.T) {

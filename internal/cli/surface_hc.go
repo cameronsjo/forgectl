@@ -7,6 +7,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -154,10 +155,24 @@ func evaluateHcWorker(table *ready.Table, harness string, s ready.Screen) ready.
 // vimModeLines are the mode indicators a vim-mode input box draws.
 var vimModeLines = []string{"-- INSERT --", "-- NORMAL --", "-- VISUAL --"}
 
-// vimModeShown reports whether the screen shows a vim mode indicator.
+// vimModeTailRows is how many non-empty rows at the bottom of the screen
+// vimModeShown reads: the mode line sits just under the input box, inside the
+// footer, so older output and scrollback above it are never matched.
+const vimModeTailRows = 6
+
+// vimModeShown reports whether a row in the screen's prompt area is a vim
+// mode indicator, the whole row and nothing else once trimmed. Output that
+// merely contains one (a vim help page, a diff, this file) does not match.
 func vimModeShown(text string) bool {
-	for _, m := range vimModeLines {
-		if strings.Contains(text, m) {
+	rows := strings.Split(text, "\n")
+	seen := 0
+	for i := len(rows) - 1; i >= 0 && seen < vimModeTailRows; i-- {
+		row := strings.TrimSpace(rows[i])
+		if row == "" {
+			continue
+		}
+		seen++
+		if slices.Contains(vimModeLines, row) {
 			return true
 		}
 	}
@@ -236,16 +251,16 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	case v.Input != "":
 		return refuse("check", "the worker's input box already holds text; clear it in the worker's terminal first", v)
 	case vimModeShown(shown):
-		return refuse("check", "the worker's screen shows a vim mode line, where the Escape sent before the paste would switch modes instead of closing a dialog; set editorMode to normal for this worker", v)
+		return refuse("check", "the worker's input box shows a vim mode line, where the Escape sent before the paste would switch modes instead of closing a dialog; switch the worker's prompt out of vim mode in its terminal and brief again", v)
 	}
 
 	if err := s.escape(ctx, before); err != nil {
-		return refuse("escape", "the Escape that closes any open dialog before the paste was not sent or failed, so nothing was typed or recorded: "+
+		return refuse("escape", "the Escape that closes any open dialog before the paste was refused or failed, and may or may not have reached the worker; the brief was not typed or recorded: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
 	count, err := s.record(worker.Brief{Marker: marker, SentAt: s.now().UTC(), Via: worker.ViaTyped})
 	if err != nil {
-		return refuse("record", "the brief could not be recorded in the worker ledger, so nothing was sent: "+
+		return refuse("record", "the brief could not be recorded in the worker ledger, so its text was not sent (the Escape before it was): "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
 	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before.Status == hcadapter.StatusIdle)

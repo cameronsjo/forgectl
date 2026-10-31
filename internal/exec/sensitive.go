@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -452,8 +453,9 @@ const (
 type envOp = validated.EnvOp
 
 const (
-	envOpReplace = validated.EnvOpReplace
-	envOpUnset   = validated.EnvOpUnset
+	envOpReplace             = validated.EnvOpReplace
+	envOpUnset               = validated.EnvOpUnset
+	envOpUnsetSessionHandles = validated.EnvOpUnsetSessionHandles
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -501,6 +503,41 @@ func ReplaceHerdrConfigPath(path string) EnvMutation {
 // redirected to whichever server the caller happens to be sitting inside.
 func UnsetTmux() EnvMutation {
 	return EnvMutation{key: envKeyTmux, op: envOpUnset}
+}
+
+// UnsetLauncherSessionHandles drops every inherited variable that names the
+// session forgectl was launched from (IsLauncherSessionHandle), so a child
+// that outlives this call, such as an hc core that hc starts implicitly and
+// that passes its own environment to every terminal it later starts, cannot
+// hand those handles on. It names no key: the runner matches the keys
+// against its captured environment.
+func UnsetLauncherSessionHandles() EnvMutation {
+	return EnvMutation{op: envOpUnsetSessionHandles}
+}
+
+// launcherSessionHandlePrefixes and launcherSessionHandleKeys are the one
+// list of the launching session's handles. CLAUDE_CODE_ covers Claude Code's
+// session id and its cross-session messaging socket and token; CLAUDECODE
+// marks a process as running inside a Claude Code session; HC_TERMINAL_
+// names the hc terminal the launcher runs in. HC_SESSION is not here: it
+// selects the core, which the launcher and its workers share.
+var (
+	launcherSessionHandlePrefixes = []string{"CLAUDE_CODE_", "HC_TERMINAL_"}
+	launcherSessionHandleKeys     = []string{"CLAUDECODE"}
+)
+
+// IsLauncherSessionHandle reports whether key names one of the launching
+// session's handles, which UnsetLauncherSessionHandles drops.
+func IsLauncherSessionHandle(key string) bool {
+	if slices.Contains(launcherSessionHandleKeys, key) {
+		return true
+	}
+	for _, p := range launcherSessionHandlePrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplaceSopsEditor points sops' EDITOR at a command. sops shell-word-splits

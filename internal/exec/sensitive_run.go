@@ -118,12 +118,21 @@ func (r *OSSensitiveRunner) buildEnv(muts []validated.Env) ([]string, []sealed.E
 		return out, nil
 	}
 	drop := make(map[string]struct{}, len(muts))
+	dropHandles := false
 	for _, m := range muts {
+		if m.Op == validated.EnvOpUnsetSessionHandles {
+			dropHandles = true
+			continue
+		}
 		drop[m.Key] = struct{}{}
 	}
 	out := make([]string, 0, len(r.env)+len(muts))
 	for _, entry := range r.env {
-		if _, mutated := drop[envKeyOf(entry)]; mutated {
+		key := envKeyOf(entry)
+		if _, mutated := drop[key]; mutated {
+			continue
+		}
+		if dropHandles && IsLauncherSessionHandle(key) {
 			continue
 		}
 		out = append(out, entry)

@@ -530,3 +530,38 @@ func TestPressEscapeRefusesAChangedWorker(t *testing.T) {
 		})
 	}
 }
+
+// TestEveryHcCallDropsTheLauncherHandles: a call that finds no core starts
+// one, and the core hands its environment to every later terminal, so every
+// hc call carries the mutation that drops the launching session's handles.
+func TestEveryHcCallDropsTheLauncherHandles(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := startWorker(t, f, a)
+	ctx := context.Background()
+	checked := Worker{Live: true, Status: StatusIdle, Turn: 1}
+	if _, err := a.WorkerScreen(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PressEscape(ctx, ref, checked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SendBrief(ctx, ref, "hi", true); err != nil {
+		t.Fatal(err)
+	}
+	a.Close(ctx, ref)
+	calls := run.Calls()
+	if len(calls) < 6 {
+		t.Fatalf("only %d hc calls recorded", len(calls))
+	}
+	want := exec.UnsetLauncherSessionHandles()
+	for i, c := range calls {
+		if len(c.Env) != 1 || !c.Env[0].Equal(want) {
+			t.Errorf("hc call %d (%s) does not drop the launcher's session handles", i, f.verbs[i])
+		}
+	}
+}

@@ -1014,3 +1014,35 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 	}
 	return g.r.Read(p)
 }
+
+// TestRunSensitive_UnsetLauncherSessionHandles: the launching session's
+// handles never reach the child, and the variables that select a core or a
+// home stay byte-exact.
+func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
+	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID"}
+	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "FORGECTL_UNRELATED=keep"}
+	extra := append([]string{}, kept...)
+	for _, k := range gone {
+		extra = append(extra, k+"=launcher-"+k)
+	}
+	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_SESSION,XDG_CONFIG_HOME,FORGECTL_UNRELATED", defaultRetireBound, extra...)
+	res, err := runner.RunSensitive(context.Background(), helperCommand(KindHcReadiness, self, 8192, UnsetLauncherSessionHandles()))
+	if err != nil {
+		t.Fatalf("RunSensitive: %v", err)
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Fatal("environment probe output was truncated")
+	}
+	got := string(data)
+	for _, k := range gone {
+		if !strings.Contains(got, k+"=<unset>") {
+			t.Errorf("%s reached the child:\n%s", k, got)
+		}
+	}
+	for _, line := range kept {
+		if !strings.Contains(got, line) {
+			t.Errorf("child environment missing %q:\n%s", line, got)
+		}
+	}
+}
