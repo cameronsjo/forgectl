@@ -529,7 +529,7 @@ func TestWorkersHelpAndEsc(t *testing.T) {
 	if out.(workersModel).help {
 		t.Error("esc did not close help")
 	}
-	if !strings.Contains(ansi.Strip(out.(workersModel).headerLine()), "q quit") {
+	if !strings.Contains(ansi.Strip(out.(workersModel).headerLine(200)), "q quit") {
 		t.Error("the header does not carry the quit key")
 	}
 }
@@ -544,7 +544,7 @@ func TestWorkersShortTerminal(t *testing.T) {
 			t.Errorf("a %d-row terminal lost the quit key", h)
 		}
 	}
-	if !strings.Contains(ansi.Strip(sizedWorkers(t, 120, 5).View().Content), "terminal too small") {
+	if !strings.Contains(ansi.Strip(sizedWorkers(t, 120, 5).View().Content), "too small: need 30x7") {
 		t.Error("a 5-row terminal does not say it is too small")
 	}
 }
@@ -626,12 +626,62 @@ func TestWorkersCutTableSaysSo(t *testing.T) {
 	for i := range 20 {
 		many.Workers = append(many.Workers, workerwatch.Worker{Name: fmt.Sprintf("cos-w-%02d", i), State: "live", Status: workerwatch.StatusWorking})
 	}
-	out, _ := m.Update(workersSnapMsg{snap: many})
-	out, _ = out.(workersModel).Update(tea.WindowSizeMsg{Width: 140, Height: 24})
-	if !strings.Contains(ansi.Strip(out.(workersModel).View().Content), "more rows") {
-		t.Error("a table cut to fit the screen does not say so")
+	snapped, _ := m.Update(workersSnapMsg{snap: many})
+	// The cue must survive at every width down to the narrowest supported
+	// one, and on the shortest supported screen, not only on a wide one.
+	for _, size := range [][2]int{{140, 24}, {80, 24}, {80, 8}, {60, 12}, {workersMinCols, 24}, {workersMinCols, workersMinRows}} {
+		out, _ := snapped.(workersModel).Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		view := ansi.Strip(out.(workersModel).View().Content)
+		if !strings.Contains(view, "more rows") {
+			t.Errorf("%dx%d: a table cut to fit the screen does not say so in full:\n%s", size[0], size[1], view)
+		}
+		for i, line := range strings.Split(view, "\n") {
+			if w := lipgloss.Width(line); w > size[0] {
+				t.Errorf("%dx%d: line %d is %d wide", size[0], size[1], i, w)
+			}
+		}
 	}
 	if strings.Contains(ansi.Strip(sizedWorkers(t, 140, 40).View().Content), "more rows") {
 		t.Error("a table that fits says rows are cut")
+	}
+}
+
+func TestWorkersCutCountsAreSingularAware(t *testing.T) {
+	if got := plural(1, "more row", "more rows"); got != "1 more row" {
+		t.Errorf("plural(1) = %q", got)
+	}
+	if got := plural(3, "more row", "more rows"); got != "3 more rows" {
+		t.Errorf("plural(3) = %q", got)
+	}
+}
+
+func TestWorkersBelowTheMinimumSaysSo(t *testing.T) {
+	for _, size := range [][2]int{{workersMinCols - 1, 24}, {120, workersMinRows - 1}} {
+		if view := ansi.Strip(sizedWorkers(t, size[0], size[1]).View().Content); !strings.Contains(view, "too small") {
+			t.Errorf("%dx%d does not say the terminal is too small:\n%s", size[0], size[1], view)
+		}
+	}
+}
+
+// The header shortens, then drops whole parts from its end: it never ends
+// mid-word, and at 80 columns the freshness part still shows.
+func TestWorkersHeaderNeverEndsMidWord(t *testing.T) {
+	m := sizedWorkers(t, 200, 30)
+	ends := []string{"help", "workers", "need you", "live", "(hc events)", "5s", "ago", "…"}
+	for width := workersMinCols; width <= 200; width++ {
+		h := ansi.Strip(m.headerLine(width))
+		if w := lipgloss.Width(h); w > width {
+			t.Fatalf("width %d: header is %d wide: %q", width, w, h)
+		}
+		whole := false
+		for _, e := range ends {
+			whole = whole || strings.HasSuffix(h, e)
+		}
+		if !whole {
+			t.Errorf("width %d: header ends mid-part: %q", width, h)
+		}
+	}
+	if h := ansi.Strip(m.headerLine(80)); !strings.Contains(h, "ago") {
+		t.Errorf("at 80 columns the header loses its freshness: %q", h)
 	}
 }

@@ -109,9 +109,10 @@ Keys: up/down (or j/k) select, r refresh now, q quit.
 REVIEW sums cadence-review markers the way forgectl sweep does: crit and
 imp over every marker at the PR's head, counting only [sweep] reviewers
 when that list is set. With the list empty, every reviewer name counts
-(sweep counts none and refuses to run), so the watch errs alarming. STATUS and REVIEW are claims: the agent reports its
-own status, and any session on your gh login can post a marker. Press ?
-in the view for the full key and column list.
+(sweep counts none and refuses to run), so the watch errs alarming.
+STATUS and REVIEW are claims: the agent reports its own status, and any
+session on your gh login can post a marker. Press ? in the view for the
+full key and column list. The view needs a terminal of at least 30x7.
 
 Exit 0: the view closed, or the snapshot printed. Exit 1: the snapshot
 printed, but hc could not be read at all (not on PATH, or every read

@@ -385,9 +385,13 @@ func SanitizeScreen(text string) []string {
 
 // --- view ---
 
-// workersMinRows is the smallest terminal the view lays out in; below it
-// the view says so instead of cutting the header or keys off.
-const workersMinRows = 7
+// workersMinRows and workersMinCols are the smallest terminal the view lays
+// out in; below either the view says so instead of cutting the header, keys
+// or cues off.
+const (
+	workersMinRows = 7
+	workersMinCols = 30
+)
 
 func (m workersModel) View() tea.View {
 	width, height := m.width, m.height
@@ -399,8 +403,9 @@ func (m workersModel) View() tea.View {
 	}
 	var content string
 	switch {
-	case height < workersMinRows:
-		content = m.styles.Warn.Render(fmt.Sprintf("terminal too small (%d rows; need %d) · q quit", height, workersMinRows))
+	case height < workersMinRows || width < workersMinCols:
+		// Short enough to read at most widths below the minimum.
+		content = m.styles.Warn.Render(fmt.Sprintf("too small: need %dx%d · q quit", workersMinCols, workersMinRows))
 	case m.help:
 		content = strings.Join(clipLines(m.helpLines(), height), "\n")
 	default:
@@ -414,7 +419,7 @@ func (m workersModel) View() tea.View {
 
 func (m workersModel) mainLines(width, height int) []string {
 	cols, hidden := workersLayout(width)
-	top := []string{m.headerLine()}
+	top := []string{m.headerLine(width)}
 	top = append(top, m.bannerLines(width, height)...)
 	top = append(top, m.columnsLine(cols, hidden))
 	rows := make([]string, 0, len(m.snap.Workers))
@@ -431,15 +436,20 @@ func (m workersModel) mainLines(width, height int) []string {
 		tableRoom = 1
 		rows = []string{m.styles.Muted.Render(m.emptyText())}
 	}
+	// A cut table says so on a line of its own, so no width cuts the cue
+	// off. That line comes out of the table's room, never below one row.
+	var cue []string
+	if len(m.snap.Workers) > tableRoom && tableRoom > 1 {
+		tableRoom--
+	}
+	if cut := len(m.snap.Workers) - tableRoom; cut > 0 && len(m.snap.Workers) > 0 {
+		cue = []string{"  " + m.styles.Warn.Render("↕ "+plural(cut, "more row", "more rows"))}
+	}
 	start := 0
 	if m.cursor >= tableRoom {
 		start = m.cursor - tableRoom + 1
 	}
-	if cut := len(m.snap.Workers) - tableRoom; cut > 0 && len(m.snap.Workers) > 0 {
-		// Say the table is cut, and which way the rest lies.
-		top[len(top)-1] += " " + m.styles.Warn.Render(fmt.Sprintf("↕ %d more rows", cut))
-	}
-	rows = rows[start:min(len(rows), start+tableRoom)]
+	rows = append(rows[start:min(len(rows), start+tableRoom)], cue...)
 	tail := m.tailBlock(room - len(rows))
 	for len(rows)+len(tail) < room {
 		tail = append(tail, "")
@@ -462,30 +472,68 @@ func (m workersModel) emptyText() string {
 	return "  no workers: the workers file is empty and --cos found no cos-* terminal"
 }
 
-func (m workersModel) headerLine() string {
-	brand := m.styles.Brand.Render("◆") + " " + m.styles.Header.Render(meta.AppName+" surface watch")
+func (m workersModel) headerLine(width int) string {
 	// The quit and help keys lead, so a narrow or short terminal that cuts
-	// the line's end or loses the footer still shows them.
-	parts := []string{"q quit · ? help", fmt.Sprintf("%d workers", len(m.snap.Workers))}
+	// the line's end or loses the footer still shows them. When the full
+	// line does not fit, each part takes its short form, and then parts
+	// drop whole from the end, so the line never ends mid-word.
+	type part struct{ full, short string } // short "" means the full form
+	parts := []part{
+		{full: "q quit · ? help"},
+		{full: fmt.Sprintf("%d workers", len(m.snap.Workers))},
+	}
 	if n := len(m.snap.NeedingYou()); n > 0 {
-		parts = append(parts, m.styles.Danger.Render(fmt.Sprintf("%d need you", n)))
+		s := m.styles.Danger.Render(fmt.Sprintf("%d need you", n))
+		parts = append(parts, part{full: s})
 	}
 	if m.eventsUp {
-		parts = append(parts, "live (hc events)")
+		parts = append(parts, part{"live (hc events)", "live"})
 	} else {
-		parts = append(parts, fmt.Sprintf("polling every %s", m.opts.Poll))
+		parts = append(parts, part{fmt.Sprintf("polling every %s", m.opts.Poll), fmt.Sprintf("poll %s", m.opts.Poll)})
 	}
 	switch {
 	case m.busy && !m.loaded:
-		parts = append(parts, "loading…")
+		parts = append(parts, part{full: "loading…"})
 	case m.busy:
-		parts = append(parts, "refreshing…")
+		parts = append(parts, part{full: "refreshing…"})
 	case m.loaded:
 		if age := ageLabel(m.now().Sub(m.snap.Taken)); age != "" {
-			parts = append(parts, "updated "+age+" ago")
+			parts = append(parts, part{"updated " + age + " ago", age + " ago"})
 		}
 	}
-	return brand + "  " + m.styles.Muted.Render(strings.Join(parts, " · "))
+	render := func(brand string, short bool, n int) string {
+		words := make([]string, 0, n)
+		for _, p := range parts[:n] {
+			if short && p.short != "" {
+				words = append(words, p.short)
+			} else {
+				words = append(words, p.full)
+			}
+		}
+		return m.styles.Brand.Render("◆") + " " + m.styles.Header.Render(brand) + "  " + m.styles.Muted.Render(strings.Join(words, " · "))
+	}
+	for _, try := range []struct {
+		brand string
+		short bool
+	}{{meta.AppName + " surface watch", false}, {"watch", false}} {
+		if line := render(try.brand, try.short, len(parts)); lipgloss.Width(line) <= width {
+			return line
+		}
+	}
+	for n := len(parts); n > 1; n-- {
+		if line := render("watch", true, n); lipgloss.Width(line) <= width {
+			return line
+		}
+	}
+	return render("watch", true, 1)
+}
+
+// plural is "1 <one>" or "N <many>".
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // bannerLines is the needs-you banner: one line per blocked worker, naming
@@ -628,7 +676,7 @@ func (m workersModel) columnsLine(cols []workersCol, hidden int) string {
 	}
 	line := m.styles.Muted.Render("  " + strings.Join(parts, " "))
 	if hidden > 0 {
-		line += " " + m.styles.Warn.Render(fmt.Sprintf("→ %d more cols", hidden))
+		line += " " + m.styles.Warn.Render("→ "+plural(hidden, "more col", "more cols"))
 	}
 	return line
 }
