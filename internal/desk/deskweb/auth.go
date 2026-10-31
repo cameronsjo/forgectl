@@ -30,11 +30,14 @@ const TokenName = "web.token"
 // tokenHexLen is the token's length: 32 random bytes, hex-encoded.
 const tokenHexLen = 64
 
-// sessionTTL is how long a session cookie lasts.
-const sessionTTL = 30 * 24 * time.Hour
+// sessionTTL is how long a session cookie lasts. Browsers send a cookie to
+// every port on its host, so other servers on 127.0.0.1 (or the same ts.net
+// name) receive it too; a week bounds how long a copy stays useful.
+const sessionTTL = 7 * 24 * time.Hour
 
-// cookieName is the session cookie's name.
-const cookieName = "desk_session"
+// cookiePrefix starts the session cookie's name; the listen port follows, so
+// desks on two ports keep separate cookies.
+const cookiePrefix = "desk_session_"
 
 // LoadToken reads <deskDir>/asks/web.token, creating it with a fresh random
 // token when it is missing or when rotate is set. The file is 0600 and never
@@ -129,6 +132,9 @@ type keys struct {
 	token   [32]byte // sha256 of the token, for constant-time comparison
 	session []byte
 	csrf    []byte
+	// port is the listen port a session is bound to: a cookie signed by a
+	// desk on another port does not open this one.
+	port string
 }
 
 func deriveKeys(token string) keys {
@@ -147,15 +153,15 @@ func (k keys) tokenOK(presented string) bool {
 	return subtle.ConstantTimeCompare(got[:], k.token[:]) == 1
 }
 
-// newSession returns a signed cookie value: v1.<expiry>.<random>.<mac>. It is
-// stateless, so a session survives a server restart and ends only when it
-// expires or the token rotates.
+// newSession returns a signed cookie value: v2.<port>.<expiry>.<random>.<mac>.
+// It is stateless, so a session survives a server restart on the same port
+// and ends when it expires, the token rotates, or the port changes.
 func (k keys) newSession(now time.Time) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	body := "v1." + strconv.FormatInt(now.Add(sessionTTL).Unix(), 10) + "." + hex.EncodeToString(b[:])
+	body := "v2." + k.port + "." + strconv.FormatInt(now.Add(sessionTTL).Unix(), 10) + "." + hex.EncodeToString(b[:])
 	return body + "." + k.sign(k.session, body), nil
 }
 
@@ -178,10 +184,10 @@ func (k keys) sessionOK(v string, now time.Time) bool {
 		return false
 	}
 	parts := strings.Split(body, ".")
-	if len(parts) != 3 || parts[0] != "v1" {
+	if len(parts) != 4 || parts[0] != "v2" || parts[1] != k.port {
 		return false
 	}
-	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	exp, err := strconv.ParseInt(parts[2], 10, 64)
 	return err == nil && now.Unix() < exp
 }
 

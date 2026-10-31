@@ -24,7 +24,7 @@
     <p class="meta">{{if .From}}from {{.From}} · {{end}}{{.Age}}{{if .Until}} · snoozed to {{.Until}}{{end}} · <code>{{.ID}}</code></p>
   </header>
   {{if .Steps}}<div class="steps">{{.Steps}}</div>{{end}}
-  {{if .Links}}<ul class="links">{{range .Links}}<li><a href="{{.URL}}" rel="noopener noreferrer nofollow" target="_blank">{{.Label}}</a></li>{{end}}</ul>{{end}}
+  {{if .Links}}<ul class="links">{{range .Links}}<li><a href="{{.URL}}" rel="noopener noreferrer nofollow" target="_blank">{{.Label}}</a>{{if .Host}} <span class="host">{{.Host}}</span>{{end}}</li>{{end}}</ul>{{end}}
   {{if .Answer}}<p class="answer">{{.Answer}}</p>{{end}}
 </article>{{end}}
 {{define "forms"}}

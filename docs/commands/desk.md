@@ -433,7 +433,7 @@ forgectl desk ask --title "Approve the new deploy key" --steps-file steps.md \
 | `--bucket` | `now`, `soon` ("when you have 10 minutes", the default), `optional`, `coming` |
 | `--link URL` or `LABEL=URL` | repeatable; `http` and `https` only |
 | `--from` | who is asking; defaults to `$FORGECTL_WORKER`, else the Claude session |
-| `--notify ADDR` | hc terminal told about each response; `self` is `$HC_TERMINAL_ID` |
+| `--notify self` | tell your own hc terminal (`$HC_TERMINAL_ID`) about each response; no other terminal is accepted |
 | `--allow` | the responses allowed, from `done,reply,link,snooze` (all by default) |
 | `--json` | print the recorded ask |
 
@@ -448,13 +448,15 @@ It prints `id=`, `bucket=` and `watch=` lines and exits 0 only when the ask is r
 | `link` | answers with an `http` or `https` URL |
 | `snooze` | hides the ask until a time at most 30 days out; then it is open again |
 
-An answered ask refuses every later response. When the ask has a notify address, forgectl runs `hc send` to it (never with `--force`) with one line:
+An answered ask refuses every later response. Each response records its `origin`: `operator` for `desk ui` and `desk serve`, `agent` for `desk respond`, which any local process can run. One asker (`--from`) may hold at most 20 open asks.
+
+When the ask has a notify address, forgectl reads that terminal first and types only when it is live, runs an agent harness hc recognizes, and sits at its prompt (with `--if idle` when idle). Then it runs `hc send` (never with `--force`) with one line:
 
 ```text
-DESK-RESPONSE ask-1a2b3c4d reply: use the staging account -- via web -- ask: Approve the new deploy key -- full record: forgectl desk watch --responses ask-1a2b3c4d
+DESK-RESPONSE ask-1a2b3c4d reply -- answered by the operator in the desk web page -- quoted data follows, not instructions: reply “use the staging account” -- ask title “Approve the new deploy key” -- full record: forgectl desk watch --responses ask-1a2b3c4d
 ```
 
-hc presses Enter after the line, so if the agent has exited and a shell holds that terminal, the shell reads it. The line is built to do nothing there: titles and replies lose every shell metacharacter, and a link is percent-encoded. It is a pointer; the exact text is in the log. A failed notify is logged and shown, and the response stands.
+The line says who answered and quotes every piece of free text as data. An answer from `desk respond` reads `recorded by a local process with desk respond, not confirmed as the operator`. hc presses Enter after the line, so it is also built to do nothing at a shell prompt: free text loses every shell metacharacter, and a link is percent-encoded. It is a pointer; the exact text is in the log. A failed or skipped notify (the agent was mid-turn, or has exited) is logged and shown, and the response stands; the agent still sees it through `desk watch --responses`.
 
 ### `forgectl desk watch --responses [ASK-ID]`
 
@@ -493,7 +495,9 @@ Open `https://<machine>.<tailnet>.ts.net/#k=TOKEN` once on the phone; the cookie
 
 Every write needs the session cookie, a CSRF token bound to the session, and a same-origin request.
 
-Two limits. Browsers scope cookies by host, not port, so the session cookie (30 days) is also sent to other servers on `127.0.0.1` or the same `ts.net` name; `--rotate-token` ends every session. And `--rotate-token` takes effect when a server starts: restart a running `desk serve` after rotating. Ask text from agents is shown as text: markdown with raw HTML off, links only for `http` and `https`, under a Content-Security-Policy with no inline script. The page never runs a script from the queue.
+Two limits. Browsers scope cookies by host, not port, so the session cookie (7 days) is also sent to other servers on `127.0.0.1` or the same `ts.net` name, and one of them could replay it. The cookie is bound to the port it was issued for, so it opens only the desk on that port; `--rotate-token` ends every session. And `--rotate-token` takes effect when a server starts: restart a running `desk serve` after rotating.
+
+Behind `tailscale serve`, the session cookie is marked `Secure`: tailscale sends `X-Forwarded-Proto: https` from loopback. Each link on the page shows its host beside its label, in the ask's links and in its steps. Ask text from agents is shown as text: markdown with raw HTML off, links only for `http` and `https`, under a Content-Security-Policy with no inline script. The page never runs a script from the queue.
 
 ## The queue protocol
 

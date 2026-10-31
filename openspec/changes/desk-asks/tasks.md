@@ -25,3 +25,10 @@
 - [x] 5.1 Referrer policy `same-origin` (header and meta): under `no-referrer` browsers send `Origin: null` and every web answer was refused.
 - [x] 5.2 Notify line is shell-inert; `SendLine` refuses control and format characters.
 - [x] 5.3 Append heals a torn last line; an unscoped `--responses` watch starts at the log's end and folds from 0.
+
+## 6. Second review
+
+- [x] 6.1 `--notify` only the asker's own terminal; `SendLine` types only into a live agent at its prompt.
+- [x] 6.2 Notify line quotes all free text as data and names who answered; responses record `origin`.
+- [x] 6.3 At most 20 open asks per asker.
+- [x] 6.4 Web: link hosts beside labels; notify survives a dropped request; session bound to its port, 7 days; `Secure` behind tailscale serve confirmed from tailscale's source.

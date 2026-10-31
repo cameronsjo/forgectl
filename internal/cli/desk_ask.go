@@ -27,8 +27,10 @@ allow: done, a free-text reply, a link, or a snooze.
 
 Each response is appended to the desk's asks log. Block on it with
   forgectl desk watch --responses ASK-ID --deadline 540
-and, with --notify, the answer is also typed into that hc terminal as one
-DESK-RESPONSE line (` + "`--notify self`" + ` uses $HC_TERMINAL_ID).
+and, with --notify self, the answer is also typed into your own hc terminal
+($HC_TERMINAL_ID) as one DESK-RESPONSE line, when it is at its prompt. The
+line quotes its free text as data and says who answered; read the record
+with desk watch --responses before acting on it.
 
 Titles are one line (at most 200 characters); steps are markdown (at most
 16 KiB) and are shown with raw HTML off; links must be http or https. Pass a
@@ -49,7 +51,7 @@ exits 0 only when the ask is recorded.`,
 	f.StringVar(&o.bucket, "bucket", "soon", "now, soon (\"when you have 10 minutes\"), optional, or coming")
 	f.StringArrayVar(&o.links, "link", nil, "a link to show with the ask: URL or LABEL=URL (repeatable)")
 	f.StringVar(&o.from, "from", "", "who is asking (default: $FORGECTL_WORKER, else the session)")
-	f.StringVar(&o.notify, "notify", "", "hc terminal address to tell about each response; self means $HC_TERMINAL_ID")
+	f.StringVar(&o.notify, "notify", "", "tell this hc terminal about each response: self (or its own $HC_TERMINAL_ID); no other terminal")
 	f.StringVar(&o.allow, "allow", "done,reply,link,snooze", "the responses the operator may give")
 	f.BoolVar(&o.asJSON, "json", false, "print the recorded ask as JSON")
 	return cmd
@@ -85,7 +87,10 @@ func newDeskRespondCmd(dir *string, deps module.Deps) *cobra.Command {
 do, and tells the asking agent when the ask has a notify address. DURATION is
 a Go duration (90m, 4h) or Nd for days, at most 30 days.
 
-Agents must not answer their own asks: respond is the operator's.`,
+Any local process can run respond, so its answers are recorded with origin
+"agent", and the asking agent is told it was not confirmed as the operator.
+The operator answers in desk ui or desk serve. Agents must not answer their
+own asks.`,
 		Example: `  forgectl desk respond ask-1a2b3c4d done
   forgectl desk respond ask-1a2b3c4d reply "Use the staging account"
   forgectl desk respond ask-1a2b3c4d snooze 4h`,

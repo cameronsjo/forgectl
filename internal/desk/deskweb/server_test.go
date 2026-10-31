@@ -23,12 +23,15 @@ const testHost = "127.0.0.1:8765"
 type stubNotifier struct {
 	mu    sync.Mutex
 	calls []string
+	// ctxErrs records each notify context's error at call time.
+	ctxErrs []error
 }
 
-func (s *stubNotifier) Notify(_ context.Context, addr, text string) error {
+func (s *stubNotifier) Notify(ctx context.Context, addr, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, addr+" "+text)
+	s.ctxErrs = append(s.ctxErrs, ctx.Err())
 	return nil
 }
 
@@ -60,7 +63,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.srv, err = New(Options{
-		Store: f.store, DeskDir: f.dir, Token: f.token, Now: clock, Location: time.UTC,
+		Store: f.store, DeskDir: f.dir, Token: f.token, Port: 18765, Now: clock, Location: time.UTC,
 		Scripts: func() ([]Script, error) {
 			return []Script{{Name: "01-merge", Kind: "script", State: "waiting", What: "Merge <b>it</b>", SHA256: strings.Repeat("ab", 32)}}, nil
 		},
@@ -111,7 +114,7 @@ func (f *fixture) login() {
 		f.t.Fatalf("login: status %d, body %q", rec.Code, rec.Body.String())
 	}
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == cookieName {
+		if c.Name == f.srv.cookieName() {
 			f.cookie = c
 		}
 	}
@@ -144,7 +147,7 @@ func TestAuth_NoSessionShowsLoginWithoutAskText(t *testing.T) {
 		}
 	}
 	// A forged cookie is no session.
-	f.cookie = &http.Cookie{Name: cookieName, Value: "v1.99999999999.00.deadbeef"} //nolint:gosec // G124: a forged client-side cookie, never set by a server
+	f.cookie = &http.Cookie{Name: f.srv.cookieName(), Value: "v1.99999999999.00.deadbeef"} //nolint:gosec // G124: a forged client-side cookie, never set by a server
 	if rec := f.do("GET", "/", nil, nil, true); rec.Code != http.StatusUnauthorized {
 		t.Errorf("forged cookie: status %d, want 401", rec.Code)
 	}
@@ -170,7 +173,7 @@ func TestAuth_TokenExchange(t *testing.T) {
 			}
 			var got *http.Cookie
 			for _, c := range rec.Result().Cookies() {
-				if c.Name == cookieName {
+				if c.Name == f.srv.cookieName() {
 					got = c
 				}
 			}
@@ -290,10 +293,11 @@ func TestRespond_HappyPathAppendsAndNotifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	it, _ := ask.Find(items, f.askID)
-	if it.State != ask.StateAnswered || it.Answer.Text != "keys done" || it.Answer.Via != "web" {
+	if it.State != ask.StateAnswered || it.Answer.Text != "keys done" || it.Answer.Via != "web" || it.Answer.Origin != ask.OriginOperator {
 		t.Fatalf("ask after reply: %+v", it)
 	}
-	if len(f.notify.calls) != 1 || !strings.HasPrefix(f.notify.calls[0], "t1k DESK-RESPONSE "+f.askID+" reply: keys done") {
+	if len(f.notify.calls) != 1 || !strings.HasPrefix(f.notify.calls[0], "t1k DESK-RESPONSE "+f.askID+" reply -- answered by the operator in the desk web page") ||
+		!strings.Contains(f.notify.calls[0], "reply “keys done”") {
 		t.Fatalf("notify calls: %v", f.notify.calls)
 	}
 	// Answering again is refused with a flash, and appends nothing.
@@ -551,5 +555,76 @@ func TestSanitizer_LinkSchemes(t *testing.T) {
 func TestPageReferrerPolicyKeepsTheOrigin(t *testing.T) {
 	if strings.Contains(pageHTML, "no-referrer") {
 		t.Fatal("page.html sets a no-referrer policy; form POSTs would carry Origin: null")
+	}
+}
+
+// TestSession_BoundToItsPort: a cookie this token signed for another port
+// does not open this server.
+func TestSession_BoundToItsPort(t *testing.T) {
+	f := newFixture(t)
+	other, err := New(Options{Store: f.store, DeskDir: f.dir, Token: f.token, Port: 18766})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := other.keys.newSession(f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.srv.keys.sessionOK(v, f.now) {
+		t.Fatal("a session signed for port 18766 opened the server on 18765")
+	}
+	if !other.keys.sessionOK(v, f.now) {
+		t.Fatal("the session does not open its own port")
+	}
+	if f.srv.cookieName() == other.cookieName() {
+		t.Fatal("two ports share a cookie name")
+	}
+}
+
+// TestRespond_NotifySurvivesADroppedRequest: the browser going away after a
+// submit must not cancel the notify.
+func TestRespond_NotifySurvivesADroppedRequest(t *testing.T) {
+	f := newFixture(t)
+	f.login()
+	ctx, cancel := context.WithCancel(t.Context())
+	form := url.Values{"csrf": {f.csrf()}, "ask": {f.askID}, "kind": {"done"}}
+	req := httptest.NewRequestWithContext(ctx, "POST", "/respond", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = testHost
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.AddCookie(f.cookie)
+	cancel()
+	rec := httptest.NewRecorder()
+	f.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if len(f.notify.ctxErrs) != 1 || f.notify.ctxErrs[0] != nil {
+		t.Fatalf("notify ran with a canceled context: %v", f.notify.ctxErrs)
+	}
+}
+
+// TestRender_LinkHostsBesideLabels: an agent cannot label one site as
+// another, in the ask's links or in its markdown steps.
+func TestRender_LinkHostsBesideLabels(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.store.Add(ask.Ask{Title: "Sign in", Bucket: ask.BucketNow,
+		Steps: "Open [GitHub settings](https://evil.example/login) and <https://plain.example/x>",
+		Links: []ask.Link{{Label: "GitHub settings", URL: "https://evil.example/login"}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.login()
+	body := f.do("GET", "/", nil, nil, true).Body.String()
+	for _, want := range []string{
+		`GitHub settings</a> <span class="host">evil.example</span>`,
+		`GitHub settings</a> (evil.example)`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "plain.example/x</a> (plain.example)") {
+		t.Error("a bare URL link got a redundant host")
 	}
 }

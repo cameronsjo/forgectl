@@ -7,6 +7,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,7 @@ func TestDeskAsk_RefusesUnsafeInput(t *testing.T) {
 		{"ask", "--title", "x", "--bucket", "urgent"},
 		{"ask", "--title", "x", "--allow", "approve"},
 		{"ask", "--title", "x", "--notify", "self"},
+		{"ask", "--title", "x", "--notify", "t1k"},
 		{"ask", "--title", "two\nlines"},
 	}
 	for _, args := range cases {
@@ -82,7 +84,11 @@ func TestDeskAsk_RespondNotifiesAndWatchEnds(t *testing.T) {
 	if !strings.Contains(out, "state=answered") || !strings.Contains(out, "notified=t9z") {
 		t.Fatalf("respond out = %q", out)
 	}
-	if len(n.sends) != 1 || !strings.HasPrefix(n.sends[0], "t9z | DESK-RESPONSE "+id+" reply: use the staging account") {
+	if !strings.Contains(out, "origin=agent") {
+		t.Fatalf("desk respond not marked agent-originated: %q", out)
+	}
+	if len(n.sends) != 1 || !strings.HasPrefix(n.sends[0], "t9z | DESK-RESPONSE "+id+" reply -- recorded by a local process") ||
+		!strings.Contains(n.sends[0], "reply “use the staging account”") {
 		t.Fatalf("sends = %q", n.sends)
 	}
 
@@ -218,5 +224,21 @@ func TestDeskWatchResponses_UnscopedStartsAtTheEndAndResumes(t *testing.T) {
 	}
 	if strings.Count(out, "\"response\"") != 1 {
 		t.Fatalf("resume printed more than the new response: %q", out)
+	}
+}
+
+func TestDeskAsk_NotifyOnlyTheAskersOwnTerminal(t *testing.T) {
+	stubAskNotifier(t)
+	dir := filepath.Join(t.TempDir(), "desk")
+	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "HC_TERMINAL_ID": "t9z"})
+	for _, tc := range []struct {
+		flag string
+		code int
+	}{{"self", 0}, {"t9z", 0}, {"t1k", deskExitUsage}, {"t9z2", deskExitUsage}} {
+		out, _, err := deskRun(t, deskDeps(), "ask", "--title", "x "+tc.flag, "--notify", tc.flag, "--json")
+		wantExit(t, err, tc.code)
+		if tc.code == 0 && !strings.Contains(out, `"notify":"t9z"`) {
+			t.Errorf("--notify %s recorded %q", tc.flag, out)
+		}
 	}
 }

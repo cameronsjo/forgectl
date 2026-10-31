@@ -64,6 +64,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,6 +118,9 @@ type Options struct {
 	Scripts func() ([]Script, error)
 	// Location is the zone snooze times are computed in; nil means Local.
 	Location *time.Location
+	// Port is the port the server listens on. Sessions and the cookie name
+	// are bound to it.
+	Port int
 }
 
 // Server is the desk web page.
@@ -148,7 +152,9 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{opts: opts, keys: deriveKeys(opts.Token), page: page}, nil
+	k := deriveKeys(opts.Token)
+	k.port = strconv.Itoa(opts.Port)
+	return &Server{opts: opts, keys: k, page: page}, nil
 }
 
 // ReadScripts lists the pending and running items of the desk at dir,
@@ -261,8 +267,11 @@ func originMatchesHost(origin, host string) bool {
 }
 
 // session returns the request's valid session cookie value, or "".
+// cookieName is the session cookie's name for this server's port.
+func (s *Server) cookieName() string { return cookiePrefix + s.keys.port }
+
 func (s *Server) session(r *http.Request) string {
-	c, err := r.Cookie(cookieName)
+	c, err := r.Cookie(s.cookieName())
 	if err != nil || !s.keys.sessionOK(c.Value, s.opts.Now()) {
 		return ""
 	}
@@ -270,7 +279,11 @@ func (s *Server) session(r *http.Request) string {
 }
 
 // secureRequest reports whether the browser reached us over https: directly,
-// or through a loopback proxy (tailscale serve) that says so.
+// or through a loopback proxy (tailscale serve) that says so. tailscale serve
+// sets X-Forwarded-Proto: https for a TLS request and keeps the incoming
+// ts.net Host for a TCP backend (ipn/ipnlocal/serve.go, addProxyForwardedHeaders,
+// read at v1.104.2), so behind it the cookie is Secure and --allow-host is
+// what admits the Host.
 func secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -304,7 +317,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	// Secure is set whenever the browser reached us over https (secureRequest);
 	// a plain http://127.0.0.1 visit cannot carry a Secure cookie.
 	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is conditional by design, see above
-		Name: cookieName, Value: v, Path: "/", MaxAge: int(sessionTTL / time.Second),
+		Name: s.cookieName(), Value: v, Path: "/", MaxAge: int(sessionTTL / time.Second),
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureRequest(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -346,8 +359,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 type itemView struct {
 	ID, Title, From, Age, Until, Answer string
 	Steps                               template.HTML
-	Links                               []ask.Link
+	Links                               []linkView
 	Done, Reply, Link, Snooze           bool
+}
+
+// linkView is an ask link with its host shown beside the label, so a label
+// cannot pass one site off as another on a phone with no hover.
+type linkView struct {
+	Label, URL, Host string
 }
 
 type bucketView struct {
@@ -381,19 +400,19 @@ func (s *Server) pageData(sess, flash string) (pageData, error) {
 		}
 		bv := bucketView{Label: b.Label()}
 		for _, it := range open[b] {
-			bv.Items = append(bv.Items, view(it, now))
+			bv.Items = append(bv.Items, view(it, now, s.opts.Location))
 		}
 		d.Open += len(bv.Items)
 		d.Buckets = append(d.Buckets, bv)
 	}
 	for _, it := range snoozed {
-		d.Snoozed = append(d.Snoozed, view(it, now))
+		d.Snoozed = append(d.Snoozed, view(it, now, s.opts.Location))
 	}
 	for i, it := range answered {
 		if i == 10 {
 			break
 		}
-		d.Answered = append(d.Answered, view(it, now))
+		d.Answered = append(d.Answered, view(it, now, s.opts.Location))
 	}
 	d.Scripts, err = s.opts.Scripts()
 	if err != nil {
@@ -404,24 +423,30 @@ func (s *Server) pageData(sess, flash string) (pageData, error) {
 	return d, nil
 }
 
-func view(it ask.Item, now time.Time) itemView {
+func view(it ask.Item, now time.Time, loc *time.Location) itemView {
 	v := itemView{
 		ID: it.Ask.ID, Title: it.Ask.Title, From: it.Ask.From, Age: age(now.Sub(it.Ask.At)),
 		Steps: renderSteps(it.Ask.Steps),
 	}
 	for _, l := range it.Ask.Links {
-		if ask.SafeURL(l.URL) {
-			if l.Label == "" {
-				l.Label = l.URL
-			}
-			v.Links = append(v.Links, l)
+		if !ask.SafeURL(l.URL) {
+			continue
 		}
+		u, err := url.Parse(l.URL)
+		if err != nil {
+			continue
+		}
+		lv := linkView{Label: l.Label, URL: l.URL, Host: u.Host}
+		if lv.Label == "" || lv.Label == l.URL {
+			lv.Label, lv.Host = l.URL, ""
+		}
+		v.Links = append(v.Links, lv)
 	}
 	if it.State != ask.StateAnswered {
 		v.Done, v.Reply, v.Link, v.Snooze = it.Ask.Allows(ask.KindDone), it.Ask.Allows(ask.KindReply), it.Ask.Allows(ask.KindLink), it.Ask.Allows(ask.KindSnooze)
 	}
 	if it.SnoozedUntil != nil {
-		v.Until = it.SnoozedUntil.Local().Format("Mon 15:04")
+		v.Until = it.SnoozedUntil.In(loc).Format("Mon Jan 2 15:04")
 	}
 	if a := it.Answer; a != nil {
 		switch a.Kind {
@@ -497,7 +522,10 @@ func (s *Server) handleRespond(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Until = &until
 	}
-	_, _, notifyErr, err := s.opts.Store.Respond(r.Context(), resp)
+	// WithoutCancel: a phone that drops the connection after submitting must
+	// not cancel the notify halfway (the store bounds it with its own
+	// timeout). The response is already recorded by then.
+	_, _, notifyErr, err := s.opts.Store.Respond(context.WithoutCancel(r.Context()), resp)
 	switch {
 	case errors.Is(err, ask.ErrClosed):
 		s.back(w, r, "closed")

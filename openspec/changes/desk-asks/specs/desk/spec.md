@@ -32,12 +32,44 @@ A response SHALL be one of the kinds the ask allows. `done`, `reply` (non-empty 
 - **WHEN** an ask allows only `done` and the operator sends a reply
 - **THEN** the reply is refused and nothing is appended
 
+### Requirement: Notify only the asker
+An ask MAY record a notify address only for the asker's own hc terminal (`$HC_TERMINAL_ID`); `desk ask` MUST refuse any other.
+
+#### Scenario: Another agent's terminal
+- **WHEN** an agent in terminal `t9z` passes `--notify t1k`
+- **THEN** nothing is recorded and the exit code is 2
+
+### Requirement: Notify line is data
+The notify line SHALL say who answered and MUST quote every free-text field (reply, link, ask title) as data. It MUST carry no shell metacharacter.
+
+#### Scenario: Hostile title
+- **WHEN** an ask title holds a closing quote and an instruction
+- **THEN** the title stays inside one quoted span and the line names the answerer
+
 ### Requirement: Notify the asking agent
-When an answered or snoozed ask carries a notify address, forgectl SHALL type one line into that hc terminal with `hc send`, without `--force`, naming the ask id, the response kind and its value. The outcome SHALL be appended to the log as a notify record. A failed notify MUST NOT undo the response.
+When a response is recorded and the ask has a notify address, forgectl SHALL read that terminal and type one line with `hc send`, without `--force`, only when it is live, runs an agent harness hc recognizes, and is at its prompt. The outcome SHALL be appended to the log as a notify record. A failed or skipped notify MUST NOT undo the response.
 
 #### Scenario: Terminal gone
 - **WHEN** the notify address names no terminal
 - **THEN** the response stands, the notify record says it failed and why, and the front end shows the failure
+
+#### Scenario: Agent mid-turn
+- **WHEN** the asking agent's terminal reports `working`
+- **THEN** nothing is typed and the notify is recorded as refused
+
+### Requirement: Response origin
+Each response SHALL record its origin: `operator` when made in `desk ui` or `desk serve`, `agent` otherwise, `desk respond` included. A caller MUST NOT be able to set it. The notify line for an `agent` response MUST say it is not confirmed as the operator.
+
+#### Scenario: Shell answer
+- **WHEN** a process runs `desk respond ASK-ID done`
+- **THEN** the response records origin `agent`
+
+### Requirement: Open asks per asker
+One asker MUST NOT hold more than 20 open or snoozed asks; `desk ask` SHALL refuse the next with an error naming the asker and the limit.
+
+#### Scenario: Twenty-first ask
+- **WHEN** an asker with 20 open asks asks again
+- **THEN** nothing is recorded and the error names the limit
 
 ### Requirement: Watch for responses
 `desk watch --responses ASK-ID` SHALL print each of that ask's responses as a JSON line and exit 0 once the ask is answered, including when it was answered before the watch started; it SHALL exit 1 when no such ask is in the log. With no ASK-ID it SHALL print every response as it arrives. On its deadline it SHALL exit 75 after printing `resume=` with a `--since` log offset that continues where it stopped. With no terminal on stdin and no `--deadline`, the deadline SHALL be 540 seconds.

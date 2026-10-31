@@ -7,6 +7,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"os/signal"
 	"syscall"
 
@@ -76,13 +77,18 @@ func runDeskServe(cmd *cobra.Command, dirFlag string, o deskServeOpts) error {
 	if err != nil {
 		return err
 	}
-	srv, err := deskweb.New(deskweb.Options{Store: store, DeskDir: deskDir, Token: token, AllowHosts: o.allowHosts, Now: deskNow})
-	if err != nil {
-		return err
-	}
 	ln, err := httpsrv.Listen(o.addr)
 	if err != nil {
 		return fmt.Errorf("desk serve: listen on %s: %w", termsafe.SafeLineMax(o.addr, deskQuoteMax), err)
+	}
+	port := 0
+	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+		port = ta.Port
+	}
+	srv, err := deskweb.New(deskweb.Options{Store: store, DeskDir: deskDir, Token: token, AllowHosts: o.allowHosts, Port: port})
+	if err != nil {
+		_ = ln.Close()
+		return err
 	}
 	banner := fmt.Sprintf("desk: %s\nopen: http://%s/#k=%s\nThe key after # is a password for this page; do not share the address. Ctrl+C stops.\n", termsafe.QuotePath(deskDir), ln.Addr().String(), token)
 	if _, err := io.WriteString(cmd.OutOrStdout(), banner); err != nil {

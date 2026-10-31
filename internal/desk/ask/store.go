@@ -324,6 +324,19 @@ func (s *Store) Add(a Ask) (Ask, error) {
 				used[r.Ask.ID] = true
 			}
 		}
+		open := 0
+		for _, it := range Fold(recs, s.now()) {
+			if it.State != StateAnswered && it.Ask.From == a.From {
+				open++
+			}
+		}
+		if open >= MaxOpenPerAsker {
+			who := a.From
+			if who == "" {
+				who = "an unnamed asker"
+			}
+			return fmt.Errorf("%w: %s already has %d open asks (the limit); wait for answers before asking more", ErrTooMany, clip(who, 40), open)
+		}
 		a.ID, err = newID("ask-", func(id string) bool { return used[id] })
 		if err != nil {
 			return err
@@ -369,6 +382,7 @@ func (s *Store) Respond(ctx context.Context, r Response) (it Item, saved Respons
 			return err
 		}
 		r.At = now.UTC()
+		r.Origin = OriginOf(r.Via)
 		if err := s.appendRecord(Record{Response: &r}); err != nil {
 			return err
 		}

@@ -52,12 +52,9 @@ func runDeskAsk(cmd *cobra.Command, _ module.Deps, dirFlag string, o deskAskOpts
 	if err != nil {
 		return deskUsage("desk ask: --steps-file: %w", err)
 	}
-	notify := o.notify
-	if notify == "self" {
-		notify = deskGetenv("HC_TERMINAL_ID")
-		if notify == "" {
-			return deskUsage("desk ask: --notify self needs $HC_TERMINAL_ID (run inside an hc terminal, or pass the address)")
-		}
+	notify, err := resolveAskNotify(o.notify, deskGetenv)
+	if err != nil {
+		return err
 	}
 	from := o.from
 	if from == "" {
@@ -81,6 +78,24 @@ func runDeskAsk(cmd *cobra.Command, _ module.Deps, dirFlag string, o deskAskOpts
 	w := &stickyWriter{w: out}
 	w.printf("id=%s\nbucket=%s\nwatch=forgectl desk watch --responses %s --deadline %d\n", a.ID, a.Bucket, a.ID, deskWatchDefaultDeadline)
 	return w.err
+}
+
+// resolveAskNotify turns --notify into the address to record. The only
+// terminal an ask may notify is the asker's own: the one hc names in
+// $HC_TERMINAL_ID. Without that rule any agent could have the operator's
+// answer typed into another agent's prompt.
+func resolveAskNotify(flag string, getenv func(string) string) (string, error) {
+	if flag == "" {
+		return "", nil
+	}
+	self := getenv("HC_TERMINAL_ID")
+	if self == "" {
+		return "", deskUsage("desk ask: --notify needs $HC_TERMINAL_ID, which hc sets in its terminals; outside hc, leave --notify off and use desk watch --responses")
+	}
+	if flag != "self" && flag != self {
+		return "", deskUsage("desk ask: --notify may name only this terminal (%s); pass --notify self", self)
+	}
+	return self, nil
 }
 
 // defaultAskFrom names the asker from the environment: a launched worker's
@@ -265,6 +280,14 @@ func writeAskDetail(out io.Writer, it ask.Item) error {
 }
 
 func responseDetail(r ask.Response) string {
+	origin := ""
+	if r.Origin != "" {
+		origin = " (" + safeText(r.Origin) + ")"
+	}
+	return responseValue(r) + origin
+}
+
+func responseValue(r ask.Response) string {
 	switch r.Kind {
 	case ask.KindReply:
 		return " " + safeText(strings.Join(strings.Fields(r.Text), " "))
@@ -330,7 +353,7 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 		return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(v)
 	}
 	w := &stickyWriter{w: cmd.OutOrStdout()}
-	w.printf("response=%s\nstate=%s\n", saved.ID, it.State)
+	w.printf("response=%s\nstate=%s\norigin=%s\n", saved.ID, it.State, saved.Origin)
 	if it.Ask.Notify != "" {
 		if notifyErr != nil {
 			w.printf("notified=failed %s\n", safeText(notifyErr.Error()))

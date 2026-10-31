@@ -21,3 +21,7 @@
 .empty { color: var(--fg-muted); }
 .tag { font-size: 0.8rem; color: var(--fg-muted); font-weight: normal; }
 .hash code { overflow-wrap: anywhere; font-size: 0.8rem; }
+
+.links .host { color: var(--fg-muted, inherit); font-size: 0.85em; }
+.links .host::before { content: "("; }
+.links .host::after { content: ")"; }

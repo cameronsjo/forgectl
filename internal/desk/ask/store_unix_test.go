@@ -287,3 +287,47 @@ func TestStoreAppendHealsATornLastLine(t *testing.T) {
 		t.Fatalf("bad = %d (want the torn line alone), err %v", bad, err)
 	}
 }
+
+func TestStoreRecordsOrigin(t *testing.T) {
+	s, _ := newTestStore(t, nil)
+	for via, want := range map[string]string{"web": OriginOperator, "ui": OriginOperator, "cli": OriginAgent, "": OriginAgent} {
+		a, err := s.Add(Ask{Title: "o " + via, Bucket: BucketNow, From: "origin-" + via})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A caller cannot claim an origin; the store sets it from via.
+		_, r, _, err := s.Respond(t.Context(), Response{Ask: a.ID, Kind: KindDone, Via: via, Origin: OriginOperator})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Origin != want {
+			t.Errorf("via %q: origin %q, want %q", via, r.Origin, want)
+		}
+	}
+}
+
+func TestStoreCapsOpenAsksPerAsker(t *testing.T) {
+	s, _ := newTestStore(t, nil)
+	var first Ask
+	for i := range MaxOpenPerAsker {
+		a, err := s.Add(Ask{Title: "a", Bucket: BucketSoon, From: "busy"})
+		if err != nil {
+			t.Fatalf("ask %d: %v", i, err)
+		}
+		if i == 0 {
+			first = a
+		}
+	}
+	if _, err := s.Add(Ask{Title: "one too many", Bucket: BucketSoon, From: "busy"}); !errors.Is(err, ErrTooMany) || !strings.Contains(err.Error(), "busy already has 20 open asks") {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if _, err := s.Add(Ask{Title: "someone else", Bucket: BucketSoon, From: "calm"}); err != nil {
+		t.Fatalf("another asker was capped: %v", err)
+	}
+	if _, _, _, err := s.Respond(t.Context(), Response{Ask: first.ID, Kind: KindDone, Via: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Ask{Title: "room again", Bucket: BucketSoon, From: "busy"}); err != nil {
+		t.Fatalf("an answer did not free a slot: %v", err)
+	}
+}

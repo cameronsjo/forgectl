@@ -236,9 +236,14 @@ func (a *Adapter) owned(ctx context.Context, ref backend.Ref) (terminal, error) 
 }
 
 // SendLine types text into the hc terminal at addr and submits it, with `hc
-// send`. Unlike SendBrief it works on any terminal, forgectl's or not: the
-// desk uses it to tell an asking agent that the operator answered. It never
-// passes --force, so hc's own refusal of a blocked terminal stands.
+// send`. The desk uses it to tell an asking agent that its ask was answered.
+//
+// hc presses Enter after the text, so SendLine first reads the terminal and
+// types nothing unless it is live, runs an agent harness hc recognizes (a
+// status app such as claude-code, so never a bare shell, an editor or a
+// REPL), and sits at its prompt (idle or done). With idle it also passes
+// `--if idle`, so hc refuses if a turn starts between the read and the send.
+// It never passes --force, so hc's own refusal of a blocked terminal stands.
 func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 	if addr == "" || strings.ContainsAny(addr, " \t\r\n") || strings.HasPrefix(addr, "-") {
 		return fmt.Errorf("%w: %q is not a terminal address", ErrSendRefused, addr)
@@ -248,13 +253,25 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 			return fmt.Errorf("%w: the text must be one line with no control or format characters", ErrSendRefused)
 		}
 	}
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
-		exec.MustFixed("send"),
-		exec.MustFixed("--json"),
-		exec.EndOfOptions(),
-		exec.Opaque(addr),
-		exec.Opaque(text),
-	))
+	t, state, cause := a.get(ctx, addr)
+	switch {
+	case state == getAbsent:
+		return fmt.Errorf("%w: no terminal at %s", ErrSendRefused, addr)
+	case state != getFound:
+		return fmt.Errorf("%w: read %s: %v", ErrSendRefused, addr, cause)
+	case t.State != stateLive:
+		return fmt.Errorf("%w: the program at %s has exited", ErrSendRefused, addr)
+	case t.Status.App == "":
+		return fmt.Errorf("%w: %s is not running an agent hc recognizes", ErrSendRefused, addr)
+	case !atPrompt(t.Status.State):
+		return fmt.Errorf("%w: %s is %s, not at its prompt", ErrSendRefused, addr, statusWord(t.Status.State))
+	}
+	args := []exec.Arg{exec.MustFixed("send"), exec.MustFixed("--json")}
+	if t.Status.State == StatusIdle {
+		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
+	}
+	args = append(args, exec.EndOfOptions(), exec.Opaque(addr), exec.Opaque(text))
+	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend, args...))
 	if runErr != nil {
 		switch kind := errorKind(res.Stderr); kind {
 		case kindBlocked, kindStatusMismatch, kindFinished:
@@ -263,4 +280,12 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 		return fmt.Errorf("%w: %v", ErrSendFailed, classifyRunError(runErr))
 	}
 	return nil
+}
+
+// statusWord names a status for an error, "unknown" when hc gave none.
+func statusWord(s string) string {
+	if s == "" {
+		return "in an unknown state"
+	}
+	return s
 }

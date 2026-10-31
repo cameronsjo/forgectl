@@ -5,17 +5,64 @@ package deskweb
 import (
 	"bytes"
 	"html/template"
+	"net/url"
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // markdown renders ask steps. Raw HTML in the source is NOT passed through:
 // goldmark's default renderer (no html.WithUnsafe) replaces every raw HTML
 // block and inline tag with a comment, so an agent's <script> or <img
 // onerror> never becomes markup. The sanitizer below is the second layer.
-var markdown = goldmark.New(goldmark.WithExtensions(extension.Strikethrough, extension.Linkify, extension.Table))
+var markdown = goldmark.New(
+	goldmark.WithExtensions(extension.Strikethrough, extension.Linkify, extension.Table),
+	goldmark.WithParserOptions(parser.WithASTTransformers(util.Prioritized(linkHosts{}, 100))),
+)
+
+// linkHosts appends " (host)" as plain text after every markdown link whose
+// label is not its own URL, so an agent cannot label one site as another on
+// a phone, where there is no hover to show the address.
+type linkHosts struct{}
+
+func (linkHosts) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	var links []*ast.Link
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if l, ok := n.(*ast.Link); ok && entering {
+			links = append(links, l)
+		}
+		return ast.WalkContinue, nil
+	})
+	src := reader.Source()
+	for _, l := range links {
+		u, err := url.Parse(string(l.Destination))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		if string(linkText(l, src)) == string(l.Destination) {
+			continue
+		}
+		l.Parent().InsertAfter(l.Parent(), l, ast.NewString([]byte(" ("+u.Host+")")))
+	}
+}
+
+// linkText is the plain text of a link's label.
+func linkText(n ast.Node, src []byte) []byte {
+	var out []byte
+	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		if t, ok := c.(*ast.Text); ok {
+			out = append(out, t.Segment.Value(src)...)
+			continue
+		}
+		out = append(out, linkText(c, src)...)
+	}
+	return out
+}
 
 // sanitizer is a closed allowlist, built from nothing rather than narrowed
 // from UGCPolicy: text formatting, lists, code, quotes, tables, and links to
