@@ -37,8 +37,8 @@ func fakeWatchRuntime(tty bool, ran *bool) watchRuntime {
 	return watchRuntime{
 		stdoutIsTerminal: func(io.Writer) bool { return tty },
 		stdinIsTerminal:  func(io.Reader) bool { return tty },
-		hc:               func() workerwatch.CLI { return workerwatch.CLI{} },
-		newCollector: func(opts watchOptions, entries []workerwatch.Entry, notes []string) *workerwatch.Collector {
+		hc:               func() (workerwatch.CLI, error) { return workerwatch.CLI{}, nil },
+		newCollector: func(opts watchOptions, entries []workerwatch.Entry, notes []string, _ workerwatch.CLI) *workerwatch.Collector {
 			return &workerwatch.Collector{
 				HC: watchFakeHC{}, Entries: entries, Notes: notes, Cos: opts.Cos, GHTTL: opts.GHTTL,
 				Reports: func(string) workerwatch.Reports {
@@ -181,8 +181,8 @@ func TestSurfaceWatchSnapshotExitsOneWithoutHC(t *testing.T) {
 	var ran bool
 	rt := fakeWatchRuntime(false, &ran)
 	base := rt.newCollector
-	rt.newCollector = func(opts watchOptions, entries []workerwatch.Entry, notes []string) *workerwatch.Collector {
-		c := base(opts, entries, notes)
+	rt.newCollector = func(opts watchOptions, entries []workerwatch.Entry, notes []string, hc workerwatch.CLI) *workerwatch.Collector {
+		c := base(opts, entries, notes, hc)
 		c.HC = watchNoHC{}
 		return c
 	}
@@ -202,7 +202,7 @@ func TestSurfaceWatchSnapshotExitsOneWithoutHC(t *testing.T) {
 func TestSurfaceWatchUsesTheSweepReviewers(t *testing.T) {
 	deps := module.Deps{Runner: &exec.FakeRunner{}}
 	deps.Cfg.Sweep.Reviewers = []string{"pr-reviewer", "security-reviewer"}
-	c := productionWatchRuntime(deps).newCollector(watchOptions{GHTTL: workerwatch.MinGHTTL}, nil, nil)
+	c := productionWatchRuntime(deps).newCollector(watchOptions{GHTTL: workerwatch.MinGHTTL}, nil, nil, workerwatch.CLI{})
 	if strings.Join(c.Reviewers, ",") != "pr-reviewer,security-reviewer" {
 		t.Errorf("collector reviewers = %q, want the [sweep] reviewers", c.Reviewers)
 	}

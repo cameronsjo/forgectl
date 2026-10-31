@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	osexec "os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 )
 
 func TestParseWorkers(t *testing.T) {
@@ -73,23 +72,49 @@ func TestModelFromArgv(t *testing.T) {
 
 const getJSON = `{"address":"t1n","argv":["env","X=1","/bin/claude","--model","opus","Read the brief"],"created_ms":1000000,"cwd":"/wt/a","foreground":{"argv":["/bin/claude","--model","opus"]},"name":"cos-a","state":"live","status":{"app":"claude-code","state":"blocked"}}`
 
+// fakeSource stands in for the shared hc adapter. It records each call as
+// the hc verb and its target.
+type fakeSource struct {
+	get    func(target string) ([]byte, error)
+	list   func() ([]byte, error)
+	read   func(target string) ([]byte, bool, error)
+	events func(ctx context.Context, w io.Writer) error
+	calls  []string
+}
+
+func (f *fakeSource) GetJSON(_ context.Context, target string) ([]byte, error) {
+	f.calls = append(f.calls, "get "+target)
+	return f.get(target)
+}
+
+func (f *fakeSource) ListJSON(context.Context) ([]byte, error) {
+	f.calls = append(f.calls, "ls")
+	return f.list()
+}
+
+func (f *fakeSource) ReadText(_ context.Context, target string) ([]byte, bool, error) {
+	f.calls = append(f.calls, "read "+target)
+	return f.read(target)
+}
+
+func (f *fakeSource) Events(ctx context.Context, w io.Writer) error {
+	f.calls = append(f.calls, "events")
+	return f.events(ctx, w)
+}
+
 func TestCLIGetAndList(t *testing.T) {
-	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name != "hc" {
-			t.Fatalf("ran %s, want hc", name)
-		}
-		switch args[0] {
-		case "get":
-			if args[len(args)-1] == "gone" {
-				return "", &exec.CommandError{Name: "hc", ExitCode: 3}
+	fake := &fakeSource{
+		get: func(target string) ([]byte, error) {
+			if target == "gone" {
+				return nil, fmt.Errorf("hc get: %w", hcadapter.ErrNoTerminal)
 			}
-			return getJSON, nil
-		case "ls":
-			return `{"terminals":[{"address":"t1","name":null,"state":"live","status":"done"},{"address":"t2","name":"cos-x","state":"live","status":"working"},{"address":"bad addr","name":"cos-y"}]}`, nil
-		}
-		return "", errors.New("unexpected")
-	}}
-	c := CLI{Run: fake}
+			return []byte(getJSON), nil
+		},
+		list: func() ([]byte, error) {
+			return []byte(`{"terminals":[{"address":"t1","name":null,"state":"live","status":"done"},{"address":"t2","name":"cos-x","state":"live","status":"working"},{"address":"bad addr","name":"cos-y"}]}`), nil
+		},
+	}
+	c := CLI{Source: fake}
 	got, err := c.Get(context.Background(), "cos-a")
 	if err != nil {
 		t.Fatal(err)
@@ -111,12 +136,21 @@ func TestCLIGetAndList(t *testing.T) {
 	if len(ts) != 2 || ts[1].Name != "cos-x" || ts[1].Status != StatusWorking {
 		t.Errorf("List = %+v, want t1 and t2 (cos-x working), bad address dropped", ts)
 	}
-	for _, call := range fake.Calls {
-		for _, a := range call.Args {
-			if a == "send" || a == "keys" || a == "kill" || a == "rm" || a == "interrupt" {
-				t.Errorf("the watch ran hc %v; it must only read", call.Args)
-			}
-		}
+	if got := strings.Join(fake.calls, ","); got != "get cos-a,get gone,ls" {
+		t.Errorf("hc calls = %q, want get cos-a, get gone, ls (and no hc call for --force)", got)
+	}
+}
+
+// TestCLIReadMarksACutScreen: a screen longer than the runner's cap comes
+// back cut, and the view says so instead of showing it as whole.
+func TestCLIReadMarksACutScreen(t *testing.T) {
+	whole := CLI{Source: &fakeSource{read: func(string) ([]byte, bool, error) { return []byte("screen"), true, nil }}}
+	if got, err := whole.Read(context.Background(), "cos-a"); err != nil || got != "screen" {
+		t.Errorf("Read = %q, %v; want the screen as is", got, err)
+	}
+	cut := CLI{Source: &fakeSource{read: func(string) ([]byte, bool, error) { return []byte("scr"), false, nil }}}
+	if got, err := cut.Read(context.Background(), "cos-a"); err != nil || got != "scr"+screenCutNote {
+		t.Errorf("Read = %q, %v; want the start and the cut note", got, err)
 	}
 }
 
@@ -364,13 +398,13 @@ func TestParseWorkersSkipsAnOverlongLine(t *testing.T) {
 // event, then blocks until its context ends, like an idle subscription.
 type blockingStream struct {
 	mu       sync.Mutex
-	args     []string
+	started  bool
 	returned bool
 }
 
-func (b *blockingStream) RunStreaming(ctx context.Context, _ io.Reader, stdout, _ io.Writer, name string, args ...string) error {
+func (b *blockingStream) Events(ctx context.Context, stdout io.Writer) error {
 	b.mu.Lock()
-	b.args = append([]string{name}, args...)
+	b.started = true
 	b.mu.Unlock()
 	_, _ = io.WriteString(stdout, `{"terminals":[]}`+"\n"+`{"params":{"type":"status"}}`+"\n")
 	<-ctx.Done()
@@ -383,7 +417,7 @@ func (b *blockingStream) RunStreaming(ctx context.Context, _ io.Reader, stdout, 
 func TestEventsDoneClosesOnlyAfterTheStreamReturns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &blockingStream{}
-	es := CLI{Stream: st}.Events(ctx)
+	es := CLI{Source: &fakeSource{events: st.Events}}.Events(ctx)
 	select {
 	case <-es.Wake:
 	case <-time.After(2 * time.Second):
@@ -405,8 +439,8 @@ func TestEventsDoneClosesOnlyAfterTheStreamReturns(t *testing.T) {
 	if !st.returned {
 		t.Error("Done closed before the stream runner returned")
 	}
-	if strings.Join(st.args, " ") != "hc events --json" {
-		t.Errorf("ran %q, want hc events --json", st.args)
+	if !st.started {
+		t.Error("the event stream never started")
 	}
 	if _, ok := <-es.Wake; ok {
 		// drain a pending wake, then it must close
@@ -505,11 +539,20 @@ func TestCollectorReportsMissingHC(t *testing.T) {
 }
 
 func TestHCFailureNamesAMissingBinary(t *testing.T) {
-	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
-		return "", &exec.CommandError{Name: "hc", Err: &osexec.Error{Name: "hc", Err: osexec.ErrNotFound}}
-	}}
-	if _, err := (CLI{Run: fake}).List(context.Background()); !errors.Is(err, ErrNoHC) {
+	if _, err := (CLI{}).List(context.Background()); !errors.Is(err, ErrNoHC) {
 		t.Errorf("err = %v, want ErrNoHC", err)
+	}
+}
+
+// TestHCFailureHidesHcsText: any failure but a missing terminal reports the
+// verb only, so hc's stderr never reaches the view.
+func TestHCFailureHidesHcsText(t *testing.T) {
+	c := CLI{Source: &fakeSource{list: func() ([]byte, error) {
+		return nil, errors.New("\x1b]52;c;secret\x07 raw hc text")
+	}}}
+	_, err := c.List(context.Background())
+	if err == nil || errors.Is(err, ErrGone) || strings.Contains(err.Error(), "raw hc text") {
+		t.Errorf("err = %v, want a failure naming hc ls and nothing hc printed", err)
 	}
 }
 

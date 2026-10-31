@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -51,23 +52,45 @@ func checkWorkerSurface(name string) error {
 	return nil
 }
 
+// errHcNotOnPath reports that hc is not on PATH.
+var errHcNotOnPath = errors.New("hc (herdr-core) not found on PATH")
+
 // newHcAdapter resolves hc on PATH and builds the adapter, for the reason the
 // other backends resolve theirs here: the sensitive runner needs an absolute
 // path chosen before any command runs.
 func newHcAdapter() (backend.Adapter, error) {
-	path, err := osexec.LookPath("hc")
-	if err != nil {
-		return nil, fmt.Errorf("%w: hc (herdr-core) not found on PATH: %w", errBackendUnavailable, err)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: resolve hc path: %w", errBackendUnavailable, termsafe.Error(err))
-	}
-	a, err := hcadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+	a, err := newHcClient()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}
 	return a, nil
+}
+
+// newHcClient is the one place forgectl builds its hc runner: the worker
+// verbs and `surface watch` both reach hc through the adapter it returns.
+// A missing hc wraps errHcNotOnPath.
+func newHcClient() (*hcadapter.Adapter, error) {
+	path, err := osexec.LookPath("hc")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errHcNotOnPath, err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve hc path: %w", termsafe.Error(err))
+	}
+	return hcadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+}
+
+// hcWatchSource is the watch's view of the shared hc adapter. Its event
+// stream runs through exec.OSRunner's scrubbed streaming call, which drops
+// the same launcher handles the adapter's calls drop.
+type hcWatchSource struct {
+	*hcadapter.Adapter
+	stream hcadapter.EventStreamer
+}
+
+func (s hcWatchSource) Events(ctx context.Context, w io.Writer) error {
+	return s.StreamEvents(ctx, s.stream, w)
 }
 
 // checkHcName refuses a display name hc would refuse, before anything is

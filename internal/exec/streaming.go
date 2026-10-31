@@ -70,6 +70,31 @@ func (OSRunner) RunStreamingWithEnv(ctx context.Context, env map[string]string, 
 	return runStreaming(ctx, cmd, nil, stdout, stderr, name)
 }
 
+// RunStreamingScrubbed is RunStreaming with no stdin and the launching
+// session's handles (IsLauncherSessionHandle) removed from the inherited
+// environment: the streaming twin of UnsetLauncherSessionHandles, for a
+// long-lived hc subscription that the sensitive runner's per-call bound
+// would cut off.
+func (OSRunner) RunStreamingScrubbed(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
+	cmd.Env = withoutLauncherSessionHandles(os.Environ())
+	return runStreaming(ctx, cmd, nil, stdout, stderr, name)
+}
+
+// withoutLauncherSessionHandles is a fresh copy of environ minus every entry
+// whose key IsLauncherSessionHandle matches. It never returns nil, so the
+// child never falls back to inheriting this process's environment.
+func withoutLauncherSessionHandles(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		if IsLauncherSessionHandle(envKeyOf(entry)) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // runStreaming is the shared body of RunStreaming and RunStreamingWithEnv.
 func runStreaming(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, name string) error {
 	slog.Debug("Preparing to run streaming command.", "cmd", name)

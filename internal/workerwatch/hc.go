@@ -7,23 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	osexec "os/exec"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 )
 
-// hcBin is the hc CLI. It reaches whichever core HC_SESSION (or the calling
-// terminal's HC_TERMINAL_SOCKET) selects, so a test or a smoke run against a
-// scratch core needs nothing here.
-const hcBin = "hc"
-
 const (
-	// maxHCOutput caps one hc JSON answer before it is decoded.
-	maxHCOutput = 8 << 20
 	// maxEventLine caps one line of the hc events stream. The first line is
 	// a snapshot of every terminal, so it is far larger than an event.
 	maxEventLine = 16 << 20
@@ -48,9 +40,6 @@ var ErrGone = errors.New("no such hc terminal")
 // ErrNoHC means the hc command is not on PATH.
 var ErrNoHC = errors.New("hc was not found on PATH")
 
-// hcNotFoundExit is hc's exit code for not_found.
-const hcNotFoundExit = 3
-
 // Terminal is what the watch reads about one hc terminal.
 type Terminal struct {
 	Address   string
@@ -72,17 +61,27 @@ type HC interface {
 	Read(ctx context.Context, target string) (string, error)
 }
 
-// Runner is the process seam: exec.Runner satisfies it.
-type Runner interface {
-	Run(ctx context.Context, name string, args ...string) (string, error)
+// Source is the process side of hc, shared with the worker surface: the hc
+// adapter (hcadapter.Adapter) runs every call, so the watch gets the same
+// absolute hc path, environment scrub, sealed argv and output caps as a
+// worker launch. It reaches the core HC_SESSION selects.
+type Source interface {
+	// GetJSON returns `hc get --json <target>`; a missing terminal wraps
+	// hcadapter.ErrNoTerminal.
+	GetJSON(ctx context.Context, target string) ([]byte, error)
+	// ListJSON returns `hc ls --json`.
+	ListJSON(ctx context.Context) ([]byte, error)
+	// ReadText returns `hc read <target>` and whether it is whole.
+	ReadText(ctx context.Context, target string) ([]byte, bool, error)
+	// Events runs `hc events --json`, writing its stdout to w until ctx
+	// ends or the stream stops.
+	Events(ctx context.Context, w io.Writer) error
 }
 
-// CLI is HC over the hc command line.
+// CLI is HC over the hc command line. A nil Source means hc could not be
+// found: every read reports ErrNoHC and Events closes at once.
 type CLI struct {
-	Run Runner
-	// Stream runs `hc events` and writes its stdout to w until ctx ends.
-	// Nil means no event stream: the watch polls.
-	Stream exec.StreamingRunner
+	Source Source
 }
 
 var (
@@ -169,12 +168,15 @@ func (c CLI) Get(ctx context.Context, target string) (Terminal, error) {
 	if err := checkTarget(target); err != nil {
 		return Terminal{}, err
 	}
-	out, err := c.Run.Run(ctx, hcBin, "get", "--json", "--", target)
+	if c.Source == nil {
+		return Terminal{}, fmt.Errorf("hc get: %w", ErrNoHC)
+	}
+	out, err := c.Source.GetJSON(ctx, target)
 	if err != nil {
 		return Terminal{}, hcFailure(ctx, "hc get", err)
 	}
 	var g hcGet
-	if len(out) > maxHCOutput || json.Unmarshal([]byte(out), &g) != nil {
+	if json.Unmarshal(out, &g) != nil {
 		return Terminal{}, errors.New("hc get returned an answer that is not a terminal record")
 	}
 	t, ok := g.terminal()
@@ -186,14 +188,17 @@ func (c CLI) Get(ctx context.Context, target string) (Terminal, error) {
 
 // List implements HC.
 func (c CLI) List(ctx context.Context) ([]Terminal, error) {
-	out, err := c.Run.Run(ctx, hcBin, "ls", "--json")
+	if c.Source == nil {
+		return nil, fmt.Errorf("hc ls: %w", ErrNoHC)
+	}
+	out, err := c.Source.ListJSON(ctx)
 	if err != nil {
 		return nil, hcFailure(ctx, "hc ls", err)
 	}
 	var resp struct {
 		Terminals []hcGet `json:"terminals"`
 	}
-	if len(out) > maxHCOutput || json.Unmarshal([]byte(out), &resp) != nil {
+	if json.Unmarshal(out, &resp) != nil {
 		return nil, errors.New("hc ls returned an answer that is not a terminal list")
 	}
 	ts := make([]Terminal, 0, len(resp.Terminals))
@@ -205,20 +210,26 @@ func (c CLI) List(ctx context.Context) ([]Terminal, error) {
 	return ts, nil
 }
 
+// screenCutNote ends a screen that was longer than the runner's output cap.
+const screenCutNote = "\n[the screen was cut: only its start fit]"
+
 // Read implements HC. It returns hc's text as is: the caller strips and
 // escapes it before it reaches a terminal.
 func (c CLI) Read(ctx context.Context, target string) (string, error) {
 	if err := checkTarget(target); err != nil {
 		return "", err
 	}
-	out, err := c.Run.Run(ctx, hcBin, "read", "--", target)
+	if c.Source == nil {
+		return "", fmt.Errorf("hc read: %w", ErrNoHC)
+	}
+	out, complete, err := c.Source.ReadText(ctx, target)
 	if err != nil {
 		return "", hcFailure(ctx, "hc read", err)
 	}
-	if len(out) > maxHCOutput {
-		out = out[len(out)-maxHCOutput:]
+	if !complete {
+		return string(out) + screenCutNote, nil
 	}
-	return out, nil
+	return string(out), nil
 }
 
 // checkTarget refuses a target that is neither a worker name nor an hc
@@ -234,11 +245,7 @@ func hcFailure(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
-	if errors.Is(err, osexec.ErrNotFound) {
-		return fmt.Errorf("%s: %w", what, ErrNoHC)
-	}
-	var ce *exec.CommandError
-	if errors.As(err, &ce) && ce.ExitCode == hcNotFoundExit {
+	if errors.Is(err, hcadapter.ErrNoTerminal) {
 		return fmt.Errorf("%s: %w", what, ErrGone)
 	}
 	return fmt.Errorf("%s failed (run it by hand to see why)", what)
@@ -260,12 +267,11 @@ type EventStream struct {
 }
 
 // Events subscribes to `hc events`. A subscription takes nothing from
-// anyone else's `hc wait`. With no Stream runner, Wake and Done are closed
-// at once.
+// anyone else's `hc wait`. With no Source, Wake and Done are closed at once.
 func (c CLI) Events(ctx context.Context) EventStream {
 	wake := make(chan struct{}, 1)
 	done := make(chan struct{})
-	if c.Stream == nil {
+	if c.Source == nil {
 		close(wake)
 		close(done)
 		return EventStream{Wake: wake, Done: done}
@@ -273,7 +279,7 @@ func (c CLI) Events(ctx context.Context) EventStream {
 	pr, pw := io.Pipe()
 	go func() {
 		defer close(done)
-		err := c.Stream.RunStreaming(ctx, nil, pw, io.Discard, hcBin, "events", "--json")
+		err := c.Source.Events(ctx, pw)
 		_ = pw.CloseWithError(errors.Join(err, io.EOF)) // the reader only needs to know the stream ended
 	}()
 	go func() {

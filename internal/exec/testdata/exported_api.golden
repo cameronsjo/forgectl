@@ -177,6 +177,7 @@ method (OSRunner) Run(ctx context.Context, name string, args ...string) (string,
 method (OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error
+method (OSRunner) RunStreamingScrubbed(ctx context.Context, stdout io.Writer, stderr io.Writer, name string, args ...string) error
 method (OSRunner) RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error
 method (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
 method (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
