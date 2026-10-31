@@ -34,7 +34,7 @@ func (a MergeAudit) Append(fn func(existing []byte) ([]byte, error)) error {
 		return fmt.Errorf("worker: audit directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
-	lock, err := openVerified(dir, mergeAuditLockName, unix.O_RDWR|unix.O_CREAT)
+	lock, err := openLockFile(dir, mergeAuditLockName)
 	if err != nil {
 		return err
 	}
