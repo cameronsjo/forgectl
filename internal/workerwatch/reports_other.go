@@ -4,6 +4,7 @@ package workerwatch
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -24,4 +25,9 @@ func openBriefDir(path string) (*os.File, error) {
 // the handle is a regular file.
 func openReportAt(dir *os.File, name string) (*os.File, error) {
 	return os.Open(filepath.Join(dir.Name(), name)) //nolint:gosec // G304: a name reportNameRe matched, inside the brief dir
+}
+
+// statAt stats name in the brief dir by path, without following a symlink.
+func statAt(dir *os.File, name string) (fs.FileInfo, error) {
+	return os.Lstat(filepath.Join(dir.Name(), name))
 }

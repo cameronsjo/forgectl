@@ -27,6 +27,10 @@ const (
 	ghTimeout = 30 * time.Second
 	// gitTimeout bounds the branch checks of one collect.
 	gitTimeout = 5 * time.Second
+	// branchCheckGap is the least time between two branch checks of one
+	// worktree, so event-driven collects do not run git for every worker
+	// every second.
+	branchCheckGap = 5 * time.Second
 	// hcParallel caps how many hc or git calls one collect runs at once.
 	hcParallel = 8
 	// detailRetry is how long a failed `hc get` for a terminal's start
@@ -155,7 +159,10 @@ type detail struct {
 // sameTerminal reports whether the `hc ls` record t is still the terminal d
 // was read from. hc reuses addresses after a core restart; `hc ls` carries
 // no start time, but a new terminal at the address has another name, or the
-// same name with its turn count started again.
+// same name with its turn count started again. A relaunch under the same
+// name that reaches the old turn count before the next collect is not told
+// apart; its age and model stay the old ones until the address is reused
+// again or `hc ls` stops listing it.
 func (d detail) sameTerminal(t Terminal) bool {
 	return d.name == t.Name && t.Turn >= d.turn
 }
@@ -165,12 +172,13 @@ func (d detail) sameTerminal(t Terminal) bool {
 func detailKey(t Terminal) string { return t.Address + "\x00" + t.Name }
 
 type prEntry struct {
-	at     time.Time // the last attempt: what the TTL counts from
-	readAt time.Time // the last successful read of pr
-	branch string
-	pr     *PR
-	issue  string
-	note   string
+	at      time.Time // the last attempt: what the TTL counts from
+	checked time.Time // the last branch check git answered (branchesMoved)
+	readAt  time.Time // the last successful read of pr
+	branch  string
+	pr      *PR
+	issue   string
+	note    string
 }
 
 // Collect reads every worker once. force refreshes PR reads older than
@@ -211,16 +219,18 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	rows := make([]rowBuild, len(entries))
 	listed := make([]bool, len(entries))
 	var jobs []func(context.Context)
+	var readRows []int // the row each readHC job fills, in job order
 	var gets []Terminal
 	for i, e := range entries {
 		rows[i] = rowBuild{Worker: Worker{Name: e.Name, Worktree: e.Worktree, BriefDir: e.BriefDir, Source: sources[e.Name]}}
 		if t, ok := live[e.Name]; ok && listErr == nil {
 			listed[i] = true
-			if c.needDetail(t, now) {
+			if c.needDetail(t, now) && !slices.ContainsFunc(gets, func(g Terminal) bool { return g.Address == t.Address }) {
 				gets = append(gets, t)
 			}
 			continue
 		}
+		readRows = append(readRows, i)
 		jobs = append(jobs, func(ctx context.Context) { c.readHC(ctx, &rows[i], now) })
 	}
 	got := make([]Terminal, len(gets))
@@ -228,7 +238,17 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	for j, t := range gets {
 		jobs = append(jobs, func(ctx context.Context) { got[j], gotErr[j] = c.HC.Get(ctx, t.Address) })
 	}
-	runAll(ctx, hcTimeout, jobs)
+	ran := runAll(ctx, hcTimeout, jobs)
+	for k, i := range readRows {
+		if !ran[k] {
+			rows[i].HCError = hcNotReadText
+		}
+	}
+	for j := range gets {
+		if !ran[len(readRows)+j] {
+			gotErr[j] = errNotRun
+		}
+	}
 	if listErr == nil {
 		c.storeDetails(live, gets, got, gotErr, now)
 	}
@@ -276,6 +296,14 @@ type rowBuild struct {
 
 // hcGoneText is the HCError for a name hc does not know.
 const hcGoneText = "no hc terminal by this name"
+
+// hcNotReadText is the HCError for a worker whose hc get was still queued
+// when the collect's hc deadline passed.
+const hcNotReadText = "hc was not read: other hc calls used up this refresh's time"
+
+// errNotRun marks a detail get runAll skipped. It is neither cached nor
+// backed off: it says nothing about the terminal.
+var errNotRun = errors.New("hc get was not run")
 
 // list is one `hc ls`, keyed by name.
 func (c *Collector) list(ctx context.Context) (map[string]Terminal, error) {
@@ -362,6 +390,9 @@ func (c *Collector) storeDetails(live map[string]Terminal, gets, got []Terminal,
 		}
 	}
 	for j, t := range gets {
+		if errors.Is(gotErr[j], errNotRun) {
+			continue
+		}
 		if gotErr[j] != nil {
 			c.detailFail[detailKey(t)] = now
 			continue
@@ -427,7 +458,7 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		i   int
 		age time.Duration
 	}
-	moved := c.branchesMoved(ctx, workers)
+	moved := c.branchesMoved(ctx, workers, now)
 	var due []stale
 	for i, w := range workers {
 		if w.Worktree == "" || c.GH == nil || c.Git == nil {
@@ -457,30 +488,42 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 	}
 }
 
-// branchesMoved checks the branch of every worktree with a cached PR read,
-// and reports the worktrees now on another branch than the read was for: a
-// worker that switched branch is re-read at once, not after the TTL. A
-// branch git cannot read keeps the cached read.
-func (c *Collector) branchesMoved(ctx context.Context, workers []Worker) map[string]bool {
+// branchesMoved checks the branch of each worktree with a cached PR read,
+// at most once per branchCheckGap, and reports the worktrees now on another
+// branch than the read was for: a worker that switched branch is re-read
+// within branchCheckGap, not after the TTL. A branch git cannot read (or a
+// check the deadline skipped) keeps the cached read.
+func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now time.Time) map[string]bool {
 	if c.Git == nil || c.GH == nil {
 		return nil
 	}
 	var trees []string
 	for _, w := range workers {
-		if _, ok := c.cache[w.Worktree]; ok && w.Worktree != "" && !slices.Contains(trees, w.Worktree) {
+		e, ok := c.cache[w.Worktree]
+		last := e.at
+		if e.checked.After(last) {
+			last = e.checked
+		}
+		if ok && w.Worktree != "" && now.Sub(last) >= branchCheckGap && !slices.Contains(trees, w.Worktree) {
 			trees = append(trees, w.Worktree)
 		}
 	}
-	current := make([]string, len(trees))
+	branches := make([]string, len(trees))
 	errs := make([]error, len(trees))
 	jobs := make([]func(context.Context), len(trees))
 	for i, wt := range trees {
-		jobs[i] = func(ctx context.Context) { current[i], errs[i] = c.Git.Branch(ctx, wt) }
+		jobs[i] = func(ctx context.Context) { branches[i], errs[i] = c.Git.Branch(ctx, wt) }
 	}
-	runAll(ctx, gitTimeout, jobs)
+	ran := runAll(ctx, gitTimeout, jobs)
 	moved := map[string]bool{}
 	for i, wt := range trees {
-		if errs[i] == nil && current[i] != c.cache[wt].branch {
+		if !ran[i] || errs[i] != nil {
+			continue
+		}
+		e := c.cache[wt]
+		e.checked = now
+		c.cache[wt] = e
+		if branches[i] != e.branch {
 			moved[wt] = true
 		}
 	}
@@ -488,23 +531,36 @@ func (c *Collector) branchesMoved(ctx context.Context, workers []Worker) map[str
 }
 
 // runAll runs jobs at once, at most hcParallel at a time, under one shared
-// timeout, and returns when every job has.
-func runAll(ctx context.Context, timeout time.Duration, jobs []func(context.Context)) {
+// timeout, and returns when every started job has. A job still queued when
+// the timeout passes is skipped rather than run on a dead context, and
+// ran[i] reports whether jobs[i] ran, so the caller does not read a skipped
+// job as a failure of the thing it would have read.
+func runAll(ctx context.Context, timeout time.Duration, jobs []func(context.Context)) (ran []bool) {
+	ran = make([]bool, len(jobs))
 	if len(jobs) == 0 {
-		return
+		return ran
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	sem := make(chan struct{}, hcParallel)
 	var wg sync.WaitGroup
-	for _, job := range jobs {
+	for i, job := range jobs {
 		wg.Go(func() {
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return // both cases were ready and select chose the slot
+			}
+			ran[i] = true
 			job(ctx)
 		})
 	}
 	wg.Wait()
+	return ran
 }
 
 // readPR resolves the worktree's repo and branch, then its PR. A failed gh

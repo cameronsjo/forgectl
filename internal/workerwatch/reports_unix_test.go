@@ -131,7 +131,8 @@ func openedBriefDir(t *testing.T, dir string) briefDirFS {
 // TestBriefDirSwappedAfterOpenIsNotFollowed: once the brief dir is open, a
 // worker that moves it away and puts a symlink to another directory at its
 // path changes nothing the scan reads: the listing and the report opens
-// stay on the directory that was opened.
+// stay on the directory that was opened, and so do the size and mtime
+// the listing reports.
 func TestBriefDirSwappedAfterOpenIsNotFollowed(t *testing.T) {
 	base := t.TempDir()
 	brief := filepath.Join(base, "brief")
@@ -141,8 +142,14 @@ func TestBriefDirSwappedAfterOpenIsNotFollowed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(brief, "report.md"), []byte("working\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	when := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(brief, "report.md"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	// The swapped-in dir has no report.md, so a size or mtime read by path
+	// (os.File.ReadDir's own Info) would drop the report from the row.
 	other := t.TempDir()
-	for _, name := range []string{"report.md", "report-a.md", "report-b.md"} {
+	for _, name := range []string{"report-a.md", "report-b.md"} {
 		if err := os.WriteFile(filepath.Join(other, name), []byte("REPORT-COMPLETE\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -155,7 +162,7 @@ func TestBriefDirSwappedAfterOpenIsNotFollowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := ScanReports(fsys)
-	if len(r.Files) != 1 || r.Files[0].Name != "report.md" || r.Files[0].Complete {
+	if len(r.Files) != 1 || r.Files[0].Name != "report.md" || r.Files[0].Complete || !r.Files[0].Modified.Equal(when) {
 		t.Errorf("the scan read the swapped-in directory: %+v", r)
 	}
 }

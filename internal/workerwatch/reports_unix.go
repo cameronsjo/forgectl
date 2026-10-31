@@ -4,7 +4,9 @@ package workerwatch
 
 import (
 	"errors"
+	"io/fs"
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -41,4 +43,22 @@ func openReportAt(dir *os.File, name string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: name, Err: err}
 	}
 	return os.NewFile(uintptr(fd), name), nil
+}
+
+// statAt stats name in the open brief dir without following a symlink.
+// Only the type bits the scan reads (regular file or not) are kept.
+func statAt(dir *os.File, name string) (fs.FileInfo, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil { //nolint:gosec // G115: a descriptor fits an int
+		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
+	}
+	mode := fs.FileMode(st.Mode & 0o777)
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+	case unix.S_IFDIR:
+		mode |= fs.ModeDir
+	default:
+		mode |= fs.ModeIrregular
+	}
+	return statInfo{name: name, size: st.Size, mode: mode, mod: time.Unix(st.Mtim.Unix())}, nil
 }

@@ -48,16 +48,25 @@ func TestCollectorDropsADetailWhenTheAddressIsReused(t *testing.T) {
 
 // slowHC answers every Get after delay, and fails it.
 type slowHC struct {
-	delay time.Duration
-	list  []Terminal
-	mu    sync.Mutex
-	gets  int
+	delay    time.Duration
+	list     []Terminal
+	mu       sync.Mutex
+	gets     int
+	inFlight int
+	maxIn    int
 }
 
 func (s *slowHC) Get(ctx context.Context, _ string) (Terminal, error) {
 	s.mu.Lock()
 	s.gets++
+	s.inFlight++
+	s.maxIn = max(s.maxIn, s.inFlight)
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
+	}()
 	select {
 	case <-time.After(s.delay):
 	case <-ctx.Done():
@@ -68,8 +77,8 @@ func (s *slowHC) Get(ctx context.Context, _ string) (Terminal, error) {
 func (s *slowHC) List(context.Context) ([]Terminal, error)     { return s.list, nil }
 func (s *slowHC) Read(context.Context, string) (string, error) { return "", nil }
 
-// TestCollectorRunsSlowGetsAtOnceAndBacksOff: three slow gets cost one
-// delay, not three, and a get that failed is not retried on the next
+// TestCollectorRunsSlowGetsAtOnceAndBacksOff: three slow gets run at the
+// same time, not one after another, and a get that failed is not retried on the next
 // collect inside detailRetry.
 func TestCollectorRunsSlowGetsAtOnceAndBacksOff(t *testing.T) {
 	const delay = 300 * time.Millisecond
@@ -80,10 +89,9 @@ func TestCollectorRunsSlowGetsAtOnceAndBacksOff(t *testing.T) {
 	}}
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	c := &Collector{HC: hc, Now: func() time.Time { return now }, Entries: []Entry{{Name: "cos-a"}, {Name: "cos-b"}, {Name: "cos-c"}}}
-	start := time.Now()
 	s := c.Collect(context.Background(), false)
-	if took := time.Since(start); took >= 2*delay {
-		t.Fatalf("three slow gets took %v, want about one delay (%v)", took, delay)
+	if hc.maxIn != 3 {
+		t.Fatalf("at most %d gets were in flight at once, want all 3", hc.maxIn)
 	}
 	if s.Workers[0].Address != "t1" || s.Workers[0].HCError != "" {
 		t.Fatalf("a failed detail get should still show the listed row: %+v", s.Workers[0])
@@ -117,7 +125,7 @@ func (g *switchGit) Branch(context.Context, string) (string, error) {
 func (g *switchGit) Repo(context.Context, string) (string, error) { return "o/r", nil }
 
 // TestCollectorRereadsAPRAfterABranchSwitch: a worker that switches branch
-// shows the new branch's PR on the next collect, not after the TTL.
+// shows the new branch's PR within branchCheckGap, not after the TTL.
 func TestCollectorRereadsAPRAfterABranchSwitch(t *testing.T) {
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	git := &switchGit{branch: "branch-old"}
@@ -132,6 +140,7 @@ func TestCollectorRereadsAPRAfterABranchSwitch(t *testing.T) {
 	if s := c.Collect(context.Background(), false); s.Workers[0].Branch != "branch-old" {
 		t.Fatalf("first read = %+v", s.Workers[0])
 	}
+	now = now.Add(branchCheckGap)
 	c.Collect(context.Background(), false)
 	if len(gh.calls) != 1 {
 		t.Fatalf("PR reads inside the TTL on one branch = %v, want 1", gh.calls)
@@ -139,8 +148,57 @@ func TestCollectorRereadsAPRAfterABranchSwitch(t *testing.T) {
 	git.mu.Lock()
 	git.branch = "branch-new"
 	git.mu.Unlock()
+	c.Collect(context.Background(), false)
+	if len(gh.calls) != 1 {
+		t.Fatalf("a branch check ran inside branchCheckGap: PR reads %v", gh.calls)
+	}
+	now = now.Add(branchCheckGap)
 	s := c.Collect(context.Background(), false)
 	if s.Workers[0].Branch != "branch-new" || len(gh.calls) != 2 || gh.calls[1] != "branch-new" {
 		t.Fatalf("after a branch switch: row branch %q, PR reads %v; want the new branch read at once", s.Workers[0].Branch, gh.calls)
+	}
+}
+
+// TestRunAllSkipsJobsQueuedPastTheDeadline: with more jobs than hcParallel
+// and every running job hung until the deadline, the queued jobs are
+// skipped, not run on a dead context, and ran says which ones ran.
+func TestRunAllSkipsJobsQueuedPastTheDeadline(t *testing.T) {
+	var mu sync.Mutex
+	started := 0
+	jobs := make([]func(context.Context), hcParallel+2)
+	for i := range jobs {
+		jobs[i] = func(ctx context.Context) {
+			mu.Lock()
+			started++
+			mu.Unlock()
+			<-ctx.Done()
+		}
+	}
+	ran := runAll(context.Background(), 100*time.Millisecond, jobs)
+	n := 0
+	for _, r := range ran {
+		if r {
+			n++
+		}
+	}
+	if n != hcParallel || started != hcParallel {
+		t.Fatalf("ran %d, started %d; want %d of %d (the queued ones skipped)", n, started, hcParallel, len(jobs))
+	}
+}
+
+// TestCollectorDoesNotBackOffASkippedGet: a detail get the deadline skipped
+// is not recorded as failed, so the next collect tries it.
+func TestCollectorDoesNotBackOffASkippedGet(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	c := &Collector{Now: func() time.Time { return now }}
+	live := map[string]Terminal{"cos-a": {Address: "t1", Name: "cos-a"}}
+	gets := []Terminal{live["cos-a"]}
+	c.storeDetails(live, gets, make([]Terminal, 1), []error{errNotRun}, now)
+	if !c.needDetail(live["cos-a"], now) {
+		t.Fatal("a skipped get was backed off")
+	}
+	c.storeDetails(live, gets, make([]Terminal, 1), []error{errors.New("hung")}, now)
+	if c.needDetail(live["cos-a"], now) {
+		t.Fatal("a failed get was not backed off")
 	}
 }
