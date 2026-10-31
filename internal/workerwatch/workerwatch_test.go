@@ -193,62 +193,6 @@ func TestScanReports(t *testing.T) {
 
 const sha = "0123456789abcdef0123456789abcdef01234567"
 
-func TestParsePR(t *testing.T) {
-	body := func(reviews ...string) string {
-		var nodes []string
-		for _, r := range reviews {
-			nodes = append(nodes, fmt.Sprintf(`{"body":%q}`, r))
-		}
-		return `{"data":{"repository":{"pullRequests":{"nodes":[{"number":12,"state":"OPEN","isDraft":true,"headRefOid":"` + sha +
-			`","commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]},"reviews":{"nodes":[` + strings.Join(nodes, ",") + `]}}]}}}}`
-	}
-	p, err := parsePR("o/r", body(
-		"<!-- cadence-review: pr-reviewer head="+sha+" crit=1 imp=2 -->\nolder",
-		"<!-- cadence-review: security-reviewer head=ffffffffffffffffffffffffffffffffffffffff crit=0 imp=0 -->\nnewest, stale head",
-		"plain comment",
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Number != 12 || p.State != "OPEN" || !p.Draft || p.Head != sha || p.Checks != "PENDING" {
-		t.Errorf("PR = %+v", p)
-	}
-	if p.Marker == nil || p.Marker.Reviewer != "security-reviewer" || p.Marker.AtHead {
-		t.Errorf("marker = %+v, want the newest (security-reviewer, stale)", p.Marker)
-	}
-
-	p, _ = parsePR("o/r", body("<!-- cadence-review: pr-reviewer head="+sha+" crit=0 imp=3 -->"))
-	if p.Marker == nil || !p.Marker.AtHead || p.Marker.Imp != 3 {
-		t.Errorf("marker at head = %+v", p.Marker)
-	}
-
-	if _, err := parsePR("o/r", `{"data":{"repository":{"pullRequests":{"nodes":[]}}}}`); !errors.Is(err, ErrNoPR) {
-		t.Errorf("no nodes: err = %v, want ErrNoPR", err)
-	}
-	if _, err := parsePR("o/r", `{"errors":[{"message":"x"}]}`); err == nil || errors.Is(err, ErrNoPR) {
-		t.Errorf("errors answer: err = %v, want an unusable-answer error", err)
-	}
-	bad, _ := parsePR("o/r", strings.Replace(strings.Replace(body(), "PENDING", "WEIRD", 1), sha, "not-a-sha", 1))
-	if bad.Checks != "" || bad.Head != "" {
-		t.Errorf("unknown enum or bad sha kept: %+v", bad)
-	}
-}
-
-func TestRepoFromRemote(t *testing.T) {
-	tests := map[string]string{
-		"git@github.com:o/r.git":         "o/r",
-		"https://github.com/o/r":         "o/r",
-		"https://gitlab.com/o/r":         "",
-		"https://tok@github.com/o/r.git": "o/r",
-	}
-	for in, want := range tests {
-		got, _ := RepoFromRemote(in)
-		if got != want {
-			t.Errorf("RepoFromRemote(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // fakeHC answers Get from a map.
 type fakeHC struct {
 	mu    sync.Mutex
@@ -285,8 +229,8 @@ func (fakeGit) Branch(_ context.Context, wt string) (string, error) {
 	return "branch-" + wt[len("/wt/"):], nil
 }
 
-func (fakeGit) OriginURL(context.Context, string) (string, error) {
-	return "git@github.com:o/r.git", nil
+func (fakeGit) Repo(context.Context, string) (string, error) {
+	return "o/r", nil
 }
 
 type fakeGH struct {

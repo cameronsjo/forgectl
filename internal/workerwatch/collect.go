@@ -261,14 +261,13 @@ func (c *Collector) readPR(ctx context.Context, worktree string, prev prEntry, n
 		return e
 	}
 	e.branch = branch
-	url, err := c.Git.OriginURL(ctx, worktree)
-	if err != nil {
-		e.note = "the worktree has no origin remote"
-		return e
-	}
-	repo, ok := RepoFromRemote(url)
-	if !ok {
+	repo, err := c.Git.Repo(ctx, worktree)
+	switch {
+	case errors.Is(err, ErrNotGitHub):
 		e.note = "origin is not a github.com repository"
+		return e
+	case err != nil:
+		e.note = "the worktree has no readable origin remote"
 		return e
 	}
 	p, err := c.GH.PRFor(ctx, repo, branch)
