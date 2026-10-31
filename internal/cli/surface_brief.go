@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -57,7 +58,9 @@ type briefResult struct {
 }
 
 type briefOptions struct {
-	Repo     string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface  string
 	Name     string
 	Text     string
 	Readback time.Duration
@@ -114,6 +117,7 @@ Exit 2: a usage or setup error.
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().DurationVar(&opts.Readback, "readback-timeout", defaultBriefReadback, "how long to wait for the typed text to show")
 	cmd.Flags().DurationVar(&opts.Start, "start-timeout", defaultBriefStart, "how long to wait for the turn to start after Enter")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","outcome","step","marker","count","blocking","reason"} as JSON`)
@@ -135,7 +139,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	if err := worker.CheckBrief(text, worker.ViaTyped); err != nil {
 		return WithExitCode(err, exitUsage)
 	}
-	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -146,21 +150,29 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), opts.Readback+opts.Start+5*time.Second)
 	defer cancel()
+	if w.hc != nil {
+		res := sendBriefHC(ctx, hcBriefSteps{
+			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
+			send: func(ctx context.Context, s string) (hcadapter.SendResult, error) {
+				return w.hc.SendBrief(ctx, w.ref, s)
+			},
+			record: w.recordBrief,
+			now:    time.Now,
+			sleep:  resume.SleepContext,
+			start:  opts.Start,
+			// --readback-timeout has no step under hc: hc's send pastes and
+			// submits in one call.
+			interval: briefPollInterval,
+		}, text, marker)
+		res.Name, res.Harness = w.row.Name, w.row.Harness
+		return reportBrief(cmd, res, opts.JSON)
+	}
 	res := sendBrief(ctx, briefSteps{
 		read:     w.read,
 		evaluate: w.evaluate,
 		typeText: func(ctx context.Context, s string) error { return w.herdr.TypeText(ctx, w.ref, s) },
 		enter:    func(ctx context.Context) error { return w.herdr.PressEnter(ctx, w.ref) },
-		record: func(b worker.Brief) (int, error) {
-			err := w.led.Update(w.row.Name, func(r *worker.Row) {
-				b.Count = 1
-				if r.Brief != nil {
-					b.Count = r.Brief.Count + 1
-				}
-				r.Brief = &b
-			})
-			return b.Count, err
-		},
+		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
 		readback: opts.Readback,
@@ -344,4 +356,16 @@ func readBriefArg(arg string) (string, error) {
 		return "", fmt.Errorf("brief file %s is over %d bytes", termsafe.QuotePath(path), worker.MaxLaunchBrief)
 	}
 	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// recordBrief writes b as the worker's latest brief and returns its count.
+func (w *openedWorker) recordBrief(b worker.Brief) (int, error) {
+	err := w.led.Update(w.row.Name, func(r *worker.Row) {
+		b.Count = 1
+		if r.Brief != nil {
+			b.Count = r.Brief.Count + 1
+		}
+		r.Brief = &b
+	})
+	return b.Count, err
 }

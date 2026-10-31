@@ -30,7 +30,7 @@ const (
 //  2. `hc get <address>` finds the terminal. not_found on a matching core is
 //     proof it is gone.
 //  3. The terminal carries the reference's ownership marker in its
-//     forgectl_surface label and was created at the reference's time. An
+//     forgectl.surface label and was created at the reference's time. An
 //     address hc handed out again after `hc rm` fails here.
 func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (terminal, locateState, backend.StartCause) {
 	id, err := ref.HcIdentity()
@@ -93,7 +93,7 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 			exec.Opaque(t.Address),
 		))
 		if err != nil {
-			if res.ExitCode == exitNotFound && errorKind(res.Stderr) == "not_found" {
+			if errorKind(res.Stderr) == kindNotFound {
 				return backend.NewCloseAlreadyGone()
 			}
 			return backend.NewCloseFailed(classifyRunError(err))
@@ -106,7 +106,7 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		exec.Opaque(t.Address),
 	))
 	if err != nil {
-		if res.ExitCode == exitNotFound && errorKind(res.Stderr) == "not_found" {
+		if errorKind(res.Stderr) == kindNotFound {
 			return backend.NewCloseClosed()
 		}
 		return backend.NewCloseFailed(classifyRunError(err))

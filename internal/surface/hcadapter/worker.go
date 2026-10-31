@@ -116,9 +116,9 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string) (
 		exec.Opaque(text),
 	))
 	if runErr != nil {
-		switch res.ExitCode {
-		case exitBlocked, exitStatusMismatch, exitFinished:
-			return SendResult{}, fmt.Errorf("%w: hc reports %s", ErrSendRefused, refusalKind(res.ExitCode))
+		switch kind := errorKind(res.Stderr); kind {
+		case kindBlocked, kindStatusMismatch, kindFinished:
+			return SendResult{}, fmt.Errorf("%w: hc reports %s", ErrSendRefused, refusalKind(kind))
 		}
 		return SendResult{}, fmt.Errorf("%w: %v", ErrSendFailed, classifyRunError(runErr))
 	}
@@ -133,11 +133,11 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string) (
 	return SendResult{Status: sent.Status.State, Turn: sent.Turn}, nil
 }
 
-func refusalKind(code int) string {
-	switch code {
-	case exitBlocked:
+func refusalKind(kind string) string {
+	switch kind {
+	case kindBlocked:
 		return "the worker is blocked"
-	case exitFinished:
+	case kindFinished:
 		return "the worker has finished"
 	default:
 		return "a status mismatch"

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -42,11 +40,13 @@ type readResult struct {
 }
 
 type readOptions struct {
-	Repo   string
-	Name   string
-	Lines  int
-	Report bool
-	JSON   bool
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface string
+	Name    string
+	Lines   int
+	Report  bool
+	JSON    bool
 }
 
 func newSurfaceReadCmd(deps module.Deps) *cobra.Command {
@@ -76,6 +76,7 @@ or the pane could not be read. Exit 2: a usage or setup error, including
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().IntVar(&opts.Lines, "lines", defaultReadLines, fmt.Sprintf("how many screen rows to print (at most %d)", maxReadLines))
 	cmd.Flags().BoolVar(&opts.Report, "report", false, "print only the REPORT line for the last brief")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","agent","status","text","marker","found","report"} as JSON`)
@@ -86,7 +87,7 @@ func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) erro
 	if opts.Lines <= 0 || opts.Lines > maxReadLines {
 		return WithExitCode(fmt.Errorf("--lines must be 1-%d", maxReadLines), exitUsage)
 	}
-	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -97,11 +98,11 @@ func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) erro
 	// end as unreadable, not hang.
 	ctx, cancel := context.WithTimeout(cmd.Context(), readTimeout)
 	defer cancel()
-	s, err := w.read(ctx)
+	s, err := w.readLast(ctx)
 	if err != nil {
 		reason := "the worker's pane could not be read"
-		if errors.Is(err, herdradapter.ErrWorkerGone) {
-			reason = "the worker's herdr workspace is gone"
+		if workerIsGone(err) {
+			reason = goneReason(err)
 		}
 		return WithExitCode(fmt.Errorf("%s: %s", reason, termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)), exitFailed)
 	}

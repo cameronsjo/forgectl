@@ -74,7 +74,9 @@ type closeResult struct {
 }
 
 type closeOptions struct {
-	Repo         string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface      string
 	Name         string
 	KeepWorktree bool
 	JSON         bool
@@ -134,6 +136,7 @@ refused. Exit 2: a usage or setup error.
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().BoolVar(&opts.KeepWorktree, "keep-worktree", false, "close the workspace and keep the worktree")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","branch","closed","workspace","worktree","kept_because","forgotten","reason","note"} as JSON (with --dry-run, the preview's keys)`)
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "print what close would do and change nothing (herdr is not asked)")
@@ -147,7 +150,7 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	if err := worker.ValidName(opts.Name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
-	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
+	w, err := openSurfaceLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -166,7 +169,7 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
 		}), opts.JSON)
 	}
-	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), realCloseSteps(deps.Runner, w.herdr, w.led, w.top, row))
+	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), realCloseSteps(deps.Runner, w.surface, w.led, w.top, row))
 	return reportClose(cmd, res, opts.JSON)
 }
 

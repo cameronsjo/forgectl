@@ -10,7 +10,7 @@
 // nothing else, and so a worker's screen text and a brief's text never reach
 // the argv-logging Runner. Identity is checked on every call that acts on a
 // terminal: the core's id, the terminal's address and creation time, and the
-// forgectl_surface label carrying the ownership marker (see locate).
+// forgectl.surface label carrying the ownership marker (see locate).
 //
 // The JSON shapes parsed here were measured on hc 0.1.15. The parsers are
 // strict and fail closed: anything they cannot read is unreadable, never gone.
@@ -28,8 +28,14 @@ import (
 
 // ownerLabel is the label key carrying forgectl's ownership marker. The
 // marker cannot be the terminal's name: hc names are at most 32 characters
-// and the marker is 43.
-const ownerLabel = "forgectl_surface"
+// and the marker is 43. Labels are a namespace shared with herdr-app (which
+// writes "where" and "herdr.*"), so the key is namespaced and only this key
+// is compared; the rest of the label set is never required to be forgectl's.
+//
+// A label is not authenticated: any hc client can write one. It is the same
+// strength as herdr's workspace label, which is why locate also requires the
+// recorded creation time and core id.
+const ownerLabel = "forgectl.surface"
 
 // ledgerPrefix keeps an hc session's worker ledger apart from a herdr session
 // of the same name: the ledger is keyed by the session string alone.
@@ -51,12 +57,16 @@ const (
 	stderrCap = 1 << 14
 )
 
-// hc's documented exit codes (`hc --skill`, Status, recovery, and cleanup).
+// hc's error kinds this package acts on. Errors are matched on kind, never
+// on exit code: several kinds share code 1.
 const (
-	exitNotFound       = 3
-	exitBlocked        = 9
-	exitStatusMismatch = 10
-	exitFinished       = 11
+	kindNotFound       = "not_found"
+	kindNameTaken      = "name_taken"
+	kindInvalidParams  = "invalid_params"
+	kindSpawnFailed    = "spawn_failed"
+	kindBlocked        = "blocked"
+	kindStatusMismatch = "status_mismatch"
+	kindFinished       = "finished"
 )
 
 // ErrResolveSession reports that the hc session could not be chosen.

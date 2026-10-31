@@ -30,7 +30,12 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("run"),
 		exec.MustFixed("--bg"),
 		exec.MustFixed("--json"),
+		// A worker outlives the terminal that launched it (a coordinator's
+		// own session ending must not kill its workers), and hc types no
+		// notes about it into that terminal: the coordinator follows the
+		// worker through forgectl, not through hc's notes.
 		exec.MustFixed("--outlive-parent"),
+		exec.MustFixed("--no-notify"),
 		exec.MustFixed("--name"),
 		spec.Name(),
 		exec.MustFixed("--cwd"),
@@ -45,11 +50,11 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		// spawn_failed was measured to leave no terminal behind (a missing
 		// cwd); any other failure may have created one.
 		switch errorKind(res.Stderr) {
-		case "name_taken":
+		case kindNameTaken:
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureNameCollision, runErr))
-		case "invalid_params":
+		case kindInvalidParams:
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureInternal, runErr))
-		case "spawn_failed":
+		case kindSpawnFailed:
 			return backend.NewNotMutated(backend.NewStartCause(backend.FailureUnavailable, runErr))
 		}
 		return a.reconcile(ctx, spec.Tag(), server, classifyRunError(runErr))
@@ -169,7 +174,7 @@ const (
 	getAbsent
 )
 
-// get reads one terminal by address. not_found (exit 3) is absent; any other
+// get reads one terminal by address. not_found is absent; any other
 // failure, or a reply that does not parse into a usable terminal, is
 // unreadable.
 func (a *Adapter) get(ctx context.Context, address string) (terminal, getState, *backend.StartCause) {
@@ -180,7 +185,7 @@ func (a *Adapter) get(ctx context.Context, address string) (terminal, getState, 
 		exec.Opaque(address),
 	))
 	if err != nil {
-		if res.ExitCode == exitNotFound && errorKind(res.Stderr) == "not_found" {
+		if errorKind(res.Stderr) == kindNotFound {
 			return terminal{}, getAbsent, nil
 		}
 		c := classifyRunError(err)

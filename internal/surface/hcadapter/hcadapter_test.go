@@ -18,8 +18,9 @@ type fakeHC struct {
 	createReply string
 	createErr   string
 	createExit  int
-	sendExit    int
-	verbs       []string
+	// sendKind, when set, is the error kind `hc send` fails with.
+	sendKind string
+	verbs    []string
 }
 
 func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
@@ -39,14 +40,15 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 			if reply, found := f.terminals[addr]; found {
 				return ok(reply), nil
 			}
-			return fail(cmd.Kind, `{"error":{"kind":"not_found","message":"no terminal"}}`, exitNotFound)
+			return fail(cmd.Kind, `{"error":{"kind":"not_found","message":"no terminal"}}`, 3)
 		case "ls":
 			return ok(`{"hidden_finished":0,"terminals":[]}`), nil
 		case "read":
 			return ok(`{"complete":true,"how":"screen","text":"hello\nREPORT m1: done\n"}`), nil
 		case "send":
-			if f.sendExit != 0 {
-				return fail(cmd.Kind, `{"error":{"kind":"blocked","message":"blocked"}}`, f.sendExit)
+			if f.sendKind != "" {
+				// Exit 1 for every kind: the adapter must map on kind.
+				return fail(cmd.Kind, `{"error":{"kind":"`+f.sendKind+`","message":"no"}}`, 1)
 			}
 			return ok(`{"started":true,"status":"working","turn":2}`), nil
 		case "kill", "rm":
@@ -135,7 +137,7 @@ func testSpec(t *testing.T) backend.StartSpec {
 
 func getReply(addr, owner string, created int64, state, status string) string {
 	return `{"address":"` + addr + `","created_ms":` + itoa(created) + `,"state":"` + state +
-		`","labels":{"forgectl_surface":"` + owner + `"},"turn":1,"status":` + status + `}`
+		`","labels":{"forgectl.surface":"` + owner + `"},"turn":1,"status":` + status + `}`
 }
 
 func itoa(n int64) string {
@@ -304,11 +306,13 @@ func TestWorkerScreenAndSend(t *testing.T) {
 	if err != nil || sent.Status != StatusWorking || sent.Turn != 2 {
 		t.Fatalf("SendBrief = %+v, %v", sent, err)
 	}
-	f.sendExit = exitBlocked
-	if _, err := a.SendBrief(context.Background(), ref, "next step"); !errors.Is(err, ErrSendRefused) {
-		t.Fatalf("blocked SendBrief err = %v, want ErrSendRefused", err)
+	for _, kind := range []string{kindBlocked, kindStatusMismatch, kindFinished} {
+		f.sendKind = kind
+		if _, err := a.SendBrief(context.Background(), ref, "next step"); !errors.Is(err, ErrSendRefused) {
+			t.Fatalf("%s SendBrief err = %v, want ErrSendRefused", kind, err)
+		}
 	}
-	f.sendExit = 1
+	f.sendKind = "internal"
 	if _, err := a.SendBrief(context.Background(), ref, "next step"); !errors.Is(err, ErrSendFailed) {
 		t.Fatalf("failed SendBrief err = %v, want ErrSendFailed", err)
 	}

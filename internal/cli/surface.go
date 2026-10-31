@@ -46,7 +46,8 @@ func newSurfaceCmd(deps module.Deps) *cobra.Command {
 		Use:   "surface",
 		Short: "Start a harness in a terminal manager, invocation hidden",
 		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
-tmux, cmux, or herdr — without the manager ever seeing the harness invocation.
+tmux, cmux, herdr, or hc (herdr-core) — without the manager ever seeing the
+harness invocation.
 
 A manager necessarily learns the target directory and the command it is asked
 to type, because it creates the workspace. What it does not learn is the
@@ -162,7 +163,7 @@ reads those settings only from the directory it starts in. The launch profile
 is still the target's. After a move, relative paths in a prompt resolve
 against the root; --here starts the session in the target itself.
 
-With --worktree <branch> (herdr only, --name required) the launch starts a
+With --worktree <branch> (--surface herdr or hc, --name required) the launch starts a
 coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
 created with repository hooks disabled, and a row in the worker ledger under
 $XDG_STATE_HOME/forgectl/surface. A branch that does not exist yet starts at
@@ -223,10 +224,18 @@ forgectl#1287), after the workspace ownership check. The workspace label
 stays the ownership marker. A failure to set it is a note on stderr, not a
 failed launch.
 
+--surface hc starts the worker in a herdr-core terminal: hc run --bg
+--outlive-parent --no-notify, named --name (hc's rules: 1-32 of a-z 0-9 - _ .,
+not shaped like an address such as t7) and labeled forgectl.surface with the
+ownership marker. It stays out of the herdr-app window. The worker verbs (list,
+read, ready, wait, brief, close) take --surface hc to reach it; under hc,
+readiness is hc's reported status, never screen text.
+
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
   forgectl surface launch . --surface herdr --worktree fix/y --name y --profile work --model sonnet
-  forgectl surface launch . --surface herdr --worktree feat/x --name x --dry-run --json`,
+  forgectl surface launch . --surface herdr --worktree feat/x --name x --dry-run --json
+  forgectl surface launch . --surface hc --worktree fix/login --name fix-login --brief @brief.md`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
@@ -253,13 +262,13 @@ failed launch.
 	// shipped while this still said "(tmux)" — so it is written next to the
 	// switch it describes in surfaceAdapterFor, and both change together.
 	cmd.Flags().StringVar(&backendName, "surface", "",
-		"terminal manager to create the surface in (tmux, cmux, herdr) — required, no default")
+		"terminal manager to create the surface in (tmux, cmux, herdr, hc) — required, no default")
 	cmd.Flags().StringVar(&displayName, "name", "",
 		"display name for the surface (defaults to the target's directory name)")
 	cmd.Flags().BoolVar(&allowPATH, "allow-path-binary", false,
 		"accept a harness found by searching $PATH rather than named in config")
 	cmd.Flags().StringVar(&worktree, "worktree", "",
-		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
+		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr or hc; --name required)")
 	cmd.Flags().StringVar(&harness, "harness", "",
 		"run this harness instead of the one the directory's launch profile names (claude, codex, or pi)")
 	cmd.Flags().BoolVar(&here, "here", false,
@@ -337,6 +346,13 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	target, err := client.ResolveTarget(opts.Target)
 	if err != nil {
 		return WithExitCode(err, exitUsage)
+	}
+	// hc names its terminal after the display name and refuses some shapes
+	// a directory name can have (uppercase, "t7"); refuse them here.
+	if opts.Backend == workerSurfaceHc {
+		if err := checkHcName(displayNameFor(opts.DisplayName, target)); err != nil {
+			return err
+		}
 	}
 
 	self, err := surface.SelfPath()
@@ -431,8 +447,13 @@ var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORK
 // CMUX_ set names the app, its shims, its socket or a port range, not a pane.
 var paneIdentityEnvByBackend = map[string][]string{
 	"herdr": herdrPaneIdentityEnv,
-	"tmux":  {"TMUX_PANE"},
-	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
+	// hc sets HC_TERMINAL_ID (the terminal's address) and HC_SESSION in
+	// every terminal it starts. hc run does not forward the launcher's
+	// environment, so these are the worker terminal's own, read by the
+	// trampoline; the worker's own `hc send` needs both to reach its core.
+	"hc":   {"HC_TERMINAL_ID", "HC_SESSION"},
+	"tmux": {"TMUX_PANE"},
+	"cmux": {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
 }
 
 // isPaneIdentityKey reports whether key names a pane under any manager.
