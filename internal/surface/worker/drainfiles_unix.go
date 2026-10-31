@@ -39,7 +39,7 @@ func (d DrainFiles) Lock() (*DrainLock, error) {
 		return nil, fmt.Errorf("worker: drain directory: %w", err)
 	}
 	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
-	f, err := openVerified(dir, drainLockName, unix.O_RDWR|unix.O_CREAT)
+	f, err := openLockFile(dir, drainLockName)
 	if err != nil {
 		return nil, err
 	}

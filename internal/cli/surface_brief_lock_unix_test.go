@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -99,4 +100,88 @@ func launchedLedgerRow(t *testing.T, led *worker.Ledger, at time.Time) worker.Ro
 		t.Fatal(err)
 	}
 	return onlyRow(t, led)
+}
+
+// TestCanceledBriefWaitKeepsTheHoldersLock: a brief that gives up waiting
+// for the lock (its context ends mid-wait) must not release the lock the
+// running brief holds. A third brief still waits until the first has sent
+// and returned.
+func TestCanceledBriefWaitKeepsTheHoldersLock(t *testing.T) {
+	led := testWorkerLedger(t)
+	opened := launchedLedgerRow(t, led, time.Unix(1e9, 0).UTC())
+	sending := make(chan struct{})
+	finish := make(chan struct{})
+	var finishOnce sync.Once
+	letFirstFinish := func() { finishOnce.Do(func() { close(finish) }) }
+	t.Cleanup(letFirstFinish) // a failed assertion never leaves the first brief holding the lock
+	var mu sync.Mutex
+	var sends []string
+	steps := func(who string, block bool) hcBriefSteps {
+		return hcBriefSteps{
+			status: func(context.Context) (hcadapter.Worker, error) {
+				return hcadapter.Worker{Live: true, Status: "idle", Turn: 1}, nil
+			},
+			screen:      func(context.Context) (string, error) { return hcFixture("claude-ready-acceptedits"), nil },
+			promptShown: func(text string) ready.Verdict { return hcTable.EvaluateText("claude", text) },
+			escape:      func(context.Context, hcadapter.Worker) error { return nil },
+			send: func(context.Context, string, hcadapter.Worker) (hcadapter.SendResult, error) {
+				mu.Lock()
+				sends = append(sends, who)
+				mu.Unlock()
+				if block {
+					close(sending)
+					<-finish
+				}
+				return hcadapter.SendResult{Status: "working", Turn: 2}, nil
+			},
+			record:   func(worker.Brief) (int, error) { return 1, nil },
+			now:      time.Now,
+			sleep:    resume.SleepContext,
+			start:    time.Second,
+			interval: 10 * time.Millisecond,
+		}
+	}
+
+	first := make(chan briefResult, 1)
+	go func() {
+		first <- hcBriefLocked(context.Background(), led.LockBrief, opened, steps("first", true), "go", "m1")
+	}()
+	select {
+	case <-sending:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first brief never reached its send")
+	}
+
+	// The second brief waits, then its context is canceled mid-wait.
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(150*time.Millisecond, cancel)
+	if res := hcBriefLocked(ctx, led.LockBrief, opened, steps("second", false), "go", "m2"); res.Outcome != briefRefused {
+		t.Fatalf("the canceled brief: %q at %s: %s, want refused", res.Outcome, res.Step, res.Reason)
+	}
+
+	// The first brief is still sending, so the lock must still be held.
+	short, cancelShort := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancelShort()
+	if release, _, err := led.LockBrief(short, "w"); !errors.Is(err, worker.ErrBriefBusy) {
+		if release != nil {
+			release()
+		}
+		letFirstFinish()
+		t.Fatalf("LockBrief after the canceled wait = %v, want ErrBriefBusy while the first brief sends", err)
+	}
+
+	letFirstFinish()
+	if res := <-first; res.Outcome != briefSent {
+		t.Fatalf("the first brief: %q at %s: %s", res.Outcome, res.Step, res.Reason)
+	}
+	release, _, err := led.LockBrief(context.Background(), "w")
+	if err != nil {
+		t.Fatalf("LockBrief after the first brief returned: %v", err)
+	}
+	release()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sends) != 1 || sends[0] != "first" {
+		t.Fatalf("sends = %v, want only the first brief's", sends)
+	}
 }
