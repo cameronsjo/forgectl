@@ -243,6 +243,7 @@ var fakeRunnerOwners = map[string]string{
 	"OutputComplete":        "internal/exec/sensitive_fake.go",
 	"OutputOverflowed":      "internal/exec/sensitive_fake.go",
 	"OutputRetired":         "internal/exec/sensitive_fake.go",
+	"OutputHeadDropped":     "internal/exec/sensitive_fake.go",
 	"BoundedOutputForTest":  "internal/exec/sensitive_fake.go",
 	"SensitiveErrorForTest": "internal/exec/sensitive_fake.go",
 }
@@ -257,6 +258,7 @@ var fakeRunnerWhy = map[string]string{
 	"OutputComplete":        "an OutputCause value, which only a test's BoundedOutput needs; production output gets its cause from the runner (forgectl#970)",
 	"OutputOverflowed":      "an OutputCause value, which only a test's BoundedOutput needs; production output gets its cause from the runner (forgectl#970)",
 	"OutputRetired":         "an OutputCause value, which only a test's BoundedOutput needs; production output gets its cause from the runner (forgectl#970)",
+	"OutputHeadDropped":     "an OutputCause value, which only a test's BoundedOutput needs; production output gets its cause from the runner (forgectl#970)",
 	"TmuxSubcommand":        "the tmux argv helper the test runners key on; production tmux code builds its argv rather than parsing one back (forgectl#970)",
 	"BoundedOutputForTest":  "a test-only BoundedOutput constructor; production output comes only from the runner (forgectl#952)",
 	"SensitiveErrorForTest": "a test-only SensitiveError constructor; production errors come only from the runner (forgectl#952)",

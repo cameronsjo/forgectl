@@ -50,12 +50,17 @@ const MaxOutputBytes int64 = 64 << 10
 // bounded capture every existing caller uses. CaptureCmuxWorkspaceList is a
 // closed, schema-specific projection for cmux's workspace-list envelope: the
 // runner streams past fields the adapter never reads and retains only workspace
-// id and description values under the same output ceiling.
+// id and description values under the same output ceiling. CaptureTail
+// reads the stream to its end and keeps its last cap bytes, for output whose
+// end is the part that matters (a terminal screen, whose live bottom holds
+// the prompt): a longer stream is not an output-limit failure, and the
+// result reports itself incomplete with its start dropped.
 type CaptureMode uint8
 
 const (
 	CaptureRaw CaptureMode = iota
 	CaptureCmuxWorkspaceList
+	CaptureTail
 	captureModeCount
 )
 
@@ -67,6 +72,8 @@ func (m CaptureMode) String() string {
 		return "raw"
 	case CaptureCmuxWorkspaceList:
 		return "cmux_workspace_list"
+	case CaptureTail:
+		return "tail"
 	default:
 		return "invalid(" + strconv.Itoa(int(m)) + ")"
 	}
@@ -572,55 +579,82 @@ func IsLauncherFocusKey(key string) bool { return slices.Contains(launcherFocusE
 // LauncherFocusEnv is a fresh copy of launcherFocusEnv.
 func LauncherFocusEnv() []string { return slices.Clone(launcherFocusEnv) }
 
-// launcherSessionHandlePrefixes and launcherSessionHandleKeys, with every
-// manager's pane ids and the launcher focus, are the launching session's
-// handles.
+// claudeConfigEnv are the CLAUDE_ variables that configure Claude Code
+// rather than describe the session that set them, so they pass: the config
+// directory, and the model-provider switches a harness cannot start without.
+// Every other CLAUDE_ variable is dropped by prefix (IsClaudeSessionKey), so
+// a per-session name a later Claude Code release adds is dropped by default.
+// What else an operator configures through variables comes back through the
+// user settings `env` block, which a launched claude loads again.
+var claudeConfigEnv = []string{
+	"CLAUDE_CONFIG_DIR",
+	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+}
+
+// ClaudeConfigEnv is a fresh copy of claudeConfigEnv.
+func ClaudeConfigEnv() []string { return slices.Clone(claudeConfigEnv) }
+
+// claudeEnvPrefix covers Claude Code's variables: its session id, pid,
+// timeline path, bridge session id, messaging socket and token, and its
+// feature switches.
+const claudeEnvPrefix = "CLAUDE_"
+
+// hcTerminalEnvPrefix covers what hc sets for one terminal: HC_TERMINAL_ID
+// and HC_TERMINAL_SOCKET, the core's socket. Without them, HC_SESSION alone
+// selects the core the adapter fingerprints.
+const hcTerminalEnvPrefix = "HC_TERMINAL_"
+
+// IsClaudeSessionKey reports whether key is a CLAUDE_ variable outside
+// claudeConfigEnv.
+func IsClaudeSessionKey(key string) bool {
+	return strings.HasPrefix(key, claudeEnvPrefix) && !slices.Contains(claudeConfigEnv, key)
+}
+
+// IsLaunchStripKey reports whether a surface launch strips key as the
+// launcher's: every manager's pane identity (hc's HC_SCOPE included), every
+// HC_TERMINAL_ variable, herdr's custom-command focus, and every CLAUDE_
+// variable outside claudeConfigEnv. The trampoline puts back the new pane's
+// own identity. It is the one copy: internal/cli's surfaceLaunchEnvironment
+// calls it, and every hc call drops these keys too (IsLauncherSessionHandle).
+func IsLaunchStripKey(key string) bool {
+	return IsPaneIdentityKey(key) || IsLauncherFocusKey(key) ||
+		strings.HasPrefix(key, hcTerminalEnvPrefix) || IsClaudeSessionKey(key)
+}
+
+// hcOnlyHandleKeys are dropped from every hc call and kept by a surface
+// launch, each for the reason a cli drift test records:
 //
-//   - CLAUDE_CODE_ covers Claude Code's session id and its cross-session
-//     messaging socket and token, and so every other CLAUDE_CODE_ variable
-//     too; CLAUDECODE marks a process as running inside a Claude Code session.
-//   - HC_TERMINAL_ covers HC_TERMINAL_ID and HC_TERMINAL_SOCKET, the core's
-//     socket: without it, HC_SESSION alone selects the core the adapter
-//     fingerprints. HC_SESSION is not here: it selects the core, which the
-//     launcher and its workers share.
+//   - CLAUDECODE marks a process as running inside a Claude Code session; a
+//     launch keeps it (forgectl#363), and an hc core must not hand it to
+//     terminals forgectl never launched.
 //   - FORGECTL_WORKER, FORGECTL_LEDGER, FORGECTL_INBOX and
 //     FORGECTL_DRAIN_WORKER are a launched worker's own identity
-//     (mail.EnvWorker and the rest; a cli test pins the two together).
+//     (mail.EnvWorker and the rest), which follows what a worker launches;
+//     the drain-worker flag is containment and must.
 //
-// FORGECTL_SURFACE_PANE is not a handle: its value names a backend, not a
-// pane, and the trampoline reads it only from the sealed invocation, never
-// from its own environment.
-//
-// A surface launch strips only part of this set (surfaceLaunchEnvironment in
-// internal/cli); a cli drift test lists, with its reason, every key hc calls
-// drop and launches keep.
-var (
-	launcherSessionHandlePrefixes = []string{"CLAUDE_CODE_", "HC_TERMINAL_"}
-	launcherSessionHandleKeys     = []string{
-		"CLAUDECODE",
-		"FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
-	}
-)
+// HC_SESSION is in neither set: it selects the core, which the launcher and
+// its workers share. FORGECTL_SURFACE_PANE is not a handle: its value names a
+// backend, not a pane, and the trampoline reads it only from the sealed
+// invocation, never from its own environment.
+var hcOnlyHandleKeys = []string{
+	"CLAUDECODE",
+	"FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
+}
 
-// LauncherSessionHandleNames returns fresh copies of the exact keys and the
-// prefixes IsLauncherSessionHandle matches beyond the pane identity and the
-// launcher focus, so a test can walk the whole set.
+// LauncherSessionHandleNames returns fresh copies of the exact keys every hc
+// call drops beyond the launch strip, and the prefixes the two share, so a
+// test can walk the whole set.
 func LauncherSessionHandleNames() (keys, prefixes []string) {
-	return slices.Clone(launcherSessionHandleKeys), slices.Clone(launcherSessionHandlePrefixes)
+	return slices.Clone(hcOnlyHandleKeys), []string{claudeEnvPrefix, hcTerminalEnvPrefix}
 }
 
 // IsLauncherSessionHandle reports whether key names one of the launching
-// session's handles, which UnsetLauncherSessionHandles drops.
+// session's handles, which UnsetLauncherSessionHandles drops: everything a
+// surface launch strips (IsLaunchStripKey), so the two cannot drift in that
+// direction, plus hcOnlyHandleKeys.
 func IsLauncherSessionHandle(key string) bool {
-	if slices.Contains(launcherSessionHandleKeys, key) || IsPaneIdentityKey(key) || IsLauncherFocusKey(key) {
-		return true
-	}
-	for _, p := range launcherSessionHandlePrefixes {
-		if strings.HasPrefix(key, p) {
-			return true
-		}
-	}
-	return false
+	return IsLaunchStripKey(key) || slices.Contains(hcOnlyHandleKeys, key)
 }
 
 // ReplaceSopsEditor points sops' EDITOR at a command. sops shell-word-splits
@@ -855,6 +889,10 @@ type BoundedOutput struct {
 	// still holding the write end. The bytes are a prefix either way, but the
 	// two causes are different answers to "should I retry".
 	forced bool
+	// headDropped means a CaptureTail stream ran past its cap: the bytes are
+	// the stream's last cap bytes, a suffix rather than a prefix, and the
+	// process was not killed for it.
+	headDropped bool
 }
 
 // Len is the number of bytes retained, which is at most the stream's cap.
@@ -875,7 +913,11 @@ func (b BoundedOutput) Len() int {
 // retires the pipe on its own schedule. That is why a cut-off stream is not an
 // error — the command did what it was asked — and why a caller that parses
 // output must read this flag rather than the returned error.
-func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
+func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced && !b.headDropped }
+
+// HeadDropped reports that a CaptureTail stream was longer than its cap, so
+// the retained bytes are its end, not its start.
+func (b BoundedOutput) HeadDropped() bool { return b.headDropped }
 
 // CopyBytesForParse returns a fresh copy of the retained bytes and whether
 // they are the complete stream. The copy keeps a parser from aliasing (and

@@ -211,7 +211,9 @@ func (c CLI) List(ctx context.Context) ([]Terminal, error) {
 }
 
 // screenCutNote ends a screen that was longer than the runner's output cap.
-const screenCutNote = "\n[the screen was cut: only its start fit]"
+// The read kept the screen's end, where the live prompt is drawn, and the
+// note goes after it because the view shows the last lines.
+const screenCutNote = "\n[the screen was cut: only its end fit]"
 
 // Read implements HC. It returns hc's text as is: the caller strips and
 // escapes it before it reaches a terminal.

@@ -36,12 +36,14 @@ func (a *Adapter) ListJSON(ctx context.Context) ([]byte, error) {
 }
 
 // ReadText returns `hc read <target>`, the terminal's screen as text. It is
-// untrusted: the caller strips and escapes it before showing it. complete is
-// false when the screen was longer than the runner's output cap and only its
-// start came back.
+// untrusted: the caller strips and escapes it before showing it. The read
+// keeps the end of the screen (exec.CaptureTail), where the live prompt and
+// any dialog are drawn; complete is false when the screen was longer than the
+// runner's output cap and only its last 64 KiB came back.
 func (a *Adapter) ReadText(ctx context.Context, target string) (text []byte, complete bool, err error) {
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcRead,
-		exec.MustFixed("read"), exec.EndOfOptions(), exec.Opaque(target)))
+	cmd := a.command(exec.KindHcRead, exec.MustFixed("read"), exec.EndOfOptions(), exec.Opaque(target))
+	cmd.StdoutMode = exec.CaptureTail
+	res, runErr := a.run.RunSensitive(ctx, cmd)
 	if runErr != nil {
 		return nil, false, a.queryError("read", res, runErr)
 	}

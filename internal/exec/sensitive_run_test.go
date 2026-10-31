@@ -57,6 +57,14 @@ func helperMain(mode string) int {
 		return 3
 	case "flood":
 		return floodTo(os.Stdout, arg)
+	case "floodend":
+		// arg bytes of filler, then a marker, so a tail read can be told
+		// from a head read.
+		if code := floodTo(os.Stdout, arg); code != 0 {
+			return code
+		}
+		_, _ = fmt.Fprint(os.Stdout, "END-OF-SCREEN")
+		return 0
 	case "cmuxlist":
 		n, err := strconv.Atoi(arg)
 		if err != nil || n < 0 {
@@ -1021,13 +1029,14 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
 	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID", "HC_SCOPE",
 		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
-		"HERDR_ACTIVE_PANE_ID", "HERDR_ACTIVE_WORKSPACE_ID", "HC_TERMINAL_SOCKET"}
-	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "HERDR_SOCKET_PATH=/x/herdr.sock", "TMUX=/tmp/tmux-1/default,1,0", "FORGECTL_UNRELATED=keep"}
+		"HERDR_ACTIVE_PANE_ID", "HERDR_ACTIVE_WORKSPACE_ID", "HC_TERMINAL_SOCKET",
+		"CLAUDE_PID", "CLAUDE_TIMELINE_PATH", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_FOO"}
+	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "HERDR_SOCKET_PATH=/x/herdr.sock", "TMUX=/tmp/tmux-1/default,1,0", "FORGECTL_UNRELATED=keep", "CLAUDE_CONFIG_DIR=/x/claude"}
 	extra := append([]string{}, kept...)
 	for _, k := range gone {
 		extra = append(extra, k+"=launcher-"+k)
 	}
-	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_SESSION,XDG_CONFIG_HOME,HERDR_SOCKET_PATH,TMUX,FORGECTL_UNRELATED", defaultRetireBound, extra...)
+	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_SESSION,XDG_CONFIG_HOME,HERDR_SOCKET_PATH,TMUX,FORGECTL_UNRELATED,CLAUDE_CONFIG_DIR", defaultRetireBound, extra...)
 	res, err := runner.RunSensitive(context.Background(), helperCommand(KindHcReadiness, self, 8192, UnsetLauncherSessionHandles()))
 	if err != nil {
 		t.Fatalf("RunSensitive: %v", err)

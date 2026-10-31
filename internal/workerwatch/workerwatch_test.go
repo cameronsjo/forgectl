@@ -148,9 +148,9 @@ func TestCLIReadMarksACutScreen(t *testing.T) {
 	if got, err := whole.Read(context.Background(), "cos-a"); err != nil || got != "screen" {
 		t.Errorf("Read = %q, %v; want the screen as is", got, err)
 	}
-	cut := CLI{Source: &fakeSource{read: func(string) ([]byte, bool, error) { return []byte("scr"), false, nil }}}
-	if got, err := cut.Read(context.Background(), "cos-a"); err != nil || got != "scr"+screenCutNote {
-		t.Errorf("Read = %q, %v; want the start and the cut note", got, err)
+	cut := CLI{Source: &fakeSource{read: func(string) ([]byte, bool, error) { return []byte("een"), false, nil }}}
+	if got, err := cut.Read(context.Background(), "cos-a"); err != nil || got != "een"+screenCutNote {
+		t.Errorf("Read = %q, %v; want the screen's end, then the cut note", got, err)
 	}
 }
 

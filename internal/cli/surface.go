@@ -448,20 +448,6 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
-// claudeCodeSessionIDEnv is the launcher session's own id. A new surface is
-// an independent session (forgectl#363), so it must not claim the
-// launcher's id: forgectl's repair log and resume trigger read it as "who".
-const claudeCodeSessionIDEnv = "CLAUDE_CODE_SESSION_ID"
-
-// claudeCodeSessionAttendedEnv describes the launcher session too (whether a
-// person is attending it), so it goes with the id.
-const claudeCodeSessionAttendedEnv = "CLAUDE_CODE_SESSION_ATTENDED"
-
-// hcTerminalEnvPrefix covers the variables hc sets for one terminal:
-// HC_TERMINAL_ID and HC_TERMINAL_SOCKET. A launch strips all of them, and an
-// hc launch's trampoline puts back the new terminal's own (paneIdentityEnv).
-const hcTerminalEnvPrefix = "HC_TERMINAL_"
-
 // hcTerminalSocketEnv is the socket of the core an hc terminal runs in.
 const hcTerminalSocketEnv = "HC_TERMINAL_SOCKET"
 
@@ -615,19 +601,25 @@ func validPaneIdentity(v string) bool {
 // launch marks its invocation with its backend (markPane), and the trampoline
 // puts back the new pane's own values for that backend (paneIdentityEnv).
 //
-// Claude Code's messaging socket and token go too: they are the launcher
+// Every CLAUDE_ variable goes too, except the configuration ones
+// (exec.ClaudeConfigEnv): the messaging socket and token are the launcher
 // session's inbox, so a Codex or pi agent in the new surface would otherwise
-// find the launcher's mail ledger and `surface send` as the coordinator.
+// find the launcher's mail ledger and `surface send` as the coordinator, and
+// the session id, pid, timeline path and bridge session id all describe the
+// launcher. Dropping by prefix means a per-session name a later Claude Code
+// adds is dropped without a change here. This narrows forgectl#363's "every
+// other value stays" for the CLAUDE_ prefix; CLAUDECODE itself still stays.
 //
 // So does the pane focus herdr gives a custom command (exec.LauncherFocusEnv):
 // a launch bound to a herdr key would otherwise hand the new surface the
 // pane that had focus at the keypress as its default target.
+//
+// exec.IsLaunchStripKey is the one list.
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || key == claudeCodeSessionIDEnv || key == claudeCodeSessionAttendedEnv || slices.Contains(claudeMessagingEnv, key) ||
-			isPaneIdentityKey(key) || strings.HasPrefix(key, hcTerminalEnvPrefix) || exec.IsLauncherFocusKey(key) {
+		if exec.IsLaunchStripKey(key) {
 			continue
 		}
 		out = append(out, entry)

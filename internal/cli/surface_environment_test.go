@@ -13,19 +13,21 @@ import (
 
 // TestSurfaceLaunchEnvironment_StripsOnlyTheClaudeChildMarker pins Cameron's
 // ruling for forgectl#363: a new surface is independent, so it must not inherit
-// Claude's child-session classification. Every other inherited value remains
-// byte-for-byte and in order, including similarly named keys.
+// Claude's child-session classification. Every other inherited value outside
+// the CLAUDE_ prefix remains byte-for-byte and in order, including similarly
+// named keys. (The CLAUDE_ prefix as a whole is dropped since #1386:
+// TestHcScrubAndLaunchStripAgree.)
 func TestSurfaceLaunchEnvironment_StripsOnlyTheClaudeChildMarker(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin:/bin",
 		"CLAUDE_CODE_CHILD_SESSION=1",
-		"CLAUDE_CODE_CHILD_SESSION_DETAIL=keep-me",
+		"XCLAUDE_CODE_CHILD_SESSION=keep-me",
 		"AUTH_TOKEN=preserved",
 		"CLAUDE_CODE_CHILD_SESSION=duplicate-must-also-go",
 	}
 	want := []string{
 		"PATH=/usr/bin:/bin",
-		"CLAUDE_CODE_CHILD_SESSION_DETAIL=keep-me",
+		"XCLAUDE_CODE_CHILD_SESSION=keep-me",
 		"AUTH_TOKEN=preserved",
 	}
 
@@ -272,38 +274,49 @@ func TestSurfaceInvocationRequest_StdoutIsATerminal(t *testing.T) {
 	}
 }
 
-// launchKeepsHcDrops lists every key or prefix that every hc call drops
+// launchKeepsHcDrops lists every key that every hc call drops
 // (exec.IsLauncherSessionHandle) and a surface launch deliberately keeps,
 // with the reason. TestHcScrubAndLaunchStripAgree fails on a key in the hc
 // scrub that is neither stripped at launch nor listed here, so a key added to
 // one list alone is a decision someone has to write down.
 var launchKeepsHcDrops = map[string]string{
-	"CLAUDECODE": "a launched harness needs Claude Code's own variables; only the child-session marker and the inbox go",
-	"CLAUDE_CODE_": "the prefix also covers Claude Code's configuration (CLAUDE_CODE_USE_BEDROCK and the rest), which a launched harness needs; " +
-		"the session's id, child marker and inbox are stripped by name (namedUnderKeptPrefix)",
+	"CLAUDECODE":        "a launched harness keeps the Claude Code marker (forgectl#363); only the child-session marker and the other CLAUDE_ variables go",
 	mail.EnvWorker:      "a worker's identity follows what it launches, so mail still resolves it as that worker",
 	mail.EnvLedger:      "a worker's identity follows what it launches",
 	mail.EnvInbox:       "a worker's identity follows what it launches",
 	mail.EnvDrainWorker: "the drain-worker containment flag must survive a launch, or a worker could shed it by starting a surface",
 }
 
-// namedUnderKeptPrefix lists the known keys under a prefix in
-// launchKeepsHcDrops, and whether a launch strips each one.
-var namedUnderKeptPrefix = map[string]bool{
-	"CLAUDE_CODE_SESSION_ID":        true,
-	"CLAUDE_CODE_SESSION_ATTENDED":  true,
-	"CLAUDE_CODE_CHILD_SESSION":     true,
-	"CLAUDE_CODE_MESSAGING_SOCKET":  true,
-	"CLAUDE_CODE_MESSAGING_TOKEN":   true,
-	"CLAUDE_CODE_USE_BEDROCK":       false,
+// claudeNames are CLAUDE_ variables a live Claude Code session sets, plus a
+// made-up one standing for a name a later release adds, and whether each
+// passes both an hc call and a launch. Only exec.ClaudeConfigEnv passes.
+var claudeNames = map[string]bool{
+	"CLAUDE_PID":                    false,
+	"CLAUDE_TIMELINE_PATH":          false,
+	"CLAUDE_CODE_BRIDGE_SESSION_ID": false,
+	"CLAUDE_CODE_SESSION_ID":        false,
+	"CLAUDE_CODE_SESSION_ATTENDED":  false,
+	"CLAUDE_CODE_CHILD_SESSION":     false,
+	"CLAUDE_CODE_MESSAGING_SOCKET":  false,
+	"CLAUDE_CODE_MESSAGING_TOKEN":   false,
+	"CLAUDE_CODE_ENTRYPOINT":        false,
 	"CLAUDE_CODE_MAX_OUTPUT_TOKENS": false,
+	"CLAUDE_EFFORT":                 false,
+	"CLAUDE_FOO":                    false,
+	"CLAUDE_CONFIG_DIR":             true,
+	"CLAUDE_CODE_USE_BEDROCK":       true,
+	"CLAUDE_CODE_USE_VERTEX":        true,
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH": true,
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":  true,
 }
 
 // TestHcScrubAndLaunchStripAgree pins the hc calls' environment scrub and the
 // surface launch strip to each other, in both directions.
 //
 // Forward: every variable a launch strips as the launcher's, and every worker
-// identity name forgectl sets, is one every hc call drops too.
+// identity name forgectl sets, is one every hc call drops too. The hc scrub
+// is built on the launch strip (exec.IsLaunchStripKey), so this holds by
+// construction; the check pins that it stays built that way.
 //
 // Reverse: every key and prefix the hc scrub names is either stripped by a
 // launch or listed in launchKeepsHcDrops with its reason.
@@ -317,7 +330,7 @@ func TestHcScrubAndLaunchStripAgree(t *testing.T) {
 		stripped = append(stripped, ids...)
 	}
 	stripped = append(stripped, exec.LauncherFocusEnv()...)
-	stripped = append(stripped, claudeCodeChildSessionEnv, claudeCodeSessionIDEnv, "HC_TERMINAL_SOCKET")
+	stripped = append(stripped, claudeCodeChildSessionEnv, "HC_TERMINAL_SOCKET")
 	stripped = append(stripped, claudeMessagingEnv...)
 	if got := surfaceLaunchEnvironment(asEnv(stripped)); len(got) != 0 {
 		t.Fatalf("the launch strip kept %v; this list no longer matches it", got)
@@ -346,32 +359,36 @@ func TestHcScrubAndLaunchStripAgree(t *testing.T) {
 		if !exec.IsLauncherSessionHandle(probe) {
 			t.Fatalf("prefix %s does not match %s", p, probe)
 		}
-		if _, kept := launchKeepsHcDrops[p]; kept {
-			continue
-		}
 		if got := surfaceLaunchEnvironment(asEnv([]string{probe})); len(got) != 0 {
-			t.Errorf("reverse: hc calls drop every %s* key but a launch keeps %s; strip the prefix at launch or list it in launchKeepsHcDrops", p, probe)
-		}
-	}
-	// A kept prefix still holds named keys that are the launcher's own; each
-	// known one is checked by name, not skipped with its prefix.
-	for k, wantStripped := range namedUnderKeptPrefix {
-		if !exec.IsLauncherSessionHandle(k) {
-			t.Errorf("%s is listed under a kept prefix but hc calls keep it", k)
-		}
-		if got := len(surfaceLaunchEnvironment(asEnv([]string{k}))) == 0; got != wantStripped {
-			t.Errorf("reverse: %s stripped at launch = %v, want %v", k, got, wantStripped)
+			t.Errorf("reverse: hc calls drop every %s* key but a launch keeps %s; strip the prefix at launch", p, probe)
 		}
 	}
 	for k := range launchKeepsHcDrops {
-		if !slices.Contains(keys, k) && !slices.Contains(prefixes, k) {
+		if !slices.Contains(keys, k) {
 			t.Errorf("launchKeepsHcDrops lists %s, which the hc scrub no longer names", k)
 		}
 	}
 
-	for _, k := range []string{"HC_SESSION", "HERDR_SOCKET_PATH", "TMUX", "CMUX_SOCKET_PATH", "PATH", "HOME", "FORGECTL_SURFACE_PANE"} {
+	for k, passes := range claudeNames {
+		if exec.IsLauncherSessionHandle(k) == passes {
+			t.Errorf("%s: hc calls drop it = %v, want %v", k, !passes, !passes)
+		}
+		if kept := len(surfaceLaunchEnvironment(asEnv([]string{k}))) == 1; kept != passes {
+			t.Errorf("%s: a launch keeps it = %v, want %v", k, kept, passes)
+		}
+	}
+	for _, k := range exec.ClaudeConfigEnv() {
+		if !strings.HasPrefix(k, "CLAUDE_") {
+			t.Errorf("ClaudeConfigEnv lists %s, which the CLAUDE_ prefix never drops; the entry does nothing", k)
+		}
+		if _, listed := claudeNames[k]; !listed {
+			t.Errorf("ClaudeConfigEnv passes %s; list it in claudeNames so the decision is pinned", k)
+		}
+	}
+
+	for _, k := range []string{"HC_SESSION", "HERDR_SOCKET_PATH", "TMUX", "CMUX_SOCKET_PATH", "PATH", "HOME", "FORGECTL_SURFACE_PANE", "ANTHROPIC_MODEL"} {
 		if exec.IsLauncherSessionHandle(k) {
-			t.Errorf("%s names a shared server, the user, or a backend, but hc calls drop it", k)
+			t.Errorf("%s names a shared server, the user, a backend or configuration, but hc calls drop it", k)
 		}
 	}
 }

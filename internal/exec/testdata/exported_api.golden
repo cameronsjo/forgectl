@@ -16,6 +16,7 @@ file internal/exec/transform.go build=any
 file internal/tmux/tmuxesc/tmuxesc.go build=any
 const CaptureCmuxWorkspaceList CaptureMode
 const CaptureRaw CaptureMode
+const CaptureTail CaptureMode
 const EnvSopsNonce untyped string
 const EnvSopsPath untyped string
 const EnvSopsWorkdir untyped string
@@ -69,12 +70,16 @@ const OutcomeStartFailed Outcome
 const OutcomeTimeout Outcome
 const OutcomeUnspecified Outcome
 const OutputComplete OutputCause
+const OutputHeadDropped OutputCause
 const OutputOverflowed OutputCause
 const OutputRetired OutputCause
 const Redacted untyped string
 func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput
+func ClaudeConfigEnv() []string
 func EndOfOptions() Arg
 func HomebrewNoAutoUpdate() map[string]string
+func IsClaudeSessionKey(key string) bool
+func IsLaunchStripKey(key string) bool
 func IsLauncherFocusKey(key string) bool
 func IsLauncherSessionHandle(key string) bool
 func IsPaneIdentityKey(key string) bool
@@ -156,6 +161,7 @@ method (BoundedOutput) Complete() bool
 method (BoundedOutput) CopyBytesForParse() (data []byte, complete bool)
 method (BoundedOutput) Format(f fmt.State, verb rune)
 method (BoundedOutput) GoString() string
+method (BoundedOutput) HeadDropped() bool
 method (BoundedOutput) Len() int
 method (BoundedOutput) LogValue() log/slog.Value
 method (BoundedOutput) MarshalJSON() ([]byte, error)
@@ -246,7 +252,7 @@ method (onceCloser) WriteAt(b []byte, off int64) (n int, err error)
 method (onceCloser) WriteString(s string) (n int, err error)
 method (onceCloser) WriteTo(w io.Writer) (n int64, err error)
 type Arg struct{v github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; kind argKind}
-type BoundedOutput struct{buf *outputBuf; overflow bool; forced bool}
+type BoundedOutput struct{buf *outputBuf; overflow bool; forced bool; headDropped bool}
 type Call struct{Name string; Args []string; TmuxUTF8 bool; Interactive bool; Input string; Env map[string]string; UnsetEnv []string; Dir string}
 type CaptureMode uint8
 type CommandError struct{Name string; Args []string; Stderr string; StderrDropped int64; Output string; ExitCode int; Err error; span opaqueSpan}

@@ -56,9 +56,18 @@ func TestQueries_ShareTheAdaptersRunner(t *testing.T) {
 }
 
 // TestQueries_CutOutput: a JSON answer over the cap is a failure, never a
-// parse of half a document; a screen over the cap comes back marked cut.
+// parse of half a document; a screen is read in tail mode, so one over the
+// cap comes back as its end, marked cut.
 func TestQueries_CutOutput(t *testing.T) {
+	var readMode exec.CaptureMode
 	over := func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if cmd.Kind == exec.KindHcRead {
+			readMode = cmd.StdoutMode
+			return exec.SensitiveResult{
+				Stdout: exec.BoundedOutputForTest([]byte("bottom"), exec.OutputHeadDropped),
+				Stderr: exec.BoundedOutputForTest(nil, exec.OutputComplete),
+			}, nil
+		}
 		return exec.SensitiveResult{
 			Stdout: exec.BoundedOutputForTest([]byte(`{"terminals":[`), exec.OutputOverflowed),
 			Stderr: exec.BoundedOutputForTest(nil, exec.OutputComplete),
@@ -71,8 +80,12 @@ func TestQueries_CutOutput(t *testing.T) {
 	if _, err := a.ListJSON(context.Background()); !errors.Is(err, ErrQueryFailed) {
 		t.Errorf("ListJSON over the cap err = %v, want ErrQueryFailed", err)
 	}
-	if _, complete, err := a.ReadText(context.Background(), "t1"); err != nil || complete {
-		t.Errorf("ReadText over the cap: complete %v, err %v; want a cut screen and no error", complete, err)
+	text, complete, err := a.ReadText(context.Background(), "t1")
+	if err != nil || complete || string(text) != "bottom" {
+		t.Errorf("ReadText over the cap: %q complete %v, err %v; want the cut screen's end and no error", text, complete, err)
+	}
+	if readMode != exec.CaptureTail {
+		t.Errorf("hc read ran with stdout mode %v, want tail", readMode)
 	}
 }
 

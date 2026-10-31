@@ -1,18 +1,22 @@
 ## ADDED Requirements
 
 ### Requirement: Launches strip the launcher's handles
-A surface launch MUST strip the launcher's pane identity for every terminal manager (for hc, every `HC_TERMINAL_` variable and `HC_SCOPE`), the launcher's Claude Code session id, and the pane focus herdr gives a custom command (the four `HERDR_ACTIVE_` variables). The trampoline SHALL put back only the new pane's own identity for the backend that launched it.
+A surface launch MUST strip the launcher's pane identity for every terminal manager (for hc, every `HC_TERMINAL_` variable and `HC_SCOPE`), every `CLAUDE_` variable except `CLAUDE_CONFIG_DIR` and the model-provider switches, and the pane focus herdr gives a custom command (the four `HERDR_ACTIVE_` variables). The trampoline SHALL put back only the new pane's own identity for the backend that launched it.
 
 #### Scenario: Launch bound to a herdr key
 - **WHEN** a surface launch runs as a herdr custom command, with `HERDR_ACTIVE_PANE_ID` naming the focused pane
 - **THEN** the new surface's harness does not receive `HERDR_ACTIVE_PANE_ID`
+
+#### Scenario: A Claude Code variable a later release adds
+- **WHEN** the launcher's environment holds `CLAUDE_FOO`, a name no list mentions
+- **THEN** neither a launched surface nor any hc call receives it, while `CLAUDE_CONFIG_DIR` reaches both
 
 #### Scenario: hc worker scope
 - **WHEN** an hc worker is launched from inside another hc terminal
 - **THEN** the worker's harness carries its own terminal's `HC_TERMINAL_ID` and `HC_SCOPE`, not the launcher's
 
 ### Requirement: hc calls drop every launcher handle
-Every hc call MUST drop each variable a launch strips as the launcher's, plus Claude Code's variables, every `HC_TERMINAL_` variable, and a worker's identity. A variable that hc calls drop and a launch keeps MUST be one the code lists with its reason.
+Every hc call MUST drop each variable a launch strips as the launcher's, plus `CLAUDECODE` and a worker's identity. A variable that hc calls drop and a launch keeps MUST be one the code lists with its reason.
 
 #### Scenario: A key added to the hc scrub alone
 - **WHEN** a key is added to the hc calls' scrub and neither stripped at launch nor listed with a reason
