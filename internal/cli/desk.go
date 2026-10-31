@@ -128,12 +128,20 @@ afterwards is skipped as "changed" instead of run.
   forgectl desk runs             every run and how far it got
   forgectl desk show NAME        one run as a flow; --events, --at N to replay
   forgectl desk skip NAME        skip a waiting item, or clear a lost run
+  forgectl desk ask --title TEXT ask the operator for something that is not a script
+  forgectl desk asks [ID]        open asks by bucket, or one ask with its responses
+  forgectl desk respond ID KIND  answer an ask: done, reply TEXT, link URL, snooze DUR
+  forgectl desk watch --responses [ID]
+                                 block until an ask is answered (JSON lines)
+  forgectl desk ui               asks and scripts in one live TUI; answer with d r l s
+  forgectl desk serve            the same as a local web page (phone via tailscale serve)
   forgectl desk layout           herdr split: Claude left, the desk right
   forgectl desk prune            delete done/ and skipped/ entries older than N days
 
 The desk directory is --dir, else $DESK_DIR, else $CLAUDE_DESK_DIR, else
 $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
-pending/, running/, done/ and skipped/ subdirectories are touched.
+pending/, running/, done/ and skipped/ subdirectories are touched, plus asks/
+for the asks log.
 
 Dashboard keys (? lists them; in the run view, ? lists its own):
 ` + tui.DeskKeysHelp(deskHelpWidth) + `
@@ -159,6 +167,11 @@ bytes, not anything the script sources, calls or downloads.`,
 		newDeskShowCmd(&dir, deps),
 		newDeskLensCmd(),
 		newDeskSkipCmd(&dir, deps),
+		newDeskAskCmd(&dir, deps),
+		newDeskAsksCmd(&dir, deps),
+		newDeskRespondCmd(&dir, deps),
+		newDeskUICmd(&dir, deps),
+		newDeskServeCmd(&dir, deps),
 		newDeskLayoutCmd(deps, &dir),
 		newDeskPruneCmd(&dir, deps),
 		newDeskSuperviseCmd(&dir),
@@ -390,8 +403,10 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 
 func newDeskWatchCmd(dir *string, deps module.Deps) *cobra.Command {
 	var deadline, skip int
+	var responses bool
+	var since int64
 	cmd := &cobra.Command{
-		Use:   "watch <name>",
+		Use:   "watch <name> | watch --responses [ASK-ID]",
 		Short: "Stream a run's event lines and exit with its outcome",
 		Long: `watch prints NAME's event lines (RUN-START, STEP-START, STEP-END, STEP-SKIP,
 STEP-WARN, RUN-END) as they arrive, one per line, and exits when the run does.
@@ -416,19 +431,41 @@ Exit codes:
       resume= command is in the error on stderr
 
 --skip N leaves out the first N event lines, the resume point a previous
-watch printed.`,
-		Example: `  forgectl desk watch 17-merge-1201 --deadline 540`,
-		Args:    cobra.ExactArgs(1),
+watch printed.` + deskWatchResponsesHelp,
+		Example: `  forgectl desk watch 17-merge-1201 --deadline 540
+  forgectl desk watch --responses ask-1a2b3c4d --deadline 540`,
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if deadline < 0 || skip < 0 {
-				return deskUsage("desk watch: --deadline and --skip must not be negative")
+			if deadline < 0 || skip < 0 || since < 0 {
+				return deskUsage("desk watch: --deadline, --skip and --since must not be negative")
 			}
 			if !cmd.Flags().Changed("deadline") {
 				deadline = deskWatchDeadlineUnset
 			}
+			if responses {
+				if cmd.Flags().Changed("skip") {
+					return deskUsage("desk watch: --skip is for a run; a --responses watch resumes with --since")
+				}
+				id := ""
+				if len(args) == 1 {
+					id = args[0]
+				}
+				if !cmd.Flags().Changed("since") {
+					since = -1
+				}
+				return runDeskWatchResponses(cmd, deps, *dir, id, deadline, since)
+			}
+			if cmd.Flags().Changed("since") {
+				return deskUsage("desk watch: --since needs --responses")
+			}
+			if len(args) != 1 {
+				return deskUsage("desk watch: name the item to watch, or pass --responses")
+			}
 			return runDeskWatch(cmd, deps, *dir, args[0], deadline, skip)
 		},
 	}
+	cmd.Flags().BoolVar(&responses, "responses", false, "follow the asks log: one ask's responses (ASK-ID), or every response")
+	cmd.Flags().Int64Var(&since, "since", 0, "with --responses: start at this log offset (a previous watch's resume point)")
 	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run; unset: "+strconv.Itoa(deskWatchDefaultDeadline)+" when stdin is not a terminal)")
 	cmd.Flags().IntVar(&skip, "skip", 0, "leave out the first N event lines (a previous watch's resume point)")
 	return cmd

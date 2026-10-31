@@ -1,0 +1,27 @@
+/* The desk page: one phone-first column over Artificer's tokens. */
+.desk { max-width: 44rem; margin: 0 auto; padding: var(--s-md, 1rem); }
+.desk h1 { display: flex; align-items: baseline; gap: 0.75rem; }
+.desk .count { font-size: 0.9rem; color: var(--fg-muted); font-weight: normal; }
+.bucket h2 { margin-top: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+.card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 0.9rem 1rem; margin: 0.75rem 0; }
+.card h3 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.meta { color: var(--fg-muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.steps { overflow-wrap: anywhere; }
+.steps pre { overflow-x: auto; }
+.links { padding-left: 1.2rem; }
+.links a { overflow-wrap: anywhere; }
+.answer { color: var(--fg-secondary); overflow-wrap: anywhere; }
+.respond { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+.respond form { display: flex; gap: 0.4rem; margin: 0; }
+.respond form.wide { flex: 1 1 100%; }
+.respond textarea, .respond input[type=url] { flex: 1; min-width: 0; font: inherit; padding: 0.5rem; border-radius: var(--radius-sm, 4px); border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.respond button, .respond select { font: inherit; min-height: 2.75rem; padding: 0 0.9rem; border-radius: var(--radius-sm, 4px); border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.respond button.primary { background: var(--accent-fill, var(--accent)); color: var(--on-accent, var(--fg)); border-color: var(--accent); }
+.flash { background: var(--attention-fill, var(--bg-raised)); border-radius: var(--radius-sm, 4px); padding: 0.5rem 0.75rem; }
+.empty { color: var(--fg-muted); }
+.tag { font-size: 0.8rem; color: var(--fg-muted); font-weight: normal; }
+.hash code { overflow-wrap: anywhere; font-size: 0.8rem; }
+
+.links .host { color: var(--fg-muted, inherit); font-size: 0.85em; }
+.links .host::before { content: "("; }
+.links .host::after { content: ")"; }
