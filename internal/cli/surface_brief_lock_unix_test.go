@@ -111,6 +111,9 @@ func TestCanceledBriefWaitKeepsTheHoldersLock(t *testing.T) {
 	opened := launchedLedgerRow(t, led, time.Unix(1e9, 0).UTC())
 	sending := make(chan struct{})
 	finish := make(chan struct{})
+	var finishOnce sync.Once
+	letFirstFinish := func() { finishOnce.Do(func() { close(finish) }) }
+	t.Cleanup(letFirstFinish) // a failed assertion never leaves the first brief holding the lock
 	var mu sync.Mutex
 	var sends []string
 	steps := func(who string, block bool) hcBriefSteps {
@@ -163,11 +166,11 @@ func TestCanceledBriefWaitKeepsTheHoldersLock(t *testing.T) {
 		if release != nil {
 			release()
 		}
-		close(finish)
+		letFirstFinish()
 		t.Fatalf("LockBrief after the canceled wait = %v, want ErrBriefBusy while the first brief sends", err)
 	}
 
-	close(finish)
+	letFirstFinish()
 	if res := <-first; res.Outcome != briefSent {
 		t.Fatalf("the first brief: %q at %s: %s", res.Outcome, res.Step, res.Reason)
 	}

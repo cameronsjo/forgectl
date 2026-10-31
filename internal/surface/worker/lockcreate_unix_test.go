@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -80,6 +82,46 @@ func TestMergeAuditFirstAppendsRaceTheLockCreate(t *testing.T) {
 		}
 		if bytes.Count(data, []byte("\n")) != 2 {
 			t.Fatalf("round %d: audit holds %q, want both lines", round, data)
+		}
+	}
+}
+
+// TestLockFilesRefuseASymlink: a symlink planted at drain.lock or
+// merge-audit.lock is refused, not followed, through openLockFile's retry,
+// and its target is left untouched.
+func TestLockFilesRefuseASymlink(t *testing.T) {
+	state := t.TempDir()
+	d := DrainFiles{stateBase: state}
+	a := MergeAudit{stateBase: state}
+	lock, err := d.Lock() // creates the private directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Close() //nolint:errcheck,gosec // releasing a test lock
+	dir := filepath.Join(state, "forgectl", "surface")
+	for _, name := range []string{drainLockName, mergeAuditLockName} {
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(filepath.Join(dir, name)) // drain.lock exists; merge-audit.lock does not yet
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if name == drainLockName {
+			var l *DrainLock
+			l, err = d.Lock()
+			l.Close() //nolint:errcheck,gosec // nil when refused
+		} else {
+			err = a.Append(func([]byte) ([]byte, error) { return []byte("z\n"), nil })
+		}
+		if !errors.Is(err, ErrLedgerUnreadable) {
+			t.Errorf("%s as a symlink: err %v, want ErrLedgerUnreadable", name, err)
+		}
+		//nolint:gosec // G304: the test's own temp file
+		if got, _ := os.ReadFile(target); string(got) != "x" {
+			t.Errorf("%s: the symlink target changed: %q", name, got)
 		}
 	}
 }
