@@ -4,12 +4,14 @@
 - [x] 1.2 `surface brief` passes the checked state; tests for each refusal and for the checked state reaching the send.
 - [x] 1.3 Escape spacing: wait out one second after the last typed brief; hold one second after an Escape of unknown delivery, and after a sent Escape whose ledger record failed.
 - [x] 1.4 `--if idle` when either the checked or the re-read status is idle.
+- [x] 1.5 Per-worker brief lock (`worker.Ledger.LockBrief`) held from the spacing check through the send and record.
 
 ## 2. Forget
 
 - [x] 2.1 `hcadapter.Adapter.Abandoned`: a reason for a new core id under the launch's own core selection, an absent terminal, or an address with another creation time; refusals otherwise, a rewritten label included.
 - [x] 2.3 Core selection digest (`hc_selection`) recorded at launch; forget refuses a changed core id without it or when it differs.
 - [x] 2.4 A changed core id under the same selection still reads the recorded address; a terminal there with the recorded creation time refuses.
+- [x] 2.5 `--legacy-row` for rows with no recorded selection: a changed core id is decided by the address read; without it the refusal names the flag.
 - [x] 2.2 `surface forget <name> --surface hc [--json]`: row refusals, hc refusal, row-still-the-same removal, exit 0/1/2.
 
 ## 3. Ledger posture

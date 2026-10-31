@@ -12,7 +12,11 @@
 - **THEN** the brief is sent without `--if idle`
 
 ### Requirement: hc brief Escape spacing
-An hc brief SHALL wait until one second has passed since the worker's last typed brief was recorded before its checks and Escape. When the Escape's delivery is unknown, or the Escape went out and the ledger record failed, the refusal SHALL return no sooner than one second after it.
+An hc brief SHALL hold a per-worker brief lock from its spacing check through its send and record, reading the last brief's time under it. An hc brief SHALL wait until one second has passed since the worker's last typed brief was recorded before its checks and Escape. When the Escape's delivery is unknown, or the Escape went out and the ledger record failed, the refusal SHALL return no sooner than one second after it.
+
+#### Scenario: Two briefs at once
+- **WHEN** two briefs to one worker start together
+- **THEN** the second sends its Escape at least one second after the first's
 
 #### Scenario: Retry right after a brief
 - **WHEN** a brief follows a typed brief recorded 300 ms earlier
@@ -32,6 +36,10 @@ An hc brief SHALL wait until one second has passed since the worker's last typed
 #### Scenario: New core id, worker still there
 - **WHEN** the core id differs under the launch's selection and the recorded address still holds a terminal with the recorded creation time
 - **THEN** the row is unchanged and the reason names `hc kill`
+
+#### Scenario: Legacy row with --legacy-row
+- **WHEN** a row with no recorded core selection digest sees a changed core id, `--legacy-row` is given, and the recorded address is empty on the current core
+- **THEN** the row is removed; without the flag it is unchanged and the reason names `--legacy-row`
 
 #### Scenario: Another core selection
 - **WHEN** the core id differs and the row records no core selection digest, or one that differs from the current environment's

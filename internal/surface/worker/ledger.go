@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -219,6 +220,41 @@ func updateRow(rows []Row, name string, fn func(*Row)) ([]Row, error) {
 type store interface {
 	read() ([]byte, error)
 	update(fn func([]byte) ([]byte, error)) error
+	// lockNamed takes an exclusive lock on a lock file of its own, named
+	// after the ledger and suffix, waiting until ctx ends. release frees it.
+	lockNamed(ctx context.Context, suffix string) (release func(), err error)
+}
+
+// ErrBriefBusy reports a brief lock another brief still holds when the
+// caller's context ended.
+var ErrBriefBusy = errors.New("worker: another brief to this worker is still running")
+
+// LockBrief takes the worker's brief lock, so two briefs to one worker run
+// one at a time: an hc brief's Escape spacing reads the last brief's time,
+// and two briefs that both read it before either records would both send an
+// Escape inside the harness's double-press window. The lock is a file of its
+// own beside the ledger, keyed by a hash of the name, so it never holds up
+// the ledger's own updates. It waits until ctx ends (ErrBriefBusy), then
+// returns the worker's row as it is under the lock. Call release when the
+// brief has sent and recorded.
+func (l *Ledger) LockBrief(ctx context.Context, name string) (func(), Row, error) {
+	sum := sha256.Sum256([]byte(name))
+	release, err := l.store.lockNamed(ctx, "brief-"+hex.EncodeToString(sum[:8]))
+	if err != nil {
+		return nil, Row{}, err
+	}
+	rows, err := l.Rows()
+	if err != nil {
+		release()
+		return nil, Row{}, err
+	}
+	for _, r := range rows {
+		if r.Name == name {
+			return release, r, nil
+		}
+	}
+	release()
+	return nil, Row{}, ErrNoRow
 }
 
 // Ledger records the workers started for one repo in one herdr session.

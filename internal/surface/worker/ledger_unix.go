@@ -3,11 +3,13 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -84,6 +86,56 @@ func (s fileStore) update(fn func([]byte) ([]byte, error)) error {
 		return err
 	}
 	return writeAt(dir, s.tmpName(), s.dataName(), next)
+}
+
+// lockPoll is how often lockNamed retries a lock another process holds.
+const lockPoll = 50 * time.Millisecond
+
+func (s fileStore) lockNamed(ctx context.Context, suffix string) (func(), error) {
+	lock, err := s.openLock(suffix)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return func() { _ = lock.Close() }, nil // closing releases the flock
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			_ = lock.Close()
+			return nil, fmt.Errorf("worker: lock %s: %w", suffix, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = lock.Close()
+			return nil, fmt.Errorf("%w: %w", ErrBriefBusy, ctx.Err())
+		case <-time.After(lockPoll):
+		}
+	}
+}
+
+// lockOpenAttempts bounds openLock's retries. Two first briefs at once can
+// race to create the lock file, and the loser's open was measured to report
+// not-exist once; a retry then finds the file the winner made.
+const lockOpenAttempts = 3
+
+// openLock pins the ledger directory and opens (creating) the named lock
+// file in it.
+func (s fileStore) openLock(suffix string) (*os.File, error) {
+	var last error
+	for range lockOpenAttempts {
+		dir, err := s.pin(true)
+		if err != nil {
+			return nil, fmt.Errorf("worker: ledger directory: %w", err)
+		}
+		lock, err := openVerified(dir, s.key+"."+suffix+".lock", unix.O_RDWR|unix.O_CREAT)
+		_ = unix.Close(dir) // the lock file keeps its own descriptor
+		if !errors.Is(err, os.ErrNotExist) {
+			return lock, err
+		}
+		last = err
+	}
+	return nil, fmt.Errorf("worker: open the %s lock: %w", suffix, last)
 }
 
 // listLedgersAt lists the ledger files in the pinned surface directory under

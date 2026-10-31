@@ -22,7 +22,10 @@ var (
 // Abandoned reports why ref provably names no terminal of forgectl's, so
 // its ledger row can be dropped without asking hc to act on anything
 // (forgectl#1386). launched is the SelectionDigest the launch recorded, or
-// "" for a row from before forgectl recorded one. It runs locate's checks, in
+// "" for a row from before forgectl recorded one. legacy lets such a row's
+// changed core id be decided by the address read alone: nothing proves the
+// selection for it, so only an explicit operator flag (--legacy-row) may
+// trust that this environment reaches the worker's core. It runs locate's checks, in
 // the same order, but tells their mismatches apart:
 //
 //   - The core's id differs from the one the reference was taken on, the
@@ -47,7 +50,7 @@ var (
 // `hc server status` starts a core when none answers the selection
 // (measured on hc 0.1.15; hc has no read that does not); that core inherits
 // no launcher handles (command).
-func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched string) (string, error) {
+func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched string, legacy bool) (string, error) {
 	id, err := ref.HcIdentity()
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrUnreadable, err)
@@ -62,9 +65,9 @@ func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched strin
 	coreChanged := !ref.Server().Matches(server)
 	if coreChanged {
 		switch {
-		case launched == "":
-			return "", fmt.Errorf("%w: the row records no core selection (it was launched before forgectl recorded one)", ErrSelectionUnproven)
-		case launched != a.selection:
+		case launched == "" && !legacy:
+			return "", fmt.Errorf("%w: the row records no core selection (it was launched before forgectl recorded one); if this environment is the one the worker was launched under, pass --legacy-row to decide by the recorded address on this core", ErrSelectionUnproven)
+		case launched != "" && launched != a.selection:
 			return "", fmt.Errorf("%w: HC_SOCKET, the XDG paths or HOME differ from the launch's; run this with the environment the worker was launched under", ErrSelectionUnproven)
 		}
 	}
@@ -76,6 +79,9 @@ func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched strin
 	t, state, gcause := a.get(ctx, id.Terminal())
 	switch state {
 	case getAbsent:
+		if coreChanged && launched == "" {
+			return "the hc core has a new id and no terminal at the worker's recorded address; the row records no core selection, so --legacy-row trusted that this environment reaches the worker's core", nil
+		}
 		if coreChanged {
 			return "the hc core under the worker's own core selection has a new id and no terminal at the worker's recorded address: its state was wiped, and the worker's terminal with it", nil
 		}

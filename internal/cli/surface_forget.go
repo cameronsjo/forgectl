@@ -44,7 +44,10 @@ type forgetOptions struct {
 	Repo    string
 	Surface string
 	Name    string
-	JSON    bool
+	// LegacyRow lets a row with no recorded core selection have a changed
+	// core id decided by the address read alone.
+	LegacyRow bool
+	JSON      bool
 }
 
 func newSurfaceForgetCmd(deps module.Deps) *cobra.Command {
@@ -67,6 +70,15 @@ taken under another HC_SESSION, when forgectl's own terminal is still there
 The worktree and the branch are left as they are: forget does not run git.
 Inspect the worktree, save its work, and remove it with git worktree remove.
 
+A row launched before forgectl recorded its core selection (hc_selection)
+refuses when the core id changed, since another HC_SOCKET or XDG path alone
+reaches a different core while the worker's may still run. --legacy-row
+decides such a row by the recorded address on the core this environment
+reaches: pass it only from the environment the worker was launched under.
+The address and creation-time read still runs, so a worker still there
+refuses. --legacy-row has no effect on a row that records its selection, or
+when the core id is unchanged.
+
 Only --surface hc is supported. A herdr worker's close settles a restarted
 server by forgectl's ownership marker.
 
@@ -82,6 +94,7 @@ Exit 0: the row was removed. Exit 1: refused. Exit 2: a usage or setup error.
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
 	addWorkerSurfaceFlag(cmd, &opts.Surface)
+	cmd.Flags().BoolVar(&opts.LegacyRow, "legacy-row", false, "for a row with no recorded core selection, decide a changed core id by the recorded address on this core (run it from the worker's launch environment)")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","branch","forgotten","reason","worktree","note"} as JSON`)
 	return cmd
 }
@@ -116,7 +129,7 @@ func runSurfaceForget(cmd *cobra.Command, deps module.Deps, opts forgetOptions) 
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), forgetTimeout)
 	defer cancel()
-	res := forgetWorker(ctx, row, time.Now(), forgetSteps{
+	res := forgetWorker(ctx, row, time.Now(), opts.LegacyRow, forgetSteps{
 		abandoned: w.hc.Abandoned,
 		remove:    func() error { return w.led.RemoveIf(row.Name, worker.SameRow(row)) },
 	})
@@ -130,14 +143,14 @@ type forgetSteps struct {
 	// abandoned is hcadapter.Adapter.Abandoned with the row's recorded core
 	// selection: a reason when hc proves the terminal gone, an error
 	// otherwise.
-	abandoned func(ctx context.Context, ref backend.Ref, launched string) (string, error)
+	abandoned func(ctx context.Context, ref backend.Ref, launched string, legacy bool) (string, error)
 	// remove drops the row, only if it is still the row forget read.
 	remove func() error
 }
 
 // forgetWorker decides from the row first, then asks hc, then removes the
 // row. Every refusal leaves the row as it was.
-func forgetWorker(ctx context.Context, row worker.Row, now time.Time, s forgetSteps) forgetResult {
+func forgetWorker(ctx context.Context, row worker.Row, now time.Time, legacy bool, s forgetSteps) forgetResult {
 	res := forgetResult{Name: row.Name, Branch: row.Branch}
 	refuse := func(reason string) forgetResult {
 		res.Reason = reason
@@ -158,13 +171,13 @@ func forgetWorker(ctx context.Context, row worker.Row, now time.Time, s forgetSt
 	if ref.Kind() != backend.KindHc {
 		return refuse("the row's reference is not an hc terminal")
 	}
-	reason, err := s.abandoned(ctx, ref, row.HcSelection)
+	reason, err := s.abandoned(ctx, ref, row.HcSelection, legacy)
 	switch {
 	case errors.Is(err, hcadapter.ErrStillThere):
 		return refuse("the worker's terminal is still on the core, at its recorded address and creation time: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 	case errors.Is(err, hcadapter.ErrSelectionUnproven):
 		return refuse("hc reaches a different core, which proves nothing about the worker's own: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen) +
-			"; run surface close under the environment the worker was launched in, or remove the row only once that core is known gone")
+			"; run surface close under the environment the worker was launched in")
 	case err != nil:
 		return refuse("hc could not prove the worker's terminal gone: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 	}

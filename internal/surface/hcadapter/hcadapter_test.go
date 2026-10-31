@@ -413,20 +413,38 @@ func TestSendBriefRefusesAChangedWorker(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(string) string
 		send   bool
+		// ifIdle is whether a send that runs carries --if idle.
+		ifIdle bool
 	}{
-		"still done":   {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"done"`, 1) }, true},
-		"now idle":     {func(r string) string { return r }, true},
-		"turn started": {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"working"`, 1) }, false},
-		"blocked":      {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"blocked"`, 1) }, false},
-		"turn moved":   {func(r string) string { return strings.Replace(r, `"turn":1`, `"turn":2`, 1) }, false},
+		"still done":   {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"done"`, 1) }, true, false},
+		"now idle":     {func(r string) string { return r }, true, true},
+		"turn started": {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"working"`, 1) }, false, false},
+		"blocked":      {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"blocked"`, 1) }, false, false},
+		"turn moved":   {func(r string) string { return strings.Replace(r, `"turn":1`, `"turn":2`, 1) }, false, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
-			a := newTestAdapter(t, f, "")
+			run := f.runner()
+			a, nerr := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+			if nerr != nil {
+				t.Fatal(nerr)
+			}
 			ref := startWorker(t, f, a)
 			f.terminals["t1"] = tc.mutate(f.terminals["t1"])
 			f.verbs = nil
 			_, err := a.SendBrief(context.Background(), ref, "go", checked)
+			if tc.send {
+				last, _ := run.Last()
+				has := false
+				for i := 0; i+1 < len(last.Args); i++ {
+					if last.Args[i].Equal(exec.MustFixed("--if")) && last.Args[i+1].Equal(exec.MustFixed("idle")) {
+						has = true
+					}
+				}
+				if has != tc.ifIdle {
+					t.Fatalf("--if idle present = %v, want %v", has, tc.ifIdle)
+				}
+			}
 			if sent := slices.Contains(f.verbs, "send"); sent != tc.send {
 				t.Fatalf("hc send ran = %v, want %v (err %v)", sent, tc.send, err)
 			}
@@ -647,6 +665,7 @@ func TestAbandoned(t *testing.T) {
 		mutate   func(*fakeHC, backend.Ref)
 		session  string
 		launched string
+		legacy   bool
 		want     error // nil: abandoned
 		// msg, when set, must appear in the refusal.
 		msg string
@@ -661,7 +680,18 @@ func TestAbandoned(t *testing.T) {
 		// creation time. A new id under the same selection is not a wipe.
 		"core id changed, worker still there": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" },
 			launched: same, want: ErrStillThere, msg: "hc kill t1"},
-		"core differs, no record": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, want: ErrSelectionUnproven, msg: "records no core selection"},
+		"core differs, no record": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, want: ErrSelectionUnproven, msg: "pass --legacy-row"},
+		// --legacy-row: a row with no recorded selection is decided by the
+		// address read on the core this environment reaches.
+		"legacy row, core changed, address empty": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") }, legacy: true},
+		"legacy row, core changed, worker still there": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" },
+			legacy: true, want: ErrStillThere, msg: "hc kill t1"},
+		// The selection check applies only on a core change: a legacy row on
+		// an unchanged core forgets without the flag.
+		"legacy row, core unchanged, terminal gone": {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
+		// --legacy-row never overrides a recorded selection that differs.
+		"recorded selection differs, legacy flag": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") },
+			launched: "0123456789abcdef0123456789abcdef", legacy: true, want: ErrSelectionUnproven},
 		"core differs, other env": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: "0123456789abcdef0123456789abcdef", want: ErrSelectionUnproven},
 		"terminal gone":           {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
 		"address reused": {mutate: func(f *fakeHC, ref backend.Ref) {
@@ -684,7 +714,7 @@ func TestAbandoned(t *testing.T) {
 			ref := startWorker(t, f, newTestAdapter(t, f, ""))
 			tc.mutate(f, ref)
 			f.verbs = nil
-			reason, err := newTestAdapter(t, f, tc.session).Abandoned(context.Background(), ref, tc.launched)
+			reason, err := newTestAdapter(t, f, tc.session).Abandoned(context.Background(), ref, tc.launched, tc.legacy)
 			switch {
 			case tc.want == nil && (err != nil || reason == ""):
 				t.Fatalf("Abandoned = %q, %v; want a reason", reason, err)

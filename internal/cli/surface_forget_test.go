@@ -79,9 +79,12 @@ func TestForgetWorker(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			asked, removed := false, false
-			res := forgetWorker(context.Background(), tc.row(), now, forgetSteps{
-				abandoned: func(_ context.Context, _ backend.Ref, launched string) (string, error) {
+			res := forgetWorker(context.Background(), tc.row(), now, true, forgetSteps{
+				abandoned: func(_ context.Context, _ backend.Ref, launched string, legacy bool) (string, error) {
 					asked = true
+					if !legacy {
+						t.Error("--legacy-row did not reach the hc check")
+					}
 					if launched != hcRow.HcSelection {
 						t.Errorf("abandoned was handed selection %q, want the row's %q", launched, hcRow.HcSelection)
 					}
