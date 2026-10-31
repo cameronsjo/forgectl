@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Launches strip the launcher's handles
-A surface launch MUST strip the launcher's pane identity for every terminal manager (for hc, `HC_TERMINAL_ID` and `HC_SCOPE`) and the pane focus herdr gives a custom command (the four `HERDR_ACTIVE_` variables). The trampoline SHALL put back only the new pane's own identity for the backend that launched it.
+A surface launch MUST strip the launcher's pane identity for every terminal manager (for hc, every `HC_TERMINAL_` variable and `HC_SCOPE`), the launcher's Claude Code session id, and the pane focus herdr gives a custom command (the four `HERDR_ACTIVE_` variables). The trampoline SHALL put back only the new pane's own identity for the backend that launched it.
 
 #### Scenario: Launch bound to a herdr key
 - **WHEN** a surface launch runs as a herdr custom command, with `HERDR_ACTIVE_PANE_ID` naming the focused pane

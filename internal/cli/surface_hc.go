@@ -81,16 +81,28 @@ func newHcClient() (*hcadapter.Adapter, error) {
 	return hcadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
 }
 
-// hcWatchSource is the watch's view of the shared hc adapter. Its event
-// stream runs through exec.OSRunner's scrubbed streaming call, which drops
-// the same launcher handles the adapter's calls drop.
+// hcWatchSource is the watch's view of the shared hc adapter. It forwards
+// the read-only calls only, so the watch cannot reach the adapter's send,
+// keys or close. Its event stream runs through exec.OSRunner's scrubbed
+// streaming call, which drops the same launcher handles the adapter's calls
+// drop.
 type hcWatchSource struct {
-	*hcadapter.Adapter
+	a      *hcadapter.Adapter
 	stream hcadapter.EventStreamer
 }
 
+func (s hcWatchSource) GetJSON(ctx context.Context, target string) ([]byte, error) {
+	return s.a.GetJSON(ctx, target)
+}
+
+func (s hcWatchSource) ListJSON(ctx context.Context) ([]byte, error) { return s.a.ListJSON(ctx) }
+
+func (s hcWatchSource) ReadText(ctx context.Context, target string) ([]byte, bool, error) {
+	return s.a.ReadText(ctx, target)
+}
+
 func (s hcWatchSource) Events(ctx context.Context, w io.Writer) error {
-	return s.StreamEvents(ctx, s.stream, w)
+	return s.a.StreamEvents(ctx, s.stream, w)
 }
 
 // checkHcName refuses a display name hc would refuse, before anything is

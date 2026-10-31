@@ -5,7 +5,8 @@ The review of the hc worker surface (#1384) and `surface watch` (#1385) left fol
 ## What Changes
 
 - The drift test between the hc calls' environment scrub and the surface launch strip checks both directions. A key the hc scrub names must be stripped by a launch or listed, with its reason, as one a launch keeps.
-- `HC_SCOPE`, a token that differs per hc terminal, joins `HC_TERMINAL_ID` as hc's pane identity: a launch strips the launcher's and the trampoline puts back the new terminal's own.
+- `HC_SCOPE`, a token that differs per hc terminal, joins `HC_TERMINAL_ID` as hc's pane identity, and a launch strips every `HC_TERMINAL_` variable: the trampoline puts back the new terminal's own address, socket and scope.
+- A launch strips the launcher's `CLAUDE_CODE_SESSION_ID`.
 - herdr's `HERDR_ACTIVE_*` variables, which herdr sets only for a keybinding's custom command and which name the focused pane, are stripped from launches and dropped from hc calls.
 - `FORGECTL_SURFACE_PANE` stays out of both lists: it names a backend, and the trampoline reads it only from the sealed invocation.
 - `surface watch` reads hc through the hc adapter the worker verbs use, and its `hc events` subscription runs with the same scrub.

@@ -87,7 +87,7 @@ func productionWatchHC() (workerwatch.CLI, error) {
 	case err != nil:
 		return workerwatch.CLI{}, fmt.Errorf("surface watch: %w", err)
 	}
-	return workerwatch.CLI{Source: hcWatchSource{Adapter: a, stream: exec.OSRunner{}}}, nil
+	return workerwatch.CLI{Source: hcWatchSource{a: a, stream: exec.OSRunner{}}}, nil
 }
 
 func newSurfaceWatchCmd(deps module.Deps) *cobra.Command {

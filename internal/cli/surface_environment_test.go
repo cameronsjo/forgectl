@@ -179,8 +179,8 @@ func TestSurfaceLaunchEnvironment_StripsTmuxAndCmuxPanes(t *testing.T) {
 
 // TestSurfaceLaunchEnvironment_StripsTheLauncherFocusAndHcTerminal: the pane
 // focus herdr gives a custom command, and the launcher's hc terminal address
-// and scope token, do not reach a new surface; the hc core's socket and
-// session, which the two share, stay.
+// scope token and core socket, do not reach a new surface; the hc session,
+// which selects the core the two share, stays.
 func TestSurfaceLaunchEnvironment_StripsTheLauncherFocusAndHcTerminal(t *testing.T) {
 	base := []string{
 		"PATH=/bin",
@@ -193,7 +193,7 @@ func TestSurfaceLaunchEnvironment_StripsTheLauncherFocusAndHcTerminal(t *testing
 		"HC_TERMINAL_SOCKET=/tmp/hc/default.sock",
 		"HC_SESSION=default",
 	}
-	want := []string{"PATH=/bin", "HC_TERMINAL_SOCKET=/tmp/hc/default.sock", "HC_SESSION=default"}
+	want := []string{"PATH=/bin", "HC_SESSION=default"}
 	if got := surfaceLaunchEnvironment(base); !slices.Equal(got, want) {
 		t.Fatalf("surface environment = %q, want %q", got, want)
 	}
@@ -202,11 +202,17 @@ func TestSurfaceLaunchEnvironment_StripsTheLauncherFocusAndHcTerminal(t *testing
 // TestPaneIdentityEnv_HcScope: an hc launch puts back the new terminal's own
 // address and scope token, which the launch stripped as the launcher's.
 func TestPaneIdentityEnv_HcScope(t *testing.T) {
-	own := map[string]string{"HC_TERMINAL_ID": "t4", "HC_SCOPE": "feed-0001", "HERDR_PANE_ID": "w1:p1"}
+	own := map[string]string{"HC_TERMINAL_ID": "t4", "HC_SCOPE": "feed-0001", "HC_TERMINAL_SOCKET": "/s/hc/x.sock", "HERDR_PANE_ID": "w1:p1"}
 	got := paneIdentityEnv(markPane([]string{"PATH=/bin"}, "hc"), func(k string) string { return own[k] })
-	want := []string{"PATH=/bin", "HC_TERMINAL_ID=t4", "HC_SCOPE=feed-0001"}
+	want := []string{"PATH=/bin", "HC_TERMINAL_ID=t4", "HC_SCOPE=feed-0001", "HC_TERMINAL_SOCKET=/s/hc/x.sock"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("env = %q, want %q", got, want)
+	}
+	for _, bad := range []string{"rel/x.sock", "/a/../b.sock", "/a/b\x1b.sock", ""} {
+		own["HC_TERMINAL_SOCKET"] = bad
+		if got := paneIdentityEnv(markPane(nil, "hc"), func(k string) string { return own[k] }); slices.ContainsFunc(got, func(e string) bool { return strings.HasPrefix(e, "HC_TERMINAL_SOCKET=") }) {
+			t.Errorf("socket %q crossed into the harness", bad)
+		}
 	}
 }
 
@@ -274,12 +280,22 @@ func TestSurfaceInvocationRequest_StdoutIsATerminal(t *testing.T) {
 var launchKeepsHcDrops = map[string]string{
 	"CLAUDECODE": "a launched harness needs Claude Code's own variables; only the child-session marker and the inbox go",
 	"CLAUDE_CODE_": "the prefix also covers Claude Code's configuration (CLAUDE_CODE_USE_BEDROCK and the rest), which a launched harness needs; " +
-		"the session's child marker and inbox are stripped by name",
-	"HC_TERMINAL_":      "beyond HC_TERMINAL_ID (pane identity, stripped), it holds HC_TERMINAL_SOCKET, the core's socket, which the launcher and a new surface share like HERDR_SOCKET_PATH",
+		"the session's id, child marker and inbox are stripped by name (namedUnderKeptPrefix)",
 	mail.EnvWorker:      "a worker's identity follows what it launches, so mail still resolves it as that worker",
 	mail.EnvLedger:      "a worker's identity follows what it launches",
 	mail.EnvInbox:       "a worker's identity follows what it launches",
 	mail.EnvDrainWorker: "the drain-worker containment flag must survive a launch, or a worker could shed it by starting a surface",
+}
+
+// namedUnderKeptPrefix lists the known keys under a prefix in
+// launchKeepsHcDrops, and whether a launch strips each one.
+var namedUnderKeptPrefix = map[string]bool{
+	"CLAUDE_CODE_SESSION_ID":        true,
+	"CLAUDE_CODE_CHILD_SESSION":     true,
+	"CLAUDE_CODE_MESSAGING_SOCKET":  true,
+	"CLAUDE_CODE_MESSAGING_TOKEN":   true,
+	"CLAUDE_CODE_USE_BEDROCK":       false,
+	"CLAUDE_CODE_MAX_OUTPUT_TOKENS": false,
 }
 
 // TestHcScrubAndLaunchStripAgree pins the hc calls' environment scrub and the
@@ -300,7 +316,7 @@ func TestHcScrubAndLaunchStripAgree(t *testing.T) {
 		stripped = append(stripped, ids...)
 	}
 	stripped = append(stripped, exec.LauncherFocusEnv()...)
-	stripped = append(stripped, claudeCodeChildSessionEnv)
+	stripped = append(stripped, claudeCodeChildSessionEnv, claudeCodeSessionIDEnv, "HC_TERMINAL_SOCKET")
 	stripped = append(stripped, claudeMessagingEnv...)
 	if got := surfaceLaunchEnvironment(asEnv(stripped)); len(got) != 0 {
 		t.Fatalf("the launch strip kept %v; this list no longer matches it", got)
@@ -334,6 +350,16 @@ func TestHcScrubAndLaunchStripAgree(t *testing.T) {
 		}
 		if got := surfaceLaunchEnvironment(asEnv([]string{probe})); len(got) != 0 {
 			t.Errorf("reverse: hc calls drop every %s* key but a launch keeps %s; strip the prefix at launch or list it in launchKeepsHcDrops", p, probe)
+		}
+	}
+	// A kept prefix still holds named keys that are the launcher's own; each
+	// known one is checked by name, not skipped with its prefix.
+	for k, wantStripped := range namedUnderKeptPrefix {
+		if !exec.IsLauncherSessionHandle(k) {
+			t.Errorf("%s is listed under a kept prefix but hc calls keep it", k)
+		}
+		if got := len(surfaceLaunchEnvironment(asEnv([]string{k}))) == 0; got != wantStripped {
+			t.Errorf("reverse: %s stripped at launch = %v, want %v", k, got, wantStripped)
 		}
 	}
 	for k := range launchKeepsHcDrops {

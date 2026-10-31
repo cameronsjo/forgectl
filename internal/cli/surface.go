@@ -448,6 +448,23 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// claudeCodeSessionIDEnv is the launcher session's own id. A new surface is
+// an independent session (forgectl#363), so it must not claim the
+// launcher's id: forgectl's repair log and resume trigger read it as "who".
+const claudeCodeSessionIDEnv = "CLAUDE_CODE_SESSION_ID"
+
+// hcTerminalEnvPrefix covers the variables hc sets for one terminal:
+// HC_TERMINAL_ID and HC_TERMINAL_SOCKET. A launch strips all of them, and an
+// hc launch's trampoline puts back the new terminal's own (paneIdentityEnv).
+const hcTerminalEnvPrefix = "HC_TERMINAL_"
+
+// hcTerminalSocketEnv is the socket of the core an hc terminal runs in.
+const hcTerminalSocketEnv = "HC_TERMINAL_SOCKET"
+
+// maxHcSocketPathLen bounds an HC_TERMINAL_SOCKET carried into a harness;
+// a unix socket path is far shorter.
+const maxHcSocketPathLen = 1024
+
 // claudeMessagingEnv is the inbox Claude Code exports to its own children.
 var claudeMessagingEnv = []string{"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
 
@@ -534,8 +551,31 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 		}) {
 			out = append(out, hcSessionEnv+"="+value)
 		}
+		// The launch stripped the launcher's core socket with the rest of
+		// its HC_TERMINAL_ variables; this terminal's own goes back, so the
+		// socket and HC_TERMINAL_ID name the same core.
+		if value := getenv(hcTerminalSocketEnv); validHcSocketPath(value) && !slices.ContainsFunc(out, func(e string) bool {
+			k, _, _ := strings.Cut(e, "=")
+			return k == hcTerminalSocketEnv
+		}) {
+			out = append(out, hcTerminalSocketEnv+"="+value)
+		}
 	}
 	return out
+}
+
+// validHcSocketPath accepts a clean absolute path with no control
+// characters, at most maxHcSocketPathLen bytes.
+func validHcSocketPath(v string) bool {
+	if v == "" || len(v) > maxHcSocketPathLen || !filepath.IsAbs(v) || filepath.Clean(v) != v {
+		return false
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // hcSessionEnv selects an hc core. It crosses into an hc worker from the
@@ -581,7 +621,8 @@ func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) || exec.IsLauncherFocusKey(key) {
+		if key == claudeCodeChildSessionEnv || key == claudeCodeSessionIDEnv || slices.Contains(claudeMessagingEnv, key) ||
+			isPaneIdentityKey(key) || strings.HasPrefix(key, hcTerminalEnvPrefix) || exec.IsLauncherFocusKey(key) {
 			continue
 		}
 		out = append(out, entry)
