@@ -31,6 +31,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 // Bucket is an ask's priority.
@@ -149,9 +151,11 @@ type Response struct {
 	Until *time.Time `json:"until,omitempty"`
 	// Via is the front end that recorded it: "ui", "web" or "cli".
 	Via string `json:"via,omitempty"`
-	// Origin is who the store takes the answer to be from: "operator" for
-	// the operator's own front ends (ui, web), "agent" for anything else,
-	// `desk respond` included, which any local process can run. Set by the
+	// Origin is the kind of front end that recorded the answer: "operator"
+	// for the operator front ends (desk ui, desk serve), "agent" for anything
+	// else, `desk respond` included, which any local process can run. It says
+	// which path the answer came through, not who was at it: a same-user
+	// process that drives a front end records "operator" too. Set by the
 	// store, never by the caller.
 	Origin string `json:"origin,omitempty"`
 }
@@ -203,12 +207,16 @@ const (
 	MaxFrom   = 120
 	MaxReply  = 4000
 	MaxSnooze = 30 * 24 * time.Hour
-	// MaxOpenPerAsker caps the open and snoozed asks one asker (From) may
-	// hold, so a runaway agent cannot bury the desk or grow the log without
-	// bound.
+	// MaxOpenPerAsker caps the open and snoozed asks under one --from name.
+	// The name is the caller's own choice, so this only keeps one honest
+	// asker from crowding out the rest; MaxOpenAsks and the log's write cap
+	// are what bound a runaway caller.
 	MaxOpenPerAsker = 20
-	maxAddress      = 64
-	maxIDLength     = 32
+	// MaxOpenAsks caps the open and snoozed asks on the desk across every
+	// asker, whatever names they give.
+	MaxOpenAsks = 200
+	maxAddress  = 64
+	maxIDLength = 32
 )
 
 // Errors callers branch on.
@@ -219,8 +227,10 @@ var (
 	ErrNotFound = errors.New("ask: no such ask")
 	// ErrClosed reports a response to an ask that is already answered.
 	ErrClosed = errors.New("ask: already answered")
-	// ErrTooMany reports an asker already holding MaxOpenPerAsker open asks.
-	ErrTooMany = errors.New("ask: too many open asks from this asker")
+	// ErrTooMany reports a desk or an asker at its open-ask limit.
+	ErrTooMany = errors.New("ask: too many open asks")
+	// ErrLogFull reports a log too large to take another record.
+	ErrLogFull = errors.New("ask: the asks log is full")
 	// ErrNotAllowed reports a response kind the ask does not accept.
 	ErrNotAllowed = errors.New("ask: response kind not allowed for this ask")
 )
@@ -269,7 +279,36 @@ func SafeURL(raw string) bool {
 	if err != nil {
 		return false
 	}
+	// url.Parse percent-decodes the host, so a %E2%80%AE in the raw string
+	// becomes a right-to-left override in the host a page shows. Refuse any
+	// control or format character there, bidi overrides included.
+	if !oneLine(u.Hostname()) {
+		return false
+	}
 	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil
+}
+
+// DisplayHost is the host to show beside a link's label: the URL's host in
+// its ASCII (punycode) form, so a look-alike Unicode host such as a Cyrillic
+// "і" in "github" shows as the xn-- name a browser will open. It returns ""
+// for a URL SafeURL refuses or a host IDNA cannot convert.
+func DisplayHost(raw string) string {
+	if !SafeURL(raw) {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	ascii, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return ""
+	}
+	if p := u.Port(); p != "" {
+		return ascii + ":" + p
+	}
+	return ascii
 }
 
 // ValidAddress reports whether s looks like an hc terminal address or name:
@@ -511,11 +550,11 @@ func Grouped(items []Item) (open map[Bucket][]Item, snoozed, answered []Item) {
 
 // NotifyText is the one line sent to the asking agent's terminal for r.
 //
-// The receiving agent reads it as a user turn, so it says who answered and
-// marks every piece of free text as quoted data: the operator's reply or
-// link, and the agent's own ask title, each in “…” with any curly quote
-// inside replaced. An answer recorded by `desk respond` is labelled as not
-// confirmed to be the operator.
+// The receiving agent reads it as a user turn, so it names the front end
+// that recorded the answer and marks every piece of free text as quoted
+// data: the reply or link, and the agent's own ask title, each in “…” with
+// any curly quote inside replaced. An answer recorded by `desk respond` is
+// labelled as not coming through an operator front end.
 //
 // hc presses Enter after it, so it is also built to be inert at a shell
 // prompt: no shell metacharacter survives (see [shellInert]), and its own
@@ -528,7 +567,7 @@ func NotifyText(a Ask, r Response) string {
 	case KindReply:
 		b.WriteString(" reply " + quoteData(shellInert(flatten(r.Text, 300))))
 	case KindLink:
-		b.WriteString(" link " + quoteData(inertURL(r.URL)))
+		b.WriteString(" link " + quoteData(clip(inertURL(r.URL), 300)))
 	case KindSnooze:
 		if r.Until != nil {
 			b.WriteString(" snoozed until " + r.Until.UTC().Format(time.RFC3339))
@@ -547,12 +586,12 @@ func answeredBy(r Response) string {
 		origin = OriginOf(r.Via)
 	}
 	if origin != OriginOperator {
-		return "recorded by a local process with desk respond, not confirmed as the operator"
+		return "recorded with desk respond, not through an operator front end"
 	}
 	if r.Via == "web" {
-		return "answered by the operator in the desk web page"
+		return "answered in the desk web page, an operator front end"
 	}
-	return "answered by the operator in desk ui"
+	return "answered in desk ui, an operator front end"
 }
 
 // quoteData wraps s in curly double quotes, after turning any curly double

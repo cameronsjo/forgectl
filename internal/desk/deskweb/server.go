@@ -387,6 +387,10 @@ type pageData struct {
 }
 
 func (s *Server) pageData(sess, flash string) (pageData, error) {
+	// The stamp is taken before the read: a write between the two then
+	// costs one extra reload, never a page that is older than its stamp,
+	// which live.js would keep showing until the next write.
+	version, _ := s.version()
 	items, err := s.opts.Store.Items()
 	if err != nil {
 		return pageData{}, err
@@ -419,7 +423,7 @@ func (s *Server) pageData(sess, flash string) (pageData, error) {
 		d.ScriptsErr = "Could not read the desk's scripts."
 		fmt.Fprintf(os.Stderr, "desk serve: read scripts: %v\n", err)
 	}
-	d.Version, _ = s.version()
+	d.Version = version
 	return d, nil
 }
 
@@ -432,11 +436,11 @@ func view(it ask.Item, now time.Time, loc *time.Location) itemView {
 		if !ask.SafeURL(l.URL) {
 			continue
 		}
-		u, err := url.Parse(l.URL)
-		if err != nil {
+		host := ask.DisplayHost(l.URL)
+		if host == "" {
 			continue
 		}
-		lv := linkView{Label: l.Label, URL: l.URL, Host: u.Host}
+		lv := linkView{Label: l.Label, URL: l.URL, Host: host}
 		if lv.Label == "" || lv.Label == l.URL {
 			lv.Label, lv.Host = l.URL, ""
 		}

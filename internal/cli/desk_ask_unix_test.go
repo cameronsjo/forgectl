@@ -87,7 +87,7 @@ func TestDeskAsk_RespondNotifiesAndWatchEnds(t *testing.T) {
 	if !strings.Contains(out, "origin=agent") {
 		t.Fatalf("desk respond not marked agent-originated: %q", out)
 	}
-	if len(n.sends) != 1 || !strings.HasPrefix(n.sends[0], "t9z | DESK-RESPONSE "+id+" reply -- recorded by a local process") ||
+	if len(n.sends) != 1 || !strings.HasPrefix(n.sends[0], "t9z | DESK-RESPONSE "+id+" reply -- recorded with desk respond, not through an operator front end") ||
 		!strings.Contains(n.sends[0], "reply “use the staging account”") {
 		t.Fatalf("sends = %q", n.sends)
 	}

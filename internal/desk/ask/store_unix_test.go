@@ -5,8 +5,10 @@
 package ask
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,5 +331,48 @@ func TestStoreCapsOpenAsksPerAsker(t *testing.T) {
 	}
 	if _, err := s.Add(Ask{Title: "room again", Bucket: BucketSoon, From: "busy"}); err != nil {
 		t.Fatalf("an answer did not free a slot: %v", err)
+	}
+}
+
+// TestStoreCapsOpenAsksOverall: varying --from does not get past the
+// desk-wide limit.
+func TestStoreCapsOpenAsksOverall(t *testing.T) {
+	s, _ := newTestStore(t, nil)
+	for i := range MaxOpenAsks {
+		if _, err := s.Add(Ask{Title: "a", Bucket: BucketSoon, From: fmt.Sprintf("asker-%d", i)}); err != nil {
+			t.Fatalf("ask %d: %v", i, err)
+		}
+	}
+	_, err := s.Add(Ask{Title: "one more", Bucket: BucketSoon, From: "fresh-name"})
+	if !errors.Is(err, ErrTooMany) || !strings.Contains(err.Error(), "200 open asks (the limit for all askers)") {
+		t.Fatalf("over the desk-wide cap: %v", err)
+	}
+}
+
+// TestStoreRefusesAsksWhenTheLogIsFull: past the ask write cap, new asks are
+// refused with a clear error while answers still land.
+func TestStoreRefusesAsksWhenTheLogIsFull(t *testing.T) {
+	s, _ := newTestStore(t, nil)
+	a, err := s.Add(Ask{Title: "keep me answerable", Bucket: BucketNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(s.LogPath(), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Filler lines: not records (skipped on read) but real bytes.
+	pad := append(bytes.Repeat([]byte("x"), 1<<20-1), '\n')
+	for f2 := 0; f2 < maxAskLogBytes>>20; f2++ {
+		if _, err := f.Write(pad); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = f.Close()
+	if _, err := s.Add(Ask{Title: "one too many", Bucket: BucketNow}); !errors.Is(err, ErrLogFull) || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("Add on a full log: %v", err)
+	}
+	if _, _, _, err := s.Respond(t.Context(), Response{Ask: a.ID, Kind: KindDone, Via: "ui"}); err != nil {
+		t.Fatalf("an answer was refused on a log full for asks: %v", err)
 	}
 }

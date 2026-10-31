@@ -756,7 +756,13 @@ func (m deskAsksModel) detailLines(width int) []string {
 		if label == "" {
 			label = "link"
 		}
-		lines = append(lines, s.Accent.Render(capSafe(label, 40))+" "+capSafe(l.URL, max(width-lipgloss.Width(label)-2, 20)))
+		line := s.Accent.Render(capSafe(label, 40)) + " " + capSafe(l.URL, max(width-lipgloss.Width(label)-2, 20))
+		// A look-alike Unicode host reads as the real one; show the punycode
+		// name a browser will open beside it.
+		if host := ask.DisplayHost(l.URL); host != "" && !strings.Contains(l.URL, host) {
+			line += s.Muted.Render(" (" + termsafe.SafeLineMax(host, 256) + ")")
+		}
+		lines = append(lines, line)
 	}
 	if len(a.Links) > 0 {
 		lines = append(lines, "")

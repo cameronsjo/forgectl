@@ -40,7 +40,7 @@ An ask MAY record a notify address only for the asker's own hc terminal (`$HC_TE
 - **THEN** nothing is recorded and the exit code is 2
 
 ### Requirement: Notify line is data
-The notify line SHALL say who answered and MUST quote every free-text field (reply, link, ask title) as data. It MUST carry no shell metacharacter.
+The notify line SHALL name the front end that recorded the answer and MUST quote every free-text field (reply, link, ask title) as data. It MUST carry no shell metacharacter.
 
 #### Scenario: Hostile title
 - **WHEN** an ask title holds a closing quote and an instruction
@@ -58,18 +58,26 @@ When a response is recorded and the ask has a notify address, forgectl SHALL rea
 - **THEN** nothing is typed and the notify is recorded as refused
 
 ### Requirement: Response origin
-Each response SHALL record its origin: `operator` when made in `desk ui` or `desk serve`, `agent` otherwise, `desk respond` included. A caller MUST NOT be able to set it. The notify line for an `agent` response MUST say it is not confirmed as the operator.
+Each response SHALL record its origin: `operator` when made in `desk ui` or `desk serve`, `agent` otherwise, `desk respond` included. A caller MUST NOT be able to set it. The notify line for an `agent` response MUST say it did not come through an operator front end. Origin names the path an answer took, not who took it.
 
 #### Scenario: Shell answer
 - **WHEN** a process runs `desk respond ASK-ID done`
 - **THEN** the response records origin `agent`
 
 ### Requirement: Open asks per asker
-One asker MUST NOT hold more than 20 open or snoozed asks; `desk ask` SHALL refuse the next with an error naming the asker and the limit.
+The desk MUST NOT hold more than 200 open or snoozed asks across all askers, nor more than 20 under one `--from` name; `desk ask` SHALL refuse the next with an error naming the limit. `desk ask` MUST refuse a new ask once the log would pass 24 MiB, while responses MAY still be appended up to the read limit.
 
 #### Scenario: Twenty-first ask
 - **WHEN** an asker with 20 open asks asks again
 - **THEN** nothing is recorded and the error names the limit
+
+#### Scenario: Varying names
+- **WHEN** 200 asks are open under 200 different `--from` names and another arrives
+- **THEN** nothing is recorded and the error names the desk-wide limit
+
+#### Scenario: Full log
+- **WHEN** the log has reached 24 MiB
+- **THEN** a new ask is refused with an error saying the log is full, and an answer to an open ask is still recorded
 
 ### Requirement: Watch for responses
 `desk watch --responses ASK-ID` SHALL print each of that ask's responses as a JSON line and exit 0 once the ask is answered, including when it was answered before the watch started; it SHALL exit 1 when no such ask is in the log. With no ASK-ID it SHALL print every response as it arrives. On its deadline it SHALL exit 75 after printing `resume=` with a `--since` log offset that continues where it stopped. With no terminal on stdin and no `--deadline`, the deadline SHALL be 540 seconds.

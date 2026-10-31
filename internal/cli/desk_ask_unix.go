@@ -80,10 +80,10 @@ func runDeskAsk(cmd *cobra.Command, _ module.Deps, dirFlag string, o deskAskOpts
 	return w.err
 }
 
-// resolveAskNotify turns --notify into the address to record. The only
-// terminal an ask may notify is the asker's own: the one hc names in
-// $HC_TERMINAL_ID. Without that rule any agent could have the operator's
-// answer typed into another agent's prompt.
+// resolveAskNotify turns --notify into the address to record: the asker's
+// own terminal, as $HC_TERMINAL_ID names it. This guards against a mistaken
+// or prompt-led address, not a hostile caller: the variable is the caller's
+// own environment, and a caller that sets it can also run hc send itself.
 func resolveAskNotify(flag string, getenv func(string) string) (string, error) {
 	if flag == "" {
 		return "", nil

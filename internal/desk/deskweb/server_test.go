@@ -296,7 +296,7 @@ func TestRespond_HappyPathAppendsAndNotifies(t *testing.T) {
 	if it.State != ask.StateAnswered || it.Answer.Text != "keys done" || it.Answer.Via != "web" || it.Answer.Origin != ask.OriginOperator {
 		t.Fatalf("ask after reply: %+v", it)
 	}
-	if len(f.notify.calls) != 1 || !strings.HasPrefix(f.notify.calls[0], "t1k DESK-RESPONSE "+f.askID+" reply -- answered by the operator in the desk web page") ||
+	if len(f.notify.calls) != 1 || !strings.HasPrefix(f.notify.calls[0], "t1k DESK-RESPONSE "+f.askID+" reply -- answered in the desk web page, an operator front end") ||
 		!strings.Contains(f.notify.calls[0], "reply “keys done”") {
 		t.Fatalf("notify calls: %v", f.notify.calls)
 	}
@@ -626,5 +626,61 @@ func TestRender_LinkHostsBesideLabels(t *testing.T) {
 	}
 	if strings.Contains(body, "plain.example/x</a> (plain.example)") {
 		t.Error("a bare URL link got a redundant host")
+	}
+}
+
+// TestPage_VersionIsNeverNewerThanThePage pins the stamp order: a write that
+// lands while the page is built must not leave the page older than its
+// stamp, or live.js would show the stale page until the next write.
+func TestPage_VersionIsNeverNewerThanThePage(t *testing.T) {
+	f := newFixture(t)
+	wrote := false
+	f.srv.opts.Scripts = func() ([]Script, error) {
+		if !wrote {
+			wrote = true
+			if _, _, _, err := f.store.Respond(t.Context(), ask.Response{Ask: f.askID, Kind: ask.KindDone, Via: "ui"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return nil, nil
+	}
+	f.login()
+	body := f.do("GET", "/", nil, nil, true).Body.String()
+	now, err := f.srv.version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped := strings.Contains(body, `data-version="`+now+`"`)
+	answered := strings.Contains(body, "Recently answered")
+	if stamped && !answered {
+		t.Fatal("the page carries the current stamp but shows the state from before the write")
+	}
+}
+
+func TestRender_PunycodeAndBidiHosts(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.store.Add(ask.Ask{Title: "Sign in", Bucket: ask.BucketNow,
+		Steps: "Open [GitHub settings](https://g\u0456thub.com/settings) or [GitHub](https://%E2%80%AEelpmaxe.live/x)",
+		Links: []ask.Link{{Label: "GitHub", URL: "https://g\u0456thub.com/settings"}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.login()
+	body := f.do("GET", "/", nil, nil, true).Body.String()
+	for _, want := range []string{`<span class="host">xn--gthub-n2e.com</span>`, `GitHub settings</a> (xn--gthub-n2e.com)`, `(unsafe address)`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "\u202e") {
+		t.Error("a decoded bidi override reached the page")
+	}
+}
+
+func TestCrossSiteGETIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.login()
+	rec := f.do("GET", "/", nil, map[string]string{"Sec-Fetch-Site": "cross-site"}, true)
+	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "Rotate the SSH key") {
+		t.Fatalf("cross-site GET: status %d", rec.Code)
 	}
 }

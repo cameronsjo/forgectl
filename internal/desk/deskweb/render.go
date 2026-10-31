@@ -5,9 +5,10 @@ package deskweb
 import (
 	"bytes"
 	"html/template"
-	"net/url"
 
 	"github.com/microcosm-cc/bluemonday"
+
+	"github.com/cameronsjo/forgectl/internal/desk/ask"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -40,14 +41,16 @@ func (linkHosts) Transform(doc *ast.Document, reader text.Reader, _ parser.Conte
 	})
 	src := reader.Source()
 	for _, l := range links {
-		u, err := url.Parse(string(l.Destination))
-		if err != nil || u.Host == "" {
-			continue
-		}
 		if string(linkText(l, src)) == string(l.Destination) {
 			continue
 		}
-		l.Parent().InsertAfter(l.Parent(), l, ast.NewString([]byte(" ("+u.Host+")")))
+		host := ask.DisplayHost(string(l.Destination))
+		if host == "" {
+			// Not a link the page will show (the sanitizer drops it), or a
+			// host with no safe display form: say so beside the label.
+			host = "unsafe address"
+		}
+		l.Parent().InsertAfter(l.Parent(), l, ast.NewString([]byte(" ("+host+")")))
 	}
 }
 

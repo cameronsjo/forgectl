@@ -31,8 +31,14 @@ const (
 	// maxLogBytes caps what a reader loads. A log past it is refused, not
 	// truncated: a fold over part of the log would show answered asks as open.
 	maxLogBytes = 32 << 20
-	dirMode     = 0o700
-	fileMode    = 0o600
+	// maxAskLogBytes is where Add stops taking new asks, well under the read
+	// cap, so answers still fit and every front end keeps working.
+	maxAskLogBytes = 24 << 20
+	// maxAnyLogBytes is where every write stops, one record short of the
+	// read cap.
+	maxAnyLogBytes = maxLogBytes - 64<<10
+	dirMode        = 0o700
+	fileMode       = 0o600
 	// notifyTimeout bounds one notify call.
 	notifyTimeout = 10 * time.Second
 )
@@ -247,8 +253,9 @@ func (s *Store) withLock(fn func() error) error {
 	return config.WithFileLock(s.LogPath(), fn)
 }
 
-// appendRecord writes one record as one line. The caller holds the lock.
-func (s *Store) appendRecord(rec Record) error {
+// appendRecord writes one record as one line, refusing it with ErrLogFull
+// when the log would pass limit bytes. The caller holds the lock.
+func (s *Store) appendRecord(rec Record, limit int64) error {
 	rec.V = recordVersion
 	// termsafe:allow-raw-json persisted log record, never command output
 	line, err := json.Marshal(rec)
@@ -267,6 +274,13 @@ func (s *Store) appendRecord(rec Record) error {
 		return fmt.Errorf("ask: check the log's last line: %w", err)
 	} else if torn {
 		line = append([]byte{'\n'}, line...)
+	}
+	if fi, err := f.Stat(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("ask: stat the log: %w", err)
+	} else if fi.Size()+int64(len(line)) > limit {
+		_ = f.Close()
+		return fmt.Errorf("%w: %s is %d MiB, and this record would pass its %d MiB limit; answer or move aside old asks", ErrLogFull, LogName, fi.Size()>>20, limit>>20)
 	}
 	if _, err := f.Write(line); err != nil {
 		_ = f.Close()
@@ -324,11 +338,18 @@ func (s *Store) Add(a Ask) (Ask, error) {
 				used[r.Ask.ID] = true
 			}
 		}
-		open := 0
+		open, total := 0, 0
 		for _, it := range Fold(recs, s.now()) {
-			if it.State != StateAnswered && it.Ask.From == a.From {
+			if it.State == StateAnswered {
+				continue
+			}
+			total++
+			if it.Ask.From == a.From {
 				open++
 			}
+		}
+		if total >= MaxOpenAsks {
+			return fmt.Errorf("%w: the desk already holds %d open asks (the limit for all askers); wait for answers before asking more", ErrTooMany, total)
 		}
 		if open >= MaxOpenPerAsker {
 			who := a.From
@@ -342,7 +363,7 @@ func (s *Store) Add(a Ask) (Ask, error) {
 			return err
 		}
 		a.At = s.now().UTC()
-		return s.appendRecord(Record{Ask: &a})
+		return s.appendRecord(Record{Ask: &a}, maxAskLogBytes)
 	})
 	return a, err
 }
@@ -383,7 +404,7 @@ func (s *Store) Respond(ctx context.Context, r Response) (it Item, saved Respons
 		}
 		r.At = now.UTC()
 		r.Origin = OriginOf(r.Via)
-		if err := s.appendRecord(Record{Response: &r}); err != nil {
+		if err := s.appendRecord(Record{Response: &r}, maxAnyLogBytes); err != nil {
 			return err
 		}
 		it = cur
@@ -418,7 +439,7 @@ func (s *Store) notify(ctx context.Context, a Ask, r Response) error {
 	if sendErr != nil {
 		n.Error = clip(flatten(sendErr.Error(), 300), 300)
 	}
-	if err := s.withLock(func() error { return s.appendRecord(Record{Notified: &n}) }); err != nil {
+	if err := s.withLock(func() error { return s.appendRecord(Record{Notified: &n}, maxAnyLogBytes) }); err != nil {
 		return errors.Join(sendErr, fmt.Errorf("record the notify outcome: %w", err))
 	}
 	if sendErr != nil {
