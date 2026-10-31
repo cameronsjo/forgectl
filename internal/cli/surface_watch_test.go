@@ -164,3 +164,33 @@ func TestSurfaceWatchUsageErrors(t *testing.T) {
 		t.Error("a usage error opened the TUI")
 	}
 }
+
+type watchNoHC struct{}
+
+func (watchNoHC) Get(context.Context, string) (workerwatch.Terminal, error) {
+	return workerwatch.Terminal{}, workerwatch.ErrNoHC
+}
+func (watchNoHC) List(context.Context) ([]workerwatch.Terminal, error) {
+	return nil, workerwatch.ErrNoHC
+}
+func (watchNoHC) Read(context.Context, string) (string, error) { return "", workerwatch.ErrNoHC }
+
+func TestSurfaceWatchSnapshotExitsOneWithoutHC(t *testing.T) {
+	var ran bool
+	rt := fakeWatchRuntime(false, &ran)
+	base := rt.newCollector
+	rt.newCollector = func(opts watchOptions, entries []workerwatch.Entry, notes []string) *workerwatch.Collector {
+		c := base(opts, entries, notes)
+		c.HC = watchNoHC{}
+		return c
+	}
+	for _, args := range [][]string{{"--workers", writeWorkersFixture(t)}, {"--workers", writeWorkersFixture(t), "--json"}} {
+		out, err := runWatch(t, rt, args...)
+		if ExitCode(err) != exitFailed {
+			t.Errorf("args %q: exit %d, want %d", args, ExitCode(err), exitFailed)
+		}
+		if !strings.Contains(out, "hc was not found on PATH") {
+			t.Errorf("args %q: the snapshot does not say hc is missing\n%s", args, out)
+		}
+	}
+}

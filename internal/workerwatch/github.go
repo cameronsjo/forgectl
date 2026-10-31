@@ -3,6 +3,7 @@ package workerwatch
 import (
 	"context"
 	"errors"
+	"slices"
 )
 
 // PR is what GitHub says about a worker's pull request.
@@ -16,14 +17,28 @@ type PR struct {
 	// Checks is the head commit's rollup: SUCCESS, FAILURE, ERROR, PENDING,
 	// EXPECTED, or "" when it has none.
 	Checks string `json:"checks,omitempty"`
-	// Markers is the newest cadence-review marker per reviewer name among
-	// the viewer's reviews, newest first. Each is a claim: anything posting
-	// under the operator's gh login, a worker included, can post any name.
+	// Markers is every cadence-review marker among the viewer's last 20
+	// reviews, newest first. Each is a claim: anything posting under the
+	// operator's gh login, a worker included, can post any name.
 	Markers []Marker `json:"markers,omitempty"`
-	// Marker is the one the row shows: WorstMarker of Markers.
-	Marker *Marker `json:"marker,omitempty"`
-	// MarkersAtHead counts Markers at the PR's head.
-	MarkersAtHead int `json:"markers_at_head,omitempty"`
+	// Review is Markers summed by sweep's rule (SummarizeMarkers); nil when
+	// no marker counts.
+	Review *Review `json:"review,omitempty"`
+}
+
+// Review is the headline verdict: sweep's rule over the PR's markers.
+type Review struct {
+	// AtHead counts the markers at the PR's head that count.
+	AtHead int `json:"at_head"`
+	// Stale counts the counted markers for another head.
+	Stale int `json:"stale"`
+	// Crit and Imp are summed over every counted marker at head.
+	Crit int `json:"crit"`
+	Imp  int `json:"imp"`
+	// Reviewers names the reviewers at head, first seen first.
+	Reviewers []string `json:"reviewers,omitempty"`
+	// Filtered is true when [sweep] reviewers limited which names count.
+	Filtered bool `json:"filtered"`
 }
 
 // Marker is a parsed cadence-review marker: a claim by whoever posted it.
@@ -51,37 +66,31 @@ type Git interface {
 	Repo(ctx context.Context, worktree string) (string, error)
 }
 
-// WorstMarker picks the marker a row shows, so a clean later review never
-// hides a worse one at the same head: among markers at head, the most crit,
-// then the most imp; with none at head, the newest (which is stale).
-func WorstMarker(ms []Marker) *Marker {
-	var worst *Marker
-	for i := range ms {
-		m := &ms[i]
-		if !m.AtHead {
+// SummarizeMarkers applies sweep's marker rule (sweep.ClassifyPR) so the
+// watch is never less alarming than the sweep beside it: only reviewers in
+// allow count (every reviewer when allow is empty), and crit and imp are
+// summed over every counted marker at head, with no per-reviewer
+// deduplication, so a later clean pass cannot cancel an earlier crit>0.
+// It returns nil when no marker counts.
+func SummarizeMarkers(ms []Marker, allow []string) *Review {
+	r := Review{Filtered: len(allow) > 0}
+	for _, m := range ms {
+		if r.Filtered && !slices.Contains(allow, m.Reviewer) {
 			continue
 		}
-		if worst == nil || m.Crit > worst.Crit || (m.Crit == worst.Crit && m.Imp > worst.Imp) {
-			worst = m
+		if !m.AtHead {
+			r.Stale++
+			continue
+		}
+		r.AtHead++
+		r.Crit += m.Crit
+		r.Imp += m.Imp
+		if !slices.Contains(r.Reviewers, m.Reviewer) {
+			r.Reviewers = append(r.Reviewers, m.Reviewer)
 		}
 	}
-	if worst == nil && len(ms) > 0 {
-		worst = &ms[0]
-	}
-	if worst == nil {
+	if r.AtHead == 0 && r.Stale == 0 {
 		return nil
 	}
-	cp := *worst
-	return &cp
-}
-
-// AtHeadCount counts the markers at the PR's head.
-func AtHeadCount(ms []Marker) int {
-	n := 0
-	for _, m := range ms {
-		if m.AtHead {
-			n++
-		}
-	}
-	return n
+	return &r
 }

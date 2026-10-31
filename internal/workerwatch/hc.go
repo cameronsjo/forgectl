@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	osexec "os/exec"
 	"regexp"
 	"slices"
 	"strings"
@@ -43,6 +44,9 @@ const (
 // ErrGone means hc has no terminal by that name or address (hc exit 3,
 // not_found).
 var ErrGone = errors.New("no such hc terminal")
+
+// ErrNoHC means the hc command is not on PATH.
+var ErrNoHC = errors.New("hc was not found on PATH")
 
 // hcNotFoundExit is hc's exit code for not_found.
 const hcNotFoundExit = 3
@@ -229,6 +233,9 @@ func checkTarget(target string) error {
 func hcFailure(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
+	}
+	if errors.Is(err, osexec.ErrNotFound) {
+		return fmt.Errorf("%s: %w", what, ErrNoHC)
 	}
 	var ce *exec.CommandError
 	if errors.As(err, &ce) && ce.ExitCode == hcNotFoundExit {

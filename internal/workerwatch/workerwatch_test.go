@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	osexec "os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -327,7 +328,7 @@ func TestCollectorTTLFloor(t *testing.T) {
 
 func TestCollectorCos(t *testing.T) {
 	hc := &fakeHC{
-		terms: map[string]Terminal{"cos-z": {Address: "t9", Name: "cos-z", State: "live", Status: StatusIdle, Cwd: "/wt/detached"}},
+		terms: map[string]Terminal{"t9": {Address: "t9", Name: "cos-z", State: "live", Status: StatusIdle, Cwd: "/wt/detached"}},
 		list: []Terminal{
 			{Address: "t9", Name: "cos-z", State: "live"},
 			{Address: "t8", Name: "other", State: "live"},
@@ -414,3 +415,123 @@ func TestEventsDoneClosesOnlyAfterTheStreamReturns(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizeMarkersFollowsSweep(t *testing.T) {
+	head := func(r string, c, i int) Marker { return Marker{Reviewer: r, Head: sha, Crit: c, Imp: i, AtHead: true} }
+	stale := Marker{Reviewer: "pr-reviewer", Head: "f", AtHead: false}
+	tests := []struct {
+		name  string
+		ms    []Marker
+		allow []string
+		want  *Review
+	}{
+		{"crit=1 then crit=0 at the same head still blocks", []Marker{head("pr-reviewer", 0, 0), head("pr-reviewer", 1, 0)}, nil,
+			&Review{AtHead: 2, Crit: 1, Reviewers: []string{"pr-reviewer"}}},
+		{"sums across reviewers", []Marker{head("pr-reviewer", 0, 2), head("security-reviewer", 1, 1)}, nil,
+			&Review{AtHead: 2, Crit: 1, Imp: 3, Reviewers: []string{"pr-reviewer", "security-reviewer"}}},
+		{"allowlist drops other names", []Marker{head("made-up", 0, 0), head("pr-reviewer", 2, 0)}, []string{"pr-reviewer"},
+			&Review{AtHead: 1, Crit: 2, Reviewers: []string{"pr-reviewer"}, Filtered: true}},
+		{"only unlisted names count as none", []Marker{head("made-up", 0, 0)}, []string{"pr-reviewer"}, nil},
+		{"stale only", []Marker{stale}, nil, &Review{Stale: 1}},
+		{"no markers", nil, nil, nil},
+	}
+	for _, tt := range tests {
+		got := SummarizeMarkers(tt.ms, tt.allow)
+		if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("%s: got %+v, want %+v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestCollectorUsesOneHCLsAndGetsNewAddressesOnce(t *testing.T) {
+	hc := &countingHC{fakeHC: fakeHC{
+		terms: map[string]Terminal{
+			"t1":       {Address: "t1", Name: "cos-a", State: "live", CreatedMS: 1, Model: "opus"},
+			"cos-gone": {}, // not used: absent from terms means gone
+		},
+		list: []Terminal{{Address: "t1", Name: "cos-a", State: "live", Status: StatusWorking}},
+	}}
+	delete(hc.terms, "cos-gone")
+	c := &Collector{HC: hc, Entries: []Entry{{Name: "cos-a"}, {Name: "cos-gone"}}}
+	for range 3 {
+		s := c.Collect(context.Background(), false)
+		if s.Workers[0].Status != StatusWorking || s.Workers[0].Model != "opus" || s.Workers[0].Address != "t1" {
+			t.Fatalf("row from hc ls + cached get = %+v", s.Workers[0])
+		}
+		if s.Workers[1].HCError != hcGoneText {
+			t.Fatalf("a name hc ls does not list should be read with get and show gone: %+v", s.Workers[1])
+		}
+	}
+	if hc.lists != 3 {
+		t.Errorf("hc ls ran %d times over 3 collects, want 3", hc.lists)
+	}
+	if hc.gets["t1"] != 1 {
+		t.Errorf("hc get t1 ran %d times, want once (start time and model never change)", hc.gets["t1"])
+	}
+	if hc.gets["cos-gone"] != 3 {
+		t.Errorf("hc get cos-gone ran %d times, want once per collect", hc.gets["cos-gone"])
+	}
+}
+
+func TestCollectorCosKeepsExitedWorkers(t *testing.T) {
+	hc := &countingHC{fakeHC: fakeHC{
+		terms: map[string]Terminal{"t1": {Address: "t1", Name: "cos-x", State: "live"}},
+		list:  []Terminal{{Address: "t1", Name: "cos-x", State: "live", Status: StatusWorking}},
+	}}
+	c := &Collector{HC: hc, Cos: true}
+	if s := c.Collect(context.Background(), false); len(s.Workers) != 1 {
+		t.Fatalf("workers = %+v", s.Workers)
+	}
+	hc.list = nil
+	hc.terms["cos-x"] = Terminal{Address: "t1", Name: "cos-x", State: "finished", Status: StatusDone}
+	s := c.Collect(context.Background(), false)
+	if len(s.Workers) != 1 || s.Workers[0].State != "finished" {
+		t.Errorf("an exited cos worker vanished or lost its state: %+v", s.Workers)
+	}
+}
+
+func TestCollectorReportsMissingHC(t *testing.T) {
+	c := &Collector{HC: noHC{}, Entries: []Entry{{Name: "cos-a"}}}
+	s := c.Collect(context.Background(), false)
+	if s.HCUnavailable != ErrNoHC.Error() || s.Workers[0].HCError != ErrNoHC.Error() {
+		t.Errorf("hc_unavailable = %q, row = %q; want both to say hc is not on PATH", s.HCUnavailable, s.Workers[0].HCError)
+	}
+	ok := &Collector{HC: &fakeHC{terms: map[string]Terminal{}}, Entries: []Entry{{Name: "cos-a"}}}
+	if s := ok.Collect(context.Background(), false); s.HCUnavailable != "" {
+		t.Errorf("a gone worker on a working hc set hc_unavailable = %q", s.HCUnavailable)
+	}
+}
+
+func TestHCFailureNamesAMissingBinary(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "", &exec.CommandError{Name: "hc", Err: &osexec.Error{Name: "hc", Err: osexec.ErrNotFound}}
+	}}
+	if _, err := (CLI{Run: fake}).List(context.Background()); !errors.Is(err, ErrNoHC) {
+		t.Errorf("err = %v, want ErrNoHC", err)
+	}
+}
+
+type countingHC struct {
+	fakeHC
+	lists int
+	gets  map[string]int
+}
+
+func (c *countingHC) List(ctx context.Context) ([]Terminal, error) {
+	c.lists++
+	return c.fakeHC.List(ctx)
+}
+
+func (c *countingHC) Get(ctx context.Context, target string) (Terminal, error) {
+	if c.gets == nil {
+		c.gets = map[string]int{}
+	}
+	c.gets[target]++
+	return c.fakeHC.Get(ctx, target)
+}
+
+type noHC struct{}
+
+func (noHC) Get(context.Context, string) (Terminal, error) { return Terminal{}, ErrNoHC }
+func (noHC) List(context.Context) ([]Terminal, error)      { return nil, ErrNoHC }
+func (noHC) Read(context.Context, string) (string, error)  { return "", ErrNoHC }

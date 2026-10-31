@@ -67,6 +67,8 @@ func productionWatchRuntime(deps module.Deps) watchRuntime {
 				Notes:   notes,
 				Cos:     opts.Cos,
 				GHTTL:   opts.GHTTL,
+				// The same allowlist forgectl sweep counts markers by.
+				Reviewers: deps.Cfg.Sweep.Reviewers,
 			}
 		},
 		run: tui.RunWorkers,
@@ -104,10 +106,18 @@ as JSON.
 
 Keys: up/down (or j/k) select, r refresh now, q quit.
 
-Exit 0: the view closed, or the snapshot printed. Exit 2: a usage error,
-or the workers file could not be read.
+REVIEW sums cadence-review markers the way forgectl sweep does: crit and
+imp over every marker at the PR's head, counting only [sweep] reviewers
+when that list is set. STATUS and REVIEW are claims: the agent reports its
+own status, and any session on your gh login can post a marker. Press ?
+in the view for the full key and column list.
 
-  forgectl surface watch --workers ~/.local/share/chief-of-staff/workers.txt
+Exit 0: the view closed, or the snapshot printed. Exit 1: the snapshot
+printed, but hc could not be read at all (not on PATH, or every read
+failed; hc_unavailable says which). Exit 2: a usage error, or the workers
+file could not be read.
+
+  forgectl surface watch --workers workers.txt
   forgectl surface watch --cos
   forgectl surface watch --cos --json`,
 		Args: cobra.NoArgs,
@@ -149,10 +159,17 @@ func runSurfaceWatch(cmd *cobra.Command, th theme.Theme, rt watchRuntime, opts w
 		ctx, cancel := context.WithTimeout(cmd.Context(), watchSnapshotTimeout)
 		defer cancel()
 		snap := c.Collect(ctx, false)
+		var err error
 		if opts.JSON {
-			return writeJSON(cmd.OutOrStdout(), snap)
+			err = writeJSON(cmd.OutOrStdout(), snap)
+		} else {
+			err = writeWatchPlain(cmd.OutOrStdout(), snap)
 		}
-		return writeWatchPlain(cmd.OutOrStdout(), snap)
+		if err == nil && snap.HCUnavailable != "" {
+			// The verdict is already on stdout (hc_unavailable, or a note).
+			return newSilentCodedError(exitFailed)
+		}
+		return err
 	}
 	hc := rt.hc()
 	return rt.run(cmd.Context(), tui.WorkersOptions{
@@ -207,12 +224,13 @@ func writeWatchPlain(out io.Writer, snap workerwatch.Snapshot) error {
 			if w.PR.Checks != "" {
 				pr += " ci=" + strings.ToLower(w.PR.Checks)
 			}
-			if m := w.PR.Marker; m != nil {
-				at := "stale"
-				if m.AtHead {
-					at = "head"
-				}
-				pr += fmt.Sprintf(" %s crit=%d imp=%d @%s", m.Reviewer, m.Crit, m.Imp, at)
+			switch r := w.PR.Review; {
+			case r == nil:
+				pr += " review=none"
+			case r.AtHead == 0:
+				pr += " review=stale"
+			default:
+				pr += fmt.Sprintf(" review crit=%d imp=%d markers=%d", r.Crit, r.Imp, r.AtHead)
 			}
 			if w.PRIssue == workerwatch.PRIssueGH {
 				pr += " (stale: " + w.PRNote + ")"
@@ -226,6 +244,9 @@ func writeWatchPlain(out io.Writer, snap workerwatch.Snapshot) error {
 	}
 	for _, n := range snap.Notes {
 		fmt.Fprintf(&b, "note: %s\n", termsafe.SafeLineMax(n, 300))
+	}
+	if snap.HCUnavailable != "" {
+		fmt.Fprintf(&b, "note: %s\n", termsafe.SafeLineMax(snap.HCUnavailable, 300))
 	}
 	_, err := io.WriteString(out, b.String())
 	return err

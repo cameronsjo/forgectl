@@ -82,6 +82,10 @@ type Snapshot struct {
 	Workers []Worker  `json:"workers"`
 	// Notes are collection-wide problems (a bad workers line, hc ls failing).
 	Notes []string `json:"notes,omitempty"`
+	// HCUnavailable says why hc could not be read at all (not on PATH, or
+	// every read failed); "" when hc answered. The off-terminal snapshot
+	// exits 1 when it is set.
+	HCUnavailable string `json:"hc_unavailable,omitempty"`
 }
 
 // NeedingYou lists the workers that need a person, in row order.
@@ -116,9 +120,14 @@ type Collector struct {
 	Cos bool
 	// GHTTL is how long a PR read is reused; below MinGHTTL means MinGHTTL.
 	GHTTL time.Duration
+	// Reviewers is the [sweep] reviewers allowlist for review markers;
+	// empty counts every reviewer.
+	Reviewers []string
 
-	mu    sync.Mutex
-	cache map[string]prEntry
+	mu      sync.Mutex
+	cache   map[string]prEntry
+	details map[string]Terminal // hc get by address: start time, model
+	cosSeen map[string]bool     // cos-* names seen live in this watch
 }
 
 type prEntry struct {
@@ -132,6 +141,12 @@ type prEntry struct {
 
 // Collect reads every worker once. force refreshes PR reads older than
 // ForceMinAge, still at most ghPerCollect of them.
+//
+// hc is read with one `hc ls` per collect for every worker's address and
+// status. `hc ls` carries no start time or argv, so `hc get` runs once per
+// new address (those never change) and for a name `hc ls` does not list
+// (finished, or gone). If `hc ls` fails, every worker falls back to
+// `hc get`.
 func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -141,12 +156,12 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	for i := range entries {
 		entries[i].Name = strings.TrimSpace(entries[i].Name)
 	}
+	live, listErr := c.list(ctx)
 	if c.Cos {
-		found, err := c.discover(ctx, entries)
-		if err != nil {
-			snap.Notes = append(snap.Notes, "--cos: "+err.Error())
+		if listErr != nil {
+			snap.Notes = append(snap.Notes, "--cos: "+listErr.Error())
 		}
-		entries = append(entries, found...)
+		entries = append(entries, c.discover(live, entries)...)
 	}
 	sources := make(map[string]string, len(entries))
 	for i, e := range entries {
@@ -157,9 +172,17 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 		}
 	}
 	workers := make([]Worker, 0, len(entries))
+	unreachable := 0
 	for _, e := range entries {
 		w := rowBuild{Worker: Worker{Name: e.Name, Worktree: e.Worktree, BriefDir: e.BriefDir, Source: sources[e.Name]}}
-		c.readHC(ctx, &w, now)
+		if t, ok := live[e.Name]; ok && listErr == nil {
+			c.fromList(ctx, &w, t, now)
+		} else {
+			c.readHC(ctx, &w, now)
+		}
+		if w.HCError != "" && w.HCError != hcGoneText {
+			unreachable++
+		}
 		if w.Worktree == "" && w.Source == "hc" {
 			w.Worktree = w.cwdFallback
 		}
@@ -170,6 +193,14 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 			w.Reports.Files = []ReportFile{} // --json always carries an array
 		}
 		workers = append(workers, w.Worker)
+	}
+	switch {
+	case errors.Is(listErr, ErrNoHC):
+		snap.HCUnavailable = ErrNoHC.Error()
+	case len(entries) > 0 && unreachable == len(entries):
+		snap.HCUnavailable = "hc could not be read for any worker"
+	case len(entries) == 0 && listErr != nil:
+		snap.HCUnavailable = "hc ls failed"
 	}
 	c.readPRs(ctx, workers, now, force)
 	snap.Workers = workers
@@ -183,27 +214,82 @@ type rowBuild struct {
 	cwdFallback string
 }
 
-func (c *Collector) discover(ctx context.Context, have []Entry) ([]Entry, error) {
+// hcGoneText is the HCError for a name hc does not know.
+const hcGoneText = "no hc terminal by this name"
+
+// list is one `hc ls`, keyed by name.
+func (c *Collector) list(ctx context.Context) (map[string]Terminal, error) {
 	ctx, cancel := context.WithTimeout(ctx, hcTimeout)
 	defer cancel()
 	ts, err := c.HC.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	out := make(map[string]Terminal, len(ts))
+	for _, t := range ts {
+		if t.Name != "" {
+			if _, dup := out[t.Name]; !dup {
+				out[t.Name] = t
+			}
+		}
+	}
+	return out, nil
+}
+
+// discover lists every live cos-* terminal not already in have, plus every
+// cos-* name seen live earlier in this watch, so a worker that exits or
+// crashes stays on screen as exited (or gone) rather than vanishing.
+func (c *Collector) discover(live map[string]Terminal, have []Entry) []Entry {
+	if c.cosSeen == nil {
+		c.cosSeen = map[string]bool{}
+	}
+	for name, t := range live {
+		if t.State == "live" && strings.HasPrefix(name, CosPrefix) {
+			c.cosSeen[name] = true
+		}
+	}
 	known := make(map[string]bool, len(have))
 	for _, e := range have {
 		known[e.Name] = true
 	}
 	var out []Entry
-	for _, t := range ts {
-		if t.State != "live" || !strings.HasPrefix(t.Name, CosPrefix) || known[t.Name] {
-			continue
+	for name := range c.cosSeen {
+		if !known[name] {
+			out = append(out, Entry{Name: name})
 		}
-		known[t.Name] = true
-		out = append(out, Entry{Name: t.Name})
 	}
 	slices.SortFunc(out, func(a, b Entry) int { return cmp.Compare(a.Name, b.Name) })
-	return out, nil
+	return out
+}
+
+// fromList fills w from its `hc ls` record, reading the start time and model
+// with `hc get` only the first time an address is seen.
+func (c *Collector) fromList(ctx context.Context, w *rowBuild, t Terminal, now time.Time) {
+	if c.details == nil {
+		c.details = map[string]Terminal{}
+	}
+	d, ok := c.details[t.Address]
+	if !ok {
+		gctx, cancel := context.WithTimeout(ctx, hcTimeout)
+		g, err := c.HC.Get(gctx, t.Address)
+		cancel()
+		if err == nil {
+			d = g
+			c.details[t.Address] = g
+		}
+	}
+	w.Address, w.State, w.Status = t.Address, t.State, t.Status
+	w.Model = d.Model
+	if age := d.Age(now); age > 0 {
+		w.AgeSeconds = int64(age / time.Second)
+	}
+	cwd := t.Cwd
+	if cwd == "" {
+		cwd = d.Cwd
+	}
+	if strings.HasPrefix(cwd, "/") {
+		w.cwdFallback = cwd
+	}
 }
 
 func (c *Collector) readHC(ctx context.Context, w *rowBuild, now time.Time) {
@@ -211,9 +297,13 @@ func (c *Collector) readHC(ctx context.Context, w *rowBuild, now time.Time) {
 	defer cancel()
 	t, err := c.HC.Get(ctx, w.Name)
 	if err != nil {
-		w.HCError = "hc could not read this terminal"
-		if errors.Is(err, ErrGone) {
-			w.HCError = "no hc terminal by this name"
+		switch {
+		case errors.Is(err, ErrGone):
+			w.HCError = hcGoneText
+		case errors.Is(err, ErrNoHC):
+			w.HCError = ErrNoHC.Error()
+		default:
+			w.HCError = "hc could not read this terminal"
 		}
 		return
 	}
@@ -303,6 +393,7 @@ func (c *Collector) readPR(ctx context.Context, worktree string, prev prEntry, n
 			e.pr, e.readAt = prev.pr, prev.readAt
 		}
 	default:
+		p.Review = SummarizeMarkers(p.Markers, c.Reviewers)
 		e.pr, e.readAt = &p, now
 	}
 	return e

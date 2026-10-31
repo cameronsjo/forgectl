@@ -33,16 +33,13 @@ func TestParsePR(t *testing.T) {
 	if p.Number != 12 || p.State != "OPEN" || !p.Draft || p.Head != sha || p.Checks != "PENDING" {
 		t.Errorf("PR = %+v", p)
 	}
-	if p.Marker == nil || p.Marker.Reviewer != "pr-reviewer" || !p.Marker.AtHead || p.Marker.Crit != 1 {
-		t.Errorf("marker = %+v, want pr-reviewer crit=1 at head; a newer stale marker must not hide it", p.Marker)
-	}
-	if len(p.Markers) != 2 || p.MarkersAtHead != 1 {
-		t.Errorf("markers = %+v (at head %d), want two, one at head", p.Markers, p.MarkersAtHead)
+	if len(p.Markers) != 2 || p.Markers[0].Reviewer != "security-reviewer" || p.Markers[0].AtHead || !p.Markers[1].AtHead || p.Markers[1].Crit != 1 {
+		t.Errorf("markers = %+v, want both, newest first: security-reviewer stale, then pr-reviewer crit=1 at head", p.Markers)
 	}
 
 	p, _ = parsePR("o/r", "octo", body("<!-- cadence-review: pr-reviewer head="+sha+" crit=0 imp=3 -->"))
-	if p.Marker == nil || !p.Marker.AtHead || p.Marker.Imp != 3 {
-		t.Errorf("marker at head = %+v", p.Marker)
+	if len(p.Markers) != 1 || !p.Markers[0].AtHead || p.Markers[0].Imp != 3 {
+		t.Errorf("marker at head = %+v", p.Markers)
 	}
 
 	if _, err := parsePR("o/r", "octo", `{"data":{"repository":{"pullRequests":{"nodes":[]}}}}`); !errors.Is(err, workerwatch.ErrNoPR) {
@@ -88,8 +85,8 @@ func TestParsePRSkipsForksAndOtherAuthors(t *testing.T) {
 	if p.Number != 5 {
 		t.Errorf("PR = #%d, want #5 (the newer #9 is a fork's, #10 has no head repo)", p.Number)
 	}
-	if p.Marker == nil || p.Marker.Crit != 2 {
-		t.Errorf("marker = %+v, want the viewer's crit=2; an outsider's clean marker must not count", p.Marker)
+	if len(p.Markers) != 1 || p.Markers[0].Crit != 2 {
+		t.Errorf("markers = %+v, want only the viewer's crit=2; an outsider's clean marker must not count", p.Markers)
 	}
 	onlyFork := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":9,"state":"OPEN","headRepository":{"nameWithOwner":"fork/r"}}]}}}}`
 	if _, err := parsePR("o/r", "octo", onlyFork); !errors.Is(err, workerwatch.ErrNoPR) {
@@ -97,43 +94,23 @@ func TestParsePRSkipsForksAndOtherAuthors(t *testing.T) {
 	}
 }
 
-func TestWorstMarkerAtHeadWins(t *testing.T) {
-	answer := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":5,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `",
-		"reviews":{"nodes":[
-			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=4 -->","author":{"login":"octo"}},
-			{"body":"<!-- cadence-review: security-reviewer head=` + sha + ` crit=1 imp=0 -->","author":{"login":"octo"}},
-			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=0 -->","author":{"login":"octo"}}]}}]}}}}`
-	p, err := parsePR("o/r", "octo", answer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Marker == nil || p.Marker.Reviewer != "security-reviewer" || p.Marker.Crit != 1 {
-		t.Errorf("shown marker = %+v, want security-reviewer crit=1: a later clean pr-reviewer pass must not hide it", p.Marker)
-	}
-	if p.MarkersAtHead != 2 {
-		t.Errorf("at head = %d, want 2 (newest per reviewer)", p.MarkersAtHead)
-	}
-	for _, m := range p.Markers {
-		if m.Reviewer == "pr-reviewer" && m.Imp != 0 {
-			t.Errorf("pr-reviewer kept its older imp=4 marker, not the newest: %+v", m)
-		}
-	}
-}
-
-func TestSameReviewerOtherHeadDoesNotHideAtHeadCrit(t *testing.T) {
+func TestMarkersKeepsEveryViewerMarker(t *testing.T) {
 	answer := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":5,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `",
 		"reviews":{"nodes":[
 			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=1 imp=0 -->","author":{"login":"octo"}},
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=0 -->","author":{"login":"octo"}},
 			{"body":"<!-- cadence-review: pr-reviewer head=ffffffffffffffffffffffffffffffffffffffff crit=0 imp=0 -->","author":{"login":"octo"}}]}}]}}}}`
 	p, err := parsePR("o/r", "octo", answer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Marker == nil || !p.Marker.AtHead || p.Marker.Crit != 1 {
-		t.Errorf("shown marker = %+v, want pr-reviewer crit=1 at head; its newer marker for another head must not hide it", p.Marker)
+	// No deduplication here: summing is sweep's rule, applied by the
+	// collector, and a re-run must not drop the earlier crit=1.
+	if len(p.Markers) != 3 || p.Markers[2].Crit != 1 || !p.Markers[2].AtHead || p.Markers[0].AtHead {
+		t.Errorf("markers = %+v, want all three, newest first", p.Markers)
 	}
-	if len(p.Markers) != 1 {
-		t.Errorf("markers = %+v, want only the at-head one (the stale one is superseded for this reviewer)", p.Markers)
+	if r := workerwatch.SummarizeMarkers(p.Markers, nil); r == nil || r.Crit != 1 || r.AtHead != 2 || r.Stale != 1 {
+		t.Errorf("summary = %+v, want crit=1 over two markers at head, one stale", r)
 	}
 }
 
