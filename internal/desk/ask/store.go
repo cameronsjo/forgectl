@@ -250,6 +250,7 @@ func (s *Store) withLock(fn func() error) error {
 // appendRecord writes one record as one line. The caller holds the lock.
 func (s *Store) appendRecord(rec Record) error {
 	rec.V = recordVersion
+	// termsafe:allow-raw-json persisted log record, never command output
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err

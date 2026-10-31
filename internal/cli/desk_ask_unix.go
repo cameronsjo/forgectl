@@ -277,7 +277,7 @@ func responseDetail(r ask.Response) string {
 	return ""
 }
 
-func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []string) error {
+func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []string, asJSON bool) error {
 	id, kind := args[0], ask.Kind(strings.ToLower(args[1]))
 	r := ask.Response{Ask: id, Kind: kind, Via: "cli"}
 	value := ""
@@ -316,6 +316,17 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 		return deskUsage("desk respond: %w", err)
 	case err != nil:
 		return fmt.Errorf("desk respond: %w", err)
+	}
+	if asJSON {
+		v := struct {
+			Response    ask.Response `json:"response"`
+			Item        ask.Item     `json:"item"`
+			NotifyError string       `json:"notify_error,omitempty"`
+		}{Response: saved, Item: it}
+		if notifyErr != nil {
+			v.NotifyError = notifyErr.Error()
+		}
+		return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(v)
 	}
 	w := &stickyWriter{w: cmd.OutOrStdout()}
 	w.printf("response=%s\nstate=%s\n", saved.ID, it.State)

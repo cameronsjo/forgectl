@@ -18,7 +18,7 @@ func runDeskAsks(*cobra.Command, module.Deps, string, string, bool, bool) error 
 	return errDeskUnsupported()
 }
 
-func runDeskRespond(*cobra.Command, module.Deps, string, []string) error {
+func runDeskRespond(*cobra.Command, module.Deps, string, []string, bool) error {
 	return errDeskUnsupported()
 }
 

@@ -77,8 +77,9 @@ With an ASK-ID it shows that ask, its responses and every notify attempt.`,
 }
 
 func newDeskRespondCmd(dir *string, deps module.Deps) *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "respond ASK-ID done | reply TEXT | link URL | snooze DURATION",
+		Use:   "respond <ask-id> <done|reply|link|snooze> [<text|url|duration>]",
 		Short: "Answer an ask from the command line",
 		Long: `respond records the operator's answer to an ask, as desk ui and desk serve
 do, and tells the asking agent when the ask has a notify address. DURATION is
@@ -90,9 +91,10 @@ Agents must not answer their own asks: respond is the operator's.`,
   forgectl desk respond ask-1a2b3c4d snooze 4h`,
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskRespond(cmd, deps, *dir, args)
+			return runDeskRespond(cmd, deps, *dir, args, asJSON)
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"response","item","notify_error"}`)
 	return cmd
 }
 
