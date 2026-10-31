@@ -147,3 +147,26 @@ func TestHcNameRefusedBeforeWorkerSetup(t *testing.T) {
 		t.Fatalf("prepareWorker(t7, hc) = %v, want ErrBadName", err)
 	}
 }
+
+func TestWorkerLaunchResultNamesHc(t *testing.T) {
+	tag, err := backend.NewRecoveryTag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := backend.FingerprintHcCore("default", "core1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := backend.NewHcIdentity("t7", 1793409108596)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := backend.NewHcRef(backend.HcDefaultSessionServer(), server, tag, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ := workerLaunchResult(context.Background(), nil, workerAttempt{launched: workerLaunched{ref: ref}}, "w", "/repo")
+	if res.Surface != "hc" || res.TerminalID != "t7" {
+		t.Fatalf("surface %q terminal_id %q, want hc and t7", res.Surface, res.TerminalID)
+	}
+}
