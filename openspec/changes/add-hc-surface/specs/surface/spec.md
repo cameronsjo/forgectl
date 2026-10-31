@@ -55,3 +55,18 @@ Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `d
 #### Scenario: Close removes the terminal
 - **WHEN** `surface close x --surface hc` runs on a live hc worker
 - **THEN** its terminal is killed and removed, and `hc get` no longer finds it
+
+### Requirement: Worker follows the launcher's mode
+`surface launch --worktree --inherit-mode <mode>` SHALL take the launching session's Claude Code permission mode. A claude worker with no `[launch.worker] permission_mode` SHALL take that mode capped at `auto`, and no claude worker MUST be looser than the launcher's mode, whatever `[launch.worker]` or the matched project block sets. An unknown mode, or the flag without `--worktree`, MUST be refused.
+
+#### Scenario: Auto coordinator
+- **WHEN** a coordinator in auto launches a worker with `--inherit-mode auto` and `[launch.worker]` sets no permission mode
+- **THEN** the worker starts in auto
+
+#### Scenario: Plan launcher caps an explicit worker mode
+- **WHEN** `[launch.worker] permission_mode = "auto"` and the launch passes `--inherit-mode plan`
+- **THEN** the worker starts in plan
+
+#### Scenario: Bypass launcher
+- **WHEN** the launch passes `--inherit-mode bypassPermissions`
+- **THEN** the worker starts no looser than auto

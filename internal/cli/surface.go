@@ -140,6 +140,7 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		brief       string
 		profile     string
 		model       string
+		inheritMode string
 		here        bool
 		dryRun      bool
 		asJSON      bool
@@ -182,6 +183,14 @@ brief from a file of at most 64 KiB. The brief stays in the harness's
 process arguments, where any local process can list it, so it must not hold
 a secret; point the worker at a file in the worktree instead.
 
+--inherit-mode <mode> passes the launching Claude Code session's permission
+mode (plan, default, acceptEdits, auto, ...) to a claude worker. With no
+[launch.worker] permission_mode, the worker takes that mode, capped at auto:
+a launcher in dontAsk or bypassPermissions still launches auto workers. Either
+way the worker is never looser than the launcher, so a launcher in plan starts
+plan workers even under [launch.worker] permission_mode = "auto". Claude Code
+does not tell a child process its live mode, so the launcher says it.
+
 --profile <name> runs a claude worker with CLAUDE_CONFIG_DIR set to the
 config_dir of [surface.profiles.<name>] (see docs/configuration.md), so it
 uses that Claude account and settings home; main, or no --profile, keeps the
@@ -203,7 +212,7 @@ only it sees, so a clean preview is not a promise. --json prints the preview as 
 {"repo","worktree","branch","branch_from","ledger_row","brief","posture"} for --worktree
 and absent otherwise. posture maps each field the harness takes (claude
 permission_mode; codex sandbox, approval_policy) to {"value","source"}, where
-source is default, launch.worker, or repo-profile; the text preview prints
+source is default, launch.worker, repo-profile, or launcher; the text preview prints
 <field>= and <field>_source= lines.
 
 Without --dry-run, --json prints what the launch created as one object:
@@ -248,6 +257,7 @@ readiness is hc's reported status, never screen text.
 				Brief:       brief,
 				Profile:     profile,
 				Model:       model,
+				InheritMode: inheritMode,
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -279,6 +289,8 @@ readiness is hc's reported status, never screen text.
 		"run the worker under this [surface.profiles] entry's config_dir as CLAUDE_CONFIG_DIR; main is the launcher's own (--worktree only, claude)")
 	cmd.Flags().StringVar(&model, "model", "",
 		"run the worker on this model instead of the launch profile's (--worktree only)")
+	cmd.Flags().StringVar(&inheritMode, "inherit-mode", "",
+		"the launching Claude Code session's permission mode: a claude worker with no [launch.worker] permission_mode takes it (capped at auto), and is never looser than it (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -299,6 +311,7 @@ type surfaceLaunchOptions struct {
 	Brief       string
 	Profile     string
 	Model       string
+	InheritMode string
 	Here        bool
 	DryRun      bool
 	JSON        bool
@@ -331,8 +344,8 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Brief != "" {
 		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
 	}
-	if opts.Profile != "" || opts.Model != "" {
-		return WithExitCode(errors.New("--profile and --model need --worktree; only a worker launch takes them"), exitUsage)
+	if opts.Profile != "" || opts.Model != "" || opts.InheritMode != "" {
+		return WithExitCode(errors.New("--profile, --model and --inherit-mode need --worktree; only a worker launch takes them"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

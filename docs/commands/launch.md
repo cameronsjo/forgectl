@@ -279,6 +279,10 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 `forgectl launch which` shows what a worker started in the current directory gets: a `worker` row names each field, its value and its source (`default`, `launch.worker`, or `repo-profile`), and says when the worker floor would refuse it. `--json` carries the same as `worker`. `forgectl config` shows the posture with no project block matched.
 
+**Following the launcher's mode: `--inherit-mode`.** `surface launch --worktree ... --inherit-mode <mode>` passes the launching Claude Code session's permission mode to a claude worker. With no `[launch.worker] permission_mode`, the worker takes that mode, capped at `auto`: a launcher in `dontAsk` or `bypassPermissions` still launches `auto` workers. Either way the worker is never looser than the launcher, so a launcher in `plan` starts `plan` workers even when `[launch.worker] permission_mode = "auto"`. A stricter matched project block still wins. The preview names the source `launcher` when the mode came from, or was capped by, the flag. Codex and pi workers ignore it.
+
+Claude Code does not expose a session's live permission mode to the processes it starts: no environment variable carries it, the session's own argv shows only the starting mode, and the transcript's per-message `permissionMode` is an undocumented format. So the launcher states its mode; a coordinator in auto passes `--inherit-mode auto`.
+
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
 **Trimming a claude worker: `settings`.** A worker loads everything an interactive session loads. To give it less, point `[launch.worker] settings` at a JSON file. forgectl merges it into the `--settings` document every claude worker already gets:

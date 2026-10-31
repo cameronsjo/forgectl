@@ -180,10 +180,12 @@ func TestWorkerLaunchFailureBeforeWorktreeStillLeavesARow(t *testing.T) {
 
 func TestWorkerLaunchRefusesBeforeTouchingAnything(t *testing.T) {
 	for name, opts := range map[string]surfaceLaunchOptions{
-		"not herdr":  {Backend: "tmux", Worktree: "feat/x", DisplayName: "w1"},
-		"no name":    {Backend: "herdr", Worktree: "feat/x"},
-		"path name":  {Backend: "herdr", Worktree: "feat/x", DisplayName: "../w1"},
-		"upper name": {Backend: "herdr", Worktree: "feat/x", DisplayName: "W1"},
+		"not herdr":       {Backend: "tmux", Worktree: "feat/x", DisplayName: "w1"},
+		"no name":         {Backend: "herdr", Worktree: "feat/x"},
+		"path name":       {Backend: "herdr", Worktree: "feat/x", DisplayName: "../w1"},
+		"upper name":      {Backend: "herdr", Worktree: "feat/x", DisplayName: "W1"},
+		"bad mode":        {Backend: "herdr", Worktree: "feat/x", DisplayName: "w1", InheritMode: "yolo"},
+		"hc address name": {Backend: "hc", Worktree: "feat/x", DisplayName: "t7"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cmd := &cobra.Command{}

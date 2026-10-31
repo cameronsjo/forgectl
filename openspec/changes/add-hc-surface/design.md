@@ -66,6 +66,17 @@ When the launcher runs inside hc, the worker terminal's parent is the launcher's
 
 Not needed for this change. A worker started by hc stays hidden from the window unless it carries `herdr.space=<id>`. Showing workers in the person's window is a follow-up: label the terminal with a space id from `herdr-app ls`, or call `herdr-app do terminal.keep`.
 
+### Following the launcher's permission mode
+
+A coordinator in auto should start auto workers, and a stricter coordinator should not start looser ones. forgectl needs the launcher's mode to do that, and Claude Code exposes no documented signal to a child process: no environment variable carries it (checked on 2.1.314), the session's argv (`CLAUDE_PID`) shows only the starting mode and misses a Shift+Tab change, and the transcript's per-entry `permissionMode` is an undocumented format. So the launcher states it with `--inherit-mode <mode>`.
+
+The rule, for claude workers only:
+
+1. With no `[launch.worker] permission_mode`, the worker takes the launcher's mode, capped at `auto`. A launcher in `dontAsk` or `bypassPermissions` starts `auto` workers, which the worker floor allows.
+2. Whatever the worker resolves to (`[launch.worker]`, the built-in value, or a stricter project block) is then capped at the launcher's mode. `[launch.worker]` stays the explicit value; the launcher is a ceiling over it, never a floor.
+
+A later change could read the transcript's latest `permissionMode` when the flag is absent, if Claude Code documents that field or a hook writes the mode somewhere stable.
+
 ## Out of scope
 
 - `surface tag`: it writes herdr sidebar metadata, which has no hc equivalent yet.

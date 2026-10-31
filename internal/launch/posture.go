@@ -122,7 +122,28 @@ const (
 	// PostureFromRepo is the matched project block's value, which won because
 	// it is stricter.
 	PostureFromRepo = "repo-profile"
+	// PostureFromLauncher is the launching session's permission mode
+	// (--inherit-mode): taken when [launch.worker] sets none, and a ceiling
+	// over every other source.
+	PostureFromLauncher = "launcher"
 )
+
+// launcherModeCap is the loosest mode a launcher's mode passes to a worker.
+// A launcher in dontAsk or bypassPermissions launches auto workers: the
+// worker floor refuses anything looser (applyWorkerFloor), and inheriting a
+// mode must never be the way past it.
+const launcherModeCap = "auto"
+
+// CheckLauncherMode refuses a launcher mode Claude Code does not have.
+func CheckLauncherMode(mode string) error {
+	return claudePermissionRank.check(mode)
+}
+
+// inheritedMode is the mode a launcher in mode passes on: itself, capped at
+// launcherModeCap.
+func inheritedMode(mode string) (string, error) {
+	return claudePermissionRank.stricter(mode, launcherModeCap)
+}
 
 // PostureValue is one resolved worker posture field and where it came from.
 type PostureValue struct {
@@ -149,9 +170,25 @@ type PostureValue struct {
 //
 // The returned values name each field the harness takes, with its source. The
 // floor afterwards refuses rather than lowers, so they are the final posture.
-func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) (Profile, []PostureValue, []string, error) {
+//
+// launcherMode, when set, is the launching session's permission mode. A
+// claude worker with no [launch.worker] permission_mode takes it in place of
+// the built-in value, capped at auto, and whatever the worker resolves to is
+// then capped at it: a launcher in plan never starts a worker looser than
+// plan, even under an explicit [launch.worker] value.
+func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject, launcherMode string) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
+	var inherited string
+	if launcherMode != "" && p.Harness == "claude" {
+		var err error
+		if inherited, err = inheritedMode(launcherMode); err != nil {
+			return Profile{}, nil, nil, fmt.Errorf("launcher mode: %w", err)
+		}
+		if w.PermissionMode == "" {
+			wpm = inherited
+		}
+	}
 	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
 	wap := firstNonEmpty(w.ApprovalPolicy, workerDefaultApproval)
 	for _, c := range []struct {
@@ -175,11 +212,25 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 			return "", err
 		}
 		source := PostureFromDefault
-		if set != "" {
+		switch {
+		case set != "":
 			source = PostureFromWorker
+		case inherited != "" && field == "permission_mode":
+			source = PostureFromLauncher
 		}
 		if project != "" && got == project && got != worker {
 			source = PostureFromRepo
+		}
+		// The launcher's mode is a ceiling over every source, the repo's
+		// included. On a tie the value already chosen keeps its source.
+		if inherited != "" && field == "permission_mode" {
+			capped, err := r.stricter(got, inherited)
+			if err != nil {
+				return "", err
+			}
+			if capped != got {
+				got, source = capped, PostureFromLauncher
+			}
 		}
 		values = append(values, PostureValue{Field: field, Value: got, Source: source})
 		return got, nil
@@ -263,7 +314,7 @@ func DefaultWorkerPosture(lc config.LaunchConfig) WorkerPosture {
 
 func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) WorkerPosture {
 	w := WorkerPosture{Harness: p.Harness}
-	p, values, notes, err := applyWorkerProfile(p, lc, proj)
+	p, values, notes, err := applyWorkerProfile(p, lc, proj, "")
 	if err != nil {
 		w.Refused = err.Error()
 		return w

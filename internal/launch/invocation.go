@@ -144,6 +144,12 @@ type InvocationRequest struct {
 	// path. It is set last, over the inherited value and the profile's env.
 	// Only a claude worker takes one.
 	ConfigDir string
+	// LauncherMode is the permission mode of the Claude Code session launching
+	// this worker (`surface launch --inherit-mode`), or "" when not given. A
+	// claude worker with no [launch.worker] permission_mode takes it, capped at
+	// auto, and no claude worker is ever looser than it. Only a worker takes
+	// one; it must be a mode claudePermissionRank knows (CheckLauncherMode).
+	LauncherMode string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -458,7 +464,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if len(req.Args) > 0 {
 			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
 		}
-		if profile, workerPosture, notes, err = applyWorkerProfile(profile, req.Config, proj); err != nil {
+		if profile, workerPosture, notes, err = applyWorkerProfile(profile, req.Config, proj, req.LauncherMode); err != nil {
 			return BuiltInvocation{}, fmt.Errorf("%w: %w", ErrWorkerPosture, err)
 		}
 		if profile, err = applyWorkerFloor(profile); err != nil {

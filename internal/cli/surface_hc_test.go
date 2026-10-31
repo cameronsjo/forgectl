@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -168,5 +170,14 @@ func TestWorkerLaunchResultNamesHc(t *testing.T) {
 	res, _ := workerLaunchResult(context.Background(), nil, workerAttempt{launched: workerLaunched{ref: ref}}, "w", "/repo")
 	if res.Surface != "hc" || res.TerminalID != "t7" {
 		t.Fatalf("surface %q terminal_id %q, want hc and t7", res.Surface, res.TerminalID)
+	}
+}
+
+func TestInheritModeNeedsWorktree(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runSurfaceLaunch(cmd, module.Deps{}, surfaceLaunchOptions{Backend: "tmux", InheritMode: "auto"})
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("exit code = %d (err %v), want 2", code, err)
 	}
 }

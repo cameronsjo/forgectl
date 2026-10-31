@@ -200,6 +200,9 @@ type workerSpec struct {
 	// surface is the worker surface, herdr or hc. Empty is herdr, which is
 	// what the drain launches into.
 	surface string
+	// launcherMode is --inherit-mode: the launching session's permission
+	// mode, or empty.
+	launcherMode string
 }
 
 // surfaceName is the spec's worker surface, herdr when unset.
@@ -214,7 +217,7 @@ func (spec workerSpec) surfaceName() string {
 // launch builds, plus the worker's profile config dir and model.
 func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string) launch.InvocationRequest {
 	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
-	req.ConfigDir, req.Model = spec.configDir, spec.model
+	req.ConfigDir, req.Model, req.LauncherMode = spec.configDir, spec.model, spec.launcherMode
 	return req
 }
 
@@ -430,6 +433,11 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
 		}
 	}
+	if opts.InheritMode != "" {
+		if err := launch.CheckLauncherMode(opts.InheritMode); err != nil {
+			return WithExitCode(fmt.Errorf("--inherit-mode: %w", err), exitUsage)
+		}
+	}
 	configDir, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir)
 	if err != nil {
 		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
@@ -438,7 +446,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
-		configDir: configDir, model: opts.Model, surface: opts.Backend}
+		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
