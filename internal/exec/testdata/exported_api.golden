@@ -76,10 +76,12 @@ func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput
 func EndOfOptions() Arg
 func HomebrewNoAutoUpdate() map[string]string
 func IsLauncherSessionHandle(key string) bool
+func IsPaneIdentityKey(key string) bool
 func MapOpaque(a Arg, t Transform) Arg
 func MustFixed(v constantArg) Arg
 func NewOSSensitiveRunner() *OSSensitiveRunner
 func Opaque(v string) Arg
+func PaneIdentityEnv(backend string) []string
 func ReplaceCmuxSocketPath(path string) EnvMutation
 func ReplaceHerdrConfigPath(path string) EnvMutation
 func ReplaceSopsEditor(command string) EnvMutation

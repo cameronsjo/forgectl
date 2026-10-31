@@ -182,15 +182,18 @@ func (a *Adapter) command(kind exec.CommandKind, args ...exec.Arg) exec.Sensitiv
 		Path: exec.Secret(a.hcPath),
 		// --json first on every verb that takes it is the caller's job; this
 		// only fixes the binary and the caps. The environment is inherited so
-		// HC_SESSION selects the core, minus the launching session's handles:
-		// a call that finds no core running starts one, and that core passes
-		// its own environment to every terminal it later starts, so the
-		// launcher's messaging socket and token, session id and terminal id
-		// would otherwise reach terminals forgectl never launched. A worker
-		// started from inside hc is a
-		// child of the launcher's terminal, but Start passes --outlive-parent
-		// and --no-notify, so it neither dies with that terminal nor sends it
-		// notes.
+		// HC_SESSION selects the core, minus the launching session's handles
+		// (exec.IsLauncherSessionHandle): a call that finds no core running
+		// starts one, and that core passes its own environment to every
+		// terminal it later starts, so the launcher's messaging socket and
+		// token, session id, pane and terminal ids, and worker identity would
+		// otherwise reach terminals forgectl never launched.
+		//
+		// Dropping HC_TERMINAL_* also hides the launcher's terminal from hc,
+		// so whether hc still treats a worker as that terminal's child is not
+		// measured. Start passes --outlive-parent and --no-notify either way,
+		// so a worker never dies with the launcher's terminal or sends it
+		// notes, whichever hc decides.
 		Args:      args,
 		Env:       []exec.EnvMutation{exec.UnsetLauncherSessionHandles()},
 		StdoutCap: stdoutCap,

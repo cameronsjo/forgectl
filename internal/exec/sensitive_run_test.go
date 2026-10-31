@@ -1019,13 +1019,14 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 // handles never reach the child, and the variables that select a core or a
 // home stay byte-exact.
 func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
-	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID"}
-	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "FORGECTL_UNRELATED=keep"}
+	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID", "HC_SCOPE",
+		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER"}
+	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "HERDR_SOCKET_PATH=/x/herdr.sock", "TMUX=/tmp/tmux-1/default,1,0", "FORGECTL_UNRELATED=keep"}
 	extra := append([]string{}, kept...)
 	for _, k := range gone {
 		extra = append(extra, k+"=launcher-"+k)
 	}
-	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_SESSION,XDG_CONFIG_HOME,FORGECTL_UNRELATED", defaultRetireBound, extra...)
+	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_SESSION,XDG_CONFIG_HOME,HERDR_SOCKET_PATH,TMUX,FORGECTL_UNRELATED", defaultRetireBound, extra...)
 	res, err := runner.RunSensitive(context.Background(), helperCommand(KindHcReadiness, self, 8192, UnsetLauncherSessionHandles()))
 	if err != nil {
 		t.Fatalf("RunSensitive: %v", err)

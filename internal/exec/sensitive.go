@@ -515,21 +515,68 @@ func UnsetLauncherSessionHandles() EnvMutation {
 	return EnvMutation{op: envOpUnsetSessionHandles}
 }
 
-// launcherSessionHandlePrefixes and launcherSessionHandleKeys are the one
-// list of the launching session's handles. CLAUDE_CODE_ covers Claude Code's
-// session id and its cross-session messaging socket and token; CLAUDECODE
-// marks a process as running inside a Claude Code session; HC_TERMINAL_
-// names the hc terminal the launcher runs in. HC_SESSION is not here: it
-// selects the core, which the launcher and its workers share.
+// paneIdentityEnvByBackend lists, per terminal manager, the variables that
+// name the pane (or its tab and workspace) a process runs in (forgectl#1044).
+// It is the one copy: surface launches strip these keys and put back the new
+// pane's own (PaneIdentityEnv), and every hc call drops them
+// (IsLauncherSessionHandle). The variables that name the server stay: TMUX,
+// CMUX_SOCKET_PATH and HERDR_SOCKET_PATH are shared by the launcher and the
+// new pane.
+//
+// tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
+// were captured from a live cmux pane on 2026-10-19: besides the workspace,
+// surface and tab ids, cmux sets CMUX_PANEL_ID (the pane's panel UUID) and
+// CMUX_TERMINAL_LIFECYCLE_ID (a UUID per terminal session). The rest of the
+// CMUX_ set names the app, its shims, its socket or a port range, not a pane.
+// hc sets HC_TERMINAL_ID, the terminal's address, in every terminal it
+// starts; HC_SESSION selects a core rather than naming a pane.
+var paneIdentityEnvByBackend = map[string][]string{
+	"herdr": {"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"},
+	"hc":    {"HC_TERMINAL_ID"},
+	"tmux":  {"TMUX_PANE"},
+	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
+}
+
+// PaneIdentityEnv is a fresh copy of the variables that name the pane a
+// process runs in under backend; nil for an unknown backend.
+func PaneIdentityEnv(backend string) []string {
+	return slices.Clone(paneIdentityEnvByBackend[backend])
+}
+
+// IsPaneIdentityKey reports whether key names a pane under any manager.
+func IsPaneIdentityKey(key string) bool {
+	for _, keys := range paneIdentityEnvByBackend {
+		if slices.Contains(keys, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// launcherSessionHandlePrefixes and launcherSessionHandleKeys, with every
+// manager's pane ids, are the launching session's handles.
+//
+//   - CLAUDE_CODE_ covers Claude Code's session id and its cross-session
+//     messaging socket and token, and so every other CLAUDE_CODE_ variable
+//     too; CLAUDECODE marks a process as running inside a Claude Code session.
+//   - HC_TERMINAL_ and HC_SCOPE name the hc terminal the launcher runs in and
+//     reach its core. HC_SESSION is not here: it selects the core, which the
+//     launcher and its workers share.
+//   - FORGECTL_WORKER, FORGECTL_LEDGER, FORGECTL_INBOX and
+//     FORGECTL_DRAIN_WORKER are a launched worker's own identity
+//     (mail.EnvWorker and the rest; a cli test pins the two together).
 var (
 	launcherSessionHandlePrefixes = []string{"CLAUDE_CODE_", "HC_TERMINAL_"}
-	launcherSessionHandleKeys     = []string{"CLAUDECODE"}
+	launcherSessionHandleKeys     = []string{
+		"CLAUDECODE", "HC_SCOPE",
+		"FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
+	}
 )
 
 // IsLauncherSessionHandle reports whether key names one of the launching
 // session's handles, which UnsetLauncherSessionHandles drops.
 func IsLauncherSessionHandle(key string) bool {
-	if slices.Contains(launcherSessionHandleKeys, key) {
+	if slices.Contains(launcherSessionHandleKeys, key) || IsPaneIdentityKey(key) {
 		return true
 	}
 	for _, p := range launcherSessionHandlePrefixes {

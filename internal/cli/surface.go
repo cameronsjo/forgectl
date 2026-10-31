@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -451,41 +452,10 @@ func withoutClaudeInbox(env []string) []string {
 	return launch.StripEnv(env, claudeMessagingEnv)
 }
 
-// herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
-// runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
-// launcher and the new pane share.
-var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
-
-// paneIdentityEnvByBackend lists, per terminal manager, the variables that
-// name the pane (or its tab and workspace) a process runs in (forgectl#1044).
-// The variables that name the server stay: TMUX and CMUX_SOCKET_PATH, like
-// HERDR_SOCKET_PATH, are shared by the launcher and the new pane.
-//
-// tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
-// were captured from a live cmux pane on 2026-10-19: besides the workspace,
-// surface and tab ids, cmux sets CMUX_PANEL_ID (the pane's panel UUID) and
-// CMUX_TERMINAL_LIFECYCLE_ID (a UUID per terminal session). The rest of the
-// CMUX_ set names the app, its shims, its socket or a port range, not a pane.
-var paneIdentityEnvByBackend = map[string][]string{
-	"herdr": herdrPaneIdentityEnv,
-	// hc sets HC_TERMINAL_ID, the terminal's address, in every terminal it
-	// starts. The launcher's own is stripped from every launch, as the other
-	// managers' pane ids are; HC_SESSION selects a core rather than naming a
-	// pane, so it is not listed here (hcSessionEnv).
-	"hc":   {"HC_TERMINAL_ID"},
-	"tmux": {"TMUX_PANE"},
-	"cmux": {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
-}
-
-// isPaneIdentityKey reports whether key names a pane under any manager.
-func isPaneIdentityKey(key string) bool {
-	for _, keys := range paneIdentityEnvByBackend {
-		if slices.Contains(keys, key) {
-			return true
-		}
-	}
-	return false
-}
+// isPaneIdentityKey reports whether key names a pane under any manager. The
+// per-manager table lives in the command seam (exec.PaneIdentityEnv), which
+// the hc calls' environment scrub reads too.
+func isPaneIdentityKey(key string) bool { return exec.IsPaneIdentityKey(key) }
 
 // maxPaneIdentityLen bounds a pane id carried into a harness. herdr's ids are
 // short ("w83:p5"), tmux's are "%" and a number, and cmux's are UUIDs;
@@ -522,7 +492,7 @@ func markHerdrPane(env []string) []string {
 // trampoline's environment reaches the harness.
 func paneIdentityEnv(env []string, getenv func(string) string) []string {
 	backend := ""
-	out := make([]string, 0, len(env)+len(herdrPaneIdentityEnv))
+	out := make([]string, 0, len(env))
 	for _, e := range env {
 		k, v, _ := strings.Cut(e, "=")
 		switch k {
@@ -537,7 +507,7 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 		}
 		out = append(out, e)
 	}
-	for _, key := range paneIdentityEnvByBackend[backend] {
+	for _, key := range exec.PaneIdentityEnv(backend) {
 		value := getenv(key)
 		if !validPaneIdentity(value) || slices.ContainsFunc(env, func(e string) bool {
 			k, _, _ := strings.Cut(e, "=")
@@ -587,7 +557,7 @@ func validPaneIdentity(v string) bool {
 // boundary: ordinary in-place launches continue to inherit the marker.
 //
 // The pane-identity variables of every manager go for the same reason
-// (paneIdentityEnvByBackend). They name the pane the LAUNCHER runs in, and the
+// (exec.PaneIdentityEnv). They name the pane the LAUNCHER runs in, and the
 // trampoline replaces the new pane's environment with this one, so a session
 // started from a herdr, tmux or cmux pane would report its agent state, and
 // receive anything addressed to "its" pane, on the launcher's pane. Every
