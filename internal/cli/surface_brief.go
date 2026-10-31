@@ -178,13 +178,14 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			escape: func(ctx context.Context, checked hcadapter.Worker) error {
 				return w.hc.PressEscape(ctx, w.ref, checked)
 			},
-			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
-				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
+			send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
+				return w.hc.SendBrief(ctx, w.ref, s, checked)
 			},
-			record: w.recordBrief,
-			now:    time.Now,
-			sleep:  resume.SleepContext,
-			start:  opts.Start,
+			record:    w.recordBrief,
+			now:       time.Now,
+			sleep:     resume.SleepContext,
+			start:     opts.Start,
+			lastTyped: lastTypedBrief(w.row),
 			// --readback-timeout has no step under hc: hc's send pastes and
 			// submits in one call.
 			interval: briefPollInterval,
@@ -381,6 +382,15 @@ func readBriefArg(arg string) (string, error) {
 		return "", fmt.Errorf("brief file %s is over %d bytes", termsafe.QuotePath(path), worker.MaxLaunchBrief)
 	}
 	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// lastTypedBrief is when row's last brief was recorded, when it was typed
+// into the worker (a launch brief sent no Escape), or the zero time.
+func lastTypedBrief(row worker.Row) time.Time {
+	if row.Brief == nil || row.Brief.Via != worker.ViaTyped {
+		return time.Time{}
+	}
+	return row.Brief.SentAt
 }
 
 // recordBrief writes b as the worker's latest brief and returns its count.

@@ -69,6 +69,9 @@ type listRow struct {
 	Marker          string    `json:"marker,omitempty"`
 	Failure         string    `json:"failure,omitempty"`
 	Recovery        string    `json:"recovery,omitempty"`
+	// Posture is the resolved posture the launch recorded: each field, its
+	// value and its source. Absent for a row from before forgectl recorded it.
+	Posture []worker.PostureSetting `json:"posture,omitempty"`
 
 	// TerminalID is herdr's terminal_id for the pane, which survives a pane
 	// move where pane_id renumbers. Read for a present worker under --json
@@ -117,7 +120,7 @@ error, such as a ledger that cannot be read.
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the workers were launched from (project name or path)")
 	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().BoolVar(&opts.Orphans, "orphans", false, "show only workers whose workspace is gone or whose launch never finished")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","terminal_id"}]} as JSON`)
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","posture","terminal_id"}]} as JSON`)
 	return cmd
 }
 
@@ -250,7 +253,7 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 		Name: r.Name, Harness: r.Harness, Repo: top, Branch: r.Branch, Stage: r.Stage,
 		Worktree: path, WorktreePresent: listed[path],
 		SessionID: r.SessionID, Transcript: r.Transcript, StartedAt: r.StartedAt,
-		Failure: r.Failure, Recovery: r.Recovery,
+		Failure: r.Failure, Recovery: r.Recovery, Posture: r.Posture,
 	}
 	if r.Brief != nil {
 		row.Marker = r.Brief.Marker

@@ -81,6 +81,20 @@ type Row struct {
 	// the worktree). `surface prune` ages a closed row by it. A row closed
 	// before the field existed has none.
 	ClosedAt *time.Time `json:"closed_at,omitempty"`
+	// Posture is the worker's resolved posture as the launch built it: each
+	// field its harness takes (permission_mode for claude, the sandbox and
+	// approval policy for codex), its value, and where the value came from
+	// (default, launch.worker, repo-profile or launcher). It is written with
+	// the harness, before the worker starts; a row from before the field
+	// existed has none.
+	Posture []PostureSetting `json:"posture,omitempty"`
+}
+
+// PostureSetting is one resolved worker posture field and its source.
+type PostureSetting struct {
+	Field  string `json:"field"`
+	Value  string `json:"value"`
+	Source string `json:"source"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is

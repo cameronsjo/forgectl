@@ -198,7 +198,7 @@ forgectl surface launch . --surface tmux --harness codex   # run codex here inst
 forgectl surface launch . --surface tmux --here      # start claude in the target, not at its repo root
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 forgectl surface launch . --surface herdr --worktree feat/x --name x --brief @brief.md   # first brief as the harness's prompt argument, nothing typed
-forgectl surface launch . --surface hc --worktree feat/x --name x --brief @brief.md      # the same worker in a herdr-core (hc) terminal; pass --surface hc to list/read/ready/wait/brief/close
+forgectl surface launch . --surface hc --worktree feat/x --name x --brief @brief.md      # the same worker in a herdr-core (hc) terminal; pass --surface hc to list/read/ready/wait/brief/close/forget
 forgectl surface ready x --json    # wait until worker x is at its input prompt; exit 1 naming any blocking dialog (never answers one)
 forgectl surface brief x "Now run the tests."   # type a one-line follow-up, read it back, then Enter; exit 1 if anything disagrees
 forgectl surface wait x --json     # wait until worker x's turn settles at its prompt
@@ -207,6 +207,7 @@ forgectl surface list --orphans    # this repo's workers: present, gone, or unre
 forgectl surface tag x --token task=PAP-12   # display tokens on x's herdr pane ($task in the sidebar)
 forgectl surface usage x --json    # price x's transcript, no GitHub call
 forgectl surface close x           # close x's workspace; remove its worktree only if no work is lost; never deletes the branch
+forgectl surface forget x --surface hc   # drop x's ledger row once hc proves its terminal gone (a wiped core); touches nothing else
 forgectl surface watch --workers workers.txt --cos   # live, read-only view of chief-of-staff workers in hc: status, reports, PRs, NEEDS YOU
 
 # recipe — run small built-in workbench recipes (alias: r)

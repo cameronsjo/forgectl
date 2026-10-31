@@ -37,6 +37,20 @@ import (
 // recorded creation time and core id.
 const ownerLabel = "forgectl.surface"
 
+// spaceLabel is herdr-app's label for the space a terminal shows in. A
+// terminal started with hc opts into the herdr-app window with
+// herdr.space=<space id>, and without it stays hidden (herdr-app --skill).
+// It is only ever written at Start, never compared: the window may move or
+// drop it.
+const spaceLabel = "herdr.space"
+
+// maxSpaceIDLen bounds a herdr-app space id. herdr-app's ids are "sp" and 32
+// hex digits; anything much longer is not one.
+const maxSpaceIDLen = 64
+
+// ErrBadSpace reports a herdr-app space id forgectl will not pass to hc.
+var ErrBadSpace = errors.New("hc: a herdr-app space id is 1-64 letters, digits, hyphens or underscores, such as one herdr-app ls prints")
+
 // ledgerPrefix keeps an hc session's worker ledger apart from a herdr session
 // of the same name: the ledger is keyed by the session string alone.
 const ledgerPrefix = "hc:"
@@ -83,6 +97,35 @@ type Adapter struct {
 	// HC_SESSION differs reaches a core whose id does not match.
 	session string
 	source  backend.ServerSource
+	// space, when set, is the herdr-app space Start labels a worker for, so
+	// the window shows it. Empty leaves the worker out of the window.
+	space string
+}
+
+// ShowInSpace makes Start label each terminal it creates herdr.space=<id>,
+// so the herdr-app window shows it in that space. It refuses an id outside
+// herdr-app's shape before anything runs.
+func (a *Adapter) ShowInSpace(id string) error {
+	if !validSpaceID(id) {
+		return ErrBadSpace
+	}
+	a.space = id
+	return nil
+}
+
+func validSpaceID(s string) bool {
+	if s == "" || len(s) > maxSpaceIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // New builds an adapter for the hc core the environment selects. hcPath must

@@ -220,6 +220,34 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 	}
 }
 
+// TestWorkerLaunchRecordsThePosture is forgectl#1386: the row keeps the
+// worker's resolved posture and where each value came from, so `surface list
+// --json` can say why a worker runs in auto (its config, --inherit-mode, or
+// the built-in value) after the launch is gone.
+func TestWorkerLaunchRecordsThePosture(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+		return launch.BuiltInvocation{
+			Invocation:    launch.Invocation{Harness: "claude", CWD: cwd},
+			Worker:        true,
+			WorkerPosture: []launch.PostureValue{{Field: "permission_mode", Value: "plan", Source: launch.PostureFromLauncher}},
+		}, nil
+	}
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
+		t.Fatalf("runWorkerSteps: %v", err)
+	}
+	row := onlyRow(t, led)
+	want := []worker.PostureSetting{{Field: "permission_mode", Value: "plan", Source: "launcher"}}
+	if !slices.Equal(row.Posture, want) {
+		t.Fatalf("row posture = %+v, want %+v", row.Posture, want)
+	}
+	listed := reconcileRow(context.Background(), fakeProber{backend.NewProbePresent()}, row, testRepoTop, map[string]bool{}, time.Unix(1e9, 0))
+	if !slices.Equal(listed.Posture, want) {
+		t.Fatalf("list posture = %+v, want %+v", listed.Posture, want)
+	}
+}
+
 // TestBuildWorkerInvocationIsolates pins the call site that turns the worker
 // floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
 // worker gets the worker settings, a session id, and none of the launcher's

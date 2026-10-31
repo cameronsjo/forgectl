@@ -68,13 +68,19 @@ type hcBriefFake struct {
 	// fixture.
 	screen string
 	// escErr fails the Escape; events records escape and send in order.
-	escErr   error
-	checked  []hcadapter.Worker
-	events   []string
-	sendErr  error
-	sendRes  hcadapter.SendResult
-	sent     []string
-	recorded []worker.Brief
+	escErr  error
+	checked []hcadapter.Worker
+	// sendChecked is the checked state each send was handed.
+	sendChecked []hcadapter.Worker
+	events      []string
+	sendErr     error
+	sendRes     hcadapter.SendResult
+	sent        []string
+	recorded    []worker.Brief
+	// slept is every sleep the steps asked for, in order.
+	slept []time.Duration
+	// lastTyped is the steps' lastTyped.
+	lastTyped time.Time
 }
 
 func (f *hcBriefFake) steps() hcBriefSteps {
@@ -102,8 +108,9 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			f.checked = append(f.checked, checked)
 			return f.escErr
 		},
-		send: func(_ context.Context, s string, _ bool) (hcadapter.SendResult, error) {
+		send: func(_ context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
 			f.events = append(f.events, "send")
+			f.sendChecked = append(f.sendChecked, checked)
 			f.sent = append(f.sent, s)
 			return f.sendRes, f.sendErr
 		},
@@ -111,10 +118,11 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			f.recorded = append(f.recorded, b)
 			return len(f.recorded), nil
 		},
-		now:      func() time.Time { now = now.Add(time.Second); return now },
-		sleep:    func(context.Context, time.Duration) error { return nil },
-		start:    5 * time.Second,
-		interval: time.Second,
+		now:       func() time.Time { now = now.Add(time.Second); return now },
+		sleep:     func(_ context.Context, d time.Duration) error { f.slept = append(f.slept, d); return nil },
+		start:     5 * time.Second,
+		interval:  time.Second,
+		lastTyped: f.lastTyped,
 	}
 }
 
@@ -327,6 +335,11 @@ func TestSendBriefHCEscapeGetsTheCheckedState(t *testing.T) {
 	if !slices.Equal(f.checked, []hcadapter.Worker{before}) {
 		t.Fatalf("Escape was handed %v, want the checked %v", f.checked, before)
 	}
+	// The send re-checks too (forgectl#1386): a worker last seen done has no
+	// --if guard, so the send must be handed the same checked state.
+	if !slices.Equal(f.sendChecked, []hcadapter.Worker{before}) {
+		t.Fatalf("send was handed %v, want the checked %v", f.sendChecked, before)
+	}
 }
 
 // TestSendBriefHCIgnoresAModeLineInScrollback: a mode string in older output
@@ -365,5 +378,75 @@ func TestSendBriefHCNamesTheDialog(t *testing.T) {
 	res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
 	if res.Outcome != briefRefused || res.Blocking != "permission prompt" || len(f.events) != 0 {
 		t.Fatalf("outcome %q blocking %q keys %v, want refused naming the permission prompt with no key sent", res.Outcome, res.Blocking, f.events)
+	}
+}
+
+// TestEscapeWait pins the spacing between two hc briefs' Escapes
+// (forgectl#1386): nothing to wait for with no typed brief or an old one, the
+// rest of the spacing for a recent one, and never more than the spacing.
+func TestEscapeWait(t *testing.T) {
+	now := time.Unix(100, 0)
+	for _, c := range []struct {
+		last time.Time
+		want time.Duration
+	}{
+		{time.Time{}, 0},
+		{now.Add(-5 * time.Second), 0},
+		{now.Add(-briefEscapeSpacing), 0},
+		{now.Add(-300 * time.Millisecond), briefEscapeSpacing - 300*time.Millisecond},
+		{now, briefEscapeSpacing},
+		{now.Add(time.Hour), briefEscapeSpacing},
+	} {
+		if got := escapeWait(now, c.last); got != c.want {
+			t.Errorf("escapeWait(last %v) = %v, want %v", now.Sub(c.last), got, c.want)
+		}
+	}
+}
+
+// TestSendBriefHCSpacesItsEscape: a brief that follows a typed brief inside
+// the spacing waits out the rest before its checks and Escape, and an Escape
+// whose delivery is unknown holds the spacing before the refusal returns, so
+// a retry at once cannot double-press Escape.
+func TestSendBriefHCSpacesItsEscape(t *testing.T) {
+	idle := hcadapter.Worker{Live: true, Status: "idle", Turn: 3}
+	f := hcBriefFake{statuses: []hcadapter.Worker{idle}, sendRes: hcadapter.SendResult{Status: "working", Turn: 4},
+		lastTyped: time.Unix(0, 0).Add(700 * time.Millisecond)}
+	if res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1"); res.Outcome != briefSent {
+		t.Fatalf("outcome %q: %s", res.Outcome, res.Reason)
+	}
+	// The fake clock reads 1s first, so 300ms of the spacing has passed.
+	if len(f.slept) == 0 || f.slept[0] != 700*time.Millisecond {
+		t.Fatalf("slept %v, want 700ms before the checks", f.slept)
+	}
+
+	f = hcBriefFake{statuses: []hcadapter.Worker{idle}, escErr: fmt.Errorf("%w: hc keys: timeout", hcadapter.ErrSendFailed)}
+	if res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1"); res.Outcome != briefRefused || res.Step != "escape" {
+		t.Fatalf("outcome %q step %q, want refused at escape", res.Outcome, res.Step)
+	}
+	if !slices.Equal(f.slept, []time.Duration{briefEscapeSpacing}) {
+		t.Fatalf("slept %v after an Escape of unknown delivery, want one spacing", f.slept)
+	}
+	f = hcBriefFake{statuses: []hcadapter.Worker{idle}, escErr: fmt.Errorf("%w: changed", hcadapter.ErrSendRefused)}
+	sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+	if len(f.slept) != 0 {
+		t.Fatalf("slept %v after an Escape refused before any key, want none", f.slept)
+	}
+}
+
+// TestLastTypedBrief: only a typed brief sent an Escape, so a launch brief
+// (the harness's prompt argument) starts no spacing.
+func TestLastTypedBrief(t *testing.T) {
+	at := time.Unix(50, 0)
+	for _, c := range []struct {
+		brief *worker.Brief
+		want  time.Time
+	}{
+		{nil, time.Time{}},
+		{&worker.Brief{SentAt: at, Via: worker.ViaLaunch}, time.Time{}},
+		{&worker.Brief{SentAt: at, Via: worker.ViaTyped}, at},
+	} {
+		if got := lastTypedBrief(worker.Row{Brief: c.brief}); !got.Equal(c.want) {
+			t.Errorf("lastTypedBrief(%+v) = %v, want %v", c.brief, got, c.want)
+		}
 	}
 }
