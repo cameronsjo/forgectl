@@ -173,7 +173,7 @@ func detailKey(t Terminal) string { return t.Address + "\x00" + t.Name }
 
 type prEntry struct {
 	at      time.Time // the last attempt: what the TTL counts from
-	checked time.Time // the last branch check git answered (branchesMoved)
+	checked time.Time // the last branch check that ran (branchesMoved)
 	readAt  time.Time // the last successful read of pr
 	branch  string
 	pr      *PR
@@ -517,13 +517,13 @@ func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now tim
 	ran := runAll(ctx, gitTimeout, jobs)
 	moved := map[string]bool{}
 	for i, wt := range trees {
-		if !ran[i] || errs[i] != nil {
-			continue
+		if !ran[i] {
+			continue // skipped by the deadline: check again next collect
 		}
 		e := c.cache[wt]
-		e.checked = now
+		e.checked = now // a failed check waits too, so a broken worktree costs one git run per gap
 		c.cache[wt] = e
-		if branches[i] != e.branch {
+		if errs[i] == nil && branches[i] != e.branch {
 			moved[wt] = true
 		}
 	}

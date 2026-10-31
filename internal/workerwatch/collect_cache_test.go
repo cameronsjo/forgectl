@@ -202,3 +202,41 @@ func TestCollectorDoesNotBackOffASkippedGet(t *testing.T) {
 		t.Fatal("a failed get was not backed off")
 	}
 }
+
+// failGit fails every branch read and counts them.
+type failGit struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (g *failGit) Branch(context.Context, string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reads++
+	return "", errors.New("bad HEAD")
+}
+
+func (g *failGit) Repo(context.Context, string) (string, error) { return "o/r", nil }
+
+// TestCollectorThrottlesAFailingBranchCheck: a worktree whose branch git
+// cannot read is checked at most once per branchCheckGap too.
+func TestCollectorThrottlesAFailingBranchCheck(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	git := &failGit{}
+	c := &Collector{
+		HC:      &fakeHC{terms: map[string]Terminal{"cos-a": {Address: "t1", Name: "cos-a", State: "live"}}},
+		Git:     git,
+		GH:      &fakeGH{},
+		Now:     func() time.Time { return now },
+		Entries: []Entry{{Name: "cos-a", Worktree: "/wt/a"}},
+	}
+	c.Collect(context.Background(), false) // the PR read: one git read
+	now = now.Add(branchCheckGap)
+	c.Collect(context.Background(), false) // a branch check: fails
+	before := git.reads
+	now = now.Add(time.Second)
+	c.Collect(context.Background(), false)
+	if git.reads != before {
+		t.Fatalf("a failed branch check ran again inside branchCheckGap: reads %d -> %d", before, git.reads)
+	}
+}
