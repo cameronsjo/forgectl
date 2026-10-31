@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,6 +22,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/workerwatch"
 )
 
 // herdr-core (hc) workers.
@@ -103,6 +105,63 @@ func (s hcWatchSource) ReadText(ctx context.Context, target string) ([]byte, boo
 
 func (s hcWatchSource) Events(ctx context.Context, w io.Writer) error {
 	return s.a.StreamEvents(ctx, s.stream, w)
+}
+
+// lazyWatchSource is the watch's hc source when hc was not on PATH at
+// start. Each call looks hc up again until it is found, then keeps that
+// source, so installing hc while the view is open takes effect on the next
+// refresh. Until then every call reports workerwatch.ErrNoHC. The event
+// stream ended at start, so the view polls.
+type lazyWatchSource struct {
+	mu   sync.Mutex
+	src  workerwatch.Source
+	find func() (workerwatch.Source, error)
+}
+
+func (l *lazyWatchSource) source() (workerwatch.Source, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.src != nil {
+		return l.src, nil
+	}
+	src, err := l.find()
+	if err != nil {
+		return nil, err
+	}
+	l.src = src
+	return src, nil
+}
+
+func (l *lazyWatchSource) GetJSON(ctx context.Context, target string) ([]byte, error) {
+	src, err := l.source()
+	if err != nil {
+		return nil, err
+	}
+	return src.GetJSON(ctx, target)
+}
+
+func (l *lazyWatchSource) ListJSON(ctx context.Context) ([]byte, error) {
+	src, err := l.source()
+	if err != nil {
+		return nil, err
+	}
+	return src.ListJSON(ctx)
+}
+
+func (l *lazyWatchSource) ReadText(ctx context.Context, target string) ([]byte, bool, error) {
+	src, err := l.source()
+	if err != nil {
+		return nil, false, err
+	}
+	return src.ReadText(ctx, target)
+}
+
+func (l *lazyWatchSource) Events(ctx context.Context, w io.Writer) error {
+	src, err := l.source()
+	if err != nil {
+		return err
+	}
+	return src.Events(ctx, w)
 }
 
 // checkHcName refuses a display name hc would refuse, before anything is

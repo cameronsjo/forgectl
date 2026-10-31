@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -242,22 +243,29 @@ func TestWatchPlainTellsGoneFromUnread(t *testing.T) {
 }
 
 // TestProductionWatchHC covers both ways the watch's hc client can fail to
-// build: hc missing is not an error (the snapshot says hc_unavailable), and
-// an HC_SESSION the adapter refuses is.
+// build: hc missing is not an error (the snapshot says hc_unavailable, and
+// the client finds hc once it is installed), and an HC_SESSION the adapter
+// refuses is.
 func TestProductionWatchHC(t *testing.T) {
-	empty := t.TempDir()
-	t.Setenv("PATH", empty)
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
 	t.Setenv("HC_SESSION", "")
 	c, err := productionWatchHC()
-	if err != nil || c.Source != nil {
-		t.Fatalf("hc missing: CLI %+v, err %v; want no source and no error", c, err)
+	if err != nil {
+		t.Fatalf("hc missing: err %v; want no error", err)
+	}
+	if _, err := c.List(t.Context()); !errors.Is(err, workerwatch.ErrNoHC) {
+		t.Fatalf("hc missing: List err = %v, want ErrNoHC", err)
 	}
 
-	bin := t.TempDir()
+	// Installing hc while the client is open: the same client now reaches
+	// it (the stub fails, which is not ErrNoHC).
 	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a test stub that must be executable
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin)
+	if _, err := c.List(t.Context()); err == nil || errors.Is(err, workerwatch.ErrNoHC) {
+		t.Fatalf("hc installed after start: List err = %v, want the stub's failure", err)
+	}
 	if c, err := productionWatchHC(); err != nil || c.Source == nil {
 		t.Fatalf("hc present: CLI %+v, err %v; want a source", c, err)
 	}

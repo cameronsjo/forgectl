@@ -26,7 +26,7 @@ func TestBriefDirFSRefusesFIFOWithoutBlocking(t *testing.T) {
 		t.Skipf("mkfifo unavailable: %v", err)
 	}
 	done := make(chan bool, 1)
-	go func() { done <- endsComplete(briefDirFS{dir: dir}, "report.md", 0) }()
+	go func() { done <- endsComplete(openedBriefDir(t, dir), "report.md", 0) }()
 	select {
 	case complete := <-done:
 		if complete {
@@ -46,7 +46,7 @@ func TestBriefDirFSRefusesSymlink(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "report.md")); err != nil {
 		t.Fatal(err)
 	}
-	if endsComplete(briefDirFS{dir: dir}, "report.md", 16) {
+	if endsComplete(openedBriefDir(t, dir), "report.md", 16) {
 		t.Error("a symlinked report was followed")
 	}
 	if r := ScanReportDir(dir); len(r.Files) != 0 {
@@ -114,5 +114,55 @@ func TestEventsChildIsReapedAfterCancel(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("the hc events child (pid %d) is still alive after Done: kill(0) = %v", pid, err)
+	}
+}
+
+// openedBriefDir opens dir the way ScanReportDir does, closed at cleanup.
+func openedBriefDir(t *testing.T, dir string) briefDirFS {
+	t.Helper()
+	d, err := openBriefDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	return briefDirFS{dir: d}
+}
+
+// TestBriefDirSwappedAfterOpenIsNotFollowed: once the brief dir is open, a
+// worker that moves it away and puts a symlink to another directory at its
+// path changes nothing the scan reads: the listing and the report opens
+// stay on the directory that was opened, and so do the size and mtime
+// the listing reports.
+func TestBriefDirSwappedAfterOpenIsNotFollowed(t *testing.T) {
+	base := t.TempDir()
+	brief := filepath.Join(base, "brief")
+	if err := os.Mkdir(brief, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(brief, "report.md"), []byte("working\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(brief, "report.md"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	// The swapped-in dir has no report.md, so a size or mtime read by path
+	// (os.File.ReadDir's own Info) would drop the report from the row.
+	other := t.TempDir()
+	for _, name := range []string{"report-a.md", "report-b.md"} {
+		if err := os.WriteFile(filepath.Join(other, name), []byte("REPORT-COMPLETE\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fsys := openedBriefDir(t, brief)
+	if err := os.Rename(brief, filepath.Join(base, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, brief); err != nil {
+		t.Fatal(err)
+	}
+	r := ScanReports(fsys)
+	if len(r.Files) != 1 || r.Files[0].Name != "report.md" || r.Files[0].Complete || !r.Files[0].Modified.Equal(when) {
+		t.Errorf("the scan read the swapped-in directory: %+v", r)
 	}
 }
