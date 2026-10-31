@@ -4,9 +4,11 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -277,5 +279,32 @@ func TestLedgerNameTakenMatchesBegin(t *testing.T) {
 	rows, err := l.Rows()
 	if err != nil || len(rows) != 1 {
 		t.Errorf("NameTaken changed the ledger: rows=%+v err=%v", rows, err)
+	}
+}
+
+// TestLedgerFirstWritesRaceTheLockCreate: two first writes to a new ledger at
+// once both create its lock file. On macOS the loser's openat(O_CREAT) can
+// return ENOENT, which openLockFile retries; every write must land.
+func TestLedgerFirstWritesRaceTheLockCreate(t *testing.T) {
+	for round := range 40 {
+		l, err := openAt(t.TempDir(), "/repo/race", "default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i := range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = l.Begin(Row{Name: fmt.Sprintf("w%d", i)})
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: write %d: %v", round, i, err)
+			}
+		}
 	}
 }
