@@ -147,16 +147,27 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, i
 // PressEscape sends one Escape to the worker with `hc keys`, so the first key
 // any open dialog sees is a refusal: Claude Code's Esc closes a dialog and
 // declines a permission prompt, Codex maps Esc to cancel on its approval
-// prompts, and pi's Escape cancels a selection. At an idle prompt it does
-// nothing a brief cares about; only a second Escape opens a menu, and this
-// sends one. It re-checks that the terminal is forgectl's and live first.
-func (a *Adapter) PressEscape(ctx context.Context, ref backend.Ref) error {
+// prompts, and pi's Escape cancels a selection. These are each harness's
+// default bindings; an operator who rebinds Escape voids this. At an idle
+// prompt one Escape does nothing a brief cares about; only a second Escape
+// within the harness's double-press window opens a menu.
+//
+// Escape also interrupts a running turn, and hc keys has no idle guard like
+// send's --if idle. So it first re-reads the terminal and refuses unless it
+// is still forgectl's, live, and at the status and turn the caller checked
+// (want): a turn that started since then is left alone. The window left is
+// the one hc round trip between that read and the key.
+func (a *Adapter) PressEscape(ctx context.Context, ref backend.Ref, want Worker) error {
 	t, err := a.owned(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSendRefused, err)
 	}
 	if t.State != stateLive {
 		return fmt.Errorf("%w: the worker's program has exited", ErrSendRefused)
+	}
+	if t.Status.State != want.Status || t.Turn != want.Turn {
+		return fmt.Errorf("%w: the worker changed since it was checked (status %q turn %d, now %q turn %d)",
+			ErrSendRefused, want.Status, want.Turn, t.Status.State, t.Turn)
 	}
 	if _, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
 		exec.MustFixed("keys"),

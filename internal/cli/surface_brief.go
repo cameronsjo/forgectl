@@ -94,8 +94,11 @@ empty, with no dialog. Both checks read the worker's own terminal output,
 so they catch an honest dialog but not a forged screen. So, right before it
 pastes, brief sends one Escape, which closes or declines any dialog open at
 that moment (Claude Code, Codex and pi all treat Escape as cancel), and a
-worker's prompt is never in vim mode. The limit: a dialog drawn after that
-Escape and before the paste is not covered. It records the brief, then sends
+worker's prompt is never in vim mode (a screen showing a vim mode line is
+refused). Escape also interrupts a running turn, so brief re-reads the
+worker first and sends no key if its status or turn moved. The limit: a
+dialog drawn after that Escape and before the paste is not covered. It
+records the brief, then sends
 (with --if idle when it was idle, so a turn that started in between refuses
 the send). It never passes --force, so hc itself refuses a blocked worker. hc's
 refusal reports refused; any other send failure reports unconfirmed.
@@ -172,7 +175,9 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 				return s.Text, err
 			},
 			promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
-			escape:      func(ctx context.Context) error { return w.hc.PressEscape(ctx, w.ref) },
+			escape: func(ctx context.Context, checked hcadapter.Worker) error {
+				return w.hc.PressEscape(ctx, w.ref, checked)
+			},
 			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
 				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
 			},

@@ -3,6 +3,8 @@ package hcadapter
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -488,7 +490,8 @@ func TestPressEscapeSendsOneEsc(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := startWorker(t, f, a)
-	if err := a.PressEscape(context.Background(), ref); err != nil {
+	checked := Worker{Live: true, Status: StatusIdle, Turn: 1}
+	if err := a.PressEscape(context.Background(), ref, checked); err != nil {
 		t.Fatal(err)
 	}
 	last, _ := run.Last()
@@ -497,7 +500,33 @@ func TestPressEscapeSendsOneEsc(t *testing.T) {
 		t.Fatal("PressEscape did not run hc keys <t1> esc")
 	}
 	delete(f.terminals, "t1")
-	if err := a.PressEscape(context.Background(), ref); !errors.Is(err, ErrSendRefused) {
+	if err := a.PressEscape(context.Background(), ref, checked); !errors.Is(err, ErrSendRefused) {
 		t.Fatalf("Escape to a gone worker: %v, want ErrSendRefused", err)
+	}
+}
+
+// TestPressEscapeRefusesAChangedWorker: Escape interrupts a running turn and
+// hc keys has no --if idle, so a worker whose status or turn moved since the
+// brief's checks gets no key at all.
+func TestPressEscapeRefusesAChangedWorker(t *testing.T) {
+	checked := Worker{Live: true, Status: StatusIdle, Turn: 1}
+	for name, mutate := range map[string]func(string) string{
+		"turn started": func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"working"`, 1) },
+		"blocked":      func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"blocked"`, 1) },
+		"turn moved":   func(r string) string { return strings.Replace(r, `"turn":1`, `"turn":2`, 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+			a := newTestAdapter(t, f, "")
+			ref := startWorker(t, f, a)
+			f.terminals["t1"] = mutate(f.terminals["t1"])
+			f.verbs = nil
+			if err := a.PressEscape(context.Background(), ref, checked); !errors.Is(err, ErrSendRefused) {
+				t.Fatalf("PressEscape = %v, want ErrSendRefused", err)
+			}
+			if slices.Contains(f.verbs, "keys") {
+				t.Fatalf("a key was sent to a changed worker: %v", f.verbs)
+			}
+		})
 	}
 }

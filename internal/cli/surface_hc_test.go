@@ -69,6 +69,7 @@ type hcBriefFake struct {
 	screen string
 	// escErr fails the Escape; events records escape and send in order.
 	escErr   error
+	checked  []hcadapter.Worker
 	events   []string
 	sendErr  error
 	sendRes  hcadapter.SendResult
@@ -96,8 +97,9 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			return f.screen, nil
 		},
 		promptShown: func(text string) ready.Verdict { return hcTable.EvaluateText("claude", text) },
-		escape: func(context.Context) error {
+		escape: func(_ context.Context, checked hcadapter.Worker) error {
 			f.events = append(f.events, "escape")
+			f.checked = append(f.checked, checked)
 			return f.escErr
 		},
 		send: func(_ context.Context, s string, _ bool) (hcadapter.SendResult, error) {
@@ -302,10 +304,40 @@ func TestSendBriefHCEscapesBeforeTheSend(t *testing.T) {
 }
 
 func TestSendBriefHCEscapeFailureSendsNothing(t *testing.T) {
-	f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, escErr: hcadapter.ErrSendFailed}
-	res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
-	if res.Outcome != briefRefused || res.Step != "escape" || len(f.sent) != 0 {
-		t.Fatalf("outcome %q step %q sent %v, want refused at escape with nothing sent", res.Outcome, res.Step, f.sent)
+	for name, escErr := range map[string]error{"failed": hcadapter.ErrSendFailed, "worker changed": hcadapter.ErrSendRefused} {
+		t.Run(name, func(t *testing.T) {
+			f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, escErr: escErr}
+			res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+			if res.Outcome != briefRefused || res.Step != "escape" || len(f.sent) != 0 || len(f.recorded) != 0 {
+				t.Fatalf("outcome %q step %q sent %v recorded %v, want refused at escape with nothing sent or recorded",
+					res.Outcome, res.Step, f.sent, f.recorded)
+			}
+		})
+	}
+}
+
+// TestSendBriefHCEscapeGetsTheCheckedState: the Escape is handed the status
+// and turn the checks passed on, so it can refuse a worker that moved since.
+func TestSendBriefHCEscapeGetsTheCheckedState(t *testing.T) {
+	before := hcadapter.Worker{Live: true, Status: "done", Turn: 3}
+	f := hcBriefFake{statuses: []hcadapter.Worker{before}, sendRes: hcadapter.SendResult{Status: "working", Turn: 4}}
+	if res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1"); res.Outcome != briefSent {
+		t.Fatalf("outcome %q: %s", res.Outcome, res.Reason)
+	}
+	if !slices.Equal(f.checked, []hcadapter.Worker{before}) {
+		t.Fatalf("Escape was handed %v, want the checked %v", f.checked, before)
+	}
+}
+
+// TestSendBriefHCRefusesAVimModeLine: an Escape in vim mode switches modes
+// instead of closing a dialog, so a screen showing a mode line gets no key.
+func TestSendBriefHCRefusesAVimModeLine(t *testing.T) {
+	for _, line := range vimModeLines {
+		f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, screen: hcFixture("claude-ready-acceptedits") + "\n  " + line + "\n"}
+		res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+		if res.Outcome != briefRefused || !strings.Contains(res.Reason, "vim mode") || len(f.events) != 0 {
+			t.Fatalf("%s: outcome %q reason %q keys %v, want refused on the vim mode line with no key sent", line, res.Outcome, res.Reason, f.events)
+		}
 	}
 }
 

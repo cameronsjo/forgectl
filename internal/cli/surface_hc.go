@@ -7,6 +7,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -150,6 +151,19 @@ func evaluateHcWorker(table *ready.Table, harness string, s ready.Screen) ready.
 	return table.EvaluateText(harness, s.Text)
 }
 
+// vimModeLines are the mode indicators a vim-mode input box draws.
+var vimModeLines = []string{"-- INSERT --", "-- NORMAL --", "-- VISUAL --"}
+
+// vimModeShown reports whether the screen shows a vim mode indicator.
+func vimModeShown(text string) bool {
+	for _, m := range vimModeLines {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // hcBriefSteps is sendBriefHC's I/O, injected so each outcome is testable
 // without hc.
 type hcBriefSteps struct {
@@ -158,8 +172,9 @@ type hcBriefSteps struct {
 	// the harness's prompt and dialog predicates (ready.Table.EvaluateText).
 	screen      func(context.Context) (string, error)
 	promptShown func(text string) ready.Verdict
-	// escape sends one Escape to the worker, right before send.
-	escape func(context.Context) error
+	// escape sends one Escape to the worker, right before send, and refuses
+	// when the worker's status or turn is no longer the checked one.
+	escape func(ctx context.Context, checked hcadapter.Worker) error
 	// send sends text; ifIdle asks hc to type only while still idle.
 	send   func(ctx context.Context, text string, ifIdle bool) (hcadapter.SendResult, error)
 	record func(worker.Brief) (int, error)
@@ -185,11 +200,16 @@ type hcBriefSteps struct {
 // permission prompt, Codex maps Esc to cancel on its approval prompts, and
 // pi's Escape cancels a selection, so the first key any dialog open at that
 // moment sees is a refusal. A worker's prompt is never in vim mode, where
-// Esc would switch to NORMAL (worker settings pin editorMode "normal"). The
-// limit: a dialog drawn after that Escape and before hc pastes is not
-// covered. hc also refuses a blocked terminal itself, and --force is never
-// passed. The marker is recorded before the send, as under herdr, so a turn
-// that started always has its marker in the ledger.
+// Esc would switch to NORMAL (worker settings pin editorMode "normal"), and a
+// screen that shows a vim mode line is refused as a backstop. Escape also
+// interrupts a running turn and hc keys has no idle guard, so the Escape
+// re-reads the worker and refuses unless its status and turn are the checked
+// ones. The limits: a dialog drawn after that Escape and before hc pastes is
+// not covered, nor a turn that starts in the one round trip between that
+// re-read and the key. hc also refuses a blocked terminal itself, and --force
+// is never passed. The marker is recorded after the Escape and before the
+// send, so a turn that started always has its marker in the ledger and a
+// refused Escape leaves none.
 func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) briefResult {
 	refuse := func(step, reason string, v ready.Verdict) briefResult {
 		return briefResult{Outcome: briefRefused, Step: step, Blocking: v.Blocking, Reason: reason}
@@ -215,15 +235,17 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 		return refuse("check", "hc reports the worker "+before.Status+", but its screen does not show the input prompt: "+v.Reason, v)
 	case v.Input != "":
 		return refuse("check", "the worker's input box already holds text; clear it in the worker's terminal first", v)
+	case vimModeShown(shown):
+		return refuse("check", "the worker's screen shows a vim mode line, where the Escape sent before the paste would switch modes instead of closing a dialog; set editorMode to normal for this worker", v)
 	}
 
+	if err := s.escape(ctx, before); err != nil {
+		return refuse("escape", "the Escape that closes any open dialog before the paste was not sent or failed, so nothing was typed or recorded: "+
+			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
+	}
 	count, err := s.record(worker.Brief{Marker: marker, SentAt: s.now().UTC(), Via: worker.ViaTyped})
 	if err != nil {
 		return refuse("record", "the brief could not be recorded in the worker ledger, so nothing was sent: "+
-			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
-	}
-	if err := s.escape(ctx); err != nil {
-		return refuse("escape", "the Escape that closes any open dialog before the paste failed, so nothing was typed; the brief is recorded in the ledger: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
 	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before.Status == hcadapter.StatusIdle)

@@ -50,7 +50,7 @@ A reference to an hc terminal SHALL record its address, its creation time, and a
 - **THEN** `surface ready` reports ready, and the docs do not call that proof that no dialog is open, since both signals come from the worker's own terminal output
 
 ### Requirement: hc briefs and close
-Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST send one Escape to the worker immediately before `hc send` so a dialog open at that moment is declined, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker before sending. A claude worker's prompt MUST NOT be in vim editor mode. `surface close` SHALL run `hc kill` and then `hc rm`.
+Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker after the Escape and before sending. `surface close` SHALL run `hc kill` and then `hc rm`.
 
 #### Scenario: Forged idle over a dialog
 - **WHEN** an hc worker reports status `idle` while its screen shows a permission prompt
@@ -67,6 +67,13 @@ Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `d
 #### Scenario: Close removes the terminal
 - **WHEN** `surface close x --surface hc` runs on a live hc worker
 - **THEN** its terminal is killed and removed, and `hc get` no longer finds it
+
+### Requirement: hc brief Escape
+Under hc, `surface brief` MUST send one Escape to the worker immediately before `hc send`, so a dialog open at that moment is declined. It MUST NOT send that Escape when the worker's status or turn changed since the brief's checks, or when its screen shows a vim mode line. A claude worker's prompt MUST NOT be in vim editor mode.
+
+#### Scenario: A turn starts before the Escape
+- **WHEN** an hc worker passed the brief's checks and then started a turn before the Escape
+- **THEN** `surface brief` reports `refused`, sends no key, and records nothing
 
 ### Requirement: Worker follows the launcher's mode
 `surface launch --worktree --inherit-mode <mode>` SHALL take the launching session's Claude Code permission mode as a ceiling: no claude worker MUST be looser than it, whatever `[launch.worker]` or the matched project block sets. Without `[launch.worker] inherit_launcher_mode = true` it MUST NOT raise a worker; with it, a worker SHALL take the launcher's mode capped at `auto`. `inherit_launcher_mode` with `permission_mode`, an unknown mode, or the flag without `--worktree` MUST be refused.
