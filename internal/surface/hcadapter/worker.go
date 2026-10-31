@@ -233,3 +233,31 @@ func (a *Adapter) owned(ctx context.Context, ref backend.Ref) (terminal, error) 
 	}
 	return terminal{}, fmt.Errorf("%w: %v", ErrUnreadable, cause)
 }
+
+// SendLine types text into the hc terminal at addr and submits it, with `hc
+// send`. Unlike SendBrief it works on any terminal, forgectl's or not: the
+// desk uses it to tell an asking agent that the operator answered. It never
+// passes --force, so hc's own refusal of a blocked terminal stands.
+func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
+	if addr == "" || strings.ContainsAny(addr, " \t\r\n") || strings.HasPrefix(addr, "-") {
+		return fmt.Errorf("%w: %q is not a terminal address", ErrSendRefused, addr)
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		return fmt.Errorf("%w: the text must be one line", ErrSendRefused)
+	}
+	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
+		exec.MustFixed("send"),
+		exec.MustFixed("--json"),
+		exec.EndOfOptions(),
+		exec.Opaque(addr),
+		exec.Opaque(text),
+	))
+	if runErr != nil {
+		switch kind := errorKind(res.Stderr); kind {
+		case kindBlocked, kindStatusMismatch, kindFinished:
+			return fmt.Errorf("%w: hc reports %s", ErrSendRefused, refusalKind(kind))
+		}
+		return fmt.Errorf("%w: %v", ErrSendFailed, classifyRunError(runErr))
+	}
+	return nil
+}
