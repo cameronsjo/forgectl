@@ -118,8 +118,8 @@ type prEntry struct {
 func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.now()
-	snap := Snapshot{Taken: now.UTC(), Notes: slices.Clone(c.Notes)}
+	now := c.now().UTC()
+	snap := Snapshot{Taken: now, Notes: slices.Clone(c.Notes)}
 	entries := slices.Clone(c.Entries)
 	for i := range entries {
 		entries[i].Name = strings.TrimSpace(entries[i].Name)
@@ -148,6 +148,9 @@ func (c *Collector) Collect(ctx context.Context, force bool) Snapshot {
 		}
 		if c.Reports != nil && w.BriefDir != "" {
 			w.Reports = c.Reports(w.BriefDir)
+		}
+		if w.Reports.Files == nil {
+			w.Reports.Files = []ReportFile{} // --json always carries an array
 		}
 		workers = append(workers, w.Worker)
 	}

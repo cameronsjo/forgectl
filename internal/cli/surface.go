@@ -100,7 +100,12 @@ tag stamps display tokens on a worker's herdr pane for the sidebar:
   forgectl surface tag fix-login --token task=PAP-12
 
 send, inbox, flush and event carry messages between a coordinator and
-its workers across harnesses. See forgectl surface send --help.`,
+its workers across harnesses. See forgectl surface send --help.
+
+watch is a live, read-only view of chief-of-staff workers in hc: status,
+reports, PRs, and the selected worker's screen:
+
+  forgectl surface watch --workers workers.txt --cos`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -126,6 +131,7 @@ its workers across harnesses. See forgectl surface send --help.`,
 	cmd.AddCommand(newSurfaceInboxCmd(deps))
 	cmd.AddCommand(newSurfaceFlushCmd(deps))
 	cmd.AddCommand(newSurfaceEventCmd(deps))
+	cmd.AddCommand(newSurfaceWatchCmd(deps))
 	return cmd
 }
 

@@ -493,8 +493,12 @@ func (m workersModel) prCell(w workerwatch.Worker) string {
 		switch {
 		case w.PRNote == "no PR yet":
 			note = "no PR yet"
+		case strings.HasPrefix(w.PRNote, "the PR could not be read"):
+			note = "gh error"
+		case strings.HasPrefix(w.PRNote, "origin is not"):
+			note = "not GitHub"
 		case w.PRNote != "":
-			note = "?"
+			note = "no branch" // git found no branch or no origin; --json has the note
 		case w.Worktree != "" && w.PRAt.IsZero():
 			note = "…"
 		}

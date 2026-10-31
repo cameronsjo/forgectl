@@ -206,6 +206,7 @@ forgectl surface list --orphans    # this repo's workers: present, gone, or unre
 forgectl surface tag x --token task=PAP-12   # display tokens on x's herdr pane ($task in the sidebar)
 forgectl surface usage x --json    # price x's transcript, no GitHub call
 forgectl surface close x           # close x's workspace; remove its worktree only if no work is lost; never deletes the branch
+forgectl surface watch --workers workers.txt --cos   # live, read-only view of chief-of-staff workers in hc: status, reports, PRs, NEEDS YOU
 
 # recipe — run small built-in workbench recipes (alias: r)
 forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it
