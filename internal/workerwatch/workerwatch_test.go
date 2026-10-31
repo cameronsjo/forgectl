@@ -558,20 +558,25 @@ func TestHCFailureHidesHcsText(t *testing.T) {
 
 type countingHC struct {
 	fakeHC
+	cmu   sync.Mutex
 	lists int
 	gets  map[string]int
 }
 
 func (c *countingHC) List(ctx context.Context) ([]Terminal, error) {
+	c.cmu.Lock()
 	c.lists++
+	c.cmu.Unlock()
 	return c.fakeHC.List(ctx)
 }
 
 func (c *countingHC) Get(ctx context.Context, target string) (Terminal, error) {
+	c.cmu.Lock()
 	if c.gets == nil {
 		c.gets = map[string]int{}
 	}
 	c.gets[target]++
+	c.cmu.Unlock()
 	return c.fakeHC.Get(ctx, target)
 }
 

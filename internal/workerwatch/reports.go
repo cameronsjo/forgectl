@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -24,6 +23,9 @@ const (
 	reportTailBytes = 4 << 10
 	// maxReportFiles caps how many report files one brief dir lists.
 	maxReportFiles = 50
+	// maxBriefDirEntries caps how many entries one scan reads from a brief
+	// dir, so a worker cannot make every collect list a huge directory.
+	maxBriefDirEntries = 4096
 )
 
 // reportNameRe matches the report files a brief owes: report.md, or
@@ -110,23 +112,28 @@ func ScanReportDir(dir string) Reports {
 	if dir == "" {
 		return Reports{}
 	}
-	// O_NOFOLLOW covers only a file's own name, so refuse a brief dir that
-	// is itself a symlink a worker could have swapped in.
-	if info, err := os.Lstat(dir); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return Reports{Error: "the brief dir is a symlink"}
+	// The dir is opened once, refusing a symlink a worker could have swapped
+	// in, and the listing and every report are read relative to that open.
+	d, err := openBriefDir(dir)
+	if errors.Is(err, errBriefDirSymlink) {
+		return Reports{Error: errBriefDirSymlink.Error()}
 	}
-	return ScanReports(briefDirFS{dir: dir})
+	if err != nil {
+		return Reports{Error: readDirReason(err)}
+	}
+	defer d.Close() //nolint:errcheck // read-only descriptor
+	return ScanReports(briefDirFS{dir: d})
 }
 
-// briefDirFS is the brief dir as an fs.FS whose Open never follows a
+// briefDirFS is an open brief dir as an fs.FS whose Open never follows a
 // symlink, never blocks, and refuses anything but a regular file.
-type briefDirFS struct{ dir string }
+type briefDirFS struct{ dir *os.File }
 
 func (b briefDirFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
-	f, err := openReport(filepath.Join(b.dir, name))
+	f, err := openReportAt(b.dir, name)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +149,42 @@ func (b briefDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if name != "." {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
 	}
-	return os.ReadDir(b.dir)
+	entries, err := b.dir.ReadDir(maxBriefDirEntries)
+	if err != nil && !errors.Is(err, io.EOF) { // EOF: an empty dir
+		return nil, err
+	}
+	out := make([]fs.DirEntry, len(entries))
+	for i, e := range entries {
+		out[i] = dirEntryAt{DirEntry: e, dir: b.dir}
+	}
+	slices.SortFunc(out, func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) })
+	return out, nil
 }
+
+// dirEntryAt is a brief-dir entry whose Info stats the name relative to the
+// open dir (statAt), not by path: os.File.ReadDir's own Info re-resolves
+// the dir's path, which a worker can have swapped for a symlink.
+type dirEntryAt struct {
+	fs.DirEntry
+	dir *os.File
+}
+
+func (d dirEntryAt) Info() (fs.FileInfo, error) { return statAt(d.dir, d.Name()) }
+
+// statInfo is the fs.FileInfo statAt builds from a stat of one name.
+type statInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
+	mod  time.Time
+}
+
+func (s statInfo) Name() string       { return s.name }
+func (s statInfo) Size() int64        { return s.size }
+func (s statInfo) Mode() fs.FileMode  { return s.mode }
+func (s statInfo) ModTime() time.Time { return s.mod }
+func (s statInfo) IsDir() bool        { return s.mode.IsDir() }
+func (s statInfo) Sys() any           { return nil }
 
 func readDirReason(err error) string {
 	switch {
