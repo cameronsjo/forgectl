@@ -74,3 +74,38 @@ func TestCheckLauncherMode(t *testing.T) {
 		t.Error("an unknown mode was accepted")
 	}
 }
+
+// TestLauncherModeNeverRaises sweeps every ranked launcher mode against every
+// [launch.worker] value and every project value, unset included: the result
+// with a launcher mode is never looser than the result without one, so no
+// future source branch can let the caller's claim raise a worker.
+func TestLauncherModeNeverRaises(t *testing.T) {
+	values := append([]string{""}, claudePermissionRank.known()...)
+	for _, launcher := range claudePermissionRank.known() {
+		for _, wv := range values {
+			for _, pv := range values {
+				lc := config.LaunchConfig{Worker: config.LaunchWorker{PermissionMode: wv}}
+				var proj *config.LaunchProject
+				if pv != "" {
+					proj = &config.LaunchProject{PermissionMode: pv}
+				}
+				base, _, _, baseErr := applyWorkerProfile(Profile{Harness: "claude"}, lc, proj, "")
+				got, _, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, proj, launcher)
+				if baseErr != nil {
+					if err == nil {
+						t.Errorf("launcher %q, worker %q, project %q: refused without a launcher mode, accepted with one", launcher, wv, pv)
+					}
+					continue
+				}
+				if err != nil {
+					t.Errorf("launcher %q, worker %q, project %q: %v", launcher, wv, pv, err)
+					continue
+				}
+				if !claudePermissionRank.atMost(got.PermissionMode, base.PermissionMode) {
+					t.Errorf("launcher %q, worker %q, project %q: %q is looser than %q without it",
+						launcher, wv, pv, got.PermissionMode, base.PermissionMode)
+				}
+			}
+		}
+	}
+}
