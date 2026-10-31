@@ -27,7 +27,7 @@ import (
 //
 // hc is its own backend: `--surface hc` names it, and the worker verbs that
 // support it take `--surface herdr|hc`, defaulting to herdr so every existing
-// command keeps its meaning. See openspec/changes/add-hc-surface/design.md.
+// command keeps its meaning. See openspec/changes/archive/2026-10-31-add-hc-surface/design.md.
 
 // Worker surfaces, as the --surface flag spells them.
 const (

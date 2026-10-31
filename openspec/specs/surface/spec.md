@@ -1,12 +1,12 @@
 # surface Specification
 
 ## Purpose
-The `surface` command group starts a harness (claude, codex, or pi) inside a terminal manager (tmux, cmux, or herdr) without exposing its invocation, and lets a coordinator drive herdr workers it launched: wait for them, brief them, read their reports, message them, close them, and merge their pull requests under policy.
+The `surface` command group starts a harness (claude, codex, or pi) inside a terminal manager (tmux, cmux, herdr, or herdr-core's `hc`) without exposing its invocation, and lets a coordinator drive the herdr and hc workers it launched: wait for them, brief them, read their reports, message them, close them, merge their pull requests under policy, and watch chief-of-staff workers live (`surface watch`).
 
 ## Requirements
 
 ### Requirement: Explicit backend
-`surface launch [target]` MUST require `--surface` naming `tmux`, `cmux`, or `herdr`; there is no default and no detection. A bare target name SHALL resolve beneath the projects root by exact match and an ambiguous name MUST be refused; a path may be anywhere. `--harness` overrides the profile's harness, and `--name` overrides the display name.
+`surface launch [target]` MUST require `--surface` naming `tmux`, `cmux`, `herdr`, or `hc`; there is no default and no detection. A bare target name SHALL resolve beneath the projects root by exact match and an ambiguous name MUST be refused; a path may be anywhere. `--harness` overrides the profile's harness, and `--name` overrides the display name.
 
 #### Scenario: Missing backend
 - **WHEN** the user runs `forgectl surface launch .` without `--surface`
@@ -24,11 +24,15 @@ A launch MUST NOT pass the resolved harness path, its arguments, its environment
 - **THEN** the tmux command line carries no harness path, arguments, environment values, or prompt
 
 ### Requirement: Worker launch
-`--worktree <branch>` SHALL require `--surface herdr` and `--name`, create a git worktree at `<repo>/.claude/worktrees/<name>` with repository hooks disabled, give the worker its own herdr workspace labeled with forgectl's ownership marker, and record a ledger row. A new branch MUST start at the GitHub default branch head when origin is on github.com, else at `HEAD`; a failing GitHub call fails the launch. An existing branch is checked out as is.
+`--worktree <branch>` SHALL require `--surface herdr` or `--surface hc`, and `--name`. It SHALL create a git worktree at `<repo>/.claude/worktrees/<name>` with repository hooks disabled, give the worker its own herdr workspace or hc terminal labeled with forgectl's ownership marker, and record a ledger row. A new branch MUST start at the GitHub default branch head when origin is on github.com, else at `HEAD`; a failing GitHub call fails the launch. An existing branch is checked out as is.
 
 #### Scenario: Worktree without herdr
 - **WHEN** `--worktree` is given with `--surface tmux`
 - **THEN** the launch is refused
+
+#### Scenario: hc worker
+- **WHEN** `--worktree feat/x --name x` is given with `--surface hc`
+- **THEN** the worker runs in an hc terminal named `x` and the hc ledger for the repo and session holds its row
 
 ### Requirement: Worker posture and environment
 A worker MUST inherit only an allowlisted environment (such as `PATH`, `HOME`, `TERM`, locale, `CLAUDE_CONFIG_DIR`, `SSH_AUTH_SOCK`, and herdr pane ids). Its permission mode SHALL come from `[launch.worker]`, `acceptEdits` by default with `auto` allowed; `dontAsk`, `bypassPermissions`, and dangerous-skip flags MUST be refused. `--model` MUST be a plain token of at most 64 characters not starting with `-`; an unknown `--profile` is refused.
@@ -172,3 +176,103 @@ A claude worker's `--settings` MUST deny `Bash(forgectl tasks done:*)` in every 
 #### Scenario: Worker cannot run the board-close shell command
 - **WHEN** a claude worker launches in any permission mode
 - **THEN** its `--settings` deny list holds `Bash(forgectl tasks done:*)`
+
+### Requirement: hc backend
+`--surface hc` SHALL start the trampoline with `hc run --bg --outlive-parent --no-notify`, naming the terminal after the display name and labeling it `forgectl.surface=<ownership marker>`. A display name outside hc's name rules MUST be refused before anything is created. forgectl MUST NOT stop or restart an hc core.
+
+#### Scenario: Name hc refuses
+- **WHEN** `surface launch --surface hc --name T7` runs
+- **THEN** the launch is refused before any worktree, ledger row, or terminal exists
+
+### Requirement: hc terminal ownership
+A reference to an hc terminal SHALL record its address, its creation time, and a fingerprint of the hc core's id. Close, probe, read, and brief MUST act only on a terminal whose `forgectl.surface` label, creation time, and core fingerprint all match the reference.
+
+#### Scenario: Address reused
+- **WHEN** an hc worker's terminal was removed and a new terminal took its address
+- **THEN** `surface close` refuses with an identity mismatch and kills nothing
+
+### Requirement: hc worker verbs
+`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, a ready verdict MUST need both hc's reported status (`idle` or `done`; `blocked` is blocked) and a screen showing the harness's input prompt with no dialog; an honest dialog on screen MUST read as blocked whatever the status says. `surface tag` MUST refuse an hc worker.
+
+#### Scenario: Blocked hc worker
+- **WHEN** an hc worker reports status `blocked`
+- **THEN** `surface ready` exits 1 naming the blocked status
+
+#### Scenario: Ready is not proof
+- **WHEN** an hc worker reports `idle` and its screen shows an empty prompt
+- **THEN** `surface ready` reports ready, and the docs do not call that proof that no dialog is open, since both signals come from the worker's own terminal output
+
+### Requirement: hc briefs and close
+Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker after the Escape and before sending. `surface close` SHALL run `hc kill` and then `hc rm`.
+
+#### Scenario: Forged idle over a dialog
+- **WHEN** an hc worker reports status `idle` while its screen shows a permission prompt
+- **THEN** `surface brief` reports `refused` and types nothing
+
+#### Scenario: Forged prompt under a dialog
+- **WHEN** a permission prompt is open and something printed an empty prompt under it
+- **THEN** `surface brief` sends an Escape before the paste, so the dialog is declined rather than answered
+
+#### Scenario: Brief to a blocked worker
+- **WHEN** an hc worker reports status `blocked`
+- **THEN** `surface brief` reports `refused` and types nothing
+
+#### Scenario: Close removes the terminal
+- **WHEN** `surface close x --surface hc` runs on a live hc worker
+- **THEN** its terminal is killed and removed, and `hc get` no longer finds it
+
+### Requirement: hc brief Escape
+Under hc, `surface brief` MUST send one Escape to the worker immediately before `hc send`, so a dialog open at that moment is declined. It MUST NOT send that Escape when the worker's status or turn changed since the brief's checks, or when its prompt area shows a vim mode line. A claude worker's prompt MUST NOT be in vim editor mode.
+
+#### Scenario: A turn starts before the Escape
+- **WHEN** an hc worker passed the brief's checks and then started a turn before the Escape
+- **THEN** `surface brief` reports `refused`, sends no key, and records nothing
+
+### Requirement: Worker follows the launcher's mode
+`surface launch --worktree --inherit-mode <mode>` SHALL take the launching session's Claude Code permission mode as a ceiling: no claude worker MUST be looser than it, whatever `[launch.worker]` or the matched project block sets. Without `[launch.worker] inherit_launcher_mode = true` it MUST NOT raise a worker; with it, a worker SHALL take the launcher's mode capped at `auto`. `inherit_launcher_mode` with `permission_mode`, an unknown mode, or the flag without `--worktree` MUST be refused.
+
+#### Scenario: Auto coordinator
+- **WHEN** a coordinator in auto launches a worker with `--inherit-mode auto` and `[launch.worker] permission_mode = "auto"`
+- **THEN** the worker starts in auto
+
+#### Scenario: A claim does not raise
+- **WHEN** the launch passes `--inherit-mode auto` and `[launch.worker]` sets no permission mode
+- **THEN** the worker starts in the built-in `acceptEdits`
+
+#### Scenario: Plan launcher caps an explicit worker mode
+- **WHEN** `[launch.worker] permission_mode = "auto"` and the launch passes `--inherit-mode plan`
+- **THEN** the worker starts in plan
+
+#### Scenario: Operator opt-in
+- **WHEN** `[launch.worker] inherit_launcher_mode = true` and the launch passes `--inherit-mode auto`
+- **THEN** the worker starts in auto
+
+#### Scenario: Bypass launcher
+- **WHEN** the launch passes `--inherit-mode bypassPermissions` and `[launch.worker] permission_mode = "auto"`
+- **THEN** the worker starts in auto, never looser
+
+### Requirement: Live worker watch
+`forgectl surface watch` SHALL show one row per worker named in `--workers FILE` (lines `name|worktree|brief dir`) and, with `--cos`, per live hc terminal whose name starts with `cos-`. Each row SHALL show the name, hc address, hc status labelled self-reported, age, model when its argv names one, its report files and which end in `REPORT-COMPLETE`, and its PR number, head, check rollup and a `cadence-review` verdict summed by the rule `forgectl sweep` uses.
+
+#### Scenario: Blocked worker needs you
+- **WHEN** a watched worker's hc status is `blocked`
+- **THEN** its row is marked "needs you" and a banner names it and the `hc read` command that shows its dialog
+
+#### Scenario: A clean re-run does not hide a Critical
+- **WHEN** a PR's head carries a `crit=1` marker and a later `crit=0` marker from the same reviewer
+- **THEN** the REVIEW cell shows `c1`, as `forgectl sweep` would count it
+
+#### Scenario: Off a terminal
+- **WHEN** stdout is not a terminal
+- **THEN** one plain snapshot is printed, or with `--json` one JSON snapshot, and the command exits 0, or 1 when hc could not be read at all
+
+### Requirement: Worker watch is read-only and safe to leave open
+`surface watch` MUST NOT send keys, kill, or brief any terminal. Worker screen text MUST have escape sequences stripped and remaining control characters escaped before rendering. GitHub reads MUST be cached for at least 30 seconds per worker.
+
+#### Scenario: Hostile screen text
+- **WHEN** the selected worker's screen contains an OSC 52 clipboard write, a screen clear and a bidi override
+- **THEN** the rendered tail contains none of those sequences
+
+#### Scenario: GitHub cache
+- **WHEN** the view collects twice within the GitHub cache lifetime
+- **THEN** GitHub is called once per worker

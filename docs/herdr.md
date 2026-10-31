@@ -139,7 +139,7 @@ The herdr workspace label is forgectl's ownership marker, which `close`, `Probe`
 
 ## herdr-core (hc) workers
 
-herdr-core replaces the herdr 0.9 server: `hc` runs and keeps terminals, and `herdr-app` draws the window. `--surface hc` is its own backend, and `--surface herdr` still drives herdr 0.9 unchanged. Design and measurements: `openspec/changes/add-hc-surface/design.md`.
+herdr-core replaces the herdr 0.9 server: `hc` runs and keeps terminals, and `herdr-app` draws the window. `--surface hc` is its own backend, and `--surface herdr` still drives herdr 0.9 unchanged. Design and measurements: `openspec/changes/archive/2026-10-31-add-hc-surface/design.md`.
 
 ```sh
 forgectl surface launch . --surface hc --worktree fix/login --name fix-login --brief @brief.md
