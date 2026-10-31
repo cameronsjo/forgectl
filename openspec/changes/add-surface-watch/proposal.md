@@ -2,8 +2,6 @@
 
 A chief-of-staff session runs several unattended worker sessions at once, each in an hc (herdr-core) terminal, each owing a report file in its brief directory and usually a pull request. Today the operator follows them by running `hc ls`, `hc read`, `ls <brief dir>` and `gh pr view` by hand, one worker at a time, and a worker that is blocked on a permission dialog sits unnoticed until someone looks. The operator asked for a simple live terminal view first, and a more playful interactive one later.
 
-Implements CAM-524 (Linear).
-
 ## What Changes
 
 - New verb `forgectl surface watch`: a read-only, live Bubble Tea view with one row per worker. Each row shows the worker's name, hc address, self-reported status (working, idle, done, blocked, error), age, model when its argv names one, its report files (how many, which end in `REPORT-COMPLETE`, the newest), and its PR (number, head SHA, CI rollup, the latest `cadence-review` marker and whether it is at head).

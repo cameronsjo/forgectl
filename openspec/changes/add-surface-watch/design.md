@@ -12,9 +12,10 @@ Chief-of-staff workers run in hc terminals named `cos-<slug>`. hc reports each o
 
 - **Verb: `surface watch`.** The `surface` group already owns worker reads (`surface read`, `surface status`, `surface wait`). This reads hc directly, through a small interface of its own, so it does not depend on the hc surface backend in flight elsewhere; when that lands, the hc reads can move onto it.
 - **Event-driven, poll as fallback.** `hc events --json` is a subscription: it does not consume anyone's unseen news, unlike `hc wait --children`, which would take the orchestrator's notifications. Any `status`, `turn`, `created`, `finished`, `removed`, `lost` or `restarted` event triggers a re-collect, at most once a second. With the stream up, a 30 s safety poll remains; if it ends, the view says so and polls every `--interval` (5 s default).
-- **hc reads are local and per worker.** `hc get <name>` per worker per collect (status, created time, argv); `hc ls` only with `--cos`. `hc read` runs only for the selected row, every 2 s.
+- **hc reads are batched.** One `hc ls` per collect gives every live worker's address and status; `hc get` runs once per new address for its start time and argv (which never change), and for a name `hc ls` does not list (finished or gone). `hc read` runs only for the selected row, every 2 s. `--cos` remembers every `cos-*` name it has seen live, so an exited worker stays as an `exited` row. On quit the view cancels the `hc events` child and waits (3 s bound) until it is reaped.
+- **Narrow terminals.** Columns have priorities (NAME, STATUS, REVIEW, CI, REPORTS first; PR, AGE, HC, MODEL after). NAME narrows before a verdict column drops, REPORTS has a short form, and a `→ N more columns` hint says when anything is hidden. Cells are cut by display width, so wide names cannot shift columns. Keys lead the header so they survive a cut line; `?` shows help, and Esc closes it rather than quitting.
 - **GitHub is cached and serialized.** One GraphQL call per worker returns the PR for the worktree's branch, its head, its check rollup and the viewer's last 20 reviews. Entries live for `--gh-ttl`; at most two stale entries refresh per collect, one call at a time, so a dozen workers never burst a dozen calls. `r` forces a refresh of entries older than 15 s.
-- **Markers are claims.** Only reviews by the authenticated login are read, as `sweep` does, but workers post under that login too, so this is not a trust filter. At head, the newest marker per reviewer is kept and the worst across reviewers is shown, so one reviewer's clean pass cannot hide another's Critical, and a reviewer's newer marker for another head cannot hide its marker at this one. A newer marker at head from the same reviewer replaces its older one (the reviewer re-ran); `sweep` sums every marker at head instead, so the two can disagree for one PR. The column is starred as a claim: a worker on the operator's login can post or edit any marker.
+- **Markers are claims, summed like sweep.** Only reviews by the authenticated login are read, as `sweep` does, but workers post under that login too, so this is not a trust filter. The headline REVIEW cell applies `sweep`'s rule: only `[sweep] reviewers` count when that list is set, and `crit`/`imp` are summed over every counted marker at head with no per-reviewer deduplication, so the watch is never less alarming than `sweep` beside it (a later `crit=0` re-run cannot cancel an earlier `crit=1`). The column is starred as a claim.
 - **Brief dirs are worker-owned.** Report files are opened `O_NONBLOCK|O_NOFOLLOW` and must be regular on the open handle, so a swapped-in FIFO or symlink cannot stall or redirect the scan.
 - **Untrusted text.** Screen tails pass through `ansi.Strip` and then `termsafe.SafeLine`, so an OSC 52 clipboard write, a hyperlink, a screen clear or a bidi override in a worker's output renders inert. Names, branches and file names are capped and escaped the same way.
 
@@ -25,6 +26,17 @@ Chief-of-staff workers run in hc terminals named `cos-<slug>`. hc reports each o
 - [Rate limits] Many workers and a short TTL could still add up. → TTL floor of 30 s and two refreshes per collect.
 
 ## Slice 2 (sketch only)
+
+Ideas from the slice-1 TUI review, to pick from:
+
+- Flash a row for a second when its status changes (working to done, a new `REPORT-COMPLETE`, a PR merged); a one-cell spinner or pulsing dot beside working rows.
+- Sort or group BLOCKED first, then working, idle, done; dim finished rows.
+- A per-row status sparkline or "last change 3m ago", from the snapshots already collected; age text that turns amber when a worker has been silent for an hour.
+- A quiet green banner when everything lands ("N reports complete, M PRs green"); an optional terminal bell on a new NEEDS YOU, off by default.
+- Set the terminal title (`surface watch: 1 need you`) so a blocked worker shows in a tab or dock.
+- Tail pane: a "following" marker, and `Tab` or `f` to pin to the blocked worker's screen.
+
+Earlier sketch:
 
 A "fun interactive" view built on the same `workerwatch` snapshot:
 
