@@ -54,12 +54,12 @@ func TestBriefDirFSRefusesSymlink(t *testing.T) {
 }
 
 func TestScanReportDirRefusesASymlinkedDir(t *testing.T) {
-	real := t.TempDir()
-	if err := os.WriteFile(filepath.Join(real, "report.md"), []byte("REPORT-COMPLETE\n"), 0o600); err != nil {
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "report.md"), []byte("REPORT-COMPLETE\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(t.TempDir(), "brief")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(realDir, link); err != nil {
 		t.Fatal(err)
 	}
 	if r := ScanReportDir(link); r.Error != "the brief dir is a symlink" || len(r.Files) != 0 {
