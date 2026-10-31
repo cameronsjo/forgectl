@@ -159,24 +159,9 @@ func parsePR(repo, viewer, out string) (workerwatch.PR, error) {
 			}
 		}
 	}
-	// Reviews come oldest first; the newest marker wins.
-	for i := len(n.Reviews.Nodes) - 1; i >= 0; i-- {
-		rv := n.Reviews.Nodes[i]
-		if rv.Author == nil || !strings.EqualFold(rv.Author.Login, viewer) {
-			continue
-		}
-		line, _, _ := strings.Cut(rv.Body, "\n")
-		line = strings.TrimSpace(line)
-		if len(line) > maxReviewLine {
-			continue
-		}
-		m, ok := sweep.ParseMarker(line)
-		if !ok {
-			continue
-		}
-		p.Marker = &workerwatch.Marker{Reviewer: m.Reviewer, Head: m.Head, Crit: m.Crit, Imp: m.Imp, AtHead: p.Head != "" && m.Head == p.Head}
-		break
-	}
+	p.Markers = markersFrom(n.Reviews.Nodes, viewer, p.Head)
+	p.Marker = workerwatch.WorstMarker(p.Markers)
+	p.MarkersAtHead = workerwatch.AtHeadCount(p.Markers)
 	return p, nil
 }
 
@@ -251,4 +236,34 @@ func (g GitCLI) Repo(ctx context.Context, worktree string) (string, error) {
 		return "", workerwatch.ErrNotGitHub
 	}
 	return repo, nil
+}
+
+// markersFrom keeps the newest marker per reviewer name among viewer's
+// reviews (oldest first in nodes), newest first.
+func markersFrom(nodes []struct {
+	Body   string `json:"body"`
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}, viewer, head string) []workerwatch.Marker {
+	seen := map[string]bool{}
+	var out []workerwatch.Marker
+	for i := len(nodes) - 1; i >= 0; i-- {
+		rv := nodes[i]
+		if rv.Author == nil || !strings.EqualFold(rv.Author.Login, viewer) {
+			continue
+		}
+		line, _, _ := strings.Cut(rv.Body, "\n")
+		line = strings.TrimSpace(line)
+		if len(line) > maxReviewLine {
+			continue
+		}
+		m, ok := sweep.ParseMarker(line)
+		if !ok || seen[m.Reviewer] {
+			continue
+		}
+		seen[m.Reviewer] = true
+		out = append(out, workerwatch.Marker{Reviewer: m.Reviewer, Head: m.Head, Crit: m.Crit, Imp: m.Imp, AtHead: head != "" && m.Head == head})
+	}
+	return out
 }

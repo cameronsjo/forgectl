@@ -142,7 +142,7 @@ func TestWorkersRowsShowEveryField(t *testing.T) {
 		"BLOCKED", "no PR yet",
 		"2/2 report-round2.md ✓", "✗ fail", "no marker",
 		"gone",
-		"STATUS*", "status is the agent's own report",
+		"STATUS*", "REVIEW*", "status and review markers are claims",
 		"note: line 7",
 		"── screen: cos-alpha-fix (t1n)", "hello from the worker",
 	} {

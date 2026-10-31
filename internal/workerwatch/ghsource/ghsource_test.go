@@ -33,8 +33,11 @@ func TestParsePR(t *testing.T) {
 	if p.Number != 12 || p.State != "OPEN" || !p.Draft || p.Head != sha || p.Checks != "PENDING" {
 		t.Errorf("PR = %+v", p)
 	}
-	if p.Marker == nil || p.Marker.Reviewer != "security-reviewer" || p.Marker.AtHead {
-		t.Errorf("marker = %+v, want the newest (security-reviewer, stale)", p.Marker)
+	if p.Marker == nil || p.Marker.Reviewer != "pr-reviewer" || !p.Marker.AtHead || p.Marker.Crit != 1 {
+		t.Errorf("marker = %+v, want pr-reviewer crit=1 at head; a newer stale marker must not hide it", p.Marker)
+	}
+	if len(p.Markers) != 2 || p.MarkersAtHead != 1 {
+		t.Errorf("markers = %+v (at head %d), want two, one at head", p.Markers, p.MarkersAtHead)
 	}
 
 	p, _ = parsePR("o/r", "octo", body("<!-- cadence-review: pr-reviewer head="+sha+" crit=0 imp=3 -->"))
@@ -91,6 +94,29 @@ func TestParsePRSkipsForksAndOtherAuthors(t *testing.T) {
 	onlyFork := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":9,"state":"OPEN","headRepository":{"nameWithOwner":"fork/r"}}]}}}}`
 	if _, err := parsePR("o/r", "octo", onlyFork); !errors.Is(err, workerwatch.ErrNoPR) {
 		t.Errorf("only a fork's PR: err = %v, want ErrNoPR", err)
+	}
+}
+
+func TestWorstMarkerAtHeadWins(t *testing.T) {
+	answer := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":5,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `",
+		"reviews":{"nodes":[
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=4 -->","author":{"login":"octo"}},
+			{"body":"<!-- cadence-review: security-reviewer head=` + sha + ` crit=1 imp=0 -->","author":{"login":"octo"}},
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=0 imp=0 -->","author":{"login":"octo"}}]}}]}}}}`
+	p, err := parsePR("o/r", "octo", answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Marker == nil || p.Marker.Reviewer != "security-reviewer" || p.Marker.Crit != 1 {
+		t.Errorf("shown marker = %+v, want security-reviewer crit=1: a later clean pr-reviewer pass must not hide it", p.Marker)
+	}
+	if p.MarkersAtHead != 2 {
+		t.Errorf("at head = %d, want 2 (newest per reviewer)", p.MarkersAtHead)
+	}
+	for _, m := range p.Markers {
+		if m.Reviewer == "pr-reviewer" && m.Imp != 0 {
+			t.Errorf("pr-reviewer kept its older imp=4 marker, not the newest: %+v", m)
+		}
 	}
 }
 

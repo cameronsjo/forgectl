@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -108,7 +110,34 @@ func ScanReportDir(dir string) Reports {
 	if dir == "" {
 		return Reports{}
 	}
-	return ScanReports(os.DirFS(dir))
+	return ScanReports(briefDirFS{dir: dir})
+}
+
+// briefDirFS is the brief dir as an fs.FS whose Open never follows a
+// symlink, never blocks, and refuses anything but a regular file.
+type briefDirFS struct{ dir string }
+
+func (b briefDirFS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	f, err := openReport(filepath.Join(b.dir, name))
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = f.Close() // refused before any read; the close error adds nothing
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	return f, nil
+}
+
+func (b briefDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
+	}
+	return os.ReadDir(b.dir)
 }
 
 func readDirReason(err error) string {
@@ -133,6 +162,9 @@ func endsComplete(fsys fs.FS, name string, size int64) (complete bool) {
 			complete = false
 		}
 	}()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return false // swapped for something else since the directory read
+	}
 	if size > reportTailBytes {
 		if s, ok := f.(io.Seeker); ok {
 			if _, err := s.Seek(size-reportTailBytes, io.SeekStart); err != nil {

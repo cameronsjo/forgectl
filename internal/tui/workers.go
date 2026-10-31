@@ -431,7 +431,7 @@ func (m workersModel) bannerLines() []string {
 func workersColumns() string {
 	return "  " + padRight("NAME", wwName) + " " + padRight("HC", wwAddr) + " " + padRight("STATUS*", wwStatus) + " " +
 		padRight("AGE", wwAge) + " " + padRight("MODEL", wwModel) + " " + padRight("REPORTS", wwReport) + " " +
-		padRight("PR", wwPR) + " " + padRight("CI", wwCI) + " REVIEW"
+		padRight("PR", wwPR) + " " + padRight("CI", wwCI) + " REVIEW*"
 }
 
 func (m workersModel) rowLines() []string {
@@ -574,6 +574,9 @@ func (m workersModel) reviewCell(w workerwatch.Worker) string {
 	}
 	mk := w.PR.Marker
 	text := fmt.Sprintf("%s crit=%d imp=%d", capSafe(mk.Reviewer, 20), mk.Crit, mk.Imp)
+	if more := w.PR.MarkersAtHead - 1; mk.AtHead && more > 0 {
+		text += fmt.Sprintf(" +%d", more) // other reviewers at head, none worse
+	}
 	switch {
 	case !mk.AtHead:
 		return s.Muted.Render(text + " stale")
@@ -621,7 +624,7 @@ func (m workersModel) tailBlock(room int) []string {
 }
 
 func (m workersModel) footerLines() []string {
-	keys := m.styles.Muted.Render("↑/↓ select · r refresh · q quit · * status is the agent's own report (hc), not an observation")
+	keys := m.styles.Muted.Render("↑/↓ select · r refresh · q quit · * status and review markers are claims (the agent's own report; any session on your gh login can post a marker)")
 	if len(m.snap.Notes) == 0 {
 		return []string{keys}
 	}

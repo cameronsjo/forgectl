@@ -12,4 +12,4 @@
 
 - [x] 3.1 `forgectl surface watch` with `--workers`, `--cos`, `--json`, `--interval`, `--gh-ttl`; plain snapshot off a terminal
 - [x] 3.2 `docs/herdr.md` (Watching chief-of-staff workers) and README
-- [ ] 3.3 build, vet, test, lint, `openspec validate --strict`
+- [x] 3.3 build, vet, test, lint, `openspec validate --strict`
