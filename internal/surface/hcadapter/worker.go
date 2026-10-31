@@ -103,16 +103,24 @@ type SendResult struct {
 // SendBrief pastes text into the worker and submits it, with `hc send`.
 //
 // It never passes --force: hc refuses a blocked terminal, and that refusal is
-// the operator's decision to make, not forgectl's. The caller checks the
-// status first; this re-checks that the terminal is forgectl's and live.
-// With ifIdle, hc types only while the status is still idle (`--if idle`),
-// so a turn that started after the caller's check refuses the send instead
-// of receiving it mid-turn. hc's --if takes no "done", so a worker last seen
-// done is sent to without it.
+// the operator's decision to make, not forgectl's. checked is the status and
+// turn the caller read before its own checks and the Escape. SendBrief
+// re-reads the terminal and refuses, typing nothing, unless it is still
+// forgectl's, live, at the checked turn, and idle or done: a turn that started
+// since the check, or a dialog hc now reports as blocked, gets no text.
+//
+// When either the checked or the re-read status is idle, hc also types only
+// while it is still idle (`--if idle`), which closes the window to the one hc
+// call. hc's --if takes no "done", so a worker checked and still done is sent
+// to without it, and the re-read is the
+// whole check: the window left is one hc round trip, the same as PressEscape's.
+// The re-read accepts idle where done was checked (and the reverse): the Escape
+// before the send may make a harness report again, and neither status means a
+// turn is running.
 //
 // Every failure before hc is asked, the identity checks included, wraps
 // ErrSendRefused: nothing was typed.
-func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, ifIdle bool) (SendResult, error) {
+func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, checked Worker) (SendResult, error) {
 	t, err := a.owned(ctx, ref)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("%w: %w", ErrSendRefused, err)
@@ -120,8 +128,15 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, i
 	if t.State != stateLive {
 		return SendResult{}, fmt.Errorf("%w: the worker's program has exited", ErrSendRefused)
 	}
+	if !atPrompt(t.Status.State) || t.Turn != checked.Turn {
+		return SendResult{}, fmt.Errorf("%w: the worker changed since it was checked (status %q turn %d, now %q turn %d)",
+			ErrSendRefused, checked.Status, checked.Turn, t.Status.State, t.Turn)
+	}
 	args := []exec.Arg{exec.MustFixed("send"), exec.MustFixed("--json")}
-	if ifIdle {
+	// --if idle goes with the send when either read saw idle: a worker
+	// checked idle and re-read done keeps hc's own guard, which then refuses
+	// rather than typing into a worker whose status moved.
+	if t.Status.State == StatusIdle || checked.Status == StatusIdle {
 		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
 	}
 	args = append(args, exec.EndOfOptions(), exec.Opaque(t.Address), exec.Opaque(text))
@@ -143,6 +158,9 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, i
 	}
 	return SendResult{Status: sent.Status.State, Turn: sent.Turn}, nil
 }
+
+// atPrompt reports a status at which a worker waits for input: idle or done.
+func atPrompt(status string) bool { return status == StatusIdle || status == StatusDone }
 
 // PressEscape sends one Escape to the worker with `hc keys`, so the first key
 // any open dialog sees is a refusal: Claude Code's Esc closes a dialog and

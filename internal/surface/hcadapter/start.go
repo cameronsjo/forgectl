@@ -26,7 +26,7 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	}
 	owner := spec.OwnershipName()
 
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcCreate,
+	args := []exec.Arg{
 		exec.MustFixed("run"),
 		exec.MustFixed("--bg"),
 		exec.MustFixed("--json"),
@@ -41,10 +41,13 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("--cwd"),
 		spec.CWD(),
 		exec.MustFixed("--label"),
-		exec.Opaque(ownerLabel+"="+owner),
-		exec.EndOfOptions(),
-		spec.Bootstrap().SensitiveArg(),
-	))
+		exec.Opaque(ownerLabel + "=" + owner),
+	}
+	if a.space != "" {
+		args = append(args, exec.MustFixed("--label"), exec.Opaque(spaceLabel+"="+a.space))
+	}
+	args = append(args, exec.EndOfOptions(), spec.Bootstrap().SensitiveArg())
+	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcCreate, args...))
 	if runErr != nil {
 		// Only hc's own refusals before it spawned anything are definitive.
 		// spawn_failed left no terminal behind in the one case measured (a

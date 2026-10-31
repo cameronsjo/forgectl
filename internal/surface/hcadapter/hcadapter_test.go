@@ -27,7 +27,9 @@ type fakeHC struct {
 	// lsReply, when set, is what `hc ls` prints; lsFail makes it fail.
 	lsReply string
 	lsFail  bool
-	verbs   []string
+	// serverFail makes `hc server status` fail, as when no core answers.
+	serverFail bool
+	verbs      []string
 }
 
 func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
@@ -36,6 +38,9 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 		f.verbs = append(f.verbs, verb)
 		switch verb {
 		case "server":
+			if f.serverFail {
+				return fail(cmd.Kind, `{"error":{"kind":"internal","message":"no core"}}`, 1)
+			}
 			return ok(`{"core":{"id":"` + f.coreID + `","name":"m"},"version":"0.1.15"}`), nil
 		case "run":
 			if f.createExit != 0 {
@@ -318,18 +323,18 @@ func TestWorkerScreenAndSend(t *testing.T) {
 	if err != nil || w.Status != StatusIdle || w.App != "claude-code" || w.Text != "hello\nREPORT m1: done" {
 		t.Fatalf("WorkerScreen = %+v, %v", w, err)
 	}
-	sent, err := a.SendBrief(context.Background(), ref, "next step", false)
+	sent, err := a.SendBrief(context.Background(), ref, "next step", idleTurn1)
 	if err != nil || sent.Status != StatusWorking || sent.Turn != 2 {
 		t.Fatalf("SendBrief = %+v, %v", sent, err)
 	}
 	for _, kind := range []string{kindBlocked, kindStatusMismatch, kindFinished} {
 		f.sendKind = kind
-		if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendRefused) {
+		if _, err := a.SendBrief(context.Background(), ref, "next step", idleTurn1); !errors.Is(err, ErrSendRefused) {
 			t.Fatalf("%s SendBrief err = %v, want ErrSendRefused", kind, err)
 		}
 	}
 	f.sendKind = "internal"
-	if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendFailed) {
+	if _, err := a.SendBrief(context.Background(), ref, "next step", idleTurn1); !errors.Is(err, ErrSendFailed) {
 		t.Fatalf("failed SendBrief err = %v, want ErrSendFailed", err)
 	}
 	delete(f.terminals, "t1")
@@ -338,21 +343,28 @@ func TestWorkerScreenAndSend(t *testing.T) {
 	}
 	// A send to a gone worker typed nothing: refused, never unknown.
 	f.sendKind = ""
-	if _, err := a.SendBrief(context.Background(), ref, "next step", false); !errors.Is(err, ErrSendRefused) {
+	if _, err := a.SendBrief(context.Background(), ref, "next step", idleTurn1); !errors.Is(err, ErrSendRefused) {
 		t.Fatalf("gone SendBrief err = %v, want ErrSendRefused", err)
 	}
 }
 
+// idleTurn1 is the checked state of the startWorker fixture: idle at turn 1.
+var idleTurn1 = Worker{Live: true, Status: StatusIdle, Turn: 1}
+
+// TestSendBriefIfIdle: --if idle goes with every send to a worker hc still
+// reports idle, and with none to a worker still done, which hc's --if cannot
+// name.
 func TestSendBriefIfIdle(t *testing.T) {
-	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
-	run := f.runner()
-	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref := startWorker(t, f, a)
-	for _, ifIdle := range []bool{true, false} {
-		if _, err := a.SendBrief(context.Background(), ref, "go", ifIdle); err != nil {
+	for _, state := range []string{StatusIdle, StatusDone} {
+		f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+		run := f.runner()
+		a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := startWorker(t, f, a)
+		f.terminals["t1"] = strings.Replace(f.terminals["t1"], `"state":"idle"`, `"state":"`+state+`"`, 1)
+		if _, err := a.SendBrief(context.Background(), ref, "go", Worker{Live: true, Status: state, Turn: 1}); err != nil {
 			t.Fatal(err)
 		}
 		last, _ := run.Last()
@@ -362,9 +374,84 @@ func TestSendBriefIfIdle(t *testing.T) {
 				has = true
 			}
 		}
-		if has != ifIdle {
-			t.Errorf("ifIdle=%v: --if idle present = %v", ifIdle, has)
+		if has != (state == StatusIdle) {
+			t.Errorf("status %s: --if idle present = %v", state, has)
 		}
+	}
+}
+
+// TestSendBriefRefusesAChangedWorker is forgectl#1386: a worker last seen done
+// gets no --if guard from hc, so SendBrief re-reads it and types nothing when
+// a turn started, a dialog blocked it, or its turn counter moved since the
+// check. Idle and done both still count as at the prompt.
+// TestSendBriefKeepsIfIdleForACheckedIdleWorker: a worker checked idle and
+// re-read done keeps hc's --if idle guard, which then refuses in hc rather
+// than typing into a worker whose status moved.
+func TestSendBriefKeepsIfIdleForACheckedIdleWorker(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := startWorker(t, f, a)
+	f.terminals["t1"] = strings.Replace(f.terminals["t1"], `"state":"idle"`, `"state":"done"`, 1)
+	if _, err := a.SendBrief(context.Background(), ref, "go", idleTurn1); err != nil {
+		t.Fatal(err)
+	}
+	last, _ := run.Last()
+	for i := 0; i+1 < len(last.Args); i++ {
+		if last.Args[i].Equal(exec.MustFixed("--if")) && last.Args[i+1].Equal(exec.MustFixed("idle")) {
+			return
+		}
+	}
+	t.Fatal("a worker checked idle and re-read done was sent to without --if idle")
+}
+
+func TestSendBriefRefusesAChangedWorker(t *testing.T) {
+	checked := Worker{Live: true, Status: StatusDone, Turn: 1}
+	for name, tc := range map[string]struct {
+		mutate func(string) string
+		send   bool
+		// ifIdle is whether a send that runs carries --if idle.
+		ifIdle bool
+	}{
+		"still done":   {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"done"`, 1) }, true, false},
+		"now idle":     {func(r string) string { return r }, true, true},
+		"turn started": {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"working"`, 1) }, false, false},
+		"blocked":      {func(r string) string { return strings.Replace(r, `"state":"idle"`, `"state":"blocked"`, 1) }, false, false},
+		"turn moved":   {func(r string) string { return strings.Replace(r, `"turn":1`, `"turn":2`, 1) }, false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+			run := f.runner()
+			a, nerr := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+			if nerr != nil {
+				t.Fatal(nerr)
+			}
+			ref := startWorker(t, f, a)
+			f.terminals["t1"] = tc.mutate(f.terminals["t1"])
+			f.verbs = nil
+			_, err := a.SendBrief(context.Background(), ref, "go", checked)
+			if tc.send {
+				last, _ := run.Last()
+				has := false
+				for i := 0; i+1 < len(last.Args); i++ {
+					if last.Args[i].Equal(exec.MustFixed("--if")) && last.Args[i+1].Equal(exec.MustFixed("idle")) {
+						has = true
+					}
+				}
+				if has != tc.ifIdle {
+					t.Fatalf("--if idle present = %v, want %v", has, tc.ifIdle)
+				}
+			}
+			if sent := slices.Contains(f.verbs, "send"); sent != tc.send {
+				t.Fatalf("hc send ran = %v, want %v (err %v)", sent, tc.send, err)
+			}
+			if !tc.send && !errors.Is(err, ErrSendRefused) {
+				t.Fatalf("SendBrief = %v, want ErrSendRefused", err)
+			}
+		})
 	}
 }
 
@@ -550,7 +637,7 @@ func TestEveryHcCallDropsTheLauncherHandles(t *testing.T) {
 	if err := a.PressEscape(ctx, ref, checked); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.SendBrief(ctx, ref, "hi", true); err != nil {
+	if _, err := a.SendBrief(ctx, ref, "hi", checked); err != nil {
 		t.Fatal(err)
 	}
 	a.Close(ctx, ref)
@@ -562,6 +649,159 @@ func TestEveryHcCallDropsTheLauncherHandles(t *testing.T) {
 	for i, c := range calls {
 		if len(c.Env) != 1 || !c.Env[0].Equal(want) {
 			t.Errorf("hc call %d (%s) does not drop the launcher's session handles", i, f.verbs[i])
+		}
+	}
+}
+
+// TestAbandoned is forgectl#1386's ledger-only forget: a reference is
+// abandoned only when hc proves forgectl's terminal is not on the core (a new
+// core id under the launch's own core selection, nothing at the address, or
+// the address handed out again), and never when the terminal is still there,
+// whatever its label says, when the selection is unproven, or when hc cannot
+// be read. It asks hc nothing but server status and get.
+func TestAbandoned(t *testing.T) {
+	same := newTestAdapter(t, &fakeHC{}, "").SelectionDigest()
+	for name, tc := range map[string]struct {
+		mutate   func(*fakeHC, backend.Ref)
+		session  string
+		launched string
+		legacy   bool
+		want     error // nil: abandoned
+		// msg, when set, must appear in the refusal.
+		msg string
+	}{
+		"core wiped": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") }, launched: same},
+		"core wiped, address reused": {mutate: func(f *fakeHC, ref backend.Ref) {
+			f.coreID = "core2"
+			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409999999, "live", `null`)
+		}, launched: same},
+		// hc 0.1.15: delete core.json, hc server restart, and the core
+		// reports a new id while t1 keeps running at the same address and
+		// creation time. A new id under the same selection is not a wipe.
+		"core id changed, worker still there": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" },
+			launched: same, want: ErrStillThere, msg: "hc kill t1"},
+		"core differs, no record": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, want: ErrSelectionUnproven, msg: "pass --legacy-row"},
+		// --legacy-row: a row with no recorded selection is decided by the
+		// address read on the core this environment reaches.
+		"legacy row, core changed, address empty": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") }, legacy: true},
+		"legacy row, core changed, worker still there": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" },
+			legacy: true, want: ErrStillThere, msg: "hc kill t1"},
+		// The selection check applies only on a core change: a legacy row on
+		// an unchanged core forgets without the flag.
+		"legacy row, core unchanged, terminal gone": {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
+		// --legacy-row never overrides a recorded selection that differs.
+		"recorded selection differs, legacy flag": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") },
+			launched: "0123456789abcdef0123456789abcdef", legacy: true, want: ErrSelectionUnproven},
+		"core differs, other env": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: "0123456789abcdef0123456789abcdef", want: ErrSelectionUnproven},
+		"terminal gone":           {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
+		"address reused": {mutate: func(f *fakeHC, ref backend.Ref) {
+			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409999999, "live", `null`)
+		}},
+		// Any hc client can rewrite a label, so a relabeled terminal at the
+		// recorded address and creation time is still the worker.
+		"label rewritten": {mutate: func(f *fakeHC, _ backend.Ref) {
+			f.terminals["t1"] = getReply("t1", "", 1793409108596, "live", `null`)
+		}, want: ErrStillThere, msg: "surface close refuses it as well"},
+		"still live": {mutate: func(*fakeHC, backend.Ref) {}, want: ErrStillThere},
+		"still finished": {mutate: func(f *fakeHC, ref backend.Ref) {
+			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409108596, "finished", `null`)
+		}, want: ErrStillThere},
+		"hc unreadable": {mutate: func(f *fakeHC, _ backend.Ref) { f.serverFail = true }, want: ErrUnreadable},
+		"other session": {mutate: func(*fakeHC, backend.Ref) {}, session: "scratch", want: ErrUnreadable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+			ref := startWorker(t, f, newTestAdapter(t, f, ""))
+			tc.mutate(f, ref)
+			f.verbs = nil
+			reason, err := newTestAdapter(t, f, tc.session).Abandoned(context.Background(), ref, tc.launched, tc.legacy)
+			switch {
+			case tc.want == nil && (err != nil || reason == ""):
+				t.Fatalf("Abandoned = %q, %v; want a reason", reason, err)
+			case tc.want != nil && (!errors.Is(err, tc.want) || reason != ""):
+				t.Fatalf("Abandoned = %q, %v; want %v", reason, err, tc.want)
+			case tc.msg != "" && !strings.Contains(err.Error(), tc.msg):
+				t.Fatalf("Abandoned = %v; want it to say %q", err, tc.msg)
+			}
+			for _, v := range f.verbs {
+				if v != "server" && v != "get" {
+					t.Fatalf("Abandoned ran hc %s; it may only read", v)
+				}
+			}
+		})
+	}
+}
+
+// TestSelectionDigestCoversTheCoreSelection: every variable that can move hc
+// to another core (HC_SESSION, HC_SOCKET, the XDG paths, HOME) changes the
+// digest, and the two spellings of the default session do not.
+func TestSelectionDigestCoversTheCoreSelection(t *testing.T) {
+	digest := func(env map[string]string) string {
+		a, err := New((&fakeHC{}).runner(), "/usr/local/bin/hc", func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.SelectionDigest()
+	}
+	base := digest(nil)
+	if base == "" || digest(map[string]string{"HC_SESSION": "default"}) != base {
+		t.Fatalf("an unset HC_SESSION and HC_SESSION=default must give one digest")
+	}
+	for _, k := range []string{"HC_SESSION", "HC_SOCKET", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "HOME"} {
+		if digest(map[string]string{k: "x1"}) == base {
+			t.Errorf("%s does not change the selection digest", k)
+		}
+	}
+	if digest(map[string]string{"HC_TERMINAL_SOCKET": "/s"}) != base {
+		t.Error("HC_TERMINAL_SOCKET changed the digest, but hc calls drop it")
+	}
+}
+
+// hasLabel reports whether cmd carries --label <want>.
+func hasLabel(cmd exec.SensitiveCommand, want string) bool {
+	for i := 0; i+1 < len(cmd.Args); i++ {
+		if cmd.Args[i].Equal(exec.MustFixed("--label")) && cmd.Args[i+1].Equal(exec.Opaque(want)) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestShowInSpaceLabelsTheTerminal is forgectl#1386: herdr-app shows an hc
+// terminal only when it carries herdr.space=<id>, so a launch asked to show
+// the worker adds that label to hc run, and one not asked adds none.
+func TestShowInSpaceLabelsTheTerminal(t *testing.T) {
+	const space = "sp8a41fc22e40d665646f4384830f2ff26"
+	for _, show := range []bool{true, false} {
+		f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+		run := f.runner()
+		a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if show {
+			if err := a.ShowInSpace(space); err != nil {
+				t.Fatal(err)
+			}
+		}
+		startWorker(t, f, a)
+		var create exec.SensitiveCommand
+		for _, c := range run.Calls() {
+			if c.Kind == exec.KindHcCreate {
+				create = c
+			}
+		}
+		if got := hasLabel(create, "herdr.space="+space); got != show {
+			t.Errorf("show=%v: hc run carries herdr.space = %v", show, got)
+		}
+		if create.Kind != exec.KindHcCreate {
+			t.Fatal("hc run was not recorded")
+		}
+	}
+	a := newTestAdapter(t, &fakeHC{coreID: "core1", terminals: map[string]string{}}, "")
+	for _, bad := range []string{"", "sp 1", "sp;rm", "herdr.space=x", strings.Repeat("a", 65)} {
+		if err := a.ShowInSpace(bad); !errors.Is(err, ErrBadSpace) {
+			t.Errorf("ShowInSpace(%q) = %v, want ErrBadSpace", bad, err)
 		}
 	}
 }

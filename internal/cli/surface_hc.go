@@ -225,14 +225,42 @@ type hcBriefSteps struct {
 	// escape sends one Escape to the worker, right before send, and refuses
 	// when the worker's status or turn is no longer the checked one.
 	escape func(ctx context.Context, checked hcadapter.Worker) error
-	// send sends text; ifIdle asks hc to type only while still idle.
-	send   func(ctx context.Context, text string, ifIdle bool) (hcadapter.SendResult, error)
+	// send sends text, and refuses when the worker's status or turn is no
+	// longer the checked one (hcadapter.SendBrief).
+	send   func(ctx context.Context, text string, checked hcadapter.Worker) (hcadapter.SendResult, error)
 	record func(worker.Brief) (int, error)
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) error
 	// start bounds the wait for the turn to begin after the send.
 	start    time.Duration
 	interval time.Duration
+	// lastTyped is when the worker's last typed brief was recorded, or the
+	// zero time; its Escape went out just before then.
+	lastTyped time.Time
+}
+
+// briefEscapeSpacing is the least time between the Escapes of two hc briefs
+// to one worker. A second Escape inside a harness's double-press window opens
+// a menu instead of closing a dialog (rewind in Claude Code; pi's window is
+// 500 ms), and the paste and Enter that follow would land in it. One second is
+// a margin over pi's documented window; Claude Code's is not documented.
+const briefEscapeSpacing = time.Second
+
+// escapeWait is how long a brief waits so its Escape comes at least
+// briefEscapeSpacing after the previous one, recorded at last. A last time in
+// the future (a clock step) waits the whole spacing, never longer.
+func escapeWait(now, last time.Time) time.Duration {
+	if last.IsZero() {
+		return 0
+	}
+	wait := briefEscapeSpacing - now.Sub(last)
+	switch {
+	case wait <= 0:
+		return 0
+	case wait > briefEscapeSpacing:
+		return briefEscapeSpacing
+	}
+	return wait
 }
 
 // sendBriefHC sends a typed brief to an hc worker.
@@ -264,6 +292,14 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	refuse := func(step, reason string, v ready.Verdict) briefResult {
 		return briefResult{Outcome: briefRefused, Step: step, Blocking: v.Blocking, Reason: reason}
 	}
+	// A retry right after a brief would send its Escape inside the harness's
+	// double-press window. The wait comes before the checks, so they still
+	// read the worker right before the Escape.
+	if wait := escapeWait(s.now(), s.lastTyped); wait > 0 {
+		if err := s.sleep(ctx, wait); err != nil {
+			return refuse("check", "canceled while spacing this brief's Escape from the last one: "+err.Error(), ready.Verdict{})
+		}
+	}
 	before, err := s.status(ctx)
 	if err != nil {
 		return refuse("check", "the worker's terminal could not be read: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
@@ -290,15 +326,24 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	}
 
 	if err := s.escape(ctx, before); err != nil {
+		// An Escape whose delivery is unknown may have reached the worker,
+		// and nothing recorded it. Holding the spacing here keeps a retry
+		// that follows at once from sending the second press.
+		if errors.Is(err, hcadapter.ErrSendFailed) {
+			_ = s.sleep(ctx, briefEscapeSpacing) // a canceled hold still refuses below
+		}
 		return refuse("escape", "the Escape that closes any open dialog before the paste was refused or failed, and may or may not have reached the worker; the brief was not typed or recorded: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
 	count, err := s.record(worker.Brief{Marker: marker, SentAt: s.now().UTC(), Via: worker.ViaTyped})
 	if err != nil {
+		// The Escape went out and no record says when, so the next brief
+		// could not space from it: hold the spacing here instead.
+		_ = s.sleep(ctx, briefEscapeSpacing) // a canceled hold still refuses below
 		return refuse("record", "the brief could not be recorded in the worker ledger, so its text was not sent (the Escape before it was): "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
-	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before.Status == hcadapter.StatusIdle)
+	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before)
 	switch {
 	case errors.Is(err, hcadapter.ErrSendRefused):
 		return refuse("send", "hc refused the send and typed nothing; the brief is recorded in the ledger: "+

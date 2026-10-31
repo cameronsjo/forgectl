@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -53,6 +54,9 @@ type workerSteps struct {
 	// the worker's name in herdr's sidebar (forgectl#1047). It is cosmetic
 	// and reports its own failure, so it returns nothing.
 	showName func(ctx context.Context, ref backend.Ref)
+	// hcSelection is an hc worker's core selection digest, written with the
+	// pending row; empty for herdr.
+	hcSelection string
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -76,7 +80,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		return workerLaunched{}, err
 	}
 	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID,
-		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID}); err != nil {
+		GitHubRepo: id.NameWithOwner, GitHubRepoID: id.DatabaseID, HcSelection: s.hcSelection}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -127,6 +131,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	}
 	if err := led.Update(name, func(r *worker.Row) {
 		r.Harness = built.Invocation.Harness
+		r.Posture = postureSettings(built.WorkerPosture)
 		if built.SessionID != "" {
 			r.SessionID = built.SessionID
 			r.Transcript = worker.TranscriptPath(built.Invocation.Env, built.Invocation.CWD, built.SessionID)
@@ -162,6 +167,18 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	return workerLaunched{ref: ref, worktree: wt.Path}, nil
 }
 
+// postureSettings is the resolved worker posture as the ledger records it.
+func postureSettings(values []launch.PostureValue) []worker.PostureSetting {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]worker.PostureSetting, 0, len(values))
+	for _, v := range values {
+		out = append(out, worker.PostureSetting{Field: v.Field, Value: v.Value, Source: v.Source})
+	}
+	return out
+}
+
 // errLaunchConfig marks a launch that failed because its configuration
 // cannot build a worker: the build step (posture, harness profile, binary
 // resolution) or a build that is not a worker. It fails the same way for
@@ -175,6 +192,19 @@ type launchConfigError struct{ err error }
 func (e launchConfigError) Error() string        { return e.err.Error() }
 func (e launchConfigError) Unwrap() error        { return e.err }
 func (e launchConfigError) Is(target error) bool { return target == errLaunchConfig }
+
+// hcSelectionOf is an hc adapter's core selection digest, or "" for any
+// other backend.
+func hcSelectionOf(a backend.Adapter) string {
+	if hc, ok := a.(*hcadapter.Adapter); ok {
+		return hc.SelectionDigest()
+	}
+	return ""
+}
+
+// errHerdrSpaceNeedsHc refuses --herdr-space on a herdr worker: herdr 0.9
+// shows every workspace already, and the label is herdr-app's.
+var errHerdrSpaceNeedsHc = errors.New("--herdr-space needs --surface hc; it labels an hc terminal for the herdr-app window")
 
 // sessionNamer is implemented by the herdr and hc adapters.
 type sessionNamer interface{ Session() string }
@@ -203,6 +233,9 @@ type workerSpec struct {
 	// launcherMode is --inherit-mode: the launching session's permission
 	// mode, or empty.
 	launcherMode string
+	// herdrSpace is --herdr-space: the herdr-app space an hc worker's
+	// terminal is labeled for, or empty.
+	herdrSpace string
 }
 
 // surfaceName is the spec's worker surface, herdr when unset.
@@ -249,7 +282,19 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 			return workerSetup{}, err
 		}
 		adapter, err = newHcAdapter()
+		if err == nil && spec.herdrSpace != "" {
+			hc, ok := adapter.(*hcadapter.Adapter)
+			if !ok {
+				return workerSetup{}, errors.New("forgectl: the hc adapter has an unexpected type")
+			}
+			if err := hc.ShowInSpace(spec.herdrSpace); err != nil {
+				return workerSetup{}, WithExitCode(fmt.Errorf("--herdr-space: %w", err), exitUsage)
+			}
+		}
 	case workerSurfaceHerdr:
+		if spec.herdrSpace != "" {
+			return workerSetup{}, WithExitCode(errHerdrSpaceNeedsHc, exitUsage)
+		}
 		adapter, err = newHerdrAdapter(warn)
 	default:
 		return workerSetup{}, WithExitCode(errUnknownWorkerSurface, exitUsage)
@@ -317,9 +362,10 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			}
 			return result.Ref(), nil
 		},
-		now:      time.Now,
-		brief:    brief,
-		launchID: spec.launchID,
+		now:         time.Now,
+		brief:       brief,
+		launchID:    spec.launchID,
+		hcSelection: hcSelectionOf(s.adapter),
 		showName: func(ctx context.Context, ref backend.Ref) {
 			showWorkerName(ctx, s.adapter, ref, spec.name, warn)
 		},
@@ -446,7 +492,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
-		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode}
+		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode, herdrSpace: opts.HerdrSpace}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {

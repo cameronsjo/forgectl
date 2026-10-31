@@ -17,10 +17,13 @@
 package hcadapter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -36,6 +39,20 @@ import (
 // strength as herdr's workspace label, which is why locate also requires the
 // recorded creation time and core id.
 const ownerLabel = "forgectl.surface"
+
+// spaceLabel is herdr-app's label for the space a terminal shows in. A
+// terminal started with hc opts into the herdr-app window with
+// herdr.space=<space id>, and without it stays hidden (herdr-app --skill).
+// It is only ever written at Start, never compared: the window may move or
+// drop it.
+const spaceLabel = "herdr.space"
+
+// maxSpaceIDLen bounds a herdr-app space id. herdr-app's ids are "sp" and 32
+// hex digits; anything much longer is not one.
+const maxSpaceIDLen = 64
+
+// ErrBadSpace reports a herdr-app space id forgectl will not pass to hc.
+var ErrBadSpace = errors.New("hc: a herdr-app space id is 1-64 letters, digits, hyphens or underscores, such as one herdr-app ls prints")
 
 // ledgerPrefix keeps an hc session's worker ledger apart from a herdr session
 // of the same name: the ledger is keyed by the session string alone.
@@ -83,6 +100,64 @@ type Adapter struct {
 	// HC_SESSION differs reaches a core whose id does not match.
 	session string
 	source  backend.ServerSource
+	// space, when set, is the herdr-app space Start labels a worker for, so
+	// the window shows it. Empty leaves the worker out of the window.
+	space string
+	// selection is the digest of what picks the core (SelectionDigest).
+	selection string
+}
+
+// selectionKeys are the variables that can choose which hc core a call
+// reaches, measured on hc 0.1.15: the core's socket lives under
+// $XDG_RUNTIME_DIR/herdr-core/<session>.sock, its state and config under the
+// XDG state and config homes (or HOME without them), and HC_SOCKET names a
+// socket outright. Over-inclusion only fails toward refusal: a value that
+// differs makes forget refuse rather than call a core wiped.
+var selectionKeys = []string{"HC_SOCKET", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "HOME"}
+
+// selectionDigest hashes the resolved session and selectionKeys' values, so
+// a ledger row records which core selection launched it without storing the
+// paths themselves.
+func selectionDigest(session string, getenv func(string) string) string {
+	var b strings.Builder
+	b.WriteString("hc-selection-v1\x00session=" + session + "\x00")
+	for _, k := range selectionKeys {
+		b.WriteString(k + "=" + getenv(k) + "\x00")
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:16])
+}
+
+// SelectionDigest is a digest of everything that picks this adapter's core:
+// the resolved HC_SESSION and selectionKeys, read at New. A launch records
+// it, and forget calls a changed core id a wiped core only when the digest is
+// the same now (Abandoned).
+func (a *Adapter) SelectionDigest() string { return a.selection }
+
+// ShowInSpace makes Start label each terminal it creates herdr.space=<id>,
+// so the herdr-app window shows it in that space. It refuses an id outside
+// herdr-app's shape before anything runs.
+func (a *Adapter) ShowInSpace(id string) error {
+	if !validSpaceID(id) {
+		return ErrBadSpace
+	}
+	a.space = id
+	return nil
+}
+
+func validSpaceID(s string) bool {
+	if s == "" || len(s) > maxSpaceIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // New builds an adapter for the hc core the environment selects. hcPath must
@@ -105,7 +180,7 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 		}
 		session, source = s, backend.HcNamedSessionServer()
 	}
-	return &Adapter{run: run, hcPath: hcPath, session: session, source: source}, nil
+	return &Adapter{run: run, hcPath: hcPath, session: session, source: source, selection: selectionDigest(session, getenv)}, nil
 }
 
 // ValidSession reports whether s is an HC_SESSION value this package

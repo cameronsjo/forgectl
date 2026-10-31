@@ -3,11 +3,13 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -66,7 +68,7 @@ func (s fileStore) update(fn func([]byte) ([]byte, error)) error {
 	}
 	defer unix.Close(dir) //nolint:errcheck // nothing to flush on a directory fd
 
-	lock, err := openVerified(dir, s.lockName(), unix.O_RDWR|unix.O_CREAT)
+	lock, err := openLockFile(dir, s.lockName())
 	if err != nil {
 		return err
 	}
@@ -84,6 +86,64 @@ func (s fileStore) update(fn func([]byte) ([]byte, error)) error {
 		return err
 	}
 	return writeAt(dir, s.tmpName(), s.dataName(), next)
+}
+
+// lockPoll is how often lockNamed retries a lock another process holds.
+const lockPoll = 50 * time.Millisecond
+
+func (s fileStore) lockNamed(ctx context.Context, suffix string) (func(), error) {
+	lock, err := s.openLock(suffix)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return func() { _ = lock.Close() }, nil // closing releases the flock
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			_ = lock.Close()
+			return nil, fmt.Errorf("worker: lock %s: %w", suffix, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = lock.Close()
+			return nil, fmt.Errorf("%w: %w", ErrBriefBusy, ctx.Err())
+		case <-time.After(lockPoll):
+		}
+	}
+}
+
+// lockOpenAttempts bounds the retries of a lock file's create-or-open. On
+// macOS, two processes that openat the same new name with O_CREAT at once
+// can get ENOENT: a two-goroutine probe on APFS saw it on about 20% of
+// opens, with or without O_NOFOLLOW. By the time the loser retries, the
+// winner's file exists, so a retry opens it.
+const lockOpenAttempts = 3
+
+// openLockFile opens (creating) the lock file name in the pinned directory
+// dir, retrying the create race lockOpenAttempts describes.
+func openLockFile(dir int, name string) (*os.File, error) {
+	var last error
+	for range lockOpenAttempts {
+		lock, err := openVerified(dir, name, unix.O_RDWR|unix.O_CREAT)
+		if !errors.Is(err, os.ErrNotExist) {
+			return lock, err
+		}
+		last = err
+	}
+	return nil, fmt.Errorf("worker: open the lock %s: %w", name, last)
+}
+
+// openLock pins the ledger directory and opens (creating) the named lock
+// file in it.
+func (s fileStore) openLock(suffix string) (*os.File, error) {
+	dir, err := s.pin(true)
+	if err != nil {
+		return nil, fmt.Errorf("worker: ledger directory: %w", err)
+	}
+	defer unix.Close(dir) //nolint:errcheck // the lock file keeps its own descriptor
+	return openLockFile(dir, s.key+"."+suffix+".lock")
 }
 
 // listLedgersAt lists the ledger files in the pinned surface directory under

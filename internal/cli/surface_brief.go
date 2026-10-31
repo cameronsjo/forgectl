@@ -168,7 +168,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	ctx, cancel := context.WithTimeout(cmd.Context(), opts.Readback+opts.Start+5*time.Second)
 	defer cancel()
 	if w.hc != nil {
-		res := sendBriefHC(ctx, hcBriefSteps{
+		res := hcBriefLocked(ctx, w.led.LockBrief, w.row, hcBriefSteps{
 			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
 			screen: func(ctx context.Context) (string, error) {
 				s, err := w.hc.WorkerScreen(ctx, w.ref)
@@ -178,8 +178,8 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			escape: func(ctx context.Context, checked hcadapter.Worker) error {
 				return w.hc.PressEscape(ctx, w.ref, checked)
 			},
-			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
-				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
+			send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
+				return w.hc.SendBrief(ctx, w.ref, s, checked)
 			},
 			record: w.recordBrief,
 			now:    time.Now,
@@ -381,6 +381,35 @@ func readBriefArg(arg string) (string, error) {
 		return "", fmt.Errorf("brief file %s is over %d bytes", termsafe.QuotePath(path), worker.MaxLaunchBrief)
 	}
 	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// hcBriefLocked runs one hc brief under the worker's brief lock
+// (worker.Ledger.LockBrief), so two briefs to one worker cannot both read
+// the last brief's time before either records it and send their Escapes
+// inside the harness's double-press window. The spacing reads the row as it
+// is under the lock, and a row that changed since the worker was opened (a
+// close or a relaunch under the name) refuses.
+func hcBriefLocked(ctx context.Context, lock func(context.Context, string) (func(), worker.Row, error), opened worker.Row, s hcBriefSteps, text, marker string) briefResult {
+	release, row, err := lock(ctx, opened.Name)
+	if err != nil {
+		return briefResult{Outcome: briefRefused, Step: "check",
+			Reason: "the worker's brief lock was not taken, so nothing was sent: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
+	}
+	defer release()
+	if !worker.SameRow(opened)(row) {
+		return briefResult{Outcome: briefRefused, Step: "check", Reason: "the worker's ledger row changed since it was read, so nothing was sent"}
+	}
+	s.lastTyped = lastTypedBrief(row)
+	return sendBriefHC(ctx, s, text, marker)
+}
+
+// lastTypedBrief is when row's last brief was recorded, when it was typed
+// into the worker (a launch brief sent no Escape), or the zero time.
+func lastTypedBrief(row worker.Row) time.Time {
+	if row.Brief == nil || row.Brief.Via != worker.ViaTyped {
+		return time.Time{}
+	}
+	return row.Brief.SentAt
 }
 
 // recordBrief writes b as the worker's latest brief and returns its count.

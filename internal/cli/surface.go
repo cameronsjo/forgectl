@@ -117,6 +117,7 @@ reports, PRs, and the selected worker's screen:
 	cmd.AddCommand(newSurfaceReadCmd(deps))
 	cmd.AddCommand(newSurfaceListCmd(deps))
 	cmd.AddCommand(newSurfaceCloseCmd(deps))
+	cmd.AddCommand(newSurfaceForgetCmd(deps))
 	cmd.AddCommand(newSurfaceEnqueueCmd(deps))
 	cmd.AddCommand(newSurfaceDequeueCmd(deps))
 	cmd.AddCommand(newSurfaceQueueCmd(deps))
@@ -149,6 +150,7 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		profile     string
 		model       string
 		inheritMode string
+		herdrSpace  string
 		here        bool
 		dryRun      bool
 		asJSON      bool
@@ -247,9 +249,12 @@ failed launch.
 --surface hc starts the worker in a herdr-core terminal: hc run --bg
 --outlive-parent --no-notify, named --name (hc's rules: 1-32 of a-z 0-9 - _ .,
 not shaped like an address such as t7) and labeled forgectl.surface with the
-ownership marker. It stays out of the herdr-app window. The worker verbs (list,
-read, ready, wait, brief, close) take --surface hc to reach it; under hc,
-readiness needs hc's reported status and the harness's prompt on screen.
+ownership marker. It stays out of the herdr-app window unless --herdr-space
+<id> (a space id from herdr-app ls) labels it herdr.space=<id>, which
+herdr-app reads to show it in that space. The worker verbs (list, read, ready,
+wait, brief, close, forget) take --surface hc to reach it; under hc, readiness
+needs hc's reported status and the harness's prompt on screen. forget drops a
+row whose terminal hc proves gone, such as one on a core whose state was wiped.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
@@ -269,6 +274,7 @@ readiness needs hc's reported status and the harness's prompt on screen.
 				Profile:     profile,
 				Model:       model,
 				InheritMode: inheritMode,
+				HerdrSpace:  herdrSpace,
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -302,6 +308,8 @@ readiness needs hc's reported status and the harness's prompt on screen.
 		"run the worker on this model instead of the launch profile's (--worktree only)")
 	cmd.Flags().StringVar(&inheritMode, "inherit-mode", "",
 		"the launching Claude Code session's permission mode: a ceiling on a claude worker's mode, and with [launch.worker] inherit_launcher_mode the worker's mode, capped at auto (--worktree only)")
+	cmd.Flags().StringVar(&herdrSpace, "herdr-space", "",
+		"show the hc worker in this herdr-app space (an id from herdr-app ls) by labeling its terminal herdr.space=<id>; without it the worker stays out of the window (--worktree --surface hc only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -323,9 +331,11 @@ type surfaceLaunchOptions struct {
 	Profile     string
 	Model       string
 	InheritMode string
-	Here        bool
-	DryRun      bool
-	JSON        bool
+	// HerdrSpace is the herdr-app space an hc worker is labeled for, or "".
+	HerdrSpace string
+	Here       bool
+	DryRun     bool
+	JSON       bool
 }
 
 func firstArg(args []string) string {
@@ -355,8 +365,8 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Brief != "" {
 		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
 	}
-	if opts.Profile != "" || opts.Model != "" || opts.InheritMode != "" {
-		return WithExitCode(errors.New("--profile, --model and --inherit-mode need --worktree; only a worker launch takes them"), exitUsage)
+	if opts.Profile != "" || opts.Model != "" || opts.InheritMode != "" || opts.HerdrSpace != "" {
+		return WithExitCode(errors.New("--profile, --model, --inherit-mode and --herdr-space need --worktree; only a worker launch takes them"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

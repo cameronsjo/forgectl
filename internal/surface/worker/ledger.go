@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Stage is how far a worker launch got. A launch writes StagePending before it
@@ -81,6 +83,25 @@ type Row struct {
 	// the worktree). `surface prune` ages a closed row by it. A row closed
 	// before the field existed has none.
 	ClosedAt *time.Time `json:"closed_at,omitempty"`
+	// Posture is the worker's resolved posture as the launch built it: each
+	// field its harness takes (permission_mode for claude, the sandbox and
+	// approval policy for codex), its value, and where the value came from
+	// (default, launch.worker, repo-profile or launcher). It is written with
+	// the harness, before the worker starts; a row from before the field
+	// existed has none.
+	Posture []PostureSetting `json:"posture,omitempty"`
+	// HcSelection is an hc worker's core selection digest
+	// (hcadapter.Adapter.SelectionDigest), written by Begin. `surface forget`
+	// calls a changed core id a wiped core only when the digest is the same
+	// now. Empty for a herdr worker and for a row from before the field.
+	HcSelection string `json:"hc_selection,omitempty"`
+}
+
+// PostureSetting is one resolved worker posture field and its source.
+type PostureSetting struct {
+	Field  string `json:"field"`
+	Value  string `json:"value"`
+	Source string `json:"source"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is
@@ -103,6 +124,9 @@ var (
 	// ErrLedgerUnreadable reports a ledger file that exists but cannot be used.
 	ErrLedgerUnreadable = errors.New("worker: the ledger file is unreadable")
 )
+
+// maxUnknownFieldLen bounds the unknown field name an error quotes.
+const maxUnknownFieldLen = 64
 
 // maxLedgerBytes caps a ledger file. A few hundred workers fit easily; a file
 // past this is not one forgectl wrote.
@@ -127,6 +151,13 @@ func decodeLedger(data []byte, repo, session string) (ledgerFile, error) {
 	dec.DisallowUnknownFields()
 	var f ledgerFile
 	if err := dec.Decode(&f); err != nil {
+		// Fields are added without a version change, so an unknown one is
+		// almost always a newer forgectl's row. Decoding stays strict: a
+		// rewrite by this build would drop that field.
+		if field, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
+			// The name comes from the file: keep it to one short, escaped line.
+			return ledgerFile{}, fmt.Errorf("%w: it holds field %s, which a newer forgectl wrote; upgrade every forgectl on this machine", ErrLedgerUnreadable, termsafe.SafeLineMax(field, maxUnknownFieldLen))
+		}
 		return ledgerFile{}, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
 	}
 	if f.Version != ledgerVersion {
@@ -189,6 +220,41 @@ func updateRow(rows []Row, name string, fn func(*Row)) ([]Row, error) {
 type store interface {
 	read() ([]byte, error)
 	update(fn func([]byte) ([]byte, error)) error
+	// lockNamed takes an exclusive lock on a lock file of its own, named
+	// after the ledger and suffix, waiting until ctx ends. release frees it.
+	lockNamed(ctx context.Context, suffix string) (release func(), err error)
+}
+
+// ErrBriefBusy reports a brief lock another brief still holds when the
+// caller's context ended.
+var ErrBriefBusy = errors.New("worker: another brief to this worker is still running")
+
+// LockBrief takes the worker's brief lock, so two briefs to one worker run
+// one at a time: an hc brief's Escape spacing reads the last brief's time,
+// and two briefs that both read it before either records would both send an
+// Escape inside the harness's double-press window. The lock is a file of its
+// own beside the ledger, keyed by a hash of the name, so it never holds up
+// the ledger's own updates. It waits until ctx ends (ErrBriefBusy), then
+// returns the worker's row as it is under the lock. Call release when the
+// brief has sent and recorded.
+func (l *Ledger) LockBrief(ctx context.Context, name string) (func(), Row, error) {
+	sum := sha256.Sum256([]byte(name))
+	release, err := l.store.lockNamed(ctx, "brief-"+hex.EncodeToString(sum[:8]))
+	if err != nil {
+		return nil, Row{}, err
+	}
+	rows, err := l.Rows()
+	if err != nil {
+		release()
+		return nil, Row{}, err
+	}
+	for _, r := range rows {
+		if r.Name == name {
+			return release, r, nil
+		}
+	}
+	release()
+	return nil, Row{}, ErrNoRow
 }
 
 // Ledger records the workers started for one repo in one herdr session.

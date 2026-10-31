@@ -16,10 +16,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -217,6 +219,59 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 	row := onlyRow(t, led)
 	if row.SessionID != id || row.Transcript != worker.TranscriptPath([]string{"HOME=/h"}, testRepoTop+"/.claude/worktrees/w1", id) || row.Transcript == "" {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+// TestWorkerLaunchRecordsThePosture is forgectl#1386: the row keeps the
+// worker's resolved posture and where each value came from, so `surface list
+// --json` can say why a worker runs in auto (its config, --inherit-mode, or
+// the built-in value) after the launch is gone.
+func TestWorkerLaunchRecordsThePosture(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+		return launch.BuiltInvocation{
+			Invocation:    launch.Invocation{Harness: "claude", CWD: cwd},
+			Worker:        true,
+			WorkerPosture: []launch.PostureValue{{Field: "permission_mode", Value: "plan", Source: launch.PostureFromLauncher}},
+		}, nil
+	}
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
+		t.Fatalf("runWorkerSteps: %v", err)
+	}
+	row := onlyRow(t, led)
+	want := []worker.PostureSetting{{Field: "permission_mode", Value: "plan", Source: "launcher"}}
+	if !slices.Equal(row.Posture, want) {
+		t.Fatalf("row posture = %+v, want %+v", row.Posture, want)
+	}
+	listed := reconcileRow(context.Background(), fakeProber{backend.NewProbePresent()}, row, testRepoTop, map[string]bool{}, time.Unix(1e9, 0))
+	if !slices.Equal(listed.Posture, want) {
+		t.Fatalf("list posture = %+v, want %+v", listed.Posture, want)
+	}
+}
+
+// TestWorkerLaunchRecordsTheHcSelection: an hc worker's pending row carries
+// the core selection digest, which forget needs before it may call a changed
+// core id a wiped core (forgectl#1386).
+func TestWorkerLaunchRecordsTheHcSelection(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	steps.hcSelection = "00112233445566778899aabbccddeeff"
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
+		t.Fatalf("runWorkerSteps: %v", err)
+	}
+	if row := onlyRow(t, led); row.HcSelection != steps.hcSelection {
+		t.Fatalf("row hc_selection = %q, want %q", row.HcSelection, steps.hcSelection)
+	}
+	hc, err := hcadapter.New(&exec.FakeSensitiveRunner{}, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hcSelectionOf(hc); got == "" || got != hc.SelectionDigest() {
+		t.Fatalf("hcSelectionOf(hc adapter) = %q, want its digest", got)
+	}
+	if got := hcSelectionOf(nil); got != "" {
+		t.Fatalf("hcSelectionOf(nil) = %q, want empty", got)
 	}
 }
 
