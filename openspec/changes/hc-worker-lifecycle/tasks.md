@@ -9,6 +9,7 @@
 
 - [x] 2.1 `hcadapter.Adapter.Abandoned`: a reason for a new core id under the launch's own core selection, an absent terminal, or an address with another creation time; refusals otherwise, a rewritten label included.
 - [x] 2.3 Core selection digest (`hc_selection`) recorded at launch; forget refuses a changed core id without it or when it differs.
+- [x] 2.4 A changed core id under the same selection still reads the recorded address; a terminal there with the recorded creation time refuses.
 - [x] 2.2 `surface forget <name> --surface hc [--json]`: row refusals, hc refusal, row-still-the-same removal, exit 0/1/2.
 
 ## 3. Ledger posture

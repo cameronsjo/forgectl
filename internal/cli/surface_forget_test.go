@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestForgetWorker(t *testing.T) {
 	}{
 		"core wiped": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "the hc core is not the one", nil },
 			forgotten: true, asked: true, reason: "hc core is not"},
-		"still there": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", hcadapter.ErrStillThere },
+		"still there": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", fmt.Errorf("%w: run surface close", hcadapter.ErrStillThere) },
 			asked: true, reason: "surface close"},
 		"selection unproven": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "", hcadapter.ErrSelectionUnproven },
 			asked: true, reason: "run surface close under the environment"},

@@ -161,7 +161,7 @@ func forgetWorker(ctx context.Context, row worker.Row, now time.Time, s forgetSt
 	reason, err := s.abandoned(ctx, ref, row.HcSelection)
 	switch {
 	case errors.Is(err, hcadapter.ErrStillThere):
-		return refuse("the worker's terminal is still on the core, at its recorded address and creation time; run surface close: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
+		return refuse("the worker's terminal is still on the core, at its recorded address and creation time: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 	case errors.Is(err, hcadapter.ErrSelectionUnproven):
 		return refuse("hc reaches a different core, which proves nothing about the worker's own: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen) +
 			"; run surface close under the environment the worker was launched in, or remove the row only once that core is known gone")

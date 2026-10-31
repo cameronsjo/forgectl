@@ -19,7 +19,7 @@ An hc brief SHALL wait until one second has passed since the worker's last typed
 - **THEN** it waits 700 ms before reading the worker
 
 ### Requirement: hc ledger-only forget
-`surface forget <name> --surface hc` SHALL remove the worker's ledger row, and nothing else, only when hc proves the worker's terminal gone: the core id differs from the one the worker started on while the row's recorded core selection digest equals the current one, hc has no terminal at the recorded address, or that address holds a terminal with another creation time. It MUST NOT kill, remove, or type into any terminal, and MUST NOT run git. Any other `--surface` is a usage error.
+`surface forget <name> --surface hc` SHALL remove the worker's ledger row, and nothing else, only when the recorded address on the current core holds no terminal with the recorded creation time. When the core id differs from the launch's, the row's core selection digest MUST also equal the current one. It MUST NOT kill, remove, or type into any terminal, and MUST NOT run git. Any other `--surface` is a usage error.
 
 #### Scenario: Wiped core
 - **WHEN** the core under the worker's session reports a new id
@@ -28,6 +28,10 @@ An hc brief SHALL wait until one second has passed since the worker's last typed
 #### Scenario: Worker still there
 - **WHEN** the recorded address holds a terminal with the recorded creation time, whatever its label
 - **THEN** the row is unchanged, the reason names `surface close`, and the exit code is 1
+
+#### Scenario: New core id, worker still there
+- **WHEN** the core id differs under the launch's selection and the recorded address still holds a terminal with the recorded creation time
+- **THEN** the row is unchanged and the reason names `hc kill`
 
 #### Scenario: Another core selection
 - **WHEN** the core id differs and the row records no core selection digest, or one that differs from the current environment's

@@ -14,10 +14,10 @@ A core keeps its id across `hc server restart` and `hc update` and gets a new on
 
 So a worker launch records a core selection digest on its row (`hc_selection`): a SHA-256 over the resolved `HC_SESSION` and the values of `HC_SOCKET`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME`. The list is over-inclusive on purpose; a variable that differs only makes forget refuse. `hcadapter.Adapter.Abandoned` runs locate's checks in locate's order and tells the mismatches apart:
 
-- A changed core id proves the terminal gone only when the row's digest is present and equals the current one. A row without a digest (launched before this change), or a digest that differs, refuses with `ErrSelectionUnproven`; the refusal names `surface close` under the launch's environment.
+- A changed core id is not proof by itself either, even under the launch's selection. Measured on a scratch hc 0.1.15 core: deleting `core.json` and running `hc server restart` gives a new core id while terminal `t1` stays live at the same address and `created_ms`. So a changed id needs two things more. The row's digest must be present and equal the current one; a row without a digest (launched before this change), or a digest that differs, refuses with `ErrSelectionUnproven`, naming `surface close` under the launch's environment. And `hc get` must find nothing at the recorded address on the current core, or a terminal created at another time. A terminal there with the recorded `created_ms` is the worker, whatever its label, and refuses.
 - Nothing at the recorded address on the matching core proves it gone.
 - A terminal at the address with another creation time proves it gone: hc handed the address out again after `hc rm`.
-- A terminal at the recorded address and creation time is the worker, whatever its `forgectl.surface` label says. Any hc client, the worker included, can rewrite a label (`hc label <t> forgectl.surface=`), so a label change is no proof and refuses.
+- A terminal at the recorded address and creation time is the worker, whatever its `forgectl.surface` label says. Any hc client, the worker included, can rewrite a label (`hc label <t> forgectl.surface=`), so a label change is no proof and refuses. close refuses that terminal too (its label or core does not match the reference), so the refusal names the manual step: `hc kill <address>`, `hc rm <address>`, then forget again.
 
 A reference taken under another `HC_SESSION` selection, an unreadable core, and forgectl's own terminal still there, live or finished, all refuse. Probe calls a finished terminal gone; forget does not, because close removes it.
 
@@ -41,7 +41,7 @@ A second Escape inside a harness's double-press window opens a menu: rewind in C
 
 ### The ledger names a newer forgectl
 
-New row fields (`posture`, `hc_selection`) come without a ledger version change, as earlier ones did, and the decoder stays strict: a rewrite by an older build would drop them. An unknown field now reads as "it holds field "x", which a newer forgectl wrote; upgrade every forgectl on this machine" instead of a bare JSON error.
+New row fields (`posture`, `hc_selection`) come without a ledger version change, as earlier ones did, and the decoder stays strict: a rewrite by an older build would drop them. An unknown field now reads as "it holds field "x", which a newer forgectl wrote; upgrade every forgectl on this machine" instead of a bare JSON error. The name comes from the file, so it is escaped and cut to 64 characters before it reaches the message.
 
 ### Not taken here
 

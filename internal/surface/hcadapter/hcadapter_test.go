@@ -651,7 +651,16 @@ func TestAbandoned(t *testing.T) {
 		// msg, when set, must appear in the refusal.
 		msg string
 	}{
-		"core wiped":              {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: same},
+		"core wiped": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2"; delete(f.terminals, "t1") }, launched: same},
+		"core wiped, address reused": {mutate: func(f *fakeHC, ref backend.Ref) {
+			f.coreID = "core2"
+			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409999999, "live", `null`)
+		}, launched: same},
+		// hc 0.1.15: delete core.json, hc server restart, and the core
+		// reports a new id while t1 keeps running at the same address and
+		// creation time. A new id under the same selection is not a wipe.
+		"core id changed, worker still there": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" },
+			launched: same, want: ErrStillThere, msg: "hc kill t1"},
 		"core differs, no record": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, want: ErrSelectionUnproven, msg: "records no core selection"},
 		"core differs, other env": {mutate: func(f *fakeHC, _ backend.Ref) { f.coreID = "core2" }, launched: "0123456789abcdef0123456789abcdef", want: ErrSelectionUnproven},
 		"terminal gone":           {mutate: func(f *fakeHC, _ backend.Ref) { delete(f.terminals, "t1") }},
@@ -662,7 +671,7 @@ func TestAbandoned(t *testing.T) {
 		// recorded address and creation time is still the worker.
 		"label rewritten": {mutate: func(f *fakeHC, _ backend.Ref) {
 			f.terminals["t1"] = getReply("t1", "", 1793409108596, "live", `null`)
-		}, want: ErrStillThere},
+		}, want: ErrStillThere, msg: "surface close refuses it as well"},
 		"still live": {mutate: func(*fakeHC, backend.Ref) {}, want: ErrStillThere},
 		"still finished": {mutate: func(f *fakeHC, ref backend.Ref) {
 			f.terminals["t1"] = getReply("t1", ref.OwnershipName(), 1793409108596, "finished", `null`)

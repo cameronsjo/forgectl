@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Stage is how far a worker launch got. A launch writes StagePending before it
@@ -123,6 +124,9 @@ var (
 	ErrLedgerUnreadable = errors.New("worker: the ledger file is unreadable")
 )
 
+// maxUnknownFieldLen bounds the unknown field name an error quotes.
+const maxUnknownFieldLen = 64
+
 // maxLedgerBytes caps a ledger file. A few hundred workers fit easily; a file
 // past this is not one forgectl wrote.
 const maxLedgerBytes = 1 << 20
@@ -150,7 +154,8 @@ func decodeLedger(data []byte, repo, session string) (ledgerFile, error) {
 		// almost always a newer forgectl's row. Decoding stays strict: a
 		// rewrite by this build would drop that field.
 		if field, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
-			return ledgerFile{}, fmt.Errorf("%w: it holds field %s, which a newer forgectl wrote; upgrade every forgectl on this machine", ErrLedgerUnreadable, field)
+			// The name comes from the file: keep it to one short, escaped line.
+			return ledgerFile{}, fmt.Errorf("%w: it holds field %s, which a newer forgectl wrote; upgrade every forgectl on this machine", ErrLedgerUnreadable, termsafe.SafeLineMax(field, maxUnknownFieldLen))
 		}
 		return ledgerFile{}, fmt.Errorf("%w: %w", ErrLedgerUnreadable, err)
 	}
