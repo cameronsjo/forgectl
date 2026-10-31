@@ -97,10 +97,11 @@ func (t *Table) Evaluate(harness string, s Screen) Verdict {
 
 // EvaluateText judges the screen text alone: no blocking screen matches and
 // the harness's input prompt is visible. It is for a terminal manager whose
-// agent status is the program's own report (herdr-core's OSC 7501): that
-// status is a second signal, never the only one, because any process that
-// can write to the terminal can print it, while it cannot paint an empty
-// input box over a dialog that is showing.
+// agent status is the program's own report (herdr-core's OSC 7501), as a
+// second check next to that status. Like every signal here (see the package
+// doc), it can be set from inside the pane: a process that can write to the
+// terminal can print an empty prompt under a real dialog, which reads as
+// ready. It catches an honest dialog, never a forged one.
 func (t *Table) EvaluateText(harness, text string) Verdict {
 	h, ok := t.harnesses[harness]
 	if !ok {

@@ -249,14 +249,20 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // permission mode, even over the operator's own allow rules (ADR-0010,
 // 2026-10-20 amendment). It backs up the FORGECTL_DRAIN_WORKER refusal, which
 // a worker can unset.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+//
+// editorMode is pinned to "normal" so a worker's prompt is never in vim mode,
+// where one Escape would switch it to NORMAL and the next typed text would be
+// read as vim commands. `surface brief --surface hc` sends one Escape before
+// it pastes, to close any dialog that is open; that is safe only at a
+// non-vim prompt.
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
 	`"deny":["Bash(forgectl tasks done:*)"]}}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
 // every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
 // allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
-const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
 	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
 	`"deny":["Bash(forgectl tasks done:*)"]}}`
 

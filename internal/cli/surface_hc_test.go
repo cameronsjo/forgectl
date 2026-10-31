@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +66,10 @@ type hcBriefFake struct {
 	statuses []hcadapter.Worker
 	// screen is the worker's screen text; "" reads as the ready claude
 	// fixture.
-	screen   string
+	screen string
+	// escErr fails the Escape; events records escape and send in order.
+	escErr   error
+	events   []string
 	sendErr  error
 	sendRes  hcadapter.SendResult
 	sent     []string
@@ -92,7 +96,12 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			return f.screen, nil
 		},
 		promptShown: func(text string) ready.Verdict { return hcTable.EvaluateText("claude", text) },
+		escape: func(context.Context) error {
+			f.events = append(f.events, "escape")
+			return f.escErr
+		},
 		send: func(_ context.Context, s string, _ bool) (hcadapter.SendResult, error) {
+			f.events = append(f.events, "send")
 			f.sent = append(f.sent, s)
 			return f.sendRes, f.sendErr
 		},
@@ -258,5 +267,52 @@ func TestEvaluateHcWorkerNeedsBothSignals(t *testing.T) {
 		if v.State != tc.want {
 			t.Errorf("%s: state %q (%s), want %q", tc.name, v.State, v.Reason, tc.want)
 		}
+	}
+}
+
+// forgedPrompt is the security review's forged screen: a real permission
+// prompt with a rule line, a bare prompt and a rule line printed under it.
+// The screen predicates read it as an empty prompt, which is why the
+// Escape, not the screen check, is what keeps Enter off the dialog.
+func forgedPrompt() string {
+	rule := strings.Repeat("─", 60)
+	return strings.TrimRight(hcFixture("claude-permission-prompt"), "\n") + "\n" + rule + "\n❯ \n" + rule + "\n"
+}
+
+func TestSendBriefHCEscapesBeforeTheSend(t *testing.T) {
+	idle := hcadapter.Worker{Live: true, Status: "idle", Turn: 3}
+	// The forged screen passes the screen check: that is the limit the
+	// Escape exists for.
+	if v := hcTable.EvaluateText("claude", forgedPrompt()); !v.Ready() {
+		t.Fatalf("the forged screen no longer passes the screen check (%s); revisit the brief's limit and this test", v.Reason)
+	}
+	for _, tc := range []struct {
+		name   string
+		screen string
+	}{{"clean prompt", ""}, {"forged prompt over a permission dialog", forgedPrompt()}} {
+		f := hcBriefFake{statuses: []hcadapter.Worker{idle}, screen: tc.screen, sendRes: hcadapter.SendResult{Status: "working", Turn: 4}}
+		res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+		if res.Outcome != briefSent {
+			t.Fatalf("%s: outcome %q (%s), want sent", tc.name, res.Outcome, res.Reason)
+		}
+		if !slices.Equal(f.events, []string{"escape", "send"}) {
+			t.Errorf("%s: keys sent = %v, want the Escape right before the paste", tc.name, f.events)
+		}
+	}
+}
+
+func TestSendBriefHCEscapeFailureSendsNothing(t *testing.T) {
+	f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, escErr: hcadapter.ErrSendFailed}
+	res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+	if res.Outcome != briefRefused || res.Step != "escape" || len(f.sent) != 0 {
+		t.Fatalf("outcome %q step %q sent %v, want refused at escape with nothing sent", res.Outcome, res.Step, f.sent)
+	}
+}
+
+func TestSendBriefHCNamesTheDialog(t *testing.T) {
+	f := hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "idle", Turn: 3}}, screen: hcFixture("claude-permission-prompt")}
+	res := sendBriefHC(context.Background(), f.steps(), "run the tests", "m1")
+	if res.Outcome != briefRefused || res.Blocking != "permission prompt" || len(f.events) != 0 {
+		t.Fatalf("outcome %q blocking %q keys %v, want refused naming the permission prompt with no key sent", res.Outcome, res.Blocking, f.events)
 	}
 }

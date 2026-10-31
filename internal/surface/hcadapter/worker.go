@@ -144,6 +144,32 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, i
 	return SendResult{Status: sent.Status.State, Turn: sent.Turn}, nil
 }
 
+// PressEscape sends one Escape to the worker with `hc keys`, so the first key
+// any open dialog sees is a refusal: Claude Code's Esc closes a dialog and
+// declines a permission prompt, Codex maps Esc to cancel on its approval
+// prompts, and pi's Escape cancels a selection. At an idle prompt it does
+// nothing a brief cares about; only a second Escape opens a menu, and this
+// sends one. It re-checks that the terminal is forgectl's and live first.
+func (a *Adapter) PressEscape(ctx context.Context, ref backend.Ref) error {
+	t, err := a.owned(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSendRefused, err)
+	}
+	if t.State != stateLive {
+		return fmt.Errorf("%w: the worker's program has exited", ErrSendRefused)
+	}
+	if _, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
+		exec.MustFixed("keys"),
+		exec.MustFixed("--json"),
+		exec.EndOfOptions(),
+		exec.Opaque(t.Address),
+		exec.MustFixed("esc"),
+	)); runErr != nil {
+		return fmt.Errorf("%w: hc keys: %v", ErrSendFailed, classifyRunError(runErr))
+	}
+	return nil
+}
+
 func refusalKind(kind string) string {
 	switch kind {
 	case kindBlocked:

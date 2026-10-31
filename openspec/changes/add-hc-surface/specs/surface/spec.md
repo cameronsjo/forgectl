@@ -39,18 +39,26 @@ A reference to an hc terminal SHALL record its address, its creation time, and a
 - **THEN** `surface close` refuses with an identity mismatch and kills nothing
 
 ### Requirement: hc worker verbs
-`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, a ready verdict MUST need both hc's reported status (`idle` or `done`; `blocked` is blocked) and a screen showing the harness's input prompt with no dialog; a dialog on screen MUST read as blocked whatever the status says. `surface tag` MUST refuse an hc worker.
+`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, a ready verdict MUST need both hc's reported status (`idle` or `done`; `blocked` is blocked) and a screen showing the harness's input prompt with no dialog; an honest dialog on screen MUST read as blocked whatever the status says. `surface tag` MUST refuse an hc worker.
 
 #### Scenario: Blocked hc worker
 - **WHEN** an hc worker reports status `blocked`
 - **THEN** `surface ready` exits 1 naming the blocked status
 
+#### Scenario: Ready is not proof
+- **WHEN** an hc worker reports `idle` and its screen shows an empty prompt
+- **THEN** `surface ready` reports ready, and the docs do not call that proof that no dialog is open, since both signals come from the worker's own terminal output
+
 ### Requirement: hc briefs and close
-Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker before sending. `surface close` SHALL run `hc kill` and then `hc rm`.
+Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST send one Escape to the worker immediately before `hc send` so a dialog open at that moment is declined, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker before sending. A claude worker's prompt MUST NOT be in vim editor mode. `surface close` SHALL run `hc kill` and then `hc rm`.
 
 #### Scenario: Forged idle over a dialog
 - **WHEN** an hc worker reports status `idle` while its screen shows a permission prompt
 - **THEN** `surface brief` reports `refused` and types nothing
+
+#### Scenario: Forged prompt under a dialog
+- **WHEN** a permission prompt is open and something printed an empty prompt under it
+- **THEN** `surface brief` sends an Escape before the paste, so the dialog is declined rather than answered
 
 #### Scenario: Brief to a blocked worker
 - **WHEN** an hc worker reports status `blocked`

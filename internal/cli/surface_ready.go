@@ -72,9 +72,11 @@ against accidents, not against a worker trying to look ready.
 
 With --surface hc the verdict needs two signals: hc's reported status (idle
 or done; blocked is blocked; working, error, or no status yet is not ready),
-and a screen showing the harness's input prompt with no dialog. The status is
-the worker's own report, which anything writing to its terminal can forge, so
-a dialog on screen reads as blocked whatever the status says. A worker whose
+and a screen showing the harness's input prompt with no dialog, so an honest
+dialog on screen reads as blocked whatever the status says. Both come from
+the worker's own terminal output, which a process writing to that terminal
+can forge, so ready is never proof that no dialog is open; brief's Escape
+before the paste is what keeps a brief from answering one. A worker whose
 program has exited is gone.
 
 ready never answers a dialog. A blocking screen (folder-trust dialog,

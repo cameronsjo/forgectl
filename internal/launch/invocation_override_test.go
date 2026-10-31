@@ -245,12 +245,12 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			// A worker is a full harness (ADR-0010, 2026-10-08): no isolation
 			// flags, only the worker settings after the posture.
 			want := []string{"--permission-mode", mode,
-				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["Bash(forgectl tasks done:*)"]}}`,
+				"--settings", `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{"deny":["Bash(forgectl tasks done:*)"]}}`,
 			}
 			// Only acceptEdits carries the allow list; a plan worker that could
 			// commit and push unprompted would be looser than its mode.
 			if mode == "acceptEdits" {
-				want[len(want)-1] = `{"useAutoModeDuringPlan":false,"permissions":{` +
+				want[len(want)-1] = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
 					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
 					`"deny":["Bash(forgectl tasks done:*)"]}}`
 			}
@@ -480,7 +480,8 @@ func TestWorkerClaudeSettingsJSON(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var s struct {
-				UseAutoModeDuringPlan *bool `json:"useAutoModeDuringPlan"`
+				UseAutoModeDuringPlan *bool   `json:"useAutoModeDuringPlan"`
+				EditorMode            *string `json:"editorMode"`
 				Permissions           struct {
 					Allow []string `json:"allow"`
 					Deny  []string `json:"deny"`
@@ -491,6 +492,11 @@ func TestWorkerClaudeSettingsJSON(t *testing.T) {
 			}
 			if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
 				t.Error("useAutoModeDuringPlan is not false")
+			}
+			// An hc brief presses Escape before it pastes; at a vim prompt
+			// that Escape would leave NORMAL mode for the paste to drive.
+			if s.EditorMode == nil || *s.EditorMode != "normal" {
+				t.Error(`editorMode is not "normal"`)
 			}
 			// A worker is otherwise a full harness (ADR-0010, 2026-10-08): the one
 			// deny is the board close, which cannot be undone.

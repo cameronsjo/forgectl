@@ -90,11 +90,14 @@ worker trying to look ready. A brief must never carry an approval.
 With --surface hc there is no read-back: hc send pastes and submits in one
 call, and hc cannot type without submitting. brief refuses unless hc reports
 the worker idle or done and the screen shows the harness's input prompt,
-empty, with no dialog; the status is the worker's own report, which anything
-writing to its terminal can forge, so the screen check is what keeps the
-send from answering a dialog. It records the brief, then sends (with
---if idle when it was idle, so a turn that started in between refuses the
-send). It never passes --force, so hc itself refuses a blocked worker. hc's
+empty, with no dialog. Both checks read the worker's own terminal output,
+so they catch an honest dialog but not a forged screen. So, right before it
+pastes, brief sends one Escape, which closes or declines any dialog open at
+that moment (Claude Code, Codex and pi all treat Escape as cancel), and a
+worker's prompt is never in vim mode. The limit: a dialog drawn after that
+Escape and before the paste is not covered. It records the brief, then sends
+(with --if idle when it was idle, so a turn that started in between refuses
+the send). It never passes --force, so hc itself refuses a blocked worker. hc's
 refusal reports refused; any other send failure reports unconfirmed.
 --readback-timeout has no step under hc.
 
@@ -169,6 +172,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 				return s.Text, err
 			},
 			promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
+			escape:      func(ctx context.Context) error { return w.hc.PressEscape(ctx, w.ref) },
 			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
 				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
 			},

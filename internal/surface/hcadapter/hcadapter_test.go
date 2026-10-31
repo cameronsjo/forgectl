@@ -65,7 +65,7 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 				return fail(cmd.Kind, `{"error":{"kind":"`+f.sendKind+`","message":"no"}}`, 1)
 			}
 			return ok(`{"started":true,"status":"working","turn":2}`), nil
-		case "kill", "rm":
+		case "kill", "rm", "keys":
 			return ok(`{}`), nil
 		}
 		return exec.SensitiveResult{}, errors.New("unscripted verb " + verb)
@@ -77,7 +77,7 @@ func (f *fakeHC) runner() *exec.FakeSensitiveRunner {
 var verbArgs = map[string]exec.Arg{
 	"server": exec.MustFixed("server"), "run": exec.MustFixed("run"), "get": exec.MustFixed("get"),
 	"ls": exec.MustFixed("ls"), "read": exec.MustFixed("read"), "send": exec.MustFixed("send"),
-	"kill": exec.MustFixed("kill"), "rm": exec.MustFixed("rm"),
+	"kill": exec.MustFixed("kill"), "rm": exec.MustFixed("rm"), "keys": exec.MustFixed("keys"),
 }
 
 func verbOf(cmd exec.SensitiveCommand) string {
@@ -477,5 +477,27 @@ func TestDefaultSessionSpellingsMatch(t *testing.T) {
 	ref := startWorker(t, f, newTestAdapter(t, f, ""))
 	if res := newTestAdapter(t, f, "work").Probe(context.Background(), ref); res.State() != backend.ProbeIdentityMismatch {
 		t.Fatalf("probe from a named session = %v, want identity-mismatch", res)
+	}
+}
+
+func TestPressEscapeSendsOneEsc(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := startWorker(t, f, a)
+	if err := a.PressEscape(context.Background(), ref); err != nil {
+		t.Fatal(err)
+	}
+	last, _ := run.Last()
+	n := len(last.Args)
+	if !last.Args[0].Equal(exec.MustFixed("keys")) || !last.Args[n-2].Equal(exec.Opaque("t1")) || !last.Args[n-1].Equal(exec.MustFixed("esc")) {
+		t.Fatal("PressEscape did not run hc keys <t1> esc")
+	}
+	delete(f.terminals, "t1")
+	if err := a.PressEscape(context.Background(), ref); !errors.Is(err, ErrSendRefused) {
+		t.Fatalf("Escape to a gone worker: %v, want ErrSendRefused", err)
 	}
 }
