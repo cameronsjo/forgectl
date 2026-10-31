@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -123,7 +124,8 @@ const (
 	// it is stricter.
 	PostureFromRepo = "repo-profile"
 	// PostureFromLauncher is the launching session's permission mode
-	// (--inherit-mode), when it capped the value from every other source.
+	// (--inherit-mode): it capped the value from every other source, or, with
+	// [launch.worker] inherit_launcher_mode, replaced the built-in value.
 	PostureFromLauncher = "launcher"
 )
 
@@ -173,18 +175,26 @@ type PostureValue struct {
 // launcherMode, when set, is the launching session's permission mode. A
 // claude worker's mode, whatever its source, is capped at it: a launcher in
 // plan never starts a worker looser than plan, even under an explicit
-// [launch.worker] value. It only ever tightens. The value is the caller's
-// claim, and nothing can check it (Claude Code exposes no live mode), so a
-// claim must never raise a worker above what the operator's config gives;
-// an operator who wants auto workers sets [launch.worker] permission_mode.
+// [launch.worker] value. By default it only tightens. The value is the
+// caller's claim, and nothing can check it (Claude Code exposes no live
+// mode), so a claim raises a worker only when the operator opted in with
+// [launch.worker] inherit_launcher_mode = true: the worker then takes the
+// launcher's mode, capped at auto, in place of the built-in value. A codex or
+// pi worker ignores it, with a note.
 func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject, launcherMode string) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
+	if w.InheritLauncherMode && w.PermissionMode != "" {
+		return Profile{}, nil, nil, errors.New("[launch.worker]: inherit_launcher_mode and permission_mode cannot both be set; a worker takes its mode from one of them")
+	}
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
 	var inherited string
 	if launcherMode != "" && p.Harness == "claude" {
 		var err error
 		if inherited, err = inheritedMode(launcherMode); err != nil {
 			return Profile{}, nil, nil, fmt.Errorf("launcher mode: %w", err)
+		}
+		if w.InheritLauncherMode {
+			wpm = inherited
 		}
 	}
 	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
@@ -210,8 +220,11 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 			return "", err
 		}
 		source := PostureFromDefault
-		if set != "" {
+		switch {
+		case set != "":
 			source = PostureFromWorker
+		case field == "permission_mode" && inherited != "" && w.InheritLauncherMode:
+			source = PostureFromLauncher
 		}
 		if project != "" && got == project && got != worker {
 			source = PostureFromRepo
@@ -231,6 +244,9 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		return got, nil
 	}
 	var notes []string
+	if launcherMode != "" && p.Harness != "claude" {
+		notes = append(notes, fmt.Sprintf("--inherit-mode applies to claude workers only; this %s worker keeps its own posture", p.Harness))
+	}
 	note := func(r postureRank, field, defaults, got string) {
 		if defaults == "" {
 			return

@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -57,12 +58,74 @@ func TestWorkerFollowsLauncherMode(t *testing.T) {
 }
 
 func TestLauncherModeIgnoredForCodex(t *testing.T) {
-	p, _, _, err := applyWorkerProfile(Profile{Harness: "codex"}, config.LaunchConfig{}, nil, "bypassPermissions")
+	p, _, notes, err := applyWorkerProfile(Profile{Harness: "codex"}, config.LaunchConfig{}, nil, "plan")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.Sandbox != workerDefaultSandbox || p.ApprovalPolicy != workerDefaultApproval {
 		t.Fatalf("codex posture = %q/%q, want the built-in worker values", p.Sandbox, p.ApprovalPolicy)
+	}
+	// Ignored, but never silently: a plan launcher is told its ceiling did
+	// not reach a codex worker.
+	if len(notes) != 1 || !strings.Contains(notes[0], "--inherit-mode applies to claude workers only") {
+		t.Fatalf("notes = %q, want the --inherit-mode note", notes)
+	}
+}
+
+// TestInheritLauncherModeOptIn pins [launch.worker] inherit_launcher_mode:
+// with it the launcher's mode replaces the built-in value, capped at auto,
+// and every other source still only tightens.
+func TestInheritLauncherModeOptIn(t *testing.T) {
+	cases := []struct {
+		name, launcher, repo, want, source string
+	}{
+		{name: "auto launcher raises to auto", launcher: "auto", want: "auto", source: PostureFromLauncher},
+		{name: "bypass launcher is capped at auto", launcher: "bypassPermissions", want: "auto", source: PostureFromLauncher},
+		{name: "dontAsk launcher is capped at auto", launcher: "dontAsk", want: "auto", source: PostureFromLauncher},
+		{name: "plan launcher gives plan", launcher: "plan", want: "plan", source: PostureFromLauncher},
+		{name: "no launcher mode keeps the built-in value", want: "acceptEdits", source: PostureFromDefault},
+		{name: "a stricter repo block still wins", launcher: "auto", repo: "default", want: "default", source: PostureFromRepo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true}}
+			var proj *config.LaunchProject
+			if tc.repo != "" {
+				proj = &config.LaunchProject{PermissionMode: tc.repo}
+			}
+			p, values, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, proj, tc.launcher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.PermissionMode != tc.want || len(values) != 1 || values[0].Source != tc.source {
+				t.Fatalf("got %q from %+v, want %q from %s", p.PermissionMode, values, tc.want, tc.source)
+			}
+			if _, err := applyWorkerFloor(p); err != nil {
+				t.Errorf("worker floor refused %q: %v", p.PermissionMode, err)
+			}
+		})
+	}
+}
+
+// TestInheritLauncherModeNeverPastAuto sweeps every launcher mode under the
+// opt-in: the result is never looser than auto.
+func TestInheritLauncherModeNeverPastAuto(t *testing.T) {
+	lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true}}
+	for _, launcher := range claudePermissionRank.known() {
+		p, _, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, launcher)
+		if err != nil {
+			t.Fatalf("%s: %v", launcher, err)
+		}
+		if !claudePermissionRank.atMost(p.PermissionMode, launcherModeCap) {
+			t.Errorf("launcher %q under the opt-in gave %q, looser than auto", launcher, p.PermissionMode)
+		}
+	}
+}
+
+func TestInheritLauncherModeRefusesAnExplicitMode(t *testing.T) {
+	lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true, PermissionMode: "acceptEdits"}}
+	if _, _, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, "auto"); err == nil {
+		t.Fatal("inherit_launcher_mode with permission_mode was accepted")
 	}
 }
 
