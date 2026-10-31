@@ -19,7 +19,7 @@
 
 ## 3b. Launcher permission mode
 
-- [x] 3b.1 `--inherit-mode` on worker launches; `LauncherMode` on the invocation request; ceiling-only rule in `applyWorkerProfile`; tests for every source, including that a claim never raises.
+- [x] 3b.1 `--inherit-mode` on worker launches; `LauncherMode` on the invocation request; the ceiling in `applyWorkerProfile`, and the `[launch.worker] inherit_launcher_mode` opt-in that lets the flag raise a worker, capped at auto; tests for every source, the opt-in's cap and conflict, and that without the opt-in a claim never raises.
 
 ## 4. Docs and checks
 

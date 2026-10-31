@@ -135,6 +135,12 @@ const (
 // mode must never be the way past it.
 const launcherModeCap = "auto"
 
+// ErrInheritConflict refuses [launch.worker] with both inherit_launcher_mode
+// and permission_mode: a worker takes its mode from one of them. The text
+// names the fix, because an operator who already had permission_mode and
+// added the opt-in has every worker launch refused until they pick one.
+var ErrInheritConflict = errors.New("[launch.worker] sets both inherit_launcher_mode and permission_mode: remove permission_mode (the worker then takes the launcher's mode, up to auto), or set inherit_launcher_mode = false")
+
 // CheckLauncherMode refuses a launcher mode Claude Code does not have.
 func CheckLauncherMode(mode string) error {
 	return claudePermissionRank.check(mode)
@@ -184,7 +190,7 @@ type PostureValue struct {
 func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject, launcherMode string) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
 	if w.InheritLauncherMode && w.PermissionMode != "" {
-		return Profile{}, nil, nil, errors.New("[launch.worker]: inherit_launcher_mode and permission_mode cannot both be set; a worker takes its mode from one of them")
+		return Profile{}, nil, nil, ErrInheritConflict
 	}
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
 	var inherited string
@@ -246,6 +252,14 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 	var notes []string
 	if launcherMode != "" && p.Harness != "claude" {
 		notes = append(notes, fmt.Sprintf("--inherit-mode applies to claude workers only; this %s worker keeps its own posture", p.Harness))
+	}
+	// The opt-in does nothing without the flag, and nothing else would say
+	// so: a coordinator that never passes --inherit-mode gets the built-in
+	// value. With the opt-in on, any caller that passes --inherit-mode auto
+	// gets an auto worker, a sub-worker launched by a worker included.
+	if launcherMode == "" && w.InheritLauncherMode && p.Harness == "claude" {
+		notes = append(notes, "[launch.worker] inherit_launcher_mode is on, but no --inherit-mode was given, so this worker gets the built-in "+
+			workerDefaultPermissionMode+"; a launch passing --inherit-mode <mode> gets that mode, up to auto")
 	}
 	note := func(r postureRank, field, defaults, got string) {
 		if defaults == "" {
@@ -325,7 +339,19 @@ func DefaultWorkerPosture(lc config.LaunchConfig) WorkerPosture {
 
 func workerPosture(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) WorkerPosture {
 	w := WorkerPosture{Harness: p.Harness}
+	orig := p
 	p, values, notes, err := applyWorkerProfile(p, lc, proj, "")
+	if errors.Is(err, ErrInheritConflict) {
+		// Still show what the worker would get from permission_mode, so the
+		// preview stays readable while it names the conflict to fix.
+		w.Refused = err.Error()
+		alt := lc
+		alt.Worker.InheritLauncherMode = false
+		if _, values, notes, aerr := applyWorkerProfile(orig, alt, proj, ""); aerr == nil {
+			w.Values, w.Notes = values, notes
+		}
+		return w
+	}
 	if err != nil {
 		w.Refused = err.Error()
 		return w

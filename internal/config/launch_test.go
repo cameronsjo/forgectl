@@ -202,3 +202,13 @@ func TestLaunchWorkerToolsDecode(t *testing.T) {
 		t.Errorf("tools = [] decoded as unset: %#v, IsZero %v", cfg.Launch.Worker.Tools, cfg.Launch.IsZero())
 	}
 }
+
+// TestLaunchConfig_InheritOnlyWorkerIsNotZero: a [launch.worker] that sets
+// only inherit_launcher_mode is a real section, or a config.toml holding just
+// that line would be read as no [launch] at all and take the legacy route.
+func TestLaunchConfig_InheritOnlyWorkerIsNotZero(t *testing.T) {
+	lc := LaunchConfig{Worker: LaunchWorker{InheritLauncherMode: true}}
+	if lc.IsZero() {
+		t.Error("a [launch.worker] setting only inherit_launcher_mode must not report as an absent section")
+	}
+}

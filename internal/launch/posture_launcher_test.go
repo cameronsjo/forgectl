@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -123,9 +124,40 @@ func TestInheritLauncherModeNeverPastAuto(t *testing.T) {
 }
 
 func TestInheritLauncherModeRefusesAnExplicitMode(t *testing.T) {
-	lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true, PermissionMode: "acceptEdits"}}
-	if _, _, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, "auto"); err == nil {
-		t.Fatal("inherit_launcher_mode with permission_mode was accepted")
+	lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true, PermissionMode: "auto"}}
+	_, _, _, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, "auto")
+	if !errors.Is(err, ErrInheritConflict) {
+		t.Fatalf("err = %v, want ErrInheritConflict", err)
+	}
+	// The refusal names the fix, both ways.
+	for _, want := range []string{"remove permission_mode", "inherit_launcher_mode = false"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not say %q", err, want)
+		}
+	}
+	// launch which and forgectl config stay readable: the preview shows what
+	// permission_mode gives and names the conflict.
+	wp := workerPosture(Profile{Harness: "claude"}, lc, nil)
+	if !strings.Contains(wp.Refused, "remove permission_mode") || len(wp.Values) != 1 || wp.Values[0].Value != "auto" {
+		t.Fatalf("preview = %+v, want the auto value from permission_mode and the conflict in Refused", wp)
+	}
+}
+
+func TestInheritLauncherModeWithoutTheFlagNotes(t *testing.T) {
+	lc := config.LaunchConfig{Worker: config.LaunchWorker{InheritLauncherMode: true}}
+	p, _, notes, err := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PermissionMode != workerDefaultPermissionMode {
+		t.Fatalf("mode = %q, want the built-in value", p.PermissionMode)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "no --inherit-mode was given") {
+		t.Fatalf("notes = %q, want the missing-flag note", notes)
+	}
+	// With the flag there is no such note.
+	if _, _, notes, _ := applyWorkerProfile(Profile{Harness: "claude"}, lc, nil, "auto"); len(notes) != 0 {
+		t.Errorf("notes with the flag = %q, want none", notes)
 	}
 }
 

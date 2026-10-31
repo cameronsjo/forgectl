@@ -283,10 +283,10 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 ```toml
 [launch.worker]
-inherit_launcher_mode = true   # and no permission_mode: a worker takes one or the other
+inherit_launcher_mode = true   # replaces an existing permission_mode line: a worker takes its mode from one or the other
 ```
 
-Then a worker takes the launcher's mode, capped at `auto`: a coordinator in `auto` starts `auto` workers, and one in `bypassPermissions` or `dontAsk` still starts `auto` ones. Without `--inherit-mode` the worker keeps the built-in `acceptEdits`. Setting both `inherit_launcher_mode` and `permission_mode` refuses the launch. A stricter matched project block still wins. The preview names the source `launcher` when the flag set or capped the mode. Codex and pi workers ignore the flag, and the launch prints a note saying so.
+Then a worker takes the launcher's mode, capped at `auto`: a coordinator in `auto` starts `auto` workers, and one in `bypassPermissions` or `dontAsk` still starts `auto` ones. The opt-in does nothing on its own: the coordinator must pass `--inherit-mode <its mode>` on every `surface launch --worktree` (in its launch command or wrapper), and a launch that omits it gets the built-in `acceptEdits` and prints a note saying so. Know what the opt-in grants: any caller that can run `forgectl surface launch` and passes `--inherit-mode auto` gets `auto` workers, including a worker launching its own sub-worker. That is no looser than `permission_mode = "auto"`, and the worker floor still caps it. Setting both `inherit_launcher_mode` and `permission_mode` refuses every worker launch, with an error naming both ways out; `launch which` and `forgectl config` show the conflict and the `permission_mode` value. `launch which` previews with no launcher mode, so under the opt-in it shows `acceptEdits` plus a note that a launch passing `--inherit-mode` gets that mode, up to `auto`. A stricter matched project block still wins. The preview names the source `launcher` when the flag set or capped the mode. Codex and pi workers ignore the flag, and the launch prints a note saying so.
 
 Claude Code does not expose a session's live permission mode to the processes it starts: no environment variable carries it, the session's own argv shows only the starting mode, and the transcript's per-message `permissionMode` is an undocumented format. So the launcher states its mode; a coordinator in auto passes `--inherit-mode auto`.
 
