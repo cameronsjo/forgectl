@@ -137,10 +137,26 @@ func evaluateHcStatus(s ready.Screen) ready.Verdict {
 	return ready.Verdict{State: ready.StateNotReady, Reason: fmt.Sprintf("hc reports status %q, want idle or done", s.Status)}
 }
 
+// evaluateHcWorker is ready and wait's verdict for an hc worker: hc's status
+// first, then the screen, which must show the harness's input prompt and no
+// dialog. The status alone is the program's own report and can be forged, so
+// a ready verdict needs both, the same two signals brief requires before it
+// sends.
+func evaluateHcWorker(table *ready.Table, harness string, s ready.Screen) ready.Verdict {
+	if v := evaluateHcStatus(s); !v.Ready() {
+		return v
+	}
+	return table.EvaluateText(harness, s.Text)
+}
+
 // hcBriefSteps is sendBriefHC's I/O, injected so each outcome is testable
 // without hc.
 type hcBriefSteps struct {
 	status func(context.Context) (hcadapter.Worker, error)
+	// screen reads the worker's screen text, and promptShown judges it with
+	// the harness's prompt and dialog predicates (ready.Table.EvaluateText).
+	screen      func(context.Context) (string, error)
+	promptShown func(text string) ready.Verdict
 	// send sends text; ifIdle asks hc to type only while still idle.
 	send   func(ctx context.Context, text string, ifIdle bool) (hcadapter.SendResult, error)
 	record func(worker.Brief) (int, error)
@@ -153,10 +169,15 @@ type hcBriefSteps struct {
 
 // sendBriefHC sends a typed brief to an hc worker.
 //
-// hc's send pastes and submits in one call, so there is no read-back step:
-// the gate is the status check before it, and hc's own refusal of a blocked
-// terminal. --force is never passed. The marker is recorded before the send,
-// as under herdr, so a turn that started always has its marker in the ledger.
+// hc's send pastes and submits in one call, so there is no read-back step,
+// and hc cannot type without submitting. Two signals gate it instead. The
+// status must be idle or done, and the screen must show the harness's input
+// prompt, empty, with no dialog: the status is the program's own OSC 7501
+// report, which anything that can write to the terminal can forge, but a
+// forged status cannot paint an empty prompt over a permission dialog, so
+// Enter never answers one. hc also refuses a blocked terminal itself, and
+// --force is never passed. The marker is recorded before the send, as under
+// herdr, so a turn that started always has its marker in the ledger.
 func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) briefResult {
 	refuse := func(step, reason string, v ready.Verdict) briefResult {
 		return briefResult{Outcome: briefRefused, Step: step, Blocking: v.Blocking, Reason: reason}
@@ -170,6 +191,18 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 	}
 	if v := evaluateHcStatus(ready.Screen{Status: before.Status}); !v.Ready() {
 		return refuse("check", "the worker is not waiting for input: "+v.Reason, v)
+	}
+	shown, err := s.screen(ctx)
+	if err != nil {
+		return refuse("check", "the worker's screen could not be read: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
+	}
+	switch v := s.promptShown(shown); {
+	case v.State == ready.StateBlocked:
+		return refuse("check", "hc reports the worker "+before.Status+", but its screen shows a dialog: "+v.Reason, v)
+	case !v.Ready():
+		return refuse("check", "hc reports the worker "+before.Status+", but its screen does not show the input prompt: "+v.Reason, v)
+	case v.Input != "":
+		return refuse("check", "the worker's input box already holds text; clear it in the worker's terminal first", v)
 	}
 
 	count, err := s.record(worker.Brief{Marker: marker, SentAt: s.now().UTC(), Via: worker.ViaTyped})

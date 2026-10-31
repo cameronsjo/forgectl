@@ -88,11 +88,15 @@ signals the worker itself can set, so they guard against accidents, not a
 worker trying to look ready. A brief must never carry an approval.
 
 With --surface hc there is no read-back: hc send pastes and submits in one
-call. brief refuses unless hc reports the worker idle or done, records the
-brief, then sends (with --if idle when it was idle, so a turn that started
-in between refuses the send). It never passes --force, so hc itself refuses
-a blocked worker. hc's refusal reports refused; any other send failure
-reports unconfirmed. --readback-timeout has no step under hc.
+call, and hc cannot type without submitting. brief refuses unless hc reports
+the worker idle or done and the screen shows the harness's input prompt,
+empty, with no dialog; the status is the worker's own report, which anything
+writing to its terminal can forge, so the screen check is what keeps the
+send from answering a dialog. It records the brief, then sends (with
+--if idle when it was idle, so a turn that started in between refuses the
+send). It never passes --force, so hc itself refuses a blocked worker. hc's
+refusal reports refused; any other send failure reports unconfirmed.
+--readback-timeout has no step under hc.
 
 Each brief gets a new random marker and asks the worker to end its final
 message with a REPORT line naming it; read it with surface read --report.
@@ -160,6 +164,11 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	if w.hc != nil {
 		res := sendBriefHC(ctx, hcBriefSteps{
 			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
+			screen: func(ctx context.Context) (string, error) {
+				s, err := w.hc.WorkerScreen(ctx, w.ref)
+				return s.Text, err
+			},
+			promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
 			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
 				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
 			},

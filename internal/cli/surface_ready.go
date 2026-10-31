@@ -70,10 +70,12 @@ harness's own input prompt is visible. herdr's status alone is a hint, never
 proof. All three can be set from inside the worker's pane, so ready guards
 against accidents, not against a worker trying to look ready.
 
-With --surface hc the verdict is hc's reported status alone, never screen
-text: idle or done is ready, blocked is blocked, and anything else (working,
-error, or no status reported yet) is not ready. A worker whose program has
-exited is gone.
+With --surface hc the verdict needs two signals: hc's reported status (idle
+or done; blocked is blocked; working, error, or no status yet is not ready),
+and a screen showing the harness's input prompt with no dialog. The status is
+the worker's own report, which anything writing to its terminal can forge, so
+a dialog on screen reads as blocked whatever the status says. A worker whose
+program has exited is gone.
 
 ready never answers a dialog. A blocking screen (folder-trust dialog,
 plan-approval dialog, permission prompt, npm's "Ok to proceed?") ends the wait
@@ -134,8 +136,9 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 // ledger row and reference, the adapter that reaches its pane, and the
 // readiness predicates for its harness.
 //
-// Exactly one of herdr and hc is set. An hc worker has no predicate table:
-// its readiness is hc's reported status (evaluateHcStatus).
+// Exactly one of herdr and hc is set. An hc worker's readiness is hc's
+// reported status (evaluateHcStatus); its table is used only by brief, to
+// check the screen before it sends (sendBriefHC).
 type openedWorker struct {
 	herdr *herdradapter.Adapter
 	hc    *hcadapter.Adapter
@@ -165,7 +168,7 @@ func (w *openedWorker) readLast(ctx context.Context) (ready.Screen, error) {
 
 func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
 	if w.hc != nil {
-		return evaluateHcStatus(s)
+		return evaluateHcWorker(w.table, w.row.Harness, s)
 	}
 	return w.table.Evaluate(w.row.Harness, s)
 }
@@ -187,9 +190,6 @@ func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
 	}
-	if wl.hc != nil {
-		return &openedWorker{hc: wl.hc, led: led, row: row, ref: ref}, nil
-	}
 
 	path, err := config.SurfaceReadyPredicatesPath()
 	if err != nil {
@@ -202,7 +202,7 @@ func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	if !table.Has(row.Harness) {
 		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), exitUsage)
 	}
-	return &openedWorker{herdr: herdr, led: led, row: row, ref: ref, table: table}, nil
+	return &openedWorker{herdr: herdr, hc: wl.hc, led: led, row: row, ref: ref, table: table}, nil
 }
 
 // launchedWorker finds the row named name and decodes its reference. Only a

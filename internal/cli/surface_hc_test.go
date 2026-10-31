@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -44,7 +46,8 @@ func TestEvaluateHcStatus(t *testing.T) {
 
 func TestHcPaneIdentityCrosses(t *testing.T) {
 	own := map[string]string{"HC_TERMINAL_ID": "t9", "HC_SESSION": "my.sess", "HERDR_PANE_ID": "w1:p1"}
-	// The launcher's own HC_TERMINAL_ID must not reach the worker.
+	// The worker gets its own terminal's HC_TERMINAL_ID and HC_SESSION, read
+	// from the trampoline's environment; the marked env carries neither.
 	env := markPane([]string{"PATH=/bin"}, "hc")
 	got := paneIdentityEnv(env, func(k string) string { return own[k] })
 	for _, want := range []string{"HC_TERMINAL_ID=t9", "HC_SESSION=my.sess"} {
@@ -60,6 +63,9 @@ func TestHcPaneIdentityCrosses(t *testing.T) {
 // hcBriefFake scripts sendBriefHC's steps.
 type hcBriefFake struct {
 	statuses []hcadapter.Worker
+	// screen is the worker's screen text; "" reads as the ready claude
+	// fixture.
+	screen   string
 	sendErr  error
 	sendRes  hcadapter.SendResult
 	sent     []string
@@ -79,6 +85,13 @@ func (f *hcBriefFake) steps() hcBriefSteps {
 			}
 			return w, nil
 		},
+		screen: func(context.Context) (string, error) {
+			if f.screen == "" {
+				return hcFixture("claude-ready-acceptedits"), nil
+			}
+			return f.screen, nil
+		},
+		promptShown: func(text string) ready.Verdict { return hcTable.EvaluateText("claude", text) },
 		send: func(_ context.Context, s string, _ bool) (hcadapter.SendResult, error) {
 			f.sent = append(f.sent, s)
 			return f.sendRes, f.sendErr
@@ -121,6 +134,19 @@ func TestSendBriefHC(t *testing.T) {
 			outcome: briefUnconfirmed, sent: true, recorded: true},
 		{name: "no turn within the start timeout", fake: hcBriefFake{statuses: []hcadapter.Worker{idle}},
 			outcome: briefUnconfirmed, sent: true, recorded: true},
+		// A forged idle status over a dialog: the screen check refuses.
+		{name: "idle status over a permission prompt is refused", fake: hcBriefFake{statuses: []hcadapter.Worker{idle}, screen: hcFixture("claude-permission-prompt")},
+			outcome: briefRefused},
+		{name: "done status over a trust dialog is refused", fake: hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "done", Turn: 3}}, screen: hcFixture("claude-trust-dialog")},
+			outcome: briefRefused},
+		{name: "done status over plan approval is refused", fake: hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "done", Turn: 3}}, screen: hcFixture("claude-plan-approval")},
+			outcome: briefRefused},
+		{name: "no prompt on screen is refused", fake: hcBriefFake{statuses: []hcadapter.Worker{idle}, screen: hcFixture("shell-idle")},
+			outcome: briefRefused},
+		{name: "text already in the input box is refused", fake: hcBriefFake{statuses: []hcadapter.Worker{idle}, screen: hcFixture("claude-typed-unsent")},
+			outcome: briefRefused},
+		{name: "done with a clean prompt sends", fake: hcBriefFake{statuses: []hcadapter.Worker{{Live: true, Status: "done", Turn: 3}}, sendRes: hcadapter.SendResult{Status: "working", Turn: 4}},
+			outcome: briefSent, sent: true, recorded: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,5 +220,43 @@ func TestHcSessionIsNotAPaneID(t *testing.T) {
 	got := paneIdentityEnv(markPane([]string{"HC_SESSION=work"}, "tmux"), func(string) string { return "" })
 	if !slices.Contains(got, "HC_SESSION=work") {
 		t.Errorf("tmux launch env %v lost HC_SESSION", got)
+	}
+}
+
+// hcTable is the built-in readiness table the hc brief checks screens with.
+var hcTable = func() *ready.Table {
+	t, err := ready.Default()
+	if err != nil {
+		panic(err)
+	}
+	return t
+}()
+
+// hcFixture reads one of the ready package's captured screens.
+func hcFixture(name string) string {
+	b, err := os.ReadFile(filepath.Join("..", "herdr", "ready", "testdata", name+".screen")) //nolint:gosec // G304: name is a literal at every call site
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestEvaluateHcWorkerNeedsBothSignals: a ready verdict needs hc's status and
+// the screen to agree; a forged idle over a dialog is blocked.
+func TestEvaluateHcWorkerNeedsBothSignals(t *testing.T) {
+	cases := []struct {
+		name, status, screen string
+		want                 ready.State
+	}{
+		{name: "idle with the prompt", status: "idle", screen: "claude-ready-acceptedits", want: ready.StateReady},
+		{name: "idle over a permission prompt", status: "idle", screen: "claude-permission-prompt", want: ready.StateBlocked},
+		{name: "done with no prompt", status: "done", screen: "shell-idle", want: ready.StateNotReady},
+		{name: "working with the prompt", status: "working", screen: "claude-ready-acceptedits", want: ready.StateNotReady},
+	}
+	for _, tc := range cases {
+		v := evaluateHcWorker(hcTable, "claude", ready.Screen{Status: tc.status, Text: hcFixture(tc.screen)})
+		if v.State != tc.want {
+			t.Errorf("%s: state %q (%s), want %q", tc.name, v.State, v.Reason, tc.want)
+		}
 	}
 }

@@ -14,7 +14,7 @@
 
 - [x] 3.1 `--surface hc` for `surface launch` and `--worktree`; hc name check before anything is created.
 - [x] 3.2 `--surface herdr|hc` on `list`, `read`, `ready`, `wait`, `brief`, `close`; `tag` refuses hc.
-- [x] 3.3 Status-only readiness and a send-based brief for hc workers.
+- [x] 3.3 Status-plus-screen readiness and a send-based brief for hc workers.
 - [x] 3.4 The worker terminal's own `HC_TERMINAL_ID` and `HC_SESSION` through the pane-identity path.
 
 ## 3b. Launcher permission mode
@@ -24,5 +24,5 @@
 ## 4. Docs and checks
 
 - [x] 4.1 `docs/herdr.md`, `README.md`, the shipped skill, command help.
-- [ ] 4.2 `go build ./...`, `go vet ./...`, `go test ./...`, golangci-lint, `scripts/openspec.sh validate --all --strict --no-interactive`.
+- [x] 4.2 `go build ./...`, `go vet ./...`, `go test ./...`, golangci-lint, `scripts/openspec.sh validate --all --strict --no-interactive`.
 - [x] 4.3 Live smoke against a scratch `HC_SESSION`: launch a throwaway worker, read it, close it.

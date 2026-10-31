@@ -46,11 +46,11 @@ A reference names the terminal by address and `created_ms`, and the server by a 
 
 An address alone is not enough: hc can reuse one after `hc rm`. A `not_found` answer from a core whose id matches proves the terminal is gone.
 
-### Status, never screen text
+### Status and screen, both
 
-hc's status states are the readiness signal for an hc worker. The herdr readiness table matches prompt patterns on screen text because herdr 0.9's agent status was not trusted on its own; hc's manual says not to guess status from screen text. Screen text is still read, but only for `surface read` and for finding a `REPORT <marker>:` line.
+hc's status states are the first readiness signal for an hc worker, and hc's manual says not to guess status from screen text. But the status is the program's own report, and the security review showed anything that can write to the terminal can print a forged `idle` over a permission dialog. So a ready verdict, and a brief, also need the screen to show the harness's input prompt with no dialog: the herdr predicates' prompt and dialog checks, without their herdr-agent clause. The screen never stands in for the status; it can only veto it.
 
-A typed brief therefore has no read-back step under hc: `hc send` pastes and submits in one call, and hc itself refuses a blocked terminal. The marker is recorded before the send, as it is under herdr. A send that hc refuses (blocked, finished, status mismatch) reports `refused`. Any other send failure reports `unconfirmed`, because the text may have arrived.
+A typed brief has no read-back step under hc: `hc send` pastes and submits in one call, and hc cannot type without submitting (`hc keys` takes named keys only). The status alone is not a safe gate before it, because it is the program's own report and anything that can write to the terminal can forge it. So brief also reads the screen and requires the harness's input prompt, empty, with no dialog, using the herdr predicates' prompt and dialog checks without their herdr-agent clause (`ready.Table.EvaluateText`). hc also refuses a blocked terminal itself. The marker is recorded before the send, as it is under herdr. A send that hc refuses (blocked, finished, status mismatch) reports `refused`. Any other send failure reports `unconfirmed`, because the text may have arrived.
 
 ### Ledger
 
@@ -72,7 +72,7 @@ A coordinator in auto should start auto workers, and a stricter coordinator shou
 
 The rule, for claude workers only: whatever the worker resolves to (`[launch.worker]`, the built-in `acceptEdits`, or a stricter project block) is capped at the launcher's mode. `[launch.worker]` stays the explicit value; the launcher is a ceiling over it, never a floor.
 
-The flag never raises a worker. An earlier draft let a worker with no `[launch.worker]` value take the launcher's mode, which made `--inherit-mode auto` lift a worker from `acceptEdits` to `auto`. The security review flagged it: the value is the caller's unverifiable claim, so any session allowed to run `surface launch` could self-grant `auto` workers. Auto workers therefore come only from `[launch.worker] permission_mode = "auto"`, the operator's own config, and an auto coordinator passing `--inherit-mode auto` keeps them auto. Whether a config opt-in (for example `[launch.worker] inherit_launcher_mode = true`) should restore the raise is an open question for the operator.
+The flag never raises a worker. An earlier draft let a worker with no `[launch.worker]` value take the launcher's mode, which made `--inherit-mode auto` lift a worker from `acceptEdits` to `auto`. The security review flagged it: the value is the caller's unverifiable claim, so any session allowed to run `surface launch` could self-grant `auto` workers. Auto workers therefore come only from `[launch.worker] permission_mode = "auto"`, the operator's own config, and an auto coordinator passing `--inherit-mode auto` keeps them auto. The operator asked for auto coordinators to start auto workers, so the raise returns behind an operator-owned opt-in: with `[launch.worker] inherit_launcher_mode = true` (and no `permission_mode`), a worker takes the launcher's mode capped at `auto`. The opt-in is config, not a flag, so a session cannot grant it to itself.
 
 A later change could read the transcript's latest `permissionMode` when the flag is absent, if Claude Code documents that field or a hook writes the mode somewhere stable.
 

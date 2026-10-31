@@ -187,11 +187,13 @@ a secret; point the worker at a file in the worktree instead.
 --inherit-mode <mode> passes the launching Claude Code session's permission
 mode (plan, default, acceptEdits, auto, ...) to a claude worker as a ceiling:
 the worker is never looser than it, so a launcher in plan starts plan workers
-even under [launch.worker] permission_mode = "auto". It never raises a
-worker: the value is the caller's claim, which nothing can check (Claude Code
-does not tell a child process its live mode). Auto workers come from
-[launch.worker] permission_mode = "auto", and an auto launcher passing
---inherit-mode auto keeps them auto.
+even under [launch.worker] permission_mode = "auto". By default it never
+raises a worker: the value is the caller's claim, which nothing can check
+(Claude Code does not tell a child process its live mode). An operator who
+wants workers to follow the launcher up sets [launch.worker]
+inherit_launcher_mode = true (and no permission_mode): the worker then takes
+the launcher's mode, capped at auto. Codex and pi workers ignore the flag,
+with a note.
 
 --profile <name> runs a claude worker with CLAUDE_CONFIG_DIR set to the
 config_dir of [surface.profiles.<name>] (see docs/configuration.md), so it
@@ -240,7 +242,7 @@ failed launch.
 not shaped like an address such as t7) and labeled forgectl.surface with the
 ownership marker. It stays out of the herdr-app window. The worker verbs (list,
 read, ready, wait, brief, close) take --surface hc to reach it; under hc,
-readiness is hc's reported status, never screen text.
+readiness needs hc's reported status and the harness's prompt on screen.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
@@ -292,7 +294,7 @@ readiness is hc's reported status, never screen text.
 	cmd.Flags().StringVar(&model, "model", "",
 		"run the worker on this model instead of the launch profile's (--worktree only)")
 	cmd.Flags().StringVar(&inheritMode, "inherit-mode", "",
-		"the launching Claude Code session's permission mode, as a ceiling: a claude worker is never looser than it, and it never raises one (--worktree only)")
+		"the launching Claude Code session's permission mode: a ceiling on a claude worker's mode, and with [launch.worker] inherit_launcher_mode the worker's mode, capped at auto (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -365,8 +367,12 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	// hc names its terminal after the display name and refuses some shapes
 	// a directory name can have (uppercase, "t7"); refuse them here.
 	if opts.Backend == workerSurfaceHc {
-		if err := checkHcName(displayNameFor(opts.DisplayName, target)); err != nil {
-			return err
+		name := displayNameFor(opts.DisplayName, target)
+		if err := hcadapter.CheckName(name); err != nil {
+			if opts.DisplayName == "" {
+				return WithExitCode(fmt.Errorf("the display name %q, taken from the target directory, is not a name hc accepts: %w; pass --name", name, err), exitUsage)
+			}
+			return checkHcName(name)
 		}
 	}
 

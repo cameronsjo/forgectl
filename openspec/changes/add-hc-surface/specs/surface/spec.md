@@ -39,14 +39,18 @@ A reference to an hc terminal SHALL record its address, its creation time, and a
 - **THEN** `surface close` refuses with an identity mismatch and kills nothing
 
 ### Requirement: hc worker verbs
-`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, readiness MUST come from hc's reported status (`idle` or `done` is ready, `blocked` is blocked), never from screen text. `surface tag` MUST refuse an hc worker.
+`list`, `read`, `ready`, `wait`, `brief`, and `close` SHALL take `--surface herdr|hc`, defaulting to `herdr`, and read that backend's ledger. Under hc, a ready verdict MUST need both hc's reported status (`idle` or `done`; `blocked` is blocked) and a screen showing the harness's input prompt with no dialog; a dialog on screen MUST read as blocked whatever the status says. `surface tag` MUST refuse an hc worker.
 
 #### Scenario: Blocked hc worker
 - **WHEN** an hc worker reports status `blocked`
 - **THEN** `surface ready` exits 1 naming the blocked status
 
 ### Requirement: hc briefs and close
-Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done`, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker before sending. `surface close` SHALL run `hc kill` and then `hc rm`.
+Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `done` and its screen shows the harness's empty input prompt with no dialog, MUST NOT pass `--force` to `hc send`, and SHALL record the brief's marker before sending. `surface close` SHALL run `hc kill` and then `hc rm`.
+
+#### Scenario: Forged idle over a dialog
+- **WHEN** an hc worker reports status `idle` while its screen shows a permission prompt
+- **THEN** `surface brief` reports `refused` and types nothing
 
 #### Scenario: Brief to a blocked worker
 - **WHEN** an hc worker reports status `blocked`
@@ -57,7 +61,7 @@ Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `d
 - **THEN** its terminal is killed and removed, and `hc get` no longer finds it
 
 ### Requirement: Worker follows the launcher's mode
-`surface launch --worktree --inherit-mode <mode>` SHALL take the launching session's Claude Code permission mode as a ceiling: no claude worker MUST be looser than it, whatever `[launch.worker]` or the matched project block sets. It MUST NOT raise a worker above the mode its config gives. An unknown mode, or the flag without `--worktree`, MUST be refused.
+`surface launch --worktree --inherit-mode <mode>` SHALL take the launching session's Claude Code permission mode as a ceiling: no claude worker MUST be looser than it, whatever `[launch.worker]` or the matched project block sets. Without `[launch.worker] inherit_launcher_mode = true` it MUST NOT raise a worker; with it, a worker SHALL take the launcher's mode capped at `auto`. `inherit_launcher_mode` with `permission_mode`, an unknown mode, or the flag without `--worktree` MUST be refused.
 
 #### Scenario: Auto coordinator
 - **WHEN** a coordinator in auto launches a worker with `--inherit-mode auto` and `[launch.worker] permission_mode = "auto"`
@@ -70,6 +74,10 @@ Under hc, `surface brief` MUST refuse unless the worker's status is `idle` or `d
 #### Scenario: Plan launcher caps an explicit worker mode
 - **WHEN** `[launch.worker] permission_mode = "auto"` and the launch passes `--inherit-mode plan`
 - **THEN** the worker starts in plan
+
+#### Scenario: Operator opt-in
+- **WHEN** `[launch.worker] inherit_launcher_mode = true` and the launch passes `--inherit-mode auto`
+- **THEN** the worker starts in auto
 
 #### Scenario: Bypass launcher
 - **WHEN** the launch passes `--inherit-mode bypassPermissions` and `[launch.worker] permission_mode = "auto"`
