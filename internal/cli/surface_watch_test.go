@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
 	"github.com/cameronsjo/forgectl/internal/workerwatch"
@@ -192,5 +194,19 @@ func TestSurfaceWatchSnapshotExitsOneWithoutHC(t *testing.T) {
 		if !strings.Contains(out, "hc was not found on PATH") {
 			t.Errorf("args %q: the snapshot does not say hc is missing\n%s", args, out)
 		}
+	}
+}
+
+// The production collector must count markers by the same [sweep] reviewers
+// allowlist forgectl sweep uses.
+func TestSurfaceWatchUsesTheSweepReviewers(t *testing.T) {
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	deps.Cfg.Sweep.Reviewers = []string{"pr-reviewer", "security-reviewer"}
+	c := productionWatchRuntime(deps).newCollector(watchOptions{GHTTL: workerwatch.MinGHTTL}, nil, nil)
+	if strings.Join(c.Reviewers, ",") != "pr-reviewer,security-reviewer" {
+		t.Errorf("collector reviewers = %q, want the [sweep] reviewers", c.Reviewers)
+	}
+	if c.GH == nil || c.Git == nil || c.HC == nil || c.Reports == nil {
+		t.Errorf("production collector is missing a source: %+v", c)
 	}
 }

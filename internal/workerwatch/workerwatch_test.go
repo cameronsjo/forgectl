@@ -427,6 +427,8 @@ func TestSummarizeMarkersFollowsSweep(t *testing.T) {
 	}{
 		{"crit=1 then crit=0 at the same head still blocks", []Marker{head("pr-reviewer", 0, 0), head("pr-reviewer", 1, 0)}, nil,
 			&Review{AtHead: 2, Crit: 1, Reviewers: []string{"pr-reviewer"}}},
+		{"sums crit, not the max", []Marker{head("pr-reviewer", 1, 0), head("security-reviewer", 2, 1)}, nil,
+			&Review{AtHead: 2, Crit: 3, Imp: 1, Reviewers: []string{"pr-reviewer", "security-reviewer"}}},
 		{"sums across reviewers", []Marker{head("pr-reviewer", 0, 2), head("security-reviewer", 1, 1)}, nil,
 			&Review{AtHead: 2, Crit: 1, Imp: 3, Reviewers: []string{"pr-reviewer", "security-reviewer"}}},
 		{"allowlist drops other names", []Marker{head("made-up", 0, 0), head("pr-reviewer", 2, 0)}, []string{"pr-reviewer"},

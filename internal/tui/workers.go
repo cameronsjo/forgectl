@@ -80,6 +80,18 @@ type WorkersOptions struct {
 // only after the hc event subscription has stopped (or workersStopGrace has
 // passed), so quitting never leaves an `hc events` child behind.
 func RunWorkers(ctx context.Context, opts WorkersOptions) error {
+	return runWorkers(ctx, opts, runWorkersProgram)
+}
+
+// runWorkersProgram runs the Bubble Tea program until the operator quits.
+func runWorkersProgram(ctx context.Context, m tea.Model) error {
+	_, err := tea.NewProgram(m, keymap.ProgramOptions(ctx)...).Run()
+	return err
+}
+
+// runWorkers is RunWorkers with the program run injected, so a test can
+// end the view without a terminal and see what happens to the stream.
+func runWorkers(ctx context.Context, opts WorkersOptions, program func(context.Context, tea.Model) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var stream *workerwatch.EventStream
@@ -87,7 +99,7 @@ func RunWorkers(ctx context.Context, opts WorkersOptions) error {
 		es := opts.Events(ctx)
 		stream = &es
 	}
-	_, err := tea.NewProgram(newWorkersModel(ctx, opts, stream), keymap.ProgramOptions(ctx)...).Run()
+	err := program(ctx, newWorkersModel(ctx, opts, stream))
 	if stream != nil {
 		stopStream(cancel, stream.Done, workersStopGrace)
 	}
@@ -423,6 +435,10 @@ func (m workersModel) mainLines(width, height int) []string {
 	if m.cursor >= tableRoom {
 		start = m.cursor - tableRoom + 1
 	}
+	if cut := len(m.snap.Workers) - tableRoom; cut > 0 && len(m.snap.Workers) > 0 {
+		// Say the table is cut, and which way the rest lies.
+		top[len(top)-1] += " " + m.styles.Warn.Render(fmt.Sprintf("↕ %d more rows", cut))
+	}
 	rows = rows[start:min(len(rows), start+tableRoom)]
 	tail := m.tailBlock(room - len(rows))
 	for len(rows)+len(tail) < room {
@@ -551,7 +567,7 @@ var workersAllCols = []workersCol{
 const workersVerdictPrio = 5
 
 // workersHintWidth is the room the "→ N more columns" hint takes.
-const workersHintWidth = 17
+const workersHintWidth = 14
 
 // workersLayout picks the columns that fit width, by priority, and how many
 // were left out. REPORTS falls back to its short form before it is dropped.
@@ -573,8 +589,11 @@ func workersLayout(width int) ([]workersCol, int) {
 				c = workersCol{colReportsShort, "REPORTS", wwReportShort, c.prio}
 			}
 			if used+c.width+1 > avail && c.kind != colName {
+				// Strict priority: once a column does not fit, no
+				// lower-priority one takes its place, so a narrow CI
+				// never shows where STATUS could not.
 				lostVerdict = lostVerdict || c.prio <= workersVerdictPrio
-				continue
+				break
 			}
 			keep = append(keep, c)
 			used += c.width + 1
@@ -609,7 +628,7 @@ func (m workersModel) columnsLine(cols []workersCol, hidden int) string {
 	}
 	line := m.styles.Muted.Render("  " + strings.Join(parts, " "))
 	if hidden > 0 {
-		line += " " + m.styles.Warn.Render(fmt.Sprintf("→ %d more columns", hidden))
+		line += " " + m.styles.Warn.Render(fmt.Sprintf("→ %d more cols", hidden))
 	}
 	return line
 }
@@ -844,13 +863,16 @@ func (m workersModel) helpLines() []string {
 		"  ?            this help; ? or esc closes it",
 		"  q, ctrl+c    quit",
 		"",
-		"  STATUS*  the agent's own report through hc (OSC 7501), not an observation.",
-		"  REVIEW*  cadence-review markers summed the way forgectl sweep sums them:",
-		"           c<crit> i<imp> over every marker at the PR's head, ×N markers;",
-		"           only [sweep] reviewers count when that list is set. Markers are",
-		"           claims: any session on your gh login, a worker included, can post one.",
-		"  PR !     the last good read, kept because the newest GitHub read failed.",
-		"  → N more columns  widen the terminal to see the rest (or use --json).",
+		"  STATUS*  the agent's own report through hc, not an observation.",
+		"  REVIEW*  markers summed the way forgectl sweep sums them:",
+		"           c<crit> i<imp> over every marker at the PR head, ×N markers.",
+		"           Only [sweep] reviewers count when that list is set; with it",
+		"           empty every name counts (sweep counts none), so this errs",
+		"           alarming. Markers are claims: any session on your gh login,",
+		"           a worker included, can post one.",
+		"  PR !     the last good read, kept because the newest one failed.",
+		"  → N more cols / ↕ N more rows   widen or heighten the terminal,",
+		"           or use --json.",
 		"",
 		"  The watch only reads: it never types into, kills, or briefs a worker.",
 	}

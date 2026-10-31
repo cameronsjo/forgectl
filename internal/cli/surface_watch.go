@@ -108,7 +108,8 @@ Keys: up/down (or j/k) select, r refresh now, q quit.
 
 REVIEW sums cadence-review markers the way forgectl sweep does: crit and
 imp over every marker at the PR's head, counting only [sweep] reviewers
-when that list is set. STATUS and REVIEW are claims: the agent reports its
+when that list is set. With the list empty, every reviewer name counts
+(sweep counts none and refuses to run), so the watch errs alarming. STATUS and REVIEW are claims: the agent reports its
 own status, and any session on your gh login can post a marker. Press ?
 in the view for the full key and column list.
 

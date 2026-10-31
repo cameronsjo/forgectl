@@ -548,3 +548,90 @@ func TestWorkersShortTerminal(t *testing.T) {
 		t.Error("a 5-row terminal does not say it is too small")
 	}
 }
+
+// RunWorkers must not return until the hc events child it started has been
+// cancelled and reaped: the stub's Done closes only after its context ends,
+// with a delay standing in for the kill and wait.
+func TestRunWorkersReapsTheStreamBeforeReturning(t *testing.T) {
+	var streamCtx context.Context
+	done := make(chan struct{})
+	reaped := false
+	var mu sync.Mutex
+	opts := WorkersOptions{
+		Collect: (&workersFakes{}).collect,
+		Theme:   theme.Default(),
+		Events: func(ctx context.Context) workerwatch.EventStream {
+			streamCtx = ctx
+			go func() {
+				<-ctx.Done()
+				time.Sleep(100 * time.Millisecond)
+				mu.Lock()
+				reaped = true
+				mu.Unlock()
+				close(done)
+			}()
+			return workerwatch.EventStream{Wake: make(chan struct{}), Done: done}
+		},
+	}
+	quit := func(context.Context, tea.Model) error { return nil } // the operator pressed q
+	if err := runWorkers(context.Background(), opts, quit); err != nil {
+		t.Fatal(err)
+	}
+	if streamCtx.Err() == nil {
+		t.Error("RunWorkers returned without cancelling the event stream")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reaped {
+		t.Error("RunWorkers returned before the hc events child was reaped")
+	}
+}
+
+func TestWorkersHelpFitsEightyColumns(t *testing.T) {
+	m := sizedWorkers(t, 80, 30)
+	m.help = true
+	for i, line := range m.helpLines() {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Errorf("help line %d is %d wide: %q", i, w, ansi.Strip(line))
+		}
+	}
+}
+
+func TestWorkersLayoutIsStrictPriority(t *testing.T) {
+	for w := 20; w <= 220; w++ {
+		cols, _ := workersLayout(w)
+		kept := map[int]bool{}
+		for _, c := range cols {
+			kept[c.prio] = true
+		}
+		for p := 1; p <= len(workersAllCols); p++ {
+			if !kept[p] {
+				for q := p + 1; q <= len(workersAllCols); q++ {
+					if kept[q] {
+						t.Fatalf("at %d columns priority %d was dropped but %d kept: %+v", w, p, q, cols)
+					}
+				}
+				break
+			}
+		}
+	}
+	if cols, _ := workersLayout(42); len(cols) < 2 || cols[1].kind != colStatus {
+		t.Errorf("at 42 columns STATUS is not kept beside NAME: %+v", cols)
+	}
+}
+
+func TestWorkersCutTableSaysSo(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	many := workersFixture()
+	for i := range 20 {
+		many.Workers = append(many.Workers, workerwatch.Worker{Name: fmt.Sprintf("cos-w-%02d", i), State: "live", Status: workerwatch.StatusWorking})
+	}
+	out, _ := m.Update(workersSnapMsg{snap: many})
+	out, _ = out.(workersModel).Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	if !strings.Contains(ansi.Strip(out.(workersModel).View().Content), "more rows") {
+		t.Error("a table cut to fit the screen does not say so")
+	}
+	if strings.Contains(ansi.Strip(sizedWorkers(t, 140, 40).View().Content), "more rows") {
+		t.Error("a table that fits says rows are cut")
+	}
+}
