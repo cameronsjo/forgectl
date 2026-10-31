@@ -1020,7 +1020,8 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 // home stay byte-exact.
 func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
 	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID", "HC_SCOPE",
-		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER"}
+		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
+		"HERDR_ACTIVE_PANE_ID", "HERDR_ACTIVE_WORKSPACE_ID", "HC_TERMINAL_SOCKET"}
 	kept := []string{"HC_SESSION=work", "XDG_CONFIG_HOME=/x/config", "HERDR_SOCKET_PATH=/x/herdr.sock", "TMUX=/tmp/tmux-1/default,1,0", "FORGECTL_UNRELATED=keep"}
 	extra := append([]string{}, kept...)
 	for _, k := range gone {

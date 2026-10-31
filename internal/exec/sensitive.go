@@ -528,11 +528,13 @@ func UnsetLauncherSessionHandles() EnvMutation {
 // surface and tab ids, cmux sets CMUX_PANEL_ID (the pane's panel UUID) and
 // CMUX_TERMINAL_LIFECYCLE_ID (a UUID per terminal session). The rest of the
 // CMUX_ set names the app, its shims, its socket or a port range, not a pane.
-// hc sets HC_TERMINAL_ID, the terminal's address, in every terminal it
-// starts; HC_SESSION selects a core rather than naming a pane.
+// hc sets HC_TERMINAL_ID, the terminal's address, and HC_SCOPE, a token that
+// differs per terminal, in every terminal it starts (both measured on hc
+// 0.1.15); HC_SESSION selects a core and HC_TERMINAL_SOCKET is the core's
+// socket, so neither names a pane.
 var paneIdentityEnvByBackend = map[string][]string{
 	"herdr": {"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"},
-	"hc":    {"HC_TERMINAL_ID"},
+	"hc":    {"HC_TERMINAL_ID", "HC_SCOPE"},
 	"tmux":  {"TMUX_PANE"},
 	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
 }
@@ -553,30 +555,64 @@ func IsPaneIdentityKey(key string) bool {
 	return false
 }
 
+// launcherFocusEnv is what herdr tells a custom command (a keybinding's
+// command) about the pane that had focus when it ran: herdr's
+// custom_command_env sets these four, and no pane's own environment carries
+// them. They name a pane that is neither the launcher's nor a new surface's,
+// so surface launches strip them and every hc call drops them; a session that
+// inherited them would take that pane as its default target
+// (herdrTargetEnvKeys in internal/cli).
+var launcherFocusEnv = []string{
+	"HERDR_ACTIVE_WORKSPACE_ID", "HERDR_ACTIVE_TAB_ID", "HERDR_ACTIVE_PANE_ID", "HERDR_ACTIVE_PANE_CWD",
+}
+
+// IsLauncherFocusKey reports whether key is one of launcherFocusEnv.
+func IsLauncherFocusKey(key string) bool { return slices.Contains(launcherFocusEnv, key) }
+
+// LauncherFocusEnv is a fresh copy of launcherFocusEnv.
+func LauncherFocusEnv() []string { return slices.Clone(launcherFocusEnv) }
+
 // launcherSessionHandlePrefixes and launcherSessionHandleKeys, with every
-// manager's pane ids, are the launching session's handles.
+// manager's pane ids and the launcher focus, are the launching session's
+// handles.
 //
 //   - CLAUDE_CODE_ covers Claude Code's session id and its cross-session
 //     messaging socket and token, and so every other CLAUDE_CODE_ variable
 //     too; CLAUDECODE marks a process as running inside a Claude Code session.
-//   - HC_TERMINAL_ and HC_SCOPE name the hc terminal the launcher runs in and
-//     reach its core. HC_SESSION is not here: it selects the core, which the
+//   - HC_TERMINAL_ covers HC_TERMINAL_ID and HC_TERMINAL_SOCKET, the core's
+//     socket: without it, HC_SESSION alone selects the core the adapter
+//     fingerprints. HC_SESSION is not here: it selects the core, which the
 //     launcher and its workers share.
 //   - FORGECTL_WORKER, FORGECTL_LEDGER, FORGECTL_INBOX and
 //     FORGECTL_DRAIN_WORKER are a launched worker's own identity
 //     (mail.EnvWorker and the rest; a cli test pins the two together).
+//
+// FORGECTL_SURFACE_PANE is not a handle: its value names a backend, not a
+// pane, and the trampoline reads it only from the sealed invocation, never
+// from its own environment.
+//
+// A surface launch strips only part of this set (surfaceLaunchEnvironment in
+// internal/cli); a cli drift test lists, with its reason, every key hc calls
+// drop and launches keep.
 var (
 	launcherSessionHandlePrefixes = []string{"CLAUDE_CODE_", "HC_TERMINAL_"}
 	launcherSessionHandleKeys     = []string{
-		"CLAUDECODE", "HC_SCOPE",
+		"CLAUDECODE",
 		"FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
 	}
 )
 
+// LauncherSessionHandleNames returns fresh copies of the exact keys and the
+// prefixes IsLauncherSessionHandle matches beyond the pane identity and the
+// launcher focus, so a test can walk the whole set.
+func LauncherSessionHandleNames() (keys, prefixes []string) {
+	return slices.Clone(launcherSessionHandleKeys), slices.Clone(launcherSessionHandlePrefixes)
+}
+
 // IsLauncherSessionHandle reports whether key names one of the launching
 // session's handles, which UnsetLauncherSessionHandles drops.
 func IsLauncherSessionHandle(key string) bool {
-	if slices.Contains(launcherSessionHandleKeys, key) || IsPaneIdentityKey(key) {
+	if slices.Contains(launcherSessionHandleKeys, key) || IsPaneIdentityKey(key) || IsLauncherFocusKey(key) {
 		return true
 	}
 	for _, p := range launcherSessionHandlePrefixes {

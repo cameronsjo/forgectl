@@ -573,11 +573,15 @@ func validPaneIdentity(v string) bool {
 // Claude Code's messaging socket and token go too: they are the launcher
 // session's inbox, so a Codex or pi agent in the new surface would otherwise
 // find the launcher's mail ledger and `surface send` as the coordinator.
+//
+// So does the pane focus herdr gives a custom command (exec.LauncherFocusEnv):
+// a launch bound to a herdr key would otherwise hand the new surface the
+// pane that had focus at the keypress as its default target.
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) {
+		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) || exec.IsLauncherFocusKey(key) {
 			continue
 		}
 		out = append(out, entry)
