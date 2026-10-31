@@ -26,7 +26,7 @@ func TestParseWorkers(t *testing.T) {
 		"-flag|/wt|/b",
 		"cos d|/wt|/b",
 		"cos-e||",
-		"cos-‮|/wt|/b",
+		"cos-\u202e|/wt|/b",
 	}, "\n")
 	entries, problems, err := ParseWorkers(strings.NewReader(in))
 	if err != nil {
