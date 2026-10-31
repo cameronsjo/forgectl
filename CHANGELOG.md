@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.61.0](https://github.com/cameronsjo/forgectl/compare/v0.60.0...v0.61.0) (2026-10-31)
+
+
+### Features
+
+* **desk:** asks — agents ask the operator for non-script work, answered from `desk ui` or a phone page (`desk serve`); agents block on `desk watch --responses` ([a9bd6a6](https://github.com/cameronsjo/forgectl/commit/a9bd6a6f0cbb259f444aa83c5fd7786fb28e4cf7))
+* **surface:** --herdr-space shows an hc worker in a herdr-app space ([f438cf1](https://github.com/cameronsjo/forgectl/commit/f438cf1103812d428040ec20ba9b4bcca7050fb0))
+* **surface:** --inherit-mode caps a worker's permission mode at the launcher's, and with [launch.worker] inherit_launcher_mode sets it, capped at auto ([646b39b](https://github.com/cameronsjo/forgectl/commit/646b39b7050b4520c2ccabfb1e0079a062797b19))
+* **surface:** add `surface watch`, a live read-only view of chief-of-staff workers in hc (status, reports, PRs, NEEDS YOU) ([ed05cf2](https://github.com/cameronsjo/forgectl/commit/ed05cf2e116945096af7e4e7292466127de953c7))
+* **surface:** herdr-core (hc) surface for worker launches ([646b39b](https://github.com/cameronsjo/forgectl/commit/646b39b7050b4520c2ccabfb1e0079a062797b19))
+* **surface:** surface forget drops an hc worker's ledger row once hc proves its terminal gone ([f438cf1](https://github.com/cameronsjo/forgectl/commit/f438cf1103812d428040ec20ba9b4bcca7050fb0))
+* **surface:** worker ledger rows and surface list --json record the resolved posture ([f438cf1](https://github.com/cameronsjo/forgectl/commit/f438cf1103812d428040ec20ba9b4bcca7050fb0))
+* **surface:** worker ledger rows gain posture and hc_selection; an older forgectl refuses a ledger holding them, so upgrade every forgectl on a machine together (one-way) ([f438cf1](https://github.com/cameronsjo/forgectl/commit/f438cf1103812d428040ec20ba9b4bcca7050fb0))
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/net to v0.62.0 for GO-2026-6860 ([1a9e71a](https://github.com/cameronsjo/forgectl/commit/1a9e71a45244a5a6f6138204e913d44dc8b83bad))
+* **deps:** bump golang.org/x/net to v0.62.0 for GO-2026-6860 ([c6558b1](https://github.com/cameronsjo/forgectl/commit/c6558b143e9c1b3ca21b310b857ac7155db8f5eb))
+* **deps:** bump golang.org/x/net to v0.62.0 for GO-2026-6860 ([4652454](https://github.com/cameronsjo/forgectl/commit/46524543ad49dbcde8fbbf624b5be53105cd1e0f))
+* **surface:** a worker launch's --json names its real backend ([646b39b](https://github.com/cameronsjo/forgectl/commit/646b39b7050b4520c2ccabfb1e0079a062797b19))
+* **surface:** an hc brief re-checks a done worker at the send and spaces its Escape from the last brief, one brief per worker at a time ([f438cf1](https://github.com/cameronsjo/forgectl/commit/f438cf1103812d428040ec20ba9b4bcca7050fb0))
+* **surface:** claude workers pin editorMode normal, so an hc brief's Escape cannot switch a prompt to vim NORMAL mode ([646b39b](https://github.com/cameronsjo/forgectl/commit/646b39b7050b4520c2ccabfb1e0079a062797b19))
+* **surface:** hc environment scrub both ways and one hc runner for surface watch ([#1388](https://github.com/cameronsjo/forgectl/issues/1388)) ([31f964a](https://github.com/cameronsjo/forgectl/commit/31f964ad4749022bd59629f2b382c0aa2fc9156c))
+* **surface:** retry the lock-file create race for drain.lock and merge-audit.lock ([#1392](https://github.com/cameronsjo/forgectl/issues/1392)) ([c3a07eb](https://github.com/cameronsjo/forgectl/commit/c3a07eb2a84b1104c662bc63af33d96eb122aae6))
+* **surface:** surface watch review follow-ups ([#1393](https://github.com/cameronsjo/forgectl/issues/1393)) ([edc10c9](https://github.com/cameronsjo/forgectl/commit/edc10c9d636ee132396d6db8e47e215cb1acf96a))
+
 ## [0.60.0](https://github.com/cameronsjo/forgectl/compare/v0.59.0...v0.60.0) (2026-10-27)
 
 
