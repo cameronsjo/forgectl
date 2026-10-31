@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -76,7 +77,9 @@ type listRow struct {
 }
 
 type listOptions struct {
-	Repo    string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface string
 	Orphans bool
 	JSON    bool
 }
@@ -90,6 +93,11 @@ func newSurfaceListCmd(deps module.Deps) *cobra.Command {
 each checked against herdr: present (its workspace is there and carries
 forgectl's ownership marker), gone, or unreadable. A herdr error is
 unreadable, never gone, and close refuses an unreadable worker.
+
+With --surface hc the workers are herdr-core (hc) terminals instead: the
+ledger is the hc session's (hc:<session>), present means the terminal is live
+and carries forgectl's forgectl.surface label at the recorded creation time,
+and a finished terminal is gone. --json's terminal_id is the hc address (t7).
 
 --orphans shows only the rows a coordinator should close: those whose
 workspace is gone, and those at any stage other than launched (failed,
@@ -107,22 +115,59 @@ error, such as a ledger that cannot be read.
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the workers were launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().BoolVar(&opts.Orphans, "orphans", false, "show only workers whose workspace is gone or whose launch never finished")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"repo","session","workers":[{"name","harness","repo","branch","stage","state","reason","orphan","worktree","worktree_present","workspace_id","pane_id","session_id","transcript","started_at","marker","failure","recovery","terminal_id"}]} as JSON`)
 	return cmd
 }
 
+// workerSurface is what the worker verbs ask of either backend's adapter.
+type workerSurface interface {
+	backend.Closer
+	backend.Prober
+	terminalReader
+	Session() string
+}
+
 // workerLedgerContext is a repo's ledger and the adapter for its session.
+// Exactly one of herdr and hc is set; surface is that one.
 type workerLedgerContext struct {
-	herdr *herdradapter.Adapter
-	led   *worker.Ledger
-	top   string
+	surface workerSurface
+	herdr   *herdradapter.Adapter
+	hc      *hcadapter.Adapter
+	led     *worker.Ledger
+	top     string
 }
 
 // openWorkerLedger resolves repo and opens its ledger for the current herdr
 // session. Every failure is a usage or setup error (exit 2). warn takes the
 // herdr adapter's setup warnings.
 func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo string) (*workerLedgerContext, error) {
+	return openSurfaceLedger(ctx, warn, deps, repo, workerSurfaceHerdr)
+}
+
+// openSurfaceLedger is openWorkerLedger for the named worker surface, herdr
+// or hc. The hc ledger is keyed "hc:<session>", so it never shares rows with
+// a herdr session's.
+func openSurfaceLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo, surfaceName string) (*workerLedgerContext, error) {
+	if err := checkWorkerSurface(surfaceName); err != nil {
+		return nil, err
+	}
+	if surfaceName == workerSurfaceHc {
+		adapter, err := newHcAdapter()
+		if err != nil {
+			return nil, WithExitCode(err, exitUsage)
+		}
+		hc, ok := adapter.(*hcadapter.Adapter)
+		if !ok {
+			return nil, errors.New("forgectl: the hc adapter has an unexpected type")
+		}
+		led, top, err := openRepoLedger(ctx, deps, repo, hc.Session())
+		if err != nil {
+			return nil, err
+		}
+		return &workerLedgerContext{surface: hc, hc: hc, led: led, top: top}, nil
+	}
 	adapter, err := newHerdrAdapter(warn)
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
@@ -131,26 +176,37 @@ func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, rep
 	if !ok {
 		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
 	}
-	target, err := projects.New(deps.Runner).ResolveTarget(repo)
+	led, top, err := openRepoLedger(ctx, deps, repo, herdr.Session())
 	if err != nil {
-		return nil, WithExitCode(err, exitUsage)
-	}
-	top, err := worker.RepoTop(ctx, deps.Runner, target)
-	if err != nil {
-		return nil, WithExitCode(err, exitUsage)
-	}
-	led, err := worker.Open(top, herdr.Session())
-	if err != nil {
-		return nil, WithExitCode(err, exitUsage)
+		return nil, err
 	}
 	// Every reference this context reads comes from the session's own
 	// ledger, so a changed server incarnation is that session restarting:
 	// close and list settle it by the ownership marker (forgectl#1077).
-	return &workerLedgerContext{herdr: herdr.ForSessionLedger(), led: led, top: top}, nil
+	bound := herdr.ForSessionLedger()
+	return &workerLedgerContext{surface: bound, herdr: bound, led: led, top: top}, nil
+}
+
+// openRepoLedger resolves repo to its top and opens that top's ledger for
+// session. Every failure is a usage or setup error (exit 2).
+func openRepoLedger(ctx context.Context, deps module.Deps, repo, session string) (*worker.Ledger, string, error) {
+	target, err := projects.New(deps.Runner).ResolveTarget(repo)
+	if err != nil {
+		return nil, "", WithExitCode(err, exitUsage)
+	}
+	top, err := worker.RepoTop(ctx, deps.Runner, target)
+	if err != nil {
+		return nil, "", WithExitCode(err, exitUsage)
+	}
+	led, err := worker.Open(top, session)
+	if err != nil {
+		return nil, "", WithExitCode(err, exitUsage)
+	}
+	return led, top, nil
 }
 
 func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) error {
-	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
+	w, err := openSurfaceLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -165,10 +221,10 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 		return WithExitCode(err, exitUsage)
 	}
 	now := time.Now()
-	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}
+	res := listResult{Repo: w.top, Session: w.surface.Session(), Workers: []listRow{}}
 	var kept []worker.Row
 	for _, r := range rows {
-		row := reconcileRow(ctx, w.herdr, r, w.top, listed, now)
+		row := reconcileRow(ctx, w.surface, r, w.top, listed, now)
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
@@ -178,7 +234,7 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	if opts.JSON {
 		// After every probe, so a slow terminal read cannot starve a later
 		// row's probe into unreadable.
-		fillTerminalIDs(ctx, w.herdr, kept, res.Workers)
+		fillTerminalIDs(ctx, w.surface, kept, res.Workers)
 	}
 	return reportList(cmd, res, opts.JSON)
 }
@@ -267,11 +323,11 @@ func probeWorkspace(ctx context.Context, probe backend.Prober, r worker.Row, row
 		}
 		return workerPresent, ""
 	case backend.ProbeGone:
-		return workerGone, "the herdr workspace is gone"
+		return workerGone, "the " + ref.Kind().String() + " " + surfaceNoun(ref) + " is gone"
 	case backend.ProbeIdentityMismatch:
 		return workerUnreadable, "the workspace cannot be proven to be forgectl's (" + causeText(res) + ")"
 	default:
-		return workerUnreadable, "herdr could not be read (" + causeText(res) + ")"
+		return workerUnreadable, ref.Kind().String() + " could not be read (" + causeText(res) + ")"
 	}
 }
 

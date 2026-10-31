@@ -21,7 +21,7 @@ import (
 )
 
 // A worker launch (`surface launch --worktree <branch>`) starts one agent for
-// a coordinator: its own git worktree, its own herdr workspace, and a ledger
+// a coordinator: its own git worktree, its own herdr workspace or hc terminal, and a ledger
 // row that says what was created at each step.
 
 // maxLedgerFailureLen bounds the error text kept in a failed row.
@@ -176,7 +176,7 @@ func (e launchConfigError) Error() string        { return e.err.Error() }
 func (e launchConfigError) Unwrap() error        { return e.err }
 func (e launchConfigError) Is(target error) bool { return target == errLaunchConfig }
 
-// sessionNamer is implemented by the herdr adapter.
+// sessionNamer is implemented by the herdr and hc adapters.
 type sessionNamer interface{ Session() string }
 
 // workerSpec is one worker launch: the CLI builds it from its flags, and an
@@ -197,13 +197,27 @@ type workerSpec struct {
 	// drain marks the drain's launch: its branch must not exist yet, in the
 	// checkout or on GitHub (worker.ErrBranchExists).
 	drain bool
+	// surface is the worker surface, herdr or hc. Empty is herdr, which is
+	// what the drain launches into.
+	surface string
+	// launcherMode is --inherit-mode: the launching session's permission
+	// mode, or empty.
+	launcherMode string
+}
+
+// surfaceName is the spec's worker surface, herdr when unset.
+func (spec workerSpec) surfaceName() string {
+	if spec.surface == "" {
+		return workerSurfaceHerdr
+	}
+	return spec.surface
 }
 
 // request is the build request for this worker at cwd: the one a surface
 // launch builds, plus the worker's profile config dir and model.
 func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string) launch.InvocationRequest {
 	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
-	req.ConfigDir, req.Model = spec.configDir, spec.model
+	req.ConfigDir, req.Model, req.LauncherMode = spec.configDir, spec.model, spec.launcherMode
 	return req
 }
 
@@ -217,7 +231,7 @@ type workerSetup struct {
 	unset    []string
 }
 
-// prepareWorker validates the name and resolves the herdr adapter, the repo
+// prepareWorker validates the name and resolves the herdr or hc adapter, the repo
 // top, its ledger, and the injected environment. warn takes the adapter's
 // setup warnings.
 func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec) (workerSetup, error) {
@@ -225,13 +239,27 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 		return workerSetup{}, WithExitCode(fmt.Errorf("--name: %w", err), exitUsage)
 	}
 
-	adapter, err := newHerdrAdapter(warn)
+	var adapter backend.Adapter
+	var err error
+	switch spec.surfaceName() {
+	case workerSurfaceHc:
+		// hc refuses names the worker grammar allows ("t7"), so the check
+		// runs here, before the worktree or the ledger row exists.
+		if err := checkHcName(spec.name); err != nil {
+			return workerSetup{}, err
+		}
+		adapter, err = newHcAdapter()
+	case workerSurfaceHerdr:
+		adapter, err = newHerdrAdapter(warn)
+	default:
+		return workerSetup{}, WithExitCode(errUnknownWorkerSurface, exitUsage)
+	}
 	if err != nil {
 		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	namer, ok := adapter.(sessionNamer)
 	if !ok {
-		return workerSetup{}, errors.New("forgectl: the herdr adapter does not report its session")
+		return workerSetup{}, errors.New("forgectl: the worker adapter does not report its session")
 	}
 
 	target, err := projects.New(deps.Runner).ResolveTarget(spec.target)
@@ -280,7 +308,7 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			return buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
-			inv.Env = markHerdrPane(inv.Env)
+			inv.Env = markPane(inv.Env, spec.surfaceName())
 			req := surface.NewLaunchRequest(spec.name, inv)
 			req.Self = s.self
 			result, err := service.Launch(ctx, req)
@@ -394,15 +422,20 @@ func launchWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec wo
 	return attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
 }
 
-// runWorkerLaunch wires the real steps: herdr only, a validated name, the repo
+// runWorkerLaunch wires the real steps: herdr or hc only, a validated name, the repo
 // top as the ledger key, and the worker posture floor on the invocation.
 func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
-	if opts.Backend != "herdr" {
-		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
+	if opts.Backend != workerSurfaceHerdr && opts.Backend != workerSurfaceHc {
+		return WithExitCode(errors.New("--worktree needs --surface herdr or --surface hc; workers run in herdr or hc only"), exitUsage)
 	}
 	if opts.Model != "" {
 		if err := config.CheckModelName(opts.Model); err != nil {
 			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	if opts.InheritMode != "" {
+		if err := launch.CheckLauncherMode(opts.InheritMode); err != nil {
+			return WithExitCode(fmt.Errorf("--inherit-mode: %w", err), exitUsage)
 		}
 	}
 	configDir, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir)
@@ -413,7 +446,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
-		configDir: configDir, model: opts.Model}
+		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {

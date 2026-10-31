@@ -88,30 +88,65 @@ func (t *Table) Evaluate(harness string, s Screen) Verdict {
 	if !ok {
 		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("no readiness predicates for harness %q", harness)}
 	}
-	p, prompted := h.matchPrompt(s.Text)
+	v, p, ok := t.evaluateText(h, harness, s.Text)
+	if !ok {
+		return v
+	}
+	return t.agreeing(h, harness, s, p)
+}
+
+// EvaluateText judges the screen text alone: no blocking screen matches and
+// the harness's input prompt is visible. It is for a terminal manager whose
+// agent status is the program's own report (herdr-core's OSC 7501), as a
+// second check next to that status. Like every signal here (see the package
+// doc), it can be set from inside the pane: a process that can write to the
+// terminal can print an empty prompt under a real dialog, which reads as
+// ready. It catches an honest dialog, never a forged one.
+func (t *Table) EvaluateText(harness, text string) Verdict {
+	h, ok := t.harnesses[harness]
+	if !ok {
+		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("no readiness predicates for harness %q", harness)}
+	}
+	v, p, ok := t.evaluateText(h, harness, text)
+	if !ok {
+		return v
+	}
+	return Verdict{State: StateReady, Input: p.input}
+}
+
+// evaluateText runs the blocking and prompt checks. ok is false when they
+// already decide the verdict.
+func (t *Table) evaluateText(h harness, name, text string) (Verdict, promptMatch, bool) {
+	p, prompted := h.matchPrompt(text)
 	var b string
 	var blocked bool
 	switch {
 	case !h.promptFirst || !prompted:
-		b, blocked = t.blockingFor(h, s.Text, false)
+		b, blocked = t.blockingFor(h, text, false)
 	default:
 		// The box shows. Rows under it are footer, where no dialog row should
 		// ever match; an overlay that keeps the box visible needs with_prompt.
 		if b, blocked = t.blockingFor(h, p.footer, false); !blocked {
-			b, blocked = t.blockingFor(h, s.Text, true)
+			b, blocked = t.blockingFor(h, text, true)
 		}
 	}
 	if blocked {
-		return Verdict{State: StateBlocked, Blocking: b, Reason: "showing the " + b}
+		return Verdict{State: StateBlocked, Blocking: b, Reason: "showing the " + b}, p, false
 	}
 	if !prompted {
-		return Verdict{State: StateNotReady, Reason: "the " + harness + " input prompt is not visible"}
+		return Verdict{State: StateNotReady, Reason: "the " + name + " input prompt is not visible"}, p, false
 	}
+	return Verdict{}, p, true
+}
+
+// agreeing is Evaluate's herdr half: herdr's agent and status must agree
+// with a visible prompt.
+func (t *Table) agreeing(h harness, name string, s Screen, p promptMatch) Verdict {
 	if s.Agent != h.agent {
-		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr detects agent %q in the pane, want %q", harness, s.Agent, h.agent)}
+		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr detects agent %q in the pane, want %q", name, s.Agent, h.agent)}
 	}
 	if !statusReady[s.Status] {
-		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr reports agent status %q, want idle or done", harness, s.Status)}
+		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr reports agent status %q, want idle or done", name, s.Status)}
 	}
 	return Verdict{State: StateReady, Input: p.input}
 }

@@ -32,11 +32,13 @@ type tagResult struct {
 }
 
 type tagOptions struct {
-	Repo   string
-	Name   string
-	Tokens []string
-	Clear  []string
-	JSON   bool
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface string
+	Name    string
+	Tokens  []string
+	Clear   []string
+	JSON    bool
 }
 
 func newSurfaceTagCmd(deps module.Deps) *cobra.Command {
@@ -76,6 +78,7 @@ worker not at stage launched, a bad token).
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().StringArrayVar(&opts.Tokens, "token", nil, "set a display token, k=v (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.Clear, "clear-token", nil, "clear a display token by key (repeatable)")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","pane_id","set","cleared"} as JSON`)
@@ -120,6 +123,14 @@ func runSurfaceTag(cmd *cobra.Command, deps module.Deps, opts tagOptions) error 
 	// are checked here too, before the ledger or herdr is touched.
 	if _, _, err := herdradapter.CheckTag(set, opts.Clear); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	if err := checkWorkerSurface(opts.Surface); err != nil {
+		return err
+	}
+	// Tags are herdr sidebar metadata tokens, which herdr-core has no
+	// equivalent of yet.
+	if opts.Surface == workerSurfaceHc {
+		return WithExitCode(errors.New("surface tag supports herdr workers only; hc has no sidebar metadata"), exitUsage)
 	}
 	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
 	if err != nil {

@@ -17,7 +17,7 @@ import (
 // test can observe which adapter it used; dropping the call from any one of
 // them fails here.
 func TestLedgerCallersUseTheLedgerBoundAdapter(t *testing.T) {
-	want := map[string]bool{"openWorkerLedger": false, "herdrWorkspaces": false, "drainCloseRow": false}
+	want := map[string]bool{"openSurfaceLedger": false, "herdrWorkspaces": false, "drainCloseRow": false}
 
 	entries, err := os.ReadDir(".")
 	if err != nil {

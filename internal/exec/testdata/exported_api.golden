@@ -25,6 +25,13 @@ const KindCmuxProbe CommandKind
 const KindCmuxReadiness CommandKind
 const KindCmuxReconcile CommandKind
 const KindCmuxSnapshot CommandKind
+const KindHcCleanup CommandKind
+const KindHcCreate CommandKind
+const KindHcProbe CommandKind
+const KindHcRead CommandKind
+const KindHcReadiness CommandKind
+const KindHcReconcile CommandKind
+const KindHcSend CommandKind
 const KindHerdrBootstrap CommandKind
 const KindHerdrCleanup CommandKind
 const KindHerdrCreate CommandKind
@@ -68,10 +75,13 @@ const Redacted untyped string
 func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput
 func EndOfOptions() Arg
 func HomebrewNoAutoUpdate() map[string]string
+func IsLauncherSessionHandle(key string) bool
+func IsPaneIdentityKey(key string) bool
 func MapOpaque(a Arg, t Transform) Arg
 func MustFixed(v constantArg) Arg
 func NewOSSensitiveRunner() *OSSensitiveRunner
 func Opaque(v string) Arg
+func PaneIdentityEnv(backend string) []string
 func ReplaceCmuxSocketPath(path string) EnvMutation
 func ReplaceHerdrConfigPath(path string) EnvMutation
 func ReplaceSopsEditor(command string) EnvMutation
@@ -84,6 +94,7 @@ func SensitiveErrorForTest(kind CommandKind, outcome Outcome) *SensitiveError
 func SetCmuxQuiet() EnvMutation
 func TmuxDirOperand() Transform
 func TmuxSubcommand(args []string) []string
+func UnsetLauncherSessionHandles() EnvMutation
 func UnsetTmux() EnvMutation
 func WithMaskedAssignments(ctx context.Context, entries []string) context.Context
 func WithOpaqueArgs(ctx context.Context, from int, n int) context.Context
@@ -302,6 +313,7 @@ validated: const ArgOpaque ArgKind
 validated: const ArgUnset ArgKind
 validated: const EnvOpReplace EnvOp
 validated: const EnvOpUnset EnvOp
+validated: const EnvOpUnsetSessionHandles EnvOp
 validated: const EnvOpUnspecified EnvOp
 validated: const KeySopsTmpdir untyped string
 validated: func New(path github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value, args []Arg, env []Env, sopsEdit bool) (Command, error)

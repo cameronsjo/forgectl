@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 )
@@ -229,5 +230,41 @@ func TestSurfaceInvocationRequest_StdoutIsATerminal(t *testing.T) {
 	}
 	if req.Args != nil || req.CWD != "/p" {
 		t.Errorf("request = %+v, want no args and CWD /p", req)
+	}
+}
+
+// TestHcScrubCoversTheLaunchStrip pins the hc calls' environment scrub to the
+// surface launch strip: every variable a launch strips as the launcher's,
+// and every worker identity name forgectl sets, is one every hc call drops
+// too (exec.IsLauncherSessionHandle). Adding a key to one side only fails
+// here.
+func TestHcScrubCoversTheLaunchStrip(t *testing.T) {
+	var stripped []string
+	for _, backend := range []string{"herdr", "hc", "tmux", "cmux"} {
+		ids := exec.PaneIdentityEnv(backend)
+		if len(ids) == 0 {
+			t.Fatalf("no pane identity variables for %s", backend)
+		}
+		stripped = append(stripped, ids...)
+	}
+	stripped = append(stripped, claudeCodeChildSessionEnv)
+	stripped = append(stripped, claudeMessagingEnv...)
+	env := make([]string, 0, len(stripped))
+	for _, k := range stripped {
+		env = append(env, k+"=x")
+	}
+	if got := surfaceLaunchEnvironment(env); len(got) != 0 {
+		t.Fatalf("the launch strip kept %v; this list no longer matches it", got)
+	}
+	identity := []string{mail.EnvWorker, mail.EnvLedger, mail.EnvInbox, mail.EnvDrainWorker, launch.DrainWorkerEnv}
+	for _, k := range append(stripped, identity...) {
+		if !exec.IsLauncherSessionHandle(k) {
+			t.Errorf("%s is a launcher handle on the launch path but reaches every hc call", k)
+		}
+	}
+	for _, k := range []string{"HC_SESSION", "HERDR_SOCKET_PATH", "TMUX", "CMUX_SOCKET_PATH", "PATH", "HOME"} {
+		if exec.IsLauncherSessionHandle(k) {
+			t.Errorf("%s names a shared server or the user, but hc calls drop it", k)
+		}
 	}
 }

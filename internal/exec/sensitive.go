@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -146,6 +147,20 @@ const (
 	// agent state.
 	KindHerdrMetadata
 
+	// KindHc* drive herdr-core's `hc`: readiness is `hc server status`,
+	// create is `hc run --bg`, reconcile is the labeled `hc ls` after an
+	// ambiguous create, probe is `hc get`, read is `hc read`, send is
+	// `hc send`, and cleanup is `hc kill` and `hc rm`. Create carries the
+	// sealed cwd, name and bootstrap; read and send carry worker screen text
+	// and brief text, which is why none of them goes through Runner.
+	KindHcReadiness
+	KindHcCreate
+	KindHcReconcile
+	KindHcProbe
+	KindHcRead
+	KindHcSend
+	KindHcCleanup
+
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
 	//
@@ -201,6 +216,14 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneAgent:   "herdr.pane-agent",
 	KindHerdrSendKeys:    "herdr.send-keys",
 	KindHerdrMetadata:    "herdr.report-metadata",
+
+	KindHcReadiness: "hc.readiness",
+	KindHcCreate:    "hc.create",
+	KindHcReconcile: "hc.reconcile",
+	KindHcProbe:     "hc.probe",
+	KindHcRead:      "hc.read",
+	KindHcSend:      "hc.send",
+	KindHcCleanup:   "hc.cleanup",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
@@ -430,8 +453,9 @@ const (
 type envOp = validated.EnvOp
 
 const (
-	envOpReplace = validated.EnvOpReplace
-	envOpUnset   = validated.EnvOpUnset
+	envOpReplace             = validated.EnvOpReplace
+	envOpUnset               = validated.EnvOpUnset
+	envOpUnsetSessionHandles = validated.EnvOpUnsetSessionHandles
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -479,6 +503,88 @@ func ReplaceHerdrConfigPath(path string) EnvMutation {
 // redirected to whichever server the caller happens to be sitting inside.
 func UnsetTmux() EnvMutation {
 	return EnvMutation{key: envKeyTmux, op: envOpUnset}
+}
+
+// UnsetLauncherSessionHandles drops every inherited variable that names the
+// session forgectl was launched from (IsLauncherSessionHandle), so a child
+// that outlives this call, such as an hc core that hc starts implicitly and
+// that passes its own environment to every terminal it later starts, cannot
+// hand those handles on. It names no key: the runner matches the keys
+// against its captured environment.
+func UnsetLauncherSessionHandles() EnvMutation {
+	return EnvMutation{op: envOpUnsetSessionHandles}
+}
+
+// paneIdentityEnvByBackend lists, per terminal manager, the variables that
+// name the pane (or its tab and workspace) a process runs in (forgectl#1044).
+// It is the one copy: surface launches strip these keys and put back the new
+// pane's own (PaneIdentityEnv), and every hc call drops them
+// (IsLauncherSessionHandle). The variables that name the server stay: TMUX,
+// CMUX_SOCKET_PATH and HERDR_SOCKET_PATH are shared by the launcher and the
+// new pane.
+//
+// tmux sets TMUX_PANE in every pane (tmux(1), ENVIRONMENT). The cmux names
+// were captured from a live cmux pane on 2026-10-19: besides the workspace,
+// surface and tab ids, cmux sets CMUX_PANEL_ID (the pane's panel UUID) and
+// CMUX_TERMINAL_LIFECYCLE_ID (a UUID per terminal session). The rest of the
+// CMUX_ set names the app, its shims, its socket or a port range, not a pane.
+// hc sets HC_TERMINAL_ID, the terminal's address, in every terminal it
+// starts; HC_SESSION selects a core rather than naming a pane.
+var paneIdentityEnvByBackend = map[string][]string{
+	"herdr": {"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"},
+	"hc":    {"HC_TERMINAL_ID"},
+	"tmux":  {"TMUX_PANE"},
+	"cmux":  {"CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_PANEL_ID", "CMUX_TERMINAL_LIFECYCLE_ID"},
+}
+
+// PaneIdentityEnv is a fresh copy of the variables that name the pane a
+// process runs in under backend; nil for an unknown backend.
+func PaneIdentityEnv(backend string) []string {
+	return slices.Clone(paneIdentityEnvByBackend[backend])
+}
+
+// IsPaneIdentityKey reports whether key names a pane under any manager.
+func IsPaneIdentityKey(key string) bool {
+	for _, keys := range paneIdentityEnvByBackend {
+		if slices.Contains(keys, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// launcherSessionHandlePrefixes and launcherSessionHandleKeys, with every
+// manager's pane ids, are the launching session's handles.
+//
+//   - CLAUDE_CODE_ covers Claude Code's session id and its cross-session
+//     messaging socket and token, and so every other CLAUDE_CODE_ variable
+//     too; CLAUDECODE marks a process as running inside a Claude Code session.
+//   - HC_TERMINAL_ and HC_SCOPE name the hc terminal the launcher runs in and
+//     reach its core. HC_SESSION is not here: it selects the core, which the
+//     launcher and its workers share.
+//   - FORGECTL_WORKER, FORGECTL_LEDGER, FORGECTL_INBOX and
+//     FORGECTL_DRAIN_WORKER are a launched worker's own identity
+//     (mail.EnvWorker and the rest; a cli test pins the two together).
+var (
+	launcherSessionHandlePrefixes = []string{"CLAUDE_CODE_", "HC_TERMINAL_"}
+	launcherSessionHandleKeys     = []string{
+		"CLAUDECODE", "HC_SCOPE",
+		"FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",
+	}
+)
+
+// IsLauncherSessionHandle reports whether key names one of the launching
+// session's handles, which UnsetLauncherSessionHandles drops.
+func IsLauncherSessionHandle(key string) bool {
+	if slices.Contains(launcherSessionHandleKeys, key) || IsPaneIdentityKey(key) {
+		return true
+	}
+	for _, p := range launcherSessionHandlePrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplaceSopsEditor points sops' EDITOR at a command. sops shell-word-splits

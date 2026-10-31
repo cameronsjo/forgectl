@@ -11,7 +11,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -49,7 +48,9 @@ type waitResult struct {
 }
 
 type waitOptions struct {
-	Repo     string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface  string
 	Name     string
 	Timeout  time.Duration
 	Interval time.Duration
@@ -71,6 +72,8 @@ A worker can sit at its prompt before its turn starts, so wait also needs one
 of: herdr reported it working during the wait, the last brief's REPORT line
 is on screen, or it has sat at its prompt for --quiet. The screen text itself
 is not compared for stability: a harness's status line changes every second.
+With --surface hc, "working" is hc's reported status, and the ready verdict
+needs that status and the harness's prompt on screen.
 
 A blocking screen (a permission prompt, the plan-approval dialog) ends the
 wait at once with exit 1, naming it; answer it in the worker's pane. wait
@@ -88,6 +91,7 @@ Exit 0: settled. Exit 1: blocked, gone, unreadable, or not settled by
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", defaultWaitTimeout, "how long to wait for the turn to settle")
 	cmd.Flags().DurationVar(&opts.Interval, "interval", defaultWaitInterval, "how often to read the pane")
 	cmd.Flags().DurationVar(&opts.Settle, "settle", defaultWaitSettle, "how long the worker must stay at its prompt")
@@ -100,7 +104,7 @@ func runSurfaceWait(cmd *cobra.Command, deps module.Deps, opts waitOptions) erro
 	if opts.Timeout <= 0 || opts.Interval <= 0 || opts.Settle < 0 || opts.Quiet < opts.Settle {
 		return WithExitCode(errors.New("--timeout and --interval must be positive, and --quiet at least --settle"), exitUsage)
 	}
-	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -148,8 +152,8 @@ func waitSettled(ctx context.Context, l waitLoop) waitResult {
 	for {
 		s, err := l.read(ctx)
 		switch {
-		case errors.Is(err, herdradapter.ErrWorkerGone):
-			last.State, last.Reason = readyStateGone, "the worker's herdr workspace is gone"
+		case workerIsGone(err):
+			last.State, last.Reason = readyStateGone, goneReason(err)
 			return finishWait(last, start, l.now())
 		case err != nil && ctx.Err() != nil && last.State != "":
 			last.Reason = fmt.Sprintf("not settled after %s: %s", l.timeout, last.Reason)

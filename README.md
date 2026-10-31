@@ -50,7 +50,7 @@ deep-dive get a link here.
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
-| `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr/hc) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
@@ -192,12 +192,13 @@ forgectl resume hooks install      # install the launchd watcher that runs the h
 forgectl resume hooks status       # watcher installed/loaded, recorded versions, last hook runs (--json)
 
 # surface — start a harness inside a terminal manager without exposing its invocation
-forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
+forgectl surface launch <target> --surface tmux           # tmux, cmux, herdr, or hc — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude, codex, or pi)
 forgectl surface launch . --surface tmux --here      # start claude in the target, not at its repo root
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 forgectl surface launch . --surface herdr --worktree feat/x --name x --brief @brief.md   # first brief as the harness's prompt argument, nothing typed
+forgectl surface launch . --surface hc --worktree feat/x --name x --brief @brief.md      # the same worker in a herdr-core (hc) terminal; pass --surface hc to list/read/ready/wait/brief/close
 forgectl surface ready x --json    # wait until worker x is at its input prompt; exit 1 naming any blocking dialog (never answers one)
 forgectl surface brief x "Now run the tests."   # type a one-line follow-up, read it back, then Enter; exit 1 if anything disagrees
 forgectl surface wait x --json     # wait until worker x's turn settles at its prompt

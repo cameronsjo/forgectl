@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -57,7 +58,9 @@ type briefResult struct {
 }
 
 type briefOptions struct {
-	Repo     string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface  string
 	Name     string
 	Text     string
 	Readback time.Duration
@@ -83,6 +86,23 @@ its own call. It then waits for herdr to report the turn working. A dialog
 can still appear between the read-back and Enter; the readiness checks read
 signals the worker itself can set, so they guard against accidents, not a
 worker trying to look ready. A brief must never carry an approval.
+
+With --surface hc there is no read-back: hc send pastes and submits in one
+call, and hc cannot type without submitting. brief refuses unless hc reports
+the worker idle or done and the screen shows the harness's input prompt,
+empty, with no dialog. Both checks read the worker's own terminal output,
+so they catch an honest dialog but not a forged screen. So, right before it
+pastes, brief sends one Escape, which closes or declines any dialog open at
+that moment (Claude Code, Codex and pi all treat Escape as cancel), and a
+worker's prompt is never in vim mode (a vim mode line under the input box is
+refused). Escape also interrupts a running turn, so brief re-reads the
+worker first and sends no key if its status or turn moved. The limit: a
+dialog drawn after that Escape and before the paste is not covered. It
+records the brief, then sends
+(with --if idle when it was idle, so a turn that started in between refuses
+the send). It never passes --force, so hc itself refuses a blocked worker. hc's
+refusal reports refused; any other send failure reports unconfirmed.
+--readback-timeout has no step under hc.
 
 Each brief gets a new random marker and asks the worker to end its final
 message with a REPORT line naming it; read it with surface read --report.
@@ -114,6 +134,7 @@ Exit 2: a usage or setup error.
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().DurationVar(&opts.Readback, "readback-timeout", defaultBriefReadback, "how long to wait for the typed text to show")
 	cmd.Flags().DurationVar(&opts.Start, "start-timeout", defaultBriefStart, "how long to wait for the turn to start after Enter")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","outcome","step","marker","count","blocking","reason"} as JSON`)
@@ -135,7 +156,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	if err := worker.CheckBrief(text, worker.ViaTyped); err != nil {
 		return WithExitCode(err, exitUsage)
 	}
-	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -146,21 +167,37 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), opts.Readback+opts.Start+5*time.Second)
 	defer cancel()
+	if w.hc != nil {
+		res := sendBriefHC(ctx, hcBriefSteps{
+			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
+			screen: func(ctx context.Context) (string, error) {
+				s, err := w.hc.WorkerScreen(ctx, w.ref)
+				return s.Text, err
+			},
+			promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
+			escape: func(ctx context.Context, checked hcadapter.Worker) error {
+				return w.hc.PressEscape(ctx, w.ref, checked)
+			},
+			send: func(ctx context.Context, s string, ifIdle bool) (hcadapter.SendResult, error) {
+				return w.hc.SendBrief(ctx, w.ref, s, ifIdle)
+			},
+			record: w.recordBrief,
+			now:    time.Now,
+			sleep:  resume.SleepContext,
+			start:  opts.Start,
+			// --readback-timeout has no step under hc: hc's send pastes and
+			// submits in one call.
+			interval: briefPollInterval,
+		}, text, marker)
+		res.Name, res.Harness = w.row.Name, w.row.Harness
+		return reportBrief(cmd, res, opts.JSON)
+	}
 	res := sendBrief(ctx, briefSteps{
 		read:     w.read,
 		evaluate: w.evaluate,
 		typeText: func(ctx context.Context, s string) error { return w.herdr.TypeText(ctx, w.ref, s) },
 		enter:    func(ctx context.Context) error { return w.herdr.PressEnter(ctx, w.ref) },
-		record: func(b worker.Brief) (int, error) {
-			err := w.led.Update(w.row.Name, func(r *worker.Row) {
-				b.Count = 1
-				if r.Brief != nil {
-					b.Count = r.Brief.Count + 1
-				}
-				r.Brief = &b
-			})
-			return b.Count, err
-		},
+		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
 		readback: opts.Readback,
@@ -344,4 +381,16 @@ func readBriefArg(arg string) (string, error) {
 		return "", fmt.Errorf("brief file %s is over %d bytes", termsafe.QuotePath(path), worker.MaxLaunchBrief)
 	}
 	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// recordBrief writes b as the worker's latest brief and returns its count.
+func (w *openedWorker) recordBrief(b worker.Brief) (int, error) {
+	err := w.led.Update(w.row.Name, func(r *worker.Row) {
+		b.Count = 1
+		if r.Brief != nil {
+			b.Count = r.Brief.Count + 1
+		}
+		r.Brief = &b
+	})
+	return b.Count, err
 }

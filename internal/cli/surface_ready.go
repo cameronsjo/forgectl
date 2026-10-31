@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -47,7 +48,9 @@ const (
 )
 
 type readyOptions struct {
-	Repo     string
+	Repo string
+	// Surface is the worker surface: herdr (the default) or hc.
+	Surface  string
 	Name     string
 	Timeout  time.Duration
 	Interval time.Duration
@@ -66,6 +69,15 @@ screen is showing, herdr detects the expected agent as idle or done, and the
 harness's own input prompt is visible. herdr's status alone is a hint, never
 proof. All three can be set from inside the worker's pane, so ready guards
 against accidents, not against a worker trying to look ready.
+
+With --surface hc the verdict needs two signals: hc's reported status (idle
+or done; blocked is blocked; working, error, or no status yet is not ready),
+and a screen showing the harness's input prompt with no dialog, so an honest
+dialog on screen reads as blocked whatever the status says. Both come from
+the worker's own terminal output, which a process writing to that terminal
+can forge, so ready is never proof that no dialog is open; brief's Escape
+before the paste is what keeps a brief from answering one. A worker whose
+program has exited is gone.
 
 ready never answers a dialog. A blocking screen (folder-trust dialog,
 plan-approval dialog, permission prompt, npm's "Ok to proceed?") ends the wait
@@ -88,6 +100,7 @@ that cannot be used, a harness with no predicates).
 		},
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
+	addWorkerSurfaceFlag(cmd, &opts.Surface)
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", defaultReadyTimeout, "how long to wait for the prompt")
 	cmd.Flags().DurationVar(&opts.Interval, "interval", defaultReadyInterval, "how often to read the pane")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","state","blocking","reason","input","waited_ms"} as JSON`)
@@ -98,7 +111,7 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 	if opts.Timeout <= 0 || opts.Interval <= 0 {
 		return WithExitCode(errors.New("--timeout and --interval must be positive"), exitUsage)
 	}
-	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name, opts.Surface)
 	if err != nil {
 		return err
 	}
@@ -124,30 +137,53 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 // openedWorker is one launched worker, ready to be read and written: its
 // ledger row and reference, the adapter that reaches its pane, and the
 // readiness predicates for its harness.
+//
+// Exactly one of herdr and hc is set. An hc worker's readiness is hc's
+// reported status (evaluateHcStatus); its table is used only by brief, to
+// check the screen before it sends (sendBriefHC).
 type openedWorker struct {
 	herdr *herdradapter.Adapter
+	hc    *hcadapter.Adapter
 	led   *worker.Ledger
 	row   worker.Row
 	ref   backend.Ref
 	table *ready.Table
 }
 
+// read reads the worker's screen for ready, wait and brief. An hc worker
+// whose program has exited reads as gone.
 func (w *openedWorker) read(ctx context.Context) (ready.Screen, error) {
+	if w.hc != nil {
+		return hcScreenReader(w.hc, w.ref, true)(ctx)
+	}
+	return w.herdr.WorkerScreen(ctx, w.ref)
+}
+
+// readLast reads the worker's screen for surface read, which still shows a
+// finished hc worker's last screen.
+func (w *openedWorker) readLast(ctx context.Context) (ready.Screen, error) {
+	if w.hc != nil {
+		return hcScreenReader(w.hc, w.ref, false)(ctx)
+	}
 	return w.herdr.WorkerScreen(ctx, w.ref)
 }
 
 func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
+	if w.hc != nil {
+		return evaluateHcWorker(w.table, w.row.Harness, s)
+	}
 	return w.table.Evaluate(w.row.Harness, s)
 }
 
 // openWorker finds the launched worker name in repo's ledger and loads its
-// harness's predicates. Every failure is a usage or setup error (exit 2).
-// warn takes the herdr adapter's setup warnings.
-func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, name string) (*openedWorker, error) {
+// harness's predicates (herdr only; an hc worker is judged by its status).
+// Every failure is a usage or setup error (exit 2). warn takes the herdr
+// adapter's setup warnings.
+func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, name, surfaceName string) (*openedWorker, error) {
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
-	wl, err := openWorkerLedger(ctx, warn, deps, repo)
+	wl, err := openSurfaceLedger(ctx, warn, deps, repo, surfaceName)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +204,7 @@ func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	if !table.Has(row.Harness) {
 		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), exitUsage)
 	}
-	return &openedWorker{herdr: herdr, led: led, row: row, ref: ref, table: table}, nil
+	return &openedWorker{herdr: herdr, hc: wl.hc, led: led, row: row, ref: ref, table: table}, nil
 }
 
 // launchedWorker finds the row named name and decodes its reference. Only a
@@ -216,8 +252,8 @@ func waitReady(ctx context.Context, l readyLoop) readyResult {
 	for {
 		s, err := l.read(ctx)
 		switch {
-		case errors.Is(err, herdradapter.ErrWorkerGone):
-			return finish(readyResult{State: readyStateGone, Reason: "the worker's herdr workspace is gone"}, start, l.now())
+		case workerIsGone(err):
+			return finish(readyResult{State: readyStateGone, Reason: goneReason(err)}, start, l.now())
 		case err != nil && ctx.Err() != nil && last.State != "":
 			// The deadline cut this read short. The last real verdict says
 			// more than the cancellation does.

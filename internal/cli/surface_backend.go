@@ -82,6 +82,8 @@ func surfaceAdapterForWithWarnings(name string, warnings io.Writer) (backend.Ada
 		return newCmuxAdapter(warnings)
 	case backend.KindHerdr:
 		return newHerdrAdapter(warnings)
+	case backend.KindHc:
+		return newHcAdapter()
 	case backend.KindUnspecified:
 	}
 	return nil, fmt.Errorf("%w: %s (forgectl#332)", errBackendNotImplemented, kind)
@@ -186,10 +188,12 @@ func parseBackendKind(name string) (backend.Kind, error) {
 		return backend.KindCmux, nil
 	case "herdr":
 		return backend.KindHerdr, nil
+	case "hc":
+		return backend.KindHc, nil
 	default:
 		// The supplied name is not echoed. It is not secret, but it is
 		// command-line input to a message that gets printed to a terminal, and
 		// every other refusal in this package is category-only for that reason.
-		return backend.Kind(0), fmt.Errorf("%w: expected one of tmux, cmux, herdr", errUnknownBackend)
+		return backend.Kind(0), fmt.Errorf("%w: expected one of tmux, cmux, herdr, hc", errUnknownBackend)
 	}
 }
