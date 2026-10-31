@@ -131,8 +131,9 @@ full key and column list. The view needs a terminal of at least 30x7.
 
 Exit 0: the view closed, or the snapshot printed. Exit 1: the snapshot
 printed, but hc could not be read at all (not on PATH, or every read
-failed; hc_unavailable says which). Exit 2: a usage error, or the workers
-file could not be read.
+failed; hc_unavailable says which). Exit 2: a usage error, the workers
+file could not be read, or HC_SESSION is not a session forgectl accepts
+(1-64 letters, digits, '-', '_' or '.'); nothing is printed then.
 
   forgectl surface watch --workers workers.txt
   forgectl surface watch --cos
@@ -227,8 +228,12 @@ func writeWatchPlain(out io.Writer, snap workerwatch.Snapshot) error {
 	for _, w := range snap.Workers {
 		status := w.Status
 		switch {
-		case w.HCError != "":
+		case w.Gone():
 			status = "gone"
+		case w.HCError != "":
+			status = "unread"
+		case w.State == "finished":
+			status = "exited"
 		case status == "":
 			status = "-"
 		}

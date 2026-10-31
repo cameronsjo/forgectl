@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -208,5 +209,60 @@ func TestSurfaceWatchUsesTheSweepReviewers(t *testing.T) {
 	}
 	if c.GH == nil || c.Git == nil || c.HC == nil || c.Reports == nil {
 		t.Errorf("production collector is missing a source: %+v", c)
+	}
+}
+
+// TestWatchPlainTellsGoneFromUnread: only hc's not_found is "gone"; any other
+// hc failure is "unread" (the worker may still be running), and a finished
+// terminal reads "exited", not its last self-reported status.
+func TestWatchPlainTellsGoneFromUnread(t *testing.T) {
+	snap := workerwatch.Snapshot{Workers: []workerwatch.Worker{
+		{Name: "cos-gone", HCError: "no hc terminal by this name"},
+		{Name: "cos-unread", HCError: "hc could not read this terminal"},
+		{Name: "cos-exited", State: "finished", Status: workerwatch.StatusWorking},
+	}}
+	var b strings.Builder
+	if err := writeWatchPlain(&b, snap); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	want := map[string]string{"cos-gone": "gone", "cos-unread": "unread", "cos-exited": "exited"}
+	for _, l := range lines {
+		f := strings.Split(l, "\t")
+		if w, ok := want[f[0]]; ok {
+			if !slices.Contains(f, w) {
+				t.Errorf("%s: line %q has no %q", f[0], l, w)
+			}
+			delete(want, f[0])
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("rows missing from the snapshot: %v\n%s", want, b.String())
+	}
+}
+
+// TestProductionWatchHC covers both ways the watch's hc client can fail to
+// build: hc missing is not an error (the snapshot says hc_unavailable), and
+// an HC_SESSION the adapter refuses is.
+func TestProductionWatchHC(t *testing.T) {
+	empty := t.TempDir()
+	t.Setenv("PATH", empty)
+	t.Setenv("HC_SESSION", "")
+	c, err := productionWatchHC()
+	if err != nil || c.Source != nil {
+		t.Fatalf("hc missing: CLI %+v, err %v; want no source and no error", c, err)
+	}
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a test stub that must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if c, err := productionWatchHC(); err != nil || c.Source == nil {
+		t.Fatalf("hc present: CLI %+v, err %v; want a source", c, err)
+	}
+	t.Setenv("HC_SESSION", "not a session!")
+	if _, err := productionWatchHC(); err == nil {
+		t.Fatal("an HC_SESSION the adapter refuses built a watch client")
 	}
 }

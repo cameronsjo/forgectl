@@ -69,6 +69,11 @@ const (
 	PRIssueGH        = "gh-error"   // the GitHub read failed
 )
 
+// Gone reports that hc has no terminal by the worker's name. Any other hc
+// failure leaves the worker unread, not gone: hc stumbled, and the worker may
+// still be running.
+func (w Worker) Gone() bool { return w.HCError == hcGoneText }
+
 // NeedsYou reports whether a person has to act: the agent says it is
 // blocked (a permission dialog or a question is on its screen) and its
 // terminal is still live. A finished terminal keeps its last report.

@@ -731,8 +731,10 @@ func (m workersModel) cell(kind int, selected bool, w workerwatch.Worker) (strin
 func (m workersModel) statusCell(w workerwatch.Worker) (string, lipgloss.Style) {
 	s := m.styles
 	switch {
-	case w.HCError != "":
+	case w.Gone():
 		return "gone", s.Warn
+	case w.HCError != "":
+		return "unread", s.Warn
 	case w.State == "finished":
 		return "exited", s.Muted
 	case w.Status == workerwatch.StatusWorking:

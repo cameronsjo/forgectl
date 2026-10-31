@@ -208,7 +208,7 @@ func TestPaneIdentityEnv_HcScope(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("env = %q, want %q", got, want)
 	}
-	for _, bad := range []string{"rel/x.sock", "/a/../b.sock", "/a/b\x1b.sock", ""} {
+	for _, bad := range []string{"rel/x.sock", "/a/../b.sock", "/a/b\x1b.sock", "/a/b\x7f.sock", "/a/\u009b.sock", "/a/\u202e.sock", "/a/\xff.sock", "/" + strings.Repeat("a", maxHcSocketPathLen), ""} {
 		own["HC_TERMINAL_SOCKET"] = bad
 		if got := paneIdentityEnv(markPane(nil, "hc"), func(k string) string { return own[k] }); slices.ContainsFunc(got, func(e string) bool { return strings.HasPrefix(e, "HC_TERMINAL_SOCKET=") }) {
 			t.Errorf("socket %q crossed into the harness", bad)
@@ -291,6 +291,7 @@ var launchKeepsHcDrops = map[string]string{
 // launchKeepsHcDrops, and whether a launch strips each one.
 var namedUnderKeptPrefix = map[string]bool{
 	"CLAUDE_CODE_SESSION_ID":        true,
+	"CLAUDE_CODE_SESSION_ATTENDED":  true,
 	"CLAUDE_CODE_CHILD_SESSION":     true,
 	"CLAUDE_CODE_MESSAGING_SOCKET":  true,
 	"CLAUDE_CODE_MESSAGING_TOKEN":   true,

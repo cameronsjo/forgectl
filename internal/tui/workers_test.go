@@ -685,3 +685,19 @@ func TestWorkersHeaderNeverEndsMidWord(t *testing.T) {
 		t.Errorf("at 80 columns the header loses its freshness: %q", h)
 	}
 }
+
+// TestWorkersStatusCellTellsGoneFromUnread: only hc's not_found is "gone".
+func TestWorkersStatusCellTellsGoneFromUnread(t *testing.T) {
+	m := loadedWorkers(t, &workersFakes{})
+	for _, tt := range []struct {
+		w    workerwatch.Worker
+		want string
+	}{
+		{workerwatch.Worker{HCError: "no hc terminal by this name"}, "gone"},
+		{workerwatch.Worker{HCError: "hc could not read this terminal"}, "unread"},
+	} {
+		if got, _ := m.statusCell(tt.w); got != tt.want {
+			t.Errorf("statusCell(%q) = %q, want %q", tt.w.HCError, got, tt.want)
+		}
+	}
+}

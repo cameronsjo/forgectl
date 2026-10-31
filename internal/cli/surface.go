@@ -453,6 +453,10 @@ const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 // launcher's id: forgectl's repair log and resume trigger read it as "who".
 const claudeCodeSessionIDEnv = "CLAUDE_CODE_SESSION_ID"
 
+// claudeCodeSessionAttendedEnv describes the launcher session too (whether a
+// person is attending it), so it goes with the id.
+const claudeCodeSessionAttendedEnv = "CLAUDE_CODE_SESSION_ATTENDED"
+
 // hcTerminalEnvPrefix covers the variables hc sets for one terminal:
 // HC_TERMINAL_ID and HC_TERMINAL_SOCKET. A launch strips all of them, and an
 // hc launch's trampoline puts back the new terminal's own (paneIdentityEnv).
@@ -564,14 +568,15 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 	return out
 }
 
-// validHcSocketPath accepts a clean absolute path with no control
-// characters, at most maxHcSocketPathLen bytes.
+// validHcSocketPath accepts a clean absolute path of printable ASCII, at
+// most maxHcSocketPathLen bytes: enough for any unix socket path, and it
+// keeps C1 controls, bidi marks and invalid UTF-8 out.
 func validHcSocketPath(v string) bool {
 	if v == "" || len(v) > maxHcSocketPathLen || !filepath.IsAbs(v) || filepath.Clean(v) != v {
 		return false
 	}
-	for _, r := range v {
-		if r < 0x20 || r == 0x7f {
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
 			return false
 		}
 	}
@@ -621,7 +626,7 @@ func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || key == claudeCodeSessionIDEnv || slices.Contains(claudeMessagingEnv, key) ||
+		if key == claudeCodeChildSessionEnv || key == claudeCodeSessionIDEnv || key == claudeCodeSessionAttendedEnv || slices.Contains(claudeMessagingEnv, key) ||
 			isPaneIdentityKey(key) || strings.HasPrefix(key, hcTerminalEnvPrefix) || exec.IsLauncherFocusKey(key) {
 			continue
 		}
