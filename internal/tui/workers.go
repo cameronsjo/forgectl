@@ -861,7 +861,9 @@ func (m workersModel) helpLines() []string {
 }
 
 // safeText escapes worker-supplied text for one terminal line.
-func safeText(s string) string { return termsafe.SafeLineMax(strings.TrimSpace(s), workersMaxCellRunes) }
+func safeText(s string) string {
+	return termsafe.SafeLineMax(strings.TrimSpace(s), workersMaxCellRunes)
+}
 
 // fitCell cuts s to n display cells (an ellipsis marks a cut) and pads it
 // to exactly n, so wide runes cannot shift the columns after it.
