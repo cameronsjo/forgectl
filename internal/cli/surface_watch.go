@@ -46,20 +46,22 @@ type watchOptions struct {
 type watchRuntime struct {
 	stdoutIsTerminal func(io.Writer) bool
 	stdinIsTerminal  func(io.Reader) bool
-	newCollector     func(opts watchOptions, entries []workerwatch.Entry, notes []string) *workerwatch.Collector
-	hc               func() workerwatch.CLI
-	run              func(ctx context.Context, opts tui.WorkersOptions) error
+	newCollector     func(opts watchOptions, entries []workerwatch.Entry, notes []string, hc workerwatch.CLI) *workerwatch.Collector
+	// hc builds the watch's hc client. A missing hc is not an error: the
+	// client reports hc_unavailable. Any other failure (an HC_SESSION the
+	// adapter refuses) is.
+	hc  func() (workerwatch.CLI, error)
+	run func(ctx context.Context, opts tui.WorkersOptions) error
 }
 
 func productionWatchRuntime(deps module.Deps) watchRuntime {
-	hc := func() workerwatch.CLI { return workerwatch.CLI{Run: deps.Runner, Stream: exec.OSRunner{}} }
 	return watchRuntime{
 		stdoutIsTerminal: docsReadOutputIsTerminal,
 		stdinIsTerminal:  docsReadInputIsTerminal,
-		hc:               hc,
-		newCollector: func(opts watchOptions, entries []workerwatch.Entry, notes []string) *workerwatch.Collector {
+		hc:               productionWatchHC,
+		newCollector: func(opts watchOptions, entries []workerwatch.Entry, notes []string, hc workerwatch.CLI) *workerwatch.Collector {
 			return &workerwatch.Collector{
-				HC:      hc(),
+				HC:      hc,
 				Git:     ghsource.GitCLI{Run: deps.Runner},
 				GH:      &ghsource.GitHub{Run: githubauth.Runner(deps.Runner, githubauth.DefaultHost)},
 				Reports: workerwatch.ScanReportDir,
@@ -73,6 +75,19 @@ func productionWatchRuntime(deps module.Deps) watchRuntime {
 		},
 		run: tui.RunWorkers,
 	}
+}
+
+// productionWatchHC builds the watch's hc client over the same adapter the
+// worker verbs use (newHcClient).
+func productionWatchHC() (workerwatch.CLI, error) {
+	a, err := newHcClient()
+	switch {
+	case errors.Is(err, errHcNotOnPath):
+		return workerwatch.CLI{}, nil
+	case err != nil:
+		return workerwatch.CLI{}, fmt.Errorf("surface watch: %w", err)
+	}
+	return workerwatch.CLI{Source: hcWatchSource{a: a, stream: exec.OSRunner{}}}, nil
 }
 
 func newSurfaceWatchCmd(deps module.Deps) *cobra.Command {
@@ -116,8 +131,9 @@ full key and column list. The view needs a terminal of at least 30x7.
 
 Exit 0: the view closed, or the snapshot printed. Exit 1: the snapshot
 printed, but hc could not be read at all (not on PATH, or every read
-failed; hc_unavailable says which). Exit 2: a usage error, or the workers
-file could not be read.
+failed; hc_unavailable says which). Exit 2: a usage error, the workers
+file could not be read, or HC_SESSION is not a session forgectl accepts
+(1-64 letters, digits, '-', '_' or '.'); nothing is printed then.
 
   forgectl surface watch --workers workers.txt
   forgectl surface watch --cos
@@ -154,7 +170,11 @@ func runSurfaceWatch(cmd *cobra.Command, th theme.Theme, rt watchRuntime, opts w
 			return WithExitCode(err, exitUsage)
 		}
 	}
-	c := rt.newCollector(opts, entries, notes)
+	hc, err := rt.hc()
+	if err != nil {
+		return WithExitCode(err, exitUsage)
+	}
+	c := rt.newCollector(opts, entries, notes, hc)
 
 	interactive := !opts.JSON && rt.stdoutIsTerminal(cmd.OutOrStdout()) && rt.stdinIsTerminal(cmd.InOrStdin()) && !termIsDumb()
 	if !interactive {
@@ -173,7 +193,6 @@ func runSurfaceWatch(cmd *cobra.Command, th theme.Theme, rt watchRuntime, opts w
 		}
 		return err
 	}
-	hc := rt.hc()
 	return rt.run(cmd.Context(), tui.WorkersOptions{
 		Collect: c.Collect,
 		Read:    hc.Read,
@@ -209,8 +228,12 @@ func writeWatchPlain(out io.Writer, snap workerwatch.Snapshot) error {
 	for _, w := range snap.Workers {
 		status := w.Status
 		switch {
-		case w.HCError != "":
+		case w.Gone():
 			status = "gone"
+		case w.HCError != "":
+			status = "unread"
+		case w.State == "finished":
+			status = "exited"
 		case status == "":
 			status = "-"
 		}

@@ -448,6 +448,13 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// hcTerminalSocketEnv is the socket of the core an hc terminal runs in.
+const hcTerminalSocketEnv = "HC_TERMINAL_SOCKET"
+
+// maxHcSocketPathLen bounds an HC_TERMINAL_SOCKET carried into a harness;
+// a unix socket path is far shorter.
+const maxHcSocketPathLen = 1024
+
 // claudeMessagingEnv is the inbox Claude Code exports to its own children.
 var claudeMessagingEnv = []string{"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
 
@@ -534,8 +541,32 @@ func paneIdentityEnv(env []string, getenv func(string) string) []string {
 		}) {
 			out = append(out, hcSessionEnv+"="+value)
 		}
+		// The launch stripped the launcher's core socket with the rest of
+		// its HC_TERMINAL_ variables; this terminal's own goes back, so the
+		// socket and HC_TERMINAL_ID name the same core.
+		if value := getenv(hcTerminalSocketEnv); validHcSocketPath(value) && !slices.ContainsFunc(out, func(e string) bool {
+			k, _, _ := strings.Cut(e, "=")
+			return k == hcTerminalSocketEnv
+		}) {
+			out = append(out, hcTerminalSocketEnv+"="+value)
+		}
 	}
 	return out
+}
+
+// validHcSocketPath accepts a clean absolute path of printable ASCII, at
+// most maxHcSocketPathLen bytes: enough for any unix socket path, and it
+// keeps C1 controls, bidi marks and invalid UTF-8 out.
+func validHcSocketPath(v string) bool {
+	if v == "" || len(v) > maxHcSocketPathLen || !filepath.IsAbs(v) || filepath.Clean(v) != v {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // hcSessionEnv selects an hc core. It crosses into an hc worker from the
@@ -570,14 +601,25 @@ func validPaneIdentity(v string) bool {
 // launch marks its invocation with its backend (markPane), and the trampoline
 // puts back the new pane's own values for that backend (paneIdentityEnv).
 //
-// Claude Code's messaging socket and token go too: they are the launcher
+// Every CLAUDE_ variable goes too, except the configuration ones
+// (exec.ClaudeConfigEnv): the messaging socket and token are the launcher
 // session's inbox, so a Codex or pi agent in the new surface would otherwise
-// find the launcher's mail ledger and `surface send` as the coordinator.
+// find the launcher's mail ledger and `surface send` as the coordinator, and
+// the session id, pid, timeline path and bridge session id all describe the
+// launcher. Dropping by prefix means a per-session name a later Claude Code
+// adds is dropped without a change here. This narrows forgectl#363's "every
+// other value stays" for the CLAUDE_ prefix; CLAUDECODE itself still stays.
+//
+// So does the pane focus herdr gives a custom command (exec.LauncherFocusEnv):
+// a launch bound to a herdr key would otherwise hand the new surface the
+// pane that had focus at the keypress as its default target.
+//
+// exec.IsLaunchStripKey is the one list.
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv || slices.Contains(claudeMessagingEnv, key) || isPaneIdentityKey(key) {
+		if exec.IsLaunchStripKey(key) {
 			continue
 		}
 		out = append(out, entry)

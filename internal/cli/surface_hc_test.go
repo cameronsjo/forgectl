@@ -220,7 +220,7 @@ func TestInheritModeNeedsWorktree(t *testing.T) {
 }
 
 // TestHcSessionIsNotAPaneID: HC_SESSION selects a core, so a tmux, cmux or
-// herdr launch keeps the launcher's; only HC_TERMINAL_ID is stripped.
+// herdr launch keeps the launcher's; HC_TERMINAL_ID and HC_SCOPE are stripped.
 func TestHcSessionIsNotAPaneID(t *testing.T) {
 	if isPaneIdentityKey("HC_SESSION") {
 		t.Error("HC_SESSION is stripped from every launch as if it named a pane")

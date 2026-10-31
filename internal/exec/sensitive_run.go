@@ -621,9 +621,14 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 }
 
 func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- BoundedOutput, overflow chan<- struct{}) {
-	if mode == CaptureRaw {
+	switch mode {
+	case CaptureRaw:
 		readCapped(r, limit, out, overflow)
 		return
+	case CaptureTail:
+		readTail(r, limit, out)
+		return
+	case CaptureCmuxWorkspaceList:
 	}
 	data, err := projectCmuxWorkspaceList(r)
 	if err != nil {
@@ -643,6 +648,40 @@ func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- Bound
 		return
 	}
 	out <- BoundedOutput{buf: newOutputBuf(data)}
+}
+
+// readTail reads r to its end and keeps the last limit bytes. Memory stays at
+// limit plus one read chunk: after every read the buffer is cut back to its
+// last limit bytes, so it never reallocates. It never signals overflow, so a
+// long stream does not kill the process; the result says the start was
+// dropped instead. A read that stops for any reason but io.EOF is a cut, as
+// in readCapped.
+func readTail(r io.Reader, limit int64, out chan<- BoundedOutput) {
+	const chunkSize = 32 << 10
+	buf := make([]byte, 0, limit+chunkSize)
+	dropped, cut := false, false
+	idle := 0
+	for {
+		m, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+m]
+		if over := int64(len(buf)) - limit; over > 0 {
+			dropped = true
+			buf = buf[:copy(buf, buf[over:])]
+		}
+		if err != nil {
+			cut = !errors.Is(err, io.EOF)
+			break
+		}
+		if m == 0 {
+			if idle++; idle >= maxZeroProgressReads {
+				cut = true
+				break
+			}
+			continue
+		}
+		idle = 0
+	}
+	out <- BoundedOutput{buf: newOutputBuf(buf), forced: cut, headDropped: dropped}
 }
 
 type projectedCmuxWorkspace struct {

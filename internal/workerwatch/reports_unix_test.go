@@ -5,6 +5,7 @@ package workerwatch
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,7 +87,9 @@ func TestEventsChildIsReapedAfterCancel(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	es := CLI{Stream: exec.OSRunner{}}.Events(ctx)
+	es := CLI{Source: &fakeSource{events: func(ctx context.Context, w io.Writer) error {
+		return exec.OSRunner{}.RunStreamingScrubbed(ctx, w, io.Discard, filepath.Join(bin, "hc"), "events", "--json")
+	}}}.Events(ctx)
 	select {
 	case <-es.Wake:
 	case <-time.After(5 * time.Second):

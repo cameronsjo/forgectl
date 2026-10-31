@@ -125,6 +125,9 @@ const (
 	// OutputRetired means the read end was closed before EOF — the ordinary
 	// outcome when a daemon the command spawned still holds the write end.
 	OutputRetired
+	// OutputHeadDropped means a CaptureTail stream ran past its cap and the
+	// bytes are its end.
+	OutputHeadDropped
 )
 
 // BoundedOutputForTest builds a BoundedOutput a fake can return, so an adapter
@@ -135,6 +138,8 @@ func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput {
 		buf:      newOutputBuf(slices.Clone(data)),
 		overflow: cause == OutputOverflowed,
 		forced:   cause == OutputRetired,
+
+		headDropped: cause == OutputHeadDropped,
 	}
 }
 

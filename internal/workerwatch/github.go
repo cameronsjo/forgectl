@@ -6,6 +6,12 @@ import (
 	"slices"
 )
 
+// Runner is the process seam for git and gh: exec.Runner satisfies it. hc
+// does not go through it (see Source).
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) (string, error)
+}
+
 // PR is what GitHub says about a worker's pull request.
 type PR struct {
 	Repo   string `json:"repo"`
