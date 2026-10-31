@@ -434,7 +434,7 @@ func TestSecurityHeaders(t *testing.T) {
 	for k, want := range map[string]string{
 		"Content-Security-Policy": contentSecurityPolicy,
 		"X-Content-Type-Options":  "nosniff",
-		"Referrer-Policy":         "no-referrer",
+		"Referrer-Policy":         "same-origin",
 		"Cache-Control":           "no-store",
 	} {
 		if got := rec.Header().Get(k); got != want {
@@ -542,5 +542,14 @@ func TestSanitizer_LinkSchemes(t *testing.T) {
 		if strings.Contains(got, "href") != keep {
 			t.Errorf("Sanitize(%q) = %q, keep href = %v", in, got, keep)
 		}
+	}
+}
+
+// TestPageReferrerPolicyKeepsTheOrigin pins the fix for real browsers: under a
+// no-referrer policy (header or meta tag) a browser sends "Origin: null" on a
+// form POST, which the fetch-site check refuses, so no answer would land.
+func TestPageReferrerPolicyKeepsTheOrigin(t *testing.T) {
+	if strings.Contains(pageHTML, "no-referrer") {
+		t.Fatal("page.html sets a no-referrer policy; form POSTs would carry Origin: null")
 	}
 }

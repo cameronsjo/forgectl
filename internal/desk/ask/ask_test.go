@@ -24,7 +24,7 @@ func TestSafeURL(t *testing.T) {
 		"https://user:pw@example.com": false,
 		"https://exa mple.com":        false,
 		"https://example.com/\x1b[2J": false,
-		"https://example.com/‮":  false,
+		"https://example.com/‮":       false,
 		"":                            false,
 		"file:///etc/passwd":          false,
 	}
@@ -177,5 +177,33 @@ func TestParseKindsAndBucket(t *testing.T) {
 	}
 	if _, err := ParseBucket("urgent"); err == nil {
 		t.Fatal("ParseBucket accepted urgent")
+	}
+}
+
+// TestNotifyTextIsShellInert pins the notify line's defense: typed at a shell
+// prompt, it must hold no character that quotes, substitutes, separates,
+// redirects, globs or comments, whatever the agent's title and the
+// operator's reply contain.
+func TestNotifyTextIsShellInert(t *testing.T) {
+	hostile := "Run `make deploy` $(rm -rf ~) ; echo hi & x | y > /tmp/z < a 'q' \"d\" {a,b} [c] *?! #c ~u ^h %j a=b \\ \x1b[2J \u202e"
+	until := t0.Add(time.Hour)
+	for _, r := range []Response{
+		{Kind: KindDone, Via: "web"},
+		{Kind: KindReply, Text: "ok, go ahead;" + hostile, Via: "cli"},
+		{Kind: KindLink, URL: "https://x.example/a;b?c=$(id)&d=`id`#frag", Via: "ui"},
+		{Kind: KindSnooze, Until: &until, Via: "web$(id)"},
+	} {
+		got := NotifyText(Ask{ID: "ask-00000001", Title: hostile}, r)
+		if i := strings.IndexAny(got, shellMeta); i >= 0 {
+			t.Errorf("%s: shell metacharacter %q at %d in %q", r.Kind, got[i], i, got)
+		}
+		for _, c := range got {
+			if c < 0x20 || c == 0x7f || c == '\u202e' {
+				t.Errorf("%s: control or format character %U in %q", r.Kind, c, got)
+			}
+		}
+		if !strings.HasPrefix(got, "DESK-RESPONSE ask-00000001 "+string(r.Kind)) {
+			t.Errorf("prefix: %q", got)
+		}
 	}
 }

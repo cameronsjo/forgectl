@@ -676,7 +676,7 @@ func (m deskAsksModel) askRowLine(it ask.Item, sel bool, width int) string {
 	case ask.StateSnoozed:
 		tail = "until " + it.SnoozedUntil.Local().Format("Mon 15:04")
 	case ask.StateAnswered:
-		tail = string(it.Answer.Kind) + " " + ageLabel(m.now().Sub(it.Answer.At)) + " ago"
+		tail = termsafe.SafeLineMax(string(it.Answer.Kind), 12) + " " + ageLabel(m.now().Sub(it.Answer.At)) + " ago"
 	default:
 		if a := ageLabel(m.now().Sub(it.Ask.At)); a != "" {
 			tail = a
@@ -786,7 +786,7 @@ func answerText(r ask.Response) string {
 	case ask.KindLink:
 		return "link: " + termsafe.SafeLineMax(r.URL, 200)
 	}
-	return string(r.Kind)
+	return termsafe.SafeLineMax(string(r.Kind), 12)
 }
 
 // wrapSafe makes untrusted text inert and wraps it to width. It always

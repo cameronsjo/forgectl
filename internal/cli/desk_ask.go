@@ -107,4 +107,3 @@ is answered (done, reply or link; a snooze is printed and the watch goes on),
 1 when there is no such ask. With no ASK-ID it prints every response as it
 arrives until the deadline. On the deadline it exits 75 with a resume= line
 whose --since is the log offset to continue from.`
-

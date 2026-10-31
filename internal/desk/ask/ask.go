@@ -485,20 +485,62 @@ func Grouped(items []Item) (open map[Bucket][]Item, snoozed, answered []Item) {
 }
 
 // NotifyText is the one line sent to the asking agent's terminal for r.
+//
+// hc types it and presses Enter, so if the agent has exited and a shell sits
+// at that terminal, the line is read as a command. It is built to be inert
+// there: no shell metacharacter survives (see [shellInert]), and its own
+// punctuation is plain dashes and colons. The full record is in the log.
 func NotifyText(a Ask, r Response) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "DESK-RESPONSE %s %s", a.ID, r.Kind)
 	switch r.Kind {
 	case KindReply:
-		b.WriteString(": " + flatten(r.Text, 300))
+		b.WriteString(": " + shellInert(flatten(r.Text, 300)))
 	case KindLink:
-		b.WriteString(": " + r.URL)
+		b.WriteString(": " + inertURL(r.URL))
 	case KindSnooze:
 		if r.Until != nil {
 			b.WriteString(" until " + r.Until.UTC().Format(time.RFC3339))
 		}
 	}
-	fmt.Fprintf(&b, " (ask: %s; full record: forgectl desk watch --responses %s)", flatten(a.Title, 80), a.ID)
+	if r.Via != "" {
+		b.WriteString(" -- via " + shellInert(flatten(r.Via, 20)))
+	}
+	fmt.Fprintf(&b, " -- ask: %s -- full record: forgectl desk watch --responses %s", shellInert(flatten(a.Title, 80)), a.ID)
+	return b.String()
+}
+
+// shellMeta is every character a POSIX shell, bash or zsh treats specially
+// on an interactive command line: quoting, substitution, separators,
+// redirection, globbing, history and comments. '%' is left out: it only
+// means something (a zsh job) at the start of a word, and percent-encoding
+// needs it mid-word; shellInert strips it from free text anyway.
+const shellMeta = "`$();&|<>\\'\"{}[]*?!#~^="
+
+// shellInert replaces each shell metacharacter, '%', and control or format
+// character in s with a space, and collapses the result to one line.
+func shellInert(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(shellMeta, r) || r == '%' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// inertURL percent-encodes every shell metacharacter in a URL, so it stays
+// one inert shell word. Encoding '?', '&', '=' and '%' can change what the
+// URL means; the line is a pointer, and the exact URL is in the log.
+func inertURL(u string) string {
+	var b strings.Builder
+	for _, c := range []byte(u) {
+		if c < 0x21 || c >= 0x7f || strings.IndexByte(shellMeta, c) >= 0 {
+			fmt.Fprintf(&b, "%%%02X", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
 	return b.String()
 }
 

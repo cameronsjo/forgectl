@@ -214,7 +214,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		// same-origin, not no-referrer: under no-referrer a browser sends
+		// "Origin: null" on a form POST, which checkFetchSite refuses, so no
+		// answer from a real browser ever landed. same-origin still sends
+		// nothing to another site.
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
 		h.Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)

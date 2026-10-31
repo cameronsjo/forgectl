@@ -208,7 +208,7 @@ func writeAskList(out io.Writer, items []ask.Item, now time.Time) error {
 		shown = true
 		w.printf("Answered\n")
 		for _, it := range answered {
-			w.printf("  %s  %s  (%s)\n", it.Ask.ID, safeText(it.Ask.Title), it.Answer.Kind)
+			w.printf("  %s  %s  (%s)\n", it.Ask.ID, safeText(it.Ask.Title), safeText(string(it.Answer.Kind)))
 		}
 	}
 	if !shown {
@@ -229,18 +229,18 @@ func askFromSuffix(a ask.Ask, now time.Time) string {
 func writeAskDetail(out io.Writer, it ask.Item) error {
 	w := &stickyWriter{w: out}
 	a := it.Ask
-	w.printf("id=%s\nstate=%s\nbucket=%s\ntitle=%s\n", a.ID, it.State, a.Bucket, safeText(a.Title))
+	w.printf("id=%s\nstate=%s\nbucket=%s\ntitle=%s\n", safeText(a.ID), it.State, safeText(string(a.Bucket)), safeText(a.Title))
 	if a.From != "" {
 		w.printf("from=%s\n", safeText(a.From))
 	}
 	if a.Notify != "" {
-		w.printf("notify=%s\n", a.Notify)
+		w.printf("notify=%s\n", safeText(a.Notify))
 	}
 	kinds := make([]string, len(a.Allow))
 	for i, k := range a.Allow {
 		kinds[i] = string(k)
 	}
-	w.printf("allow=%s\n", strings.Join(kinds, ","))
+	w.printf("allow=%s\n", safeText(strings.Join(kinds, ",")))
 	for _, l := range a.Links {
 		w.printf("link=%s %s\n", safeText(l.URL), safeText(l.Label))
 	}
@@ -251,14 +251,14 @@ func writeAskDetail(out io.Writer, it ask.Item) error {
 		}
 	}
 	for _, r := range it.Responses {
-		w.printf("response=%s %s %s%s\n", r.ID, r.At.UTC().Format(time.RFC3339), r.Kind, responseDetail(r))
+		w.printf("response=%s %s %s%s\n", safeText(r.ID), r.At.UTC().Format(time.RFC3339), safeText(string(r.Kind)), responseDetail(r))
 	}
 	for _, n := range it.Notified {
 		status := "ok"
 		if !n.OK {
 			status = "failed: " + safeText(n.Error)
 		}
-		w.printf("notified=%s %s %s\n", n.Response, n.Address, status)
+		w.printf("notified=%s %s %s\n", safeText(n.Response), safeText(n.Address), status)
 	}
 	return w.err
 }
@@ -334,7 +334,7 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 		if notifyErr != nil {
 			w.printf("notified=failed %s\n", safeText(notifyErr.Error()))
 		} else {
-			w.printf("notified=%s\n", it.Ask.Notify)
+			w.printf("notified=%s\n", safeText(it.Ask.Notify))
 		}
 	}
 	return w.err

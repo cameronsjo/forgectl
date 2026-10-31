@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -242,8 +243,10 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 	if addr == "" || strings.ContainsAny(addr, " \t\r\n") || strings.HasPrefix(addr, "-") {
 		return fmt.Errorf("%w: %q is not a terminal address", ErrSendRefused, addr)
 	}
-	if strings.ContainsAny(text, "\r\n") {
-		return fmt.Errorf("%w: the text must be one line", ErrSendRefused)
+	for _, r := range text {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("%w: the text must be one line with no control or format characters", ErrSendRefused)
+		}
 	}
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
 		exec.MustFixed("send"),
