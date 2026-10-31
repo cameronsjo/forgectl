@@ -186,32 +186,32 @@ func runDeskAsks(cmd *cobra.Command, _ module.Deps, dirFlag, id string, all, asJ
 func writeAskList(out io.Writer, items []ask.Item, now time.Time) error {
 	w := &stickyWriter{w: out}
 	open, snoozed, answered := ask.Grouped(items)
-	any := false
+	shown := false
 	for _, b := range ask.Buckets {
 		if len(open[b]) == 0 {
 			continue
 		}
-		any = true
+		shown = true
 		w.printf("%s\n", b.Label())
 		for _, it := range open[b] {
 			w.printf("  %s  %s%s\n", it.Ask.ID, safeText(it.Ask.Title), askFromSuffix(it.Ask, now))
 		}
 	}
 	if len(snoozed) > 0 {
-		any = true
+		shown = true
 		w.printf("Snoozed\n")
 		for _, it := range snoozed {
 			w.printf("  %s  %s  (until %s)\n", it.Ask.ID, safeText(it.Ask.Title), it.SnoozedUntil.Local().Format("Mon 15:04"))
 		}
 	}
 	if len(answered) > 0 {
-		any = true
+		shown = true
 		w.printf("Answered\n")
 		for _, it := range answered {
 			w.printf("  %s  %s  (%s)\n", it.Ask.ID, safeText(it.Ask.Title), it.Answer.Kind)
 		}
 	}
-	if !any {
+	if !shown {
 		w.printf("no open asks\n")
 	}
 	return w.err

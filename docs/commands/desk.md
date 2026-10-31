@@ -22,6 +22,12 @@ forgectl desk layout --progress 'CMD'           # herdr split: this pane left, t
 forgectl desk layout --below                    # herdr: the desk in a full-width row under every pane in the tab
 forgectl desk layout --dry-run                  # print the planned splits and commands; change nothing
 forgectl desk prune --days 30                   # delete done/ and skipped/ items older than 30 days
+forgectl desk ask --title "..." --bucket now --notify self   # ask for something that is not a script
+forgectl desk watch --responses ask-1a2b3c4d --deadline 540  # block until the ask is answered
+forgectl desk asks                              # open asks by bucket
+forgectl desk respond ask-1a2b3c4d done         # answer one from a shell
+forgectl desk ui                                # asks and scripts in one live TUI
+forgectl desk serve                             # the same as a local web page, for a phone
 ```
 
 ## Requirements
@@ -409,6 +415,84 @@ Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`,
 
 `prune` refuses a desk it cannot safely open, with or without `--dry-run`: a desk directory that is a symlink, not a directory or owned by another user, or a `pending/`, `running/`, `done/` or `skipped/` that is a symlink, a file or unreadable. It names which and exits 1; nothing is deleted. Exit codes: 0 pruned (perhaps nothing), or listed with `--dry-run`; 1 a delete failed, or the desk was refused; 2 `--days` below 1.
 
+## Asks
+
+Most of what an agent needs from a person is not a script: sign in somewhere, approve a key, check a page on a phone, paste a link back. An **ask** records that request. The operator answers it in `desk ui` or `desk serve` (or with `desk respond`), and the agent learns the answer from `desk watch --responses`, and, with `--notify`, from a line typed into its hc terminal. Design and the security decisions: `openspec/changes/desk-asks/`.
+
+### `forgectl desk ask --title <text>`
+
+```bash
+forgectl desk ask --title "Approve the new deploy key" --steps-file steps.md \
+  --bucket now --link "Settings=https://example.com/keys" --notify self
+```
+
+| Flag | Meaning |
+|---|---|
+| `--title` | one line, at most 200 characters (required) |
+| `--steps-file FILE` or `-` | markdown steps, at most 16 KiB; shown with raw HTML off |
+| `--bucket` | `now`, `soon` ("when you have 10 minutes", the default), `optional`, `coming` |
+| `--link URL` or `LABEL=URL` | repeatable; `http` and `https` only |
+| `--from` | who is asking; defaults to `$FORGECTL_WORKER`, else the Claude session |
+| `--notify ADDR` | hc terminal told about each response; `self` is `$HC_TERMINAL_ID` |
+| `--allow` | the responses allowed, from `done,reply,link,snooze` (all by default) |
+| `--json` | print the recorded ask |
+
+It prints `id=`, `bucket=` and `watch=` lines and exits 0 only when the ask is recorded; 2 on a refused flag (a `javascript:` link, a two-line title).
+
+### Responses
+
+| Kind | Effect |
+|---|---|
+| `done` | answers the ask |
+| `reply` | answers with text (at most 4000 characters) |
+| `link` | answers with an `http` or `https` URL |
+| `snooze` | hides the ask until a time at most 30 days out; then it is open again |
+
+An answered ask refuses every later response. When the ask has a notify address, forgectl runs `hc send` to it (never with `--force`) with one line:
+
+```text
+DESK-RESPONSE ask-1a2b3c4d reply: use the staging account (ask: Approve the new deploy key; full record: forgectl desk watch --responses ask-1a2b3c4d)
+```
+
+A failed notify is logged and shown, and the response stands.
+
+### `forgectl desk watch --responses [ASK-ID]`
+
+With an ASK-ID: prints that ask's responses as JSON lines (`{"ask","title","response","offset","state"}`) and exits 0 once it is answered, at once if it already was; a snooze is printed and the watch goes on. Exit 1 when there is no such ask. With no ASK-ID: prints every response as it arrives. On the deadline (540 seconds with no terminal on stdin and no `--deadline`) it exits 75 after `resume=forgectl desk watch --responses [ID] --since OFFSET ...`.
+
+### `forgectl desk asks [ASK-ID]`
+
+The open and snoozed asks by bucket; `--all` adds answered ones; `--json` prints the folded items. With an ASK-ID it prints the ask, every response, and every notify attempt.
+
+### `forgectl desk respond ASK-ID done | reply TEXT | link URL | snooze DURATION`
+
+The operator's shell answer. `DURATION` is a Go duration (`90m`, `4h`) or `Nd`. Agents must not answer their own asks.
+
+### `forgectl desk ui`
+
+A live TUI over the asks log and the queue. Asks are grouped Now, When you have 10 minutes, Optional, Coming, then Snoozed and recently answered; queued scripts are listed read-only with their sha256 (run them from the dashboard). Keys: `j`/`k` move, `enter` details, `d` done, `r` reply, `l` link, `s` snooze, `?` help, `q` quit. Only the responses the ask allows are offered. `--frame` prints one frame sized by `$COLUMNS` and `$LINES`.
+
+### `forgectl desk serve`
+
+The same view as a phone-first web page. It binds `127.0.0.1` (a random port unless `--addr` names one) and refuses any non-loopback address, and prints the URL to open:
+
+```text
+http://127.0.0.1:PORT/#k=TOKEN
+```
+
+The token is per install, kept in `asks/web.token` (`0600`); `--rotate-token` replaces it and ends every session. The token travels in the URL fragment, which the browser never sends, and a small script trades it for an `HttpOnly`, `SameSite=Strict` session cookie, then removes it from the address bar.
+
+From a phone on your tailnet:
+
+```bash
+tailscale serve --bg http://127.0.0.1:PORT
+forgectl desk serve --addr 127.0.0.1:PORT --allow-host <machine>.<tailnet>.ts.net
+```
+
+Open `https://<machine>.<tailnet>.ts.net/#k=TOKEN` once on the phone; the cookie keeps it signed in. `--allow-host` adds the name to the Host check, which otherwise accepts only loopback names (so a page that rebinds its DNS to `127.0.0.1` gets nothing).
+
+Every write needs the session cookie, a CSRF token bound to the session, and a same-origin request. Ask text from agents is shown as text: markdown with raw HTML off, links only for `http` and `https`, under a Content-Security-Policy with no inline script. The page never runs a script from the queue.
+
 ## The queue protocol
 
 ### Directory
@@ -427,6 +511,9 @@ The desk directory is `--dir`, else `$DESK_DIR`, else `$CLAUDE_DESK_DIR`, else `
 | `done/NN-name.d/` | a batch's `steps/<id>.log`, `steps/<id>.out`, `status.tsv` and `summary.json` |
 | `skipped/NN-name.sh` or `.manifest` | a skipped item |
 | `<dir>/NN-name.meta.json` | the item's metadata; it moves with the item |
+| `asks/log.jsonl` | the asks log: asks, responses and notify outcomes, one JSON record per line, append-only |
+| `asks/log.jsonl.lock` | the lock every asks writer holds |
+| `asks/web.token` | the `desk serve` login token |
 
 ### Items
 
