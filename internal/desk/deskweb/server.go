@@ -544,6 +544,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	v, _ := s.version()
 	w.Header().Set("Content-Type", "application/json")
+	// termsafe:allow-raw-json an HTTP body for the page's own script, never terminal output
 	_ = json.NewEncoder(w).Encode(map[string]string{"v": v})
 }
 
