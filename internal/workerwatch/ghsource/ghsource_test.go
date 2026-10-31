@@ -120,6 +120,23 @@ func TestWorstMarkerAtHeadWins(t *testing.T) {
 	}
 }
 
+func TestSameReviewerOtherHeadDoesNotHideAtHeadCrit(t *testing.T) {
+	answer := `{"data":{"repository":{"pullRequests":{"nodes":[{"number":5,"state":"OPEN","headRepository":{"nameWithOwner":"o/r"},"headRefOid":"` + sha + `",
+		"reviews":{"nodes":[
+			{"body":"<!-- cadence-review: pr-reviewer head=` + sha + ` crit=1 imp=0 -->","author":{"login":"octo"}},
+			{"body":"<!-- cadence-review: pr-reviewer head=ffffffffffffffffffffffffffffffffffffffff crit=0 imp=0 -->","author":{"login":"octo"}}]}}]}}}}`
+	p, err := parsePR("o/r", "octo", answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Marker == nil || !p.Marker.AtHead || p.Marker.Crit != 1 {
+		t.Errorf("shown marker = %+v, want pr-reviewer crit=1 at head; its newer marker for another head must not hide it", p.Marker)
+	}
+	if len(p.Markers) != 1 {
+		t.Errorf("markers = %+v, want only the at-head one (the stale one is superseded for this reviewer)", p.Markers)
+	}
+}
+
 func TestPRForReadsViewerOnceAndRefusesBadInput(t *testing.T) {
 	var calls [][]string
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {

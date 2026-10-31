@@ -238,16 +238,20 @@ func (g GitCLI) Repo(ctx context.Context, worktree string) (string, error) {
 	return repo, nil
 }
 
-// markersFrom keeps the newest marker per reviewer name among viewer's
-// reviews (oldest first in nodes), newest first.
+// markersFrom keeps, newest first, the newest marker per reviewer name at
+// head, then the newest stale marker of each reviewer with none at head.
+// Deduplicating at-head and stale markers apart means a reviewer's newer
+// marker for another head never hides its marker at this one. A newer
+// marker at head from the same reviewer does replace its older one: that is
+// the reviewer re-running (sweep sums them instead; see design.md).
 func markersFrom(nodes []struct {
 	Body   string `json:"body"`
 	Author *struct {
 		Login string `json:"login"`
 	} `json:"author"`
 }, viewer, head string) []workerwatch.Marker {
-	seen := map[string]bool{}
-	var out []workerwatch.Marker
+	var atHead, stale []workerwatch.Marker
+	seenHead, seenStale := map[string]bool{}, map[string]bool{}
 	for i := len(nodes) - 1; i >= 0; i-- {
 		rv := nodes[i]
 		if rv.Author == nil || !strings.EqualFold(rv.Author.Login, viewer) {
@@ -259,11 +263,24 @@ func markersFrom(nodes []struct {
 			continue
 		}
 		m, ok := sweep.ParseMarker(line)
-		if !ok || seen[m.Reviewer] {
+		if !ok {
 			continue
 		}
-		seen[m.Reviewer] = true
-		out = append(out, workerwatch.Marker{Reviewer: m.Reviewer, Head: m.Head, Crit: m.Crit, Imp: m.Imp, AtHead: head != "" && m.Head == head})
+		mk := workerwatch.Marker{Reviewer: m.Reviewer, Head: m.Head, Crit: m.Crit, Imp: m.Imp, AtHead: head != "" && m.Head == head}
+		switch {
+		case mk.AtHead && !seenHead[mk.Reviewer]:
+			seenHead[mk.Reviewer] = true
+			atHead = append(atHead, mk)
+		case !mk.AtHead && !seenStale[mk.Reviewer]:
+			seenStale[mk.Reviewer] = true
+			stale = append(stale, mk)
+		}
+	}
+	out := atHead
+	for _, mk := range stale {
+		if !seenHead[mk.Reviewer] {
+			out = append(out, mk)
+		}
 	}
 	return out
 }

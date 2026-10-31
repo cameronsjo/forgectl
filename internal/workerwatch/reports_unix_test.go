@@ -52,3 +52,17 @@ func TestBriefDirFSRefusesSymlink(t *testing.T) {
 		t.Errorf("a real report on disk was not read as complete: %+v", r)
 	}
 }
+
+func TestScanReportDirRefusesASymlinkedDir(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "report.md"), []byte("REPORT-COMPLETE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "brief")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if r := ScanReportDir(link); r.Error != "the brief dir is a symlink" || len(r.Files) != 0 {
+		t.Errorf("a symlinked brief dir was read: %+v", r)
+	}
+}

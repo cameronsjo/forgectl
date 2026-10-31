@@ -110,6 +110,11 @@ func ScanReportDir(dir string) Reports {
 	if dir == "" {
 		return Reports{}
 	}
+	// O_NOFOLLOW covers only a file's own name, so refuse a brief dir that
+	// is itself a symlink a worker could have swapped in.
+	if info, err := os.Lstat(dir); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return Reports{Error: "the brief dir is a symlink"}
+	}
 	return ScanReports(briefDirFS{dir: dir})
 }
 
