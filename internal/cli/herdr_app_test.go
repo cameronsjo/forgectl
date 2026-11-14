@@ -205,6 +205,19 @@ func TestHerdrOrganize_App_ApplyReordersAndNeverCrossesSpaces(t *testing.T) {
 	if len(moves) != 1 || moves[0] != `{"id":"tbF1","index":1}` {
 		t.Errorf("tab.move calls = %v, want exactly one for tbF1 to position 1", moves)
 	}
+	// The last mutation selects the caller's space, after every tab select.
+	var dos [][]string
+	for _, c := range r.runner.Calls {
+		if len(c.Args) > 1 && c.Args[0] == "do" {
+			dos = append(dos, c.Args)
+		}
+	}
+	if last := dos[len(dos)-1]; last[1] != "space.select" || last[2] != `{"id":"spF"}` {
+		t.Errorf("last mutation = %v, want space.select of the caller's space spF; all: %v", last, dos)
+	}
+	if prev := dos[len(dos)-2]; prev[1] != "tab.select" {
+		t.Errorf("the space select should follow the tab selects: %v", dos)
+	}
 	if !strings.Contains(r.stdout, "ordered") || !strings.Contains(r.stdout, "focus restored") {
 		t.Errorf("apply report:\n%s", r.stdout)
 	}
@@ -250,4 +263,117 @@ func runOrganizeApp(t *testing.T, w *appWorld, args ...string) organizeRun {
 	cfg := organizeCfg()
 	cfg.Herdr.Organize.WorkspaceOrder = []string{"forge", "misc"}
 	return runOrganizeWith(t, cfg, w.runner(), args...)
+}
+
+func TestHerdrOrganize_App_ApplyRefusesAWindowThatDoesNotShowThisTerminal(t *testing.T) {
+	setAppSeams(t)
+	lookupHerdrEnv = func(k string) (string, bool) {
+		if k == "HC_TERMINAL_ID" {
+			return "t-elsewhere", true
+		}
+		return "", false
+	}
+	w := newAppWorld()
+	r := runOrganizeApp(t, w, "--apply")
+	if r.err == nil || ExitCode(r.err) != 2 || !strings.Contains(r.err.Error(), "this terminal is not in the window herdr-app reports") {
+		t.Fatalf("err = %v (exit %d), want exit 2 with the window reason", r.err, ExitCode(r.err))
+	}
+	for _, c := range r.runner.Calls {
+		if len(c.Args) > 0 && c.Args[0] == "do" {
+			t.Errorf("a mutation ran before the refusal: %v", c)
+		}
+	}
+}
+
+func TestHerdrOrganize_App_ReportOnlyNotesAWindowMismatchButDoesNotRefuse(t *testing.T) {
+	setAppSeams(t)
+	lookupHerdrEnv = func(k string) (string, bool) {
+		if k == "HC_TERMINAL_ID" {
+			return "t-elsewhere", true
+		}
+		return "", false
+	}
+	r := runOrganizeApp(t, newAppWorld())
+	if r.err != nil {
+		t.Fatalf("a report must not refuse: %v", r.err)
+	}
+	if !strings.Contains(r.stdout, "note: this terminal is not in the window herdr-app reports") {
+		t.Errorf("report lacks the note:\n%s", r.stdout)
+	}
+}
+
+func TestHerdrOrganize_App_ReportInTheWindowHasNoNote(t *testing.T) {
+	setAppSeams(t)
+	r := runOrganizeApp(t, newAppWorld())
+	if r.err != nil || strings.Contains(r.stdout, "note:") {
+		t.Errorf("err = %v; stdout:\n%s", r.err, r.stdout)
+	}
+}
+
+// A name herdr-app reports is chosen by whatever runs in the terminal, so it
+// is untrusted: it must not reach the human report or --json as a raw
+// control or bidi character.
+func TestHerdrOrganize_App_HostileNamesAreNeutralized(t *testing.T) {
+	const hostile = "\x1b]0;x\x07evil\u202e"
+	setAppSeams(t)
+	w := newAppWorld()
+	w.spaces[1].name = hostile
+	w.spaces[1].tabs[0].name = hostile
+	for _, args := range [][]string{nil, {"--json"}, {"--explain"}} {
+		r := runOrganizeApp(t, w, args...)
+		if r.err != nil {
+			t.Fatalf("%v: err = %v", args, r.err)
+		}
+		for name, out := range map[string]string{"stdout": r.stdout, "stderr": r.stderr} {
+			if strings.ContainsAny(out, "\x1b\x07\u202e") {
+				t.Errorf("%v %s carries a raw control or bidi character: %q", args, name, out)
+			}
+		}
+		if all := r.stdout + r.stderr; !strings.Contains(all, "evil") {
+			t.Errorf("%v: the hostile name never reached the output, so the check proves nothing:\n%s", args, all)
+		}
+	}
+}
+
+func TestHerdrOrganize_App_JSONMarksUnsupportedMoves(t *testing.T) {
+	setAppSeams(t)
+	r := runOrganizeApp(t, newAppWorld(), "--json")
+	if r.err != nil {
+		t.Fatalf("err = %v", r.err)
+	}
+	var doc struct {
+		Plan struct {
+			Moves []map[string]any `json:"moves"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("stdout: %v\n%s", err, r.stdout)
+	}
+	if len(doc.Plan.Moves) != 1 || doc.Plan.Moves[0]["unsupported"] != true || doc.Plan.Moves[0]["blocked"] != true {
+		t.Errorf("moves = %v, want one blocked move with unsupported true", doc.Plan.Moves)
+	}
+}
+
+func TestHerdrOrganize_BothHostsSet_RefusalExplainsInheritedHerdrVars(t *testing.T) {
+	setHerdrSeams(t, herdrSeams{
+		sessionErr: herdr.ErrNotInSession,
+		env:        map[string]string{"HERDR_ENV": "1", "HC_TERMINAL_ID": "t1"},
+	})
+	r := runOrganize(t, organizeCfg(), nil)
+	if ExitCode(r.err) != 2 || r.err == nil {
+		t.Fatalf("err = %v", r.err)
+	}
+	for _, want := range []string{"not inside a herdr session", "inherits HERDR_ENV", "unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID"} {
+		if !strings.Contains(r.err.Error(), want) {
+			t.Errorf("refusal lacks %q: %v", want, r.err)
+		}
+	}
+}
+
+func TestHerdrOrganize_HerdrOnly_RefusalHasNoHerdrAppHint(t *testing.T) {
+	setHerdrSeams(t, herdrSeams{sessionErr: herdr.ErrNotInSession, env: map[string]string{"HERDR_ENV": "1"}})
+	r := runOrganize(t, organizeCfg(), nil)
+	if r.err == nil || strings.Contains(r.err.Error(), "herdr-app") {
+		t.Errorf("err = %v, want no herdr-app hint", r.err)
+	}
 }

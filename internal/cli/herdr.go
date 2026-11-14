@@ -136,8 +136,13 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	host := herdrDetectHost(lookupHerdrEnv)
 	if host != herdr.HostApp {
 		if err := herdrCheckSession(lookupHerdrEnv); err != nil {
-			if host == herdr.HostNone {
+			switch {
+			case host == herdr.HostNone:
 				err = fmt.Errorf("%w; or run it from a herdr-app terminal (HC_TERMINAL_ID is not set either)", err)
+			case hasHCTerminal(lookupHerdrEnv):
+				// Both sets of variables: herdr 0.9 wins, so a herdr-app
+				// launched from a 0.9 pane lands here with a dead socket.
+				err = fmt.Errorf("%w; HC_TERMINAL_ID is also set: a herdr-app launched from a herdr 0.9 pane inherits HERDR_ENV, HERDR_SOCKET_PATH and HERDR_PANE_ID, so run `unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID` first to run as herdr-app", err)
 			}
 			problems = append(problems, err)
 		}
@@ -199,6 +204,18 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts, host 
 	if err != nil {
 		return termsafe.Error(err)
 	}
+	var windowNote string
+	if host == herdr.HostApp {
+		// Mutations go to whichever window herdr-app reports, so check it is
+		// the window this terminal is in before the first one.
+		if id, _ := lookupHerdrEnv("HC_TERMINAL_ID"); !snapshotHasTerminal(snap, strings.TrimSpace(id)) {
+			const why = "this terminal is not in the window herdr-app reports; run it from a terminal that window shows"
+			if opts.apply {
+				return WithExitCode(termsafe.Error(errors.New(why)), exitUsage)
+			}
+			windowNote = "note: " + why + "\n"
+		}
+	}
 	root, err := herdrProjectsRoot()
 	if err != nil {
 		return termsafe.Error(err)
@@ -215,6 +232,9 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts, host 
 		home = ""
 	}
 	r := organizeReport{w: human, home: home}
+	if windowNote != "" {
+		r.printf("%s", windowNote)
+	}
 
 	if !opts.apply {
 		r.dryRun(cfg, snap, plan, opts.explain)
@@ -280,6 +300,23 @@ func organizeConfigProblem(c config.Config) error {
 		fmt.Fprintf(&b, ". %s is set, and forgectl ignores it.", legacyOrganizeRulesEnv)
 	}
 	return errors.New(b.String())
+}
+
+func hasHCTerminal(lookup func(string) (string, bool)) bool {
+	v, ok := lookup("HC_TERMINAL_ID")
+	return ok && strings.TrimSpace(v) != ""
+}
+
+func snapshotHasTerminal(snap organize.Snapshot, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, p := range snap.Panes {
+		if p.TerminalID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func toOrganizeConfig(o config.HerdrOrganizeConfig) organize.Config {
@@ -574,6 +611,9 @@ type organizeMoveJSON struct {
 	To            string `json:"to"`
 	Blocked       bool   `json:"blocked"`
 	BlockedReason string `json:"blocked_reason,omitempty"`
+	// Unsupported marks a blocked move the host can never make (herdr-app has
+	// no cross-space move), as opposed to one herdr refuses at run time.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 type organizeLayoutJSON struct {
@@ -609,7 +649,7 @@ type organizeResultJSON struct {
 func moveJSON(m organize.Move) organizeMoveJSON {
 	return organizeMoveJSON{
 		TerminalID: m.TerminalID, TabID: m.TabID, Title: m.Title, CWD: m.CWD,
-		From: m.From, To: m.To, Blocked: m.Blocked, BlockedReason: m.BlockedReason,
+		From: m.From, To: m.To, Blocked: m.Blocked, BlockedReason: m.BlockedReason, Unsupported: m.Unsupported,
 	}
 }
 

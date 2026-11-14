@@ -57,8 +57,9 @@ When moves are pending the report says `tab order will be rechecked after the mo
 herdr-app calls workspaces spaces, and its `tab.move` only changes a tab's position within its own space; it has no command that takes a tab to another space or makes a space for one. So in herdr-app:
 
 - the report and `--apply` read `herdr-app ls` and take each terminal's folder from `hc ls`, matching on terminal id (`herdr-app ls` has no folder per terminal). The tab's name stands in for the terminal title in the `"<cwd> :: <title>"` match key, and a tab with no name is called `tab N` by its position;
-- a tab whose rule points at another workspace is a `blocked` move that says to move it by hand. Nothing in the layout assumes it moved, so the order steps below still apply to what each space holds;
-- `--apply` reorders tabs within each space (`tab.move`, one move at a time, positions counted from 1) and orders the spaces (`space.move`), takes the same lock, and restores focus with `tab.select` and `space.select`;
+- a tab whose rule points at another workspace is a `blocked` move that says to move it by hand. In `--json` that move carries `"unsupported": true` (the field is left out of every other move, so the herdr 0.9 output is unchanged), which tells it apart from a move herdr refuses at run time. Nothing in the layout assumes it moved, so the order steps below still apply to what each space holds;
+- `--apply` also refuses (exit 2) before changing anything unless `$HC_TERMINAL_ID` is a terminal in the `herdr-app ls` reply, so it cannot reorder a window other than the one the terminal is in; the report prints a note instead. It also refuses when `hc` is not on `PATH`.
+- `--apply` reorders tabs within each space (`tab.move`, one move at a time, positions counted from 1) and orders the spaces (`space.move`), takes the same lock, and restores focus with `tab.select`, then always `space.select` on the space you were in, because `tab.select` is only documented as showing a tab;
 - an `order` line's position is the same 1-based position herdr-app uses.
 
 `hc` is read-only here. Worker launch (`forgectl launch`, `forgectl desk`) never calls herdr-app; only `organize` does.

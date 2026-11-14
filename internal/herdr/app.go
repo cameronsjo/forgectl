@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	osexec "os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -127,11 +128,41 @@ func (a *AppClient) ls(ctx context.Context) (appLS, error) {
 	return appLS{Spaces: *d.Spaces}, nil
 }
 
-func spaceLabel(s appSpace) string {
-	if s.Name != "" {
-		return s.Name
+// spaceLabels names every space. A named space keeps its name. An unnamed one
+// is labeled by its folder's base name, or "space N" (N its 1-based position)
+// when it has no usable folder; two unnamed spaces that would share a label
+// each get " N" appended, so no two unnamed spaces collide.
+func spaceLabels(spaces []appSpace) []string {
+	base := func(s appSpace) string {
+		if s.Name != "" {
+			return ""
+		}
+		b := filepath.Base(s.Folder)
+		if s.Folder == "" || b == "." || b == string(filepath.Separator) {
+			return ""
+		}
+		return b
 	}
-	return filepath.Base(s.Folder)
+	uses := map[string]int{}
+	for _, s := range spaces {
+		if b := base(s); b != "" {
+			uses[b]++
+		}
+	}
+	out := make([]string, len(spaces))
+	for i, s := range spaces {
+		switch b := base(s); {
+		case s.Name != "":
+			out[i] = s.Name
+		case b == "":
+			out[i] = "space " + strconv.Itoa(i+1)
+		case uses[b] > 1:
+			out[i] = b + " " + strconv.Itoa(i+1)
+		default:
+			out[i] = b
+		}
+	}
+	return out
 }
 
 func tabLabel(t appTab, pos int) string {
@@ -147,10 +178,11 @@ func (a *AppClient) Workspaces(ctx context.Context) ([]Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
+	labels := spaceLabels(d.Spaces)
 	out := make([]Workspace, 0, len(d.Spaces))
 	for i, s := range d.Spaces {
 		w := Workspace{
-			WorkspaceID: s.ID, Label: spaceLabel(s), Number: i + 1, Focused: s.Active, TabCount: len(s.Tabs),
+			WorkspaceID: s.ID, Label: labels[i], Number: i + 1, Focused: s.Active, TabCount: len(s.Tabs),
 		}
 		for _, t := range s.Tabs {
 			w.PaneCount += len(t.Terminals)
@@ -232,6 +264,10 @@ func (a *AppClient) folders(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
+// FocusNeedsSpace reports that selecting a tab is not known to switch the
+// space it is in, so a focus restore must finish by selecting the space.
+func (a *AppClient) FocusNeedsSpace() bool { return true }
+
 // MoveTab reorders a tab inside its space. Only an index target is supported:
 // herdr-app cannot move a tab to another space, and a target that asks for
 // that returns [ErrUnsupportedMove] before anything runs. The result carries
@@ -306,11 +342,19 @@ func (a *AppClient) do(ctx context.Context, command string, args map[string]any)
 // appNeeded are the commands organize --apply drives.
 var appNeeded = []string{"tab.move", "space.move", "tab.select", "space.select"}
 
-// CheckApp reports whether herdr-app lists the commands `organize --apply`
-// needs. `herdr-app commands` prints the built-in list without an open window,
+// lookPath finds a binary on PATH; tests replace it.
+var lookPath = osexec.LookPath
+
+// CheckApp reports whether `hc` is on PATH and herdr-app lists the commands
+// `organize --apply` needs. `herdr-app commands` prints the built-in list without an open window,
 // so this checks the binary, not the window; a window that is closed surfaces
 // at the first read.
 func CheckApp(ctx context.Context, r exec.Runner) error {
+	// hc supplies each terminal's folder; refuse here, with the other gate
+	// errors, rather than at the first read.
+	if _, err := lookPath(HCBinary); err != nil {
+		return fmt.Errorf("%s is not on PATH, and organize reads each terminal's folder from `%s ls`: %w", HCBinary, HCBinary, err)
+	}
 	out, err := r.Run(ctx, AppBinary, "commands")
 	if err != nil {
 		return fmt.Errorf("cannot run %s commands: %w", AppBinary, err)

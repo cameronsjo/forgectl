@@ -33,6 +33,16 @@ func appRunner(t *testing.T, doErr error, doOut string) *exec.FakeRunner {
 	}}
 }
 
+func TestAppFocusNeedsSpace(t *testing.T) {
+	var w Window = NewApp(nil)
+	if n, ok := w.(interface{ FocusNeedsSpace() bool }); !ok || !n.FocusNeedsSpace() {
+		t.Error("AppClient must ask for a final space select")
+	}
+	if _, ok := Window(New(nil)).(interface{ FocusNeedsSpace() bool }); ok {
+		t.Error("the 0.9 Client must not: its focus path is unchanged")
+	}
+}
+
 func TestAppWorkspacesMapsSpaces(t *testing.T) {
 	got, err := NewApp(appRunner(t, nil, "")).Workspaces(context.Background())
 	if err != nil {
@@ -211,7 +221,39 @@ func TestAppDoReportsRefusals(t *testing.T) {
 	}
 }
 
+func fakeLookPath(t *testing.T, err error) {
+	t.Helper()
+	old := lookPath
+	t.Cleanup(func() { lookPath = old })
+	lookPath = func(string) (string, error) { return "/bin/hc", err }
+}
+
+func TestCheckAppRefusesWhenHCIsMissing(t *testing.T) {
+	fakeLookPath(t, errors.New("not found"))
+	err := CheckApp(context.Background(), appRunner(t, nil, ""))
+	if err == nil || !strings.Contains(err.Error(), "hc is not on PATH") {
+		t.Errorf("err = %v, want a refusal naming hc", err)
+	}
+}
+
+func TestSpaceLabels(t *testing.T) {
+	spaces := []appSpace{
+		{ID: "a", Name: "named", Folder: "/x/proj"},
+		{ID: "b", Folder: "/x/proj"},
+		{ID: "c", Folder: "/y/proj"},
+		{ID: "d", Folder: "/x/solo"},
+		{ID: "e"},
+		{ID: "f"},
+		{ID: "g", Folder: "/"},
+	}
+	want := []string{"named", "proj 2", "proj 3", "solo", "space 5", "space 6", "space 7"}
+	if got := spaceLabels(spaces); !reflect.DeepEqual(got, want) {
+		t.Errorf("labels = %v, want %v", got, want)
+	}
+}
+
 func TestCheckApp(t *testing.T) {
+	fakeLookPath(t, nil)
 	if err := CheckApp(context.Background(), appRunner(t, nil, "")); err != nil {
 		t.Errorf("recorded command list should pass: %v", err)
 	}

@@ -422,19 +422,27 @@ func restoreFocus(ctx context.Context, c herdr.Window, fs focusState) (title, ta
 			errs = append(errs, err)
 		}
 	}
+	// herdr-app documents `tab.select` as showing a tab, not as switching to
+	// its space, so there the restore always ends by selecting the caller's
+	// space. On 0.9 `tab focus` is assumed to switch workspace, and that path
+	// is unchanged.
+	needSpace := false
+	if n, ok := c.(interface{ FocusNeedsSpace() bool }); ok {
+		needSpace = n.FocusNeedsSpace()
+	}
 	if p, ok := byTerminal[fs.caller]; ok {
 		if err := c.FocusTab(ctx, p.TabID); err != nil {
 			errs = append(errs, err)
 		} else {
 			title, tabID = p.TerminalTitleStripped, p.TabID
 		}
-	} else {
-		// The caller's own tab is gone: leave the UI in the workspace it was
-		// looking at rather than on whichever workspace was restored last.
-		if fs.focusedWS != "" {
-			if err := c.FocusWorkspace(ctx, fs.focusedWS); err != nil {
-				errs = append(errs, err)
-			}
+	}
+	if (needSpace || byTerminal[fs.caller].TerminalID == "") && fs.focusedWS != "" {
+		// The caller's own tab is gone (or the host needs it): leave the UI in
+		// the workspace it was looking at rather than on whichever workspace
+		// was restored last.
+		if err := c.FocusWorkspace(ctx, fs.focusedWS); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return title, tabID, errors.Join(errs...)
