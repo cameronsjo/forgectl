@@ -33,9 +33,11 @@ type FakeSensitiveRunner struct {
 	//     SecretArg value are unexported. All three expose only redacting
 	//     formatters, and Arg adds Secret; none has a method that returns a
 	//     payload. The payload itself sits in internal/exec/internal/sealed,
-	//     whose one reveal, sealed.Start, puts a payload only into a child
-	//     process and is called only by OSSensitiveRunner (forgectl#854).
-	//     The fake never calls it, and no code outside internal/exec can
+	//     whose two reveals each hand nothing back: sealed.Start puts a
+	//     payload only into a child process and is called only by
+	//     OSSensitiveRunner (forgectl#854), and sealed.WriteNewFile puts one
+	//     only into a new 0600 file and is called only by NewLaunchScript.
+	//     The fake calls neither, and no code outside internal/exec can
 	//     import sealed to try. The exported-API golden pins both surfaces.
 	//   - Equal on each of the three types is a comparison oracle: holding a
 	//     sealed value, a RunFunc can test a guess by building a candidate

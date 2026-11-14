@@ -168,6 +168,22 @@ const (
 	KindHcSend
 	KindHcCleanup
 
+	// KindRex* drive Rex's `rex`: readiness is `rex whoami`, preflight is the
+	// `test -d` that proves the target directory exists before Rex is asked
+	// to start in it (Rex starts a missing one in $HOME and reports success),
+	// create is `rex new`, label is `rex block rename`, reconcile is the
+	// listing after an ambiguous create, probe is `rex ls`, `rex block ls`
+	// and `rex block call process`, and cleanup is `rex block close` and
+	// `rex kill`. Preflight and create carry the sealed cwd and display name,
+	// which is why none of them goes through Runner.
+	KindRexReadiness
+	KindRexPreflight
+	KindRexCreate
+	KindRexLabel
+	KindRexReconcile
+	KindRexProbe
+	KindRexCleanup
+
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
 	//
@@ -231,6 +247,14 @@ var kindNames = [kindCount]string{
 	KindHcRead:      "hc.read",
 	KindHcSend:      "hc.send",
 	KindHcCleanup:   "hc.cleanup",
+
+	KindRexReadiness: "rex.readiness",
+	KindRexPreflight: "rex.preflight",
+	KindRexCreate:    "rex.create",
+	KindRexLabel:     "rex.label",
+	KindRexReconcile: "rex.reconcile",
+	KindRexProbe:     "rex.probe",
+	KindRexCleanup:   "rex.cleanup",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

@@ -20,9 +20,12 @@
 // read through the operating system, is the residual-risk paragraph of
 // internal/exec's startSealed doc.
 //
-// The one way a payload leaves is Start, which puts it into a child process's
-// path, argv and environment and hands back a *Proc that can only wait for or
-// kill that process. The *exec.Cmd holding the plaintext is built and kept
+// A payload leaves in two ways. Start puts it into a child process's path,
+// argv and environment and hands back a *Proc that can only wait for or kill
+// that process. WriteNewFile puts one payload, between two fixed strings,
+// into a file it creates exclusively with mode 0600, for a terminal manager
+// that records the command it is given (internal/exec's NewLaunchScript is
+// its one caller). Neither hands the plaintext back. The *exec.Cmd holding the plaintext is built and kept
 // inside this package; nothing exported returns it, and Proc holds only
 // closures over it, which no ordinary reflection accessor reads (the
 // UnsafePointer route above does). Everything else is a fixed
@@ -163,8 +166,9 @@ func (p *Proc) Wait() error { return p.wait() }
 // Kill kills the process (os.Process.Kill); it does not wait for it.
 func (p *Proc) Kill() error { return p.kill() }
 
-// Start is the reveal boundary: the only place any payload leaves its wrapper,
-// and it leaves into a child process and nowhere else. It builds the command
+// Start is the reveal boundary for processes, one of the two places a payload
+// leaves its wrapper (WriteNewFile is the other): here it leaves into a child
+// process and nowhere else. It builds the command
 // (see command), connects stdout and stderr, and starts it. On failure it
 // returns errNotStarted and never the os/exec error, whose text names the
 // path. Every Value must be set; the caller validates before calling.
@@ -195,6 +199,44 @@ func Start(path Value, args []Value, env []string, set []EnvVar, stdout, stderr 
 	}, nil
 }
 
+// errNotWritten is the only error WriteNewFile returns. The os error names
+// the path, and a refusal must not say what was wrong with the payload.
+var errNotWritten = errors.New("sealed: file was not written")
+
+// WriteNewFile is the second reveal boundary: it creates path exclusively
+// (O_CREATE|O_EXCL, so an existing file or a symlink at path refuses), with
+// mode 0600, and writes prefix, v's payload and suffix to it, and nothing
+// else. prefix and suffix are the caller's fixed text, not payloads.
+//
+// It refuses a payload that is empty or holds a NUL, a carriage return or a
+// newline. The one caller writes the payload as one line of a shell script,
+// and a line break inside it would start a second command the payload's
+// author never quoted.
+//
+// On any failure after the file exists it removes the file, so no partial
+// payload is left behind, and it returns errNotWritten, never the os error.
+// The plaintext exists here and in the file; the caller gets neither.
+func WriteNewFile(path, prefix string, v Value, suffix string) error {
+	if v.reveal == nil {
+		return errNotWritten
+	}
+	payload := v.reveal()
+	if payload == "" || strings.ContainsAny(payload, "\x00\r\n") {
+		return errNotWritten
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the path is the caller's freshly made private directory; O_EXCL refuses anything already there
+	if err != nil {
+		return errNotWritten
+	}
+	_, werr := f.WriteString(prefix + payload + suffix)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(path)
+		return errNotWritten
+	}
+	return nil
+}
+
 // command builds the *exec.Cmd Start runs: Path and Args from path and args,
 // and Env set to a fresh copy of env followed by one Key=Value entry per
 // element of set, in order. Env is never nil, so the child never silently
@@ -205,7 +247,7 @@ func command(path Value, args []Value, env []string, set []EnvVar) *exec.Cmd {
 	for i := range args {
 		argv[i] = args[i].reveal()
 	}
-	cmd := exec.Command(path.reveal(), argv...) //nolint:gosec,noctx // G204: the sealed seam's one reveal, validated absolute by the caller; noctx: the runner owns kill and reap, so CommandContext would race it (see OSSensitiveRunner.RunSensitive)
+	cmd := exec.Command(path.reveal(), argv...) //nolint:gosec,noctx // G204: the sealed seam's process reveal, validated absolute by the caller; noctx: the runner owns kill and reap, so CommandContext would race it (see OSSensitiveRunner.RunSensitive)
 	out := make([]string, 0, len(env)+len(set))
 	out = append(out, env...)
 	for _, e := range set {
