@@ -1,7 +1,7 @@
 # Rex CLI measurement
 
 Measured on 2026-11-14 by a scripted run of Rex Beta `0.1.0-preview.19` (commit `ad5a836c`, `api_revision` 14): one detached scratch session, created and killed.
-`[RAN]` means observed; `[HELP]` means inferred from help text, `api describe` or docs.
+`[RAN]` means observed; `[HELP]` means inferred from help text, `api describe` or docs. The tags mark sections and bullets where the source run distinguished them; a table row or bullet without a tag was not tagged by the run, so treat it as unverified until re-run.
 Raw captures were not kept.
 The contract mapping in section 7 is inferred from the adapter task, not checked against `internal/surface/hcadapter` and the `backend.Adapter` contract, so check it there before building.
 

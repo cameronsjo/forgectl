@@ -12,7 +12,8 @@
 // terminal: the core's id, the terminal's address and creation time, and the
 // forgectl.surface label carrying the ownership marker (see locate).
 //
-// The JSON shapes parsed here were measured on hc 0.1.15 and re-checked on 0.1.21, which added fields only. The parsers are
+// The JSON shapes parsed here were measured on hc 0.1.15 and re-checked on 0.1.21, which
+// added fields only (docs/measurements/hc-0.1.21.md). The parsers are
 // strict and fail closed: anything they cannot read is unreadable, never gone.
 package hcadapter
 
@@ -108,7 +109,7 @@ type Adapter struct {
 }
 
 // selectionKeys are the variables that can choose which hc core a call
-// reaches, measured on hc 0.1.15 (the 0.1.21 check of the adapter verbs found additive drift only): the core's socket lives under
+// reaches, measured on hc 0.1.15: the core's socket lives under
 // $XDG_RUNTIME_DIR/herdr-core/<session>.sock, its state and config under the
 // XDG state and config homes (or HOME without them), and HC_SOCKET names a
 // socket outright. Over-inclusion only fails toward refusal: a value that
@@ -215,7 +216,7 @@ var ErrBadName = errors.New("hc: the name must be 1-32 of a-z 0-9 - _ ., start w
 // maxNameLen is hc's name limit.
 const maxNameLen = 32
 
-// CheckName applies hc's terminal-name rules, measured on hc 0.1.15 (the 0.1.21 check of the adapter verbs found additive drift only), so a
+// CheckName applies hc's terminal-name rules, measured on hc 0.1.15, so a
 // launch can refuse a name before it creates a worktree or a ledger row. The
 // adapter itself cannot check: by the time it runs, the name is sealed.
 func CheckName(name string) error {

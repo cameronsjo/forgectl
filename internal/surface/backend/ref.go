@@ -337,7 +337,7 @@ const hcCoreDomain = "forgectl-hc-core\x00"
 // It is separate from Fingerprint because hc has no socket this process can
 // stat, and because what turns over is different. hc keeps terminals and their
 // addresses across `hc server restart` and `hc update`, and core.id stays the
-// same across both (measured on hc 0.1.15, re-checked on 0.1.21), so a restart is not a new
+// same across both (measured on hc 0.1.15), so a restart is not a new
 // incarnation and must not orphan a worker. A different session, or a core
 // whose state was wiped, reports a different id, and that is the case this
 // refuses. The version is deliberately left out for the same reason.

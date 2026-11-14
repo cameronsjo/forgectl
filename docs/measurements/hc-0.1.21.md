@@ -34,7 +34,7 @@ No other terminal and no server was touched.
 
 ## Still true
 
-hc has no expected-identity guard on `kill`, `rm` or `send` (the debt noted in `close.go`), and 0.1.21 offers none.
+hc has no expected-identity guard on `kill`, `rm` or `send` (the debt noted in `close.go`), and 0.1.21's help offers none either (read from help output, not exercised).
 
 ## Not run
 

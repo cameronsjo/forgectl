@@ -33,7 +33,7 @@ var (
 //     nothing at the recorded address, or a terminal created at another
 //     time. A new id alone proves nothing: a core restarted after its
 //     core.json is deleted reports one while its terminals keep running
-//     (hc 0.1.15, re-checked on 0.1.21), and a differing or unrecorded selection reaches a
+//     (hc 0.1.15), and a differing or unrecorded selection reaches a
 //     different core while the worker's may still run. An unproven
 //     selection refuses with ErrSelectionUnproven.
 //   - `hc get` finds nothing at the recorded address on the matching core.
@@ -48,7 +48,7 @@ var (
 //
 // It never kills, removes, or types anything. Like every hc call, its
 // `hc server status` starts a core when none answers the selection
-// (measured on hc 0.1.15, re-checked on 0.1.21; hc has no read that does not); that core inherits
+// (measured on hc 0.1.15; hc has no read that does not); that core inherits
 // no launcher handles (command).
 func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched string, legacy bool) (string, error) {
 	id, err := ref.HcIdentity()
@@ -74,7 +74,7 @@ func (a *Adapter) Abandoned(ctx context.Context, ref backend.Ref, launched strin
 	// A new core id under the launch's own selection is still not proof: a
 	// core whose core.json is deleted and then restarted reports a new id
 	// while its terminals keep running at the same address and creation
-	// time (measured on hc 0.1.15, re-checked on 0.1.21). So the address is read on this core
+	// time (measured on hc 0.1.15). So the address is read on this core
 	// either way, and only what is there decides.
 	t, state, gcause := a.get(ctx, id.Terminal())
 	switch state {
