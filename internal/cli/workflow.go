@@ -199,7 +199,8 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 			status := newProgramStatus()
 			stopSignals := reportOnSignal(status, plan.Name)
 			defer stopSignals()
-			defer func() { reportOutcome(status, plan.Name, runErr) }()
+			finished := false // false at the deferred report means a panic is unwinding
+			defer func() { reportOutcome(status, plan.Name, runErr, finished) }()
 			opts = append(opts, workflow.WithProgress(func(i, n int, uses string) {
 				status.Working(fmt.Sprintf("%s %d/%d %s", plan.Name, i, n, uses), 100*(i-1)/n)
 			}))
@@ -215,6 +216,7 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 				return runErr
 			}
 			fmt.Fprintf(out, "workflow %q completed\n", plan.Name)
+			finished = true
 			return nil
 		},
 	}

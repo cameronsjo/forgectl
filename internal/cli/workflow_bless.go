@@ -179,7 +179,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	// 7. Sign the exact bytes — this fires the presence prompt.
 	status := newProgramStatus()
 	var env bless.Envelope
-	err = reportBlocked(status, "auth", "Touch ID: bless "+name, func() (signErr error) {
+	err = reportBlocked(status, "Touch ID: bless "+name, func() (signErr error) {
 		env, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainWorkflow, src.Data, time.Now())
 		return signErr
 	})
@@ -337,7 +337,7 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 	fmt.Fprintln(out, "Signing the trust store — approve the presence prompt…")
 	status := newProgramStatus()
 	var storeEnv bless.Envelope
-	err = reportBlocked(status, "auth", "Touch ID: trust init", func() (signErr error) {
+	err = reportBlocked(status, "Touch ID: trust init", func() (signErr error) {
 		storeEnv, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainTrust, storeBytes, time.Now())
 		return signErr
 	})
@@ -359,7 +359,7 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 5. Install the root-owned anchor LAST (interactive sudo).
 	fmt.Fprintln(out, "Installing the root-owned trust anchor — sudo may prompt…")
-	anchorErr := reportBlocked(status, "auth", "sudo: install trust anchor", func() error {
+	anchorErr := reportBlocked(status, "sudo: install trust anchor", func() error {
 		return installAnchor(ctx, deps.Runner, pubDER)
 	})
 	if anchorErr != nil {
@@ -495,7 +495,7 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	fmt.Fprintln(out, "Signing the rebuilt trust store — approve the presence prompt…")
 	status := newProgramStatus()
 	var storeEnv bless.Envelope
-	err = reportBlocked(status, "auth", "Touch ID: trust rebuild", func() (signErr error) {
+	err = reportBlocked(status, "Touch ID: trust rebuild", func() (signErr error) {
 		storeEnv, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, anchorFP, bless.DomainTrust, storeBytes, time.Now())
 		return signErr
 	})

@@ -87,15 +87,13 @@ func (r *Reporter) Done(msg string) { r.send("done", msg, "") }
 // Error reports state=error.
 func (r *Reporter) Error(msg string) { r.send("error", msg, "") }
 
-// Blocked reports state=blocked. kind is "auth" for a credential or approval
-// ceremony; any other value sends no kind key.
-func (r *Reporter) Blocked(kind, msg string) {
-	extra := ""
-	if kind == "auth" {
-		extra = ":kind=auth"
-	}
-	r.send("blocked", msg, extra)
-}
+// Blocked reports state=blocked: the program waits on something other than
+// itself.
+func (r *Reporter) Blocked(msg string) { r.send("blocked", msg, "") }
+
+// BlockedAuth reports state=blocked with kind=auth: the program waits on a
+// credential or presence ceremony (Touch ID, sudo).
+func (r *Reporter) BlockedAuth(msg string) { r.send("blocked", msg, ":kind=auth") }
 
 // Clear removes forgectl's own record, and only that one.
 func (r *Reporter) Clear() { r.send("clear", "", "") }

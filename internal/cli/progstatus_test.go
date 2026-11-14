@@ -16,8 +16,8 @@ func statusB64(s string) string { return base64.StdEncoding.EncodeToString([]byt
 
 func TestReportOutcome(t *testing.T) {
 	var ok, bad bytes.Buffer
-	reportOutcome(progstatus.ForWriter(&ok, false), "wf", nil)
-	reportOutcome(progstatus.ForWriter(&bad, false), "wf", errors.New("step 1 (run): boom\nsecond line"))
+	reportOutcome(progstatus.ForWriter(&ok, false), "wf", nil, true)
+	reportOutcome(progstatus.ForWriter(&bad, false), "wf", errors.New("step 1 (run): boom\nsecond line"), true)
 	if !strings.Contains(ok.String(), "state=done") || !strings.Contains(ok.String(), statusB64("wf finished")) {
 		t.Errorf("nil error = %q, want done 'wf finished'", ok.String())
 	}
@@ -42,7 +42,7 @@ func TestReportBlocked_ClearsOnEveryPath(t *testing.T) {
 			r := progstatus.ForWriter(&buf, false)
 			func() {
 				defer func() { _ = recover() }()
-				_ = reportBlocked(r, "auth", "Touch ID: x", tc.fn)
+				_ = reportBlocked(r, "Touch ID: x", tc.fn)
 			}()
 			out := buf.String()
 			if !strings.Contains(out, "state=blocked") || !strings.Contains(out, ":kind=auth") {
@@ -52,5 +52,14 @@ func TestReportBlocked_ClearsOnEveryPath(t *testing.T) {
 				t.Errorf("last report is not the clear in %q", out)
 			}
 		})
+	}
+}
+
+// A nil error with finished false is a panic unwinding, not a success.
+func TestReportOutcome_PanicIsNotDone(t *testing.T) {
+	var buf bytes.Buffer
+	reportOutcome(progstatus.ForWriter(&buf, false), "wf", nil, false)
+	if strings.Contains(buf.String(), "state=done") || !strings.Contains(buf.String(), "state=error") {
+		t.Errorf("= %q, want an error report and no done", buf.String())
 	}
 }

@@ -52,10 +52,18 @@ func TestReportDeskWatchOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			reportDeskWatchOutcome(progstatus.ForWriter(&buf, false), "x", tc.err)
+			reportDeskWatchOutcome(progstatus.ForWriter(&buf, false), "x", tc.err, true)
 			if !strings.Contains(buf.String(), tc.want) {
 				t.Errorf("= %q, want %q", buf.String(), tc.want)
 			}
 		})
+	}
+}
+
+func TestReportDeskWatchOutcome_PanicIsNotDone(t *testing.T) {
+	var buf bytes.Buffer
+	reportDeskWatchOutcome(progstatus.ForWriter(&buf, false), "x", nil, false)
+	if strings.Contains(buf.String(), "state=done") || !strings.Contains(buf.String(), "state=error") {
+		t.Errorf("= %q, want an error report and no done", buf.String())
 	}
 }

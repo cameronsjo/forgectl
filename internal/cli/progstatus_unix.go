@@ -95,12 +95,12 @@ func reportOnSignal(r *progstatus.Reporter, name string) (stop func()) {
 	}
 }
 
-// reportBlocked reports blocked for kind and msg, runs fn, then clears the row
+// reportBlocked reports blocked (kind=auth) for msg, runs fn, then clears the row
 // on every return path, a panic included. It also reports an interrupt: a
 // Ctrl-C during a presence prompt leaves an error row rather than a stale
 // blocked one.
-func reportBlocked(r *progstatus.Reporter, kind, msg string, fn func() error) error {
-	r.Blocked(kind, msg)
+func reportBlocked(r *progstatus.Reporter, msg string, fn func() error) error {
+	r.BlockedAuth(msg)
 	stop := reportOnSignal(r, msg)
 	defer stop()
 	defer r.Clear()

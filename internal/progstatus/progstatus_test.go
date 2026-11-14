@@ -50,8 +50,8 @@ func TestExactBytes(t *testing.T) {
 		{"working without progress", func(r *Reporter) { r.Working("x", -1) }, pre + "state=working" + idApp + ":msg=" + b64("x") + "\x1b\\"},
 		{"done", func(r *Reporter) { r.Done("fin") }, pre + "state=done" + idApp + ":msg=" + b64("fin") + "\x1b\\"},
 		{"error", func(r *Reporter) { r.Error("bad") }, pre + "state=error" + idApp + ":msg=" + b64("bad") + "\x1b\\"},
-		{"blocked auth", func(r *Reporter) { r.Blocked("auth", "Touch ID") }, pre + "state=blocked" + idApp + ":kind=auth:msg=" + b64("Touch ID") + "\x1b\\"},
-		{"blocked question", func(r *Reporter) { r.Blocked("question", "ok?") }, pre + "state=blocked" + idApp + ":msg=" + b64("ok?") + "\x1b\\"},
+		{"blocked auth", func(r *Reporter) { r.BlockedAuth("Touch ID") }, pre + "state=blocked" + idApp + ":kind=auth:msg=" + b64("Touch ID") + "\x1b\\"},
+		{"blocked", func(r *Reporter) { r.Blocked("ok?") }, pre + "state=blocked" + idApp + ":msg=" + b64("ok?") + "\x1b\\"},
 		{"clear carries id", func(r *Reporter) { r.Clear() }, pre + "state=clear" + idApp + "\x1b\\"},
 	}
 	for _, tc := range cases {

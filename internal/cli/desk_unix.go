@@ -956,7 +956,8 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 	// an interrupted return, so the outcome mapping covers it and no
 	// re-raise handler is installed here (it would race the resume= line).
 	status := newProgramStatus()
-	defer func() { reportDeskWatchOutcome(status, name, retErr) }()
+	finished := false // false at the deferred report means a panic is unwinding
+	defer func() { reportDeskWatchOutcome(status, name, retErr, finished) }()
 	var rc *int
 	printed := 0
 	emit := func(line string) {
@@ -980,7 +981,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		// yet; either way it is waiting on something other than the watcher.
 		switch st {
 		case desk.WatchWaiting:
-			status.Blocked("question", name+" waiting to start")
+			status.Blocked(name + " waiting to start")
 		case desk.WatchRunning:
 			status.Working(name+" running", -1)
 		}
@@ -1027,6 +1028,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 	case *rc != 0:
 		return fmt.Errorf("desk watch: %s finished with exit %d", name, *rc)
 	}
+	finished = true
 	return nil
 }
 
@@ -1050,8 +1052,10 @@ func reportDeskEvent(status *progstatus.Reporter, name, line string) {
 // reportDeskWatchOutcome maps a desk watch's result: nil is done (RUN-END
 // rc=0), a --deadline expiry clears the record because the run outlives the
 // watch, and everything else (rc!=0, lost, skipped, interrupted) is an error.
-func reportDeskWatchOutcome(status *progstatus.Reporter, name string, err error) {
+func reportDeskWatchOutcome(status *progstatus.Reporter, name string, err error, finished bool) {
 	switch {
+	case err == nil && !finished:
+		status.Error(name + " stopped unexpectedly")
 	case err == nil:
 		status.Done(name + " finished")
 	case ExitCode(err) == deskExitTempFail:
