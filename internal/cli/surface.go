@@ -48,8 +48,8 @@ func newSurfaceCmd(deps module.Deps) *cobra.Command {
 		Use:   "surface",
 		Short: "Start a harness in a terminal manager, invocation hidden",
 		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
-tmux, cmux, herdr, or hc (herdr-core) — without the manager ever seeing the
-harness invocation.
+tmux, cmux, herdr, hc (herdr-core), or rex (Rex) — without the manager ever
+seeing the harness invocation.
 
 A manager necessarily learns the target directory and the command it is asked
 to type, because it creates the workspace. What it does not learn is the
@@ -289,7 +289,7 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 	// shipped while this still said "(tmux)" — so it is written next to the
 	// switch it describes in surfaceAdapterFor, and both change together.
 	cmd.Flags().StringVar(&backendName, "surface", "",
-		"terminal manager to create the surface in (tmux, cmux, herdr, hc) — required, no default")
+		"terminal manager to create the surface in (tmux, cmux, herdr, hc, rex) — required, no default")
 	cmd.Flags().StringVar(&displayName, "name", "",
 		"display name for the surface (defaults to the target's directory name)")
 	cmd.Flags().BoolVar(&allowPATH, "allow-path-binary", false,

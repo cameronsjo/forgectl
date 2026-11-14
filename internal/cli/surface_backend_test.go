@@ -19,6 +19,8 @@ func TestParseBackendKind_IsAClosedSet(t *testing.T) {
 		"tmux":  backend.KindTmux,
 		"cmux":  backend.KindCmux,
 		"herdr": backend.KindHerdr,
+		"hc":    backend.KindHc,
+		"rex":   backend.KindRex,
 	}
 	for name, want := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -79,6 +81,8 @@ func TestSurfaceAdapterFor_DrivesEveryNamedBackend(t *testing.T) {
 		"tmux":  backend.KindTmux,
 		"cmux":  backend.KindCmux,
 		"herdr": backend.KindHerdr,
+		"hc":    backend.KindHc,
+		"rex":   backend.KindRex,
 	}
 	for name, want := range driven {
 		t.Run(name, func(t *testing.T) {
