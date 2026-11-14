@@ -587,7 +587,13 @@ func writeShowText(out io.Writer, r *loadedRun, o deskShowOpts, noIcons bool) er
 		if d := runview.StepDur(r.delta.Timing, st); d > 0 && !replay {
 			parts = append(parts, d.Round(100*time.Millisecond).String())
 		}
-		if p := after[st.ID]; len(p) > 0 && !isChainLink(s, i, p) {
+		p := after[st.ID]
+		switch {
+		case len(p) == 0 && i > 0:
+			// Not first and nothing before it: a parallel root, which would
+			// otherwise read the same as a step chained to the one above.
+			parts = append(parts, "no deps")
+		case len(p) > 0 && (i == 0 || !isChainLink(s.Steps[i-1].ID, p)):
 			safe := make([]string, len(p))
 			for k, id := range p {
 				safe[k] = safeLabel(id)
@@ -671,13 +677,10 @@ func predecessors(s runview.RunState) map[string][]string {
 	return out
 }
 
-// isChainLink reports whether the steps before step i are exactly the one
-// listed before it (or none, for the first), so "after" adds nothing.
-func isChainLink(s runview.RunState, i int, before []string) bool {
-	if i == 0 {
-		return len(before) == 0
-	}
-	return len(before) == 1 && before[0] == s.Steps[i-1].ID
+// isChainLink reports whether a step's only predecessor is the step listed
+// just above it (prev), so "after" adds nothing.
+func isChainLink(prev string, before []string) bool {
+	return len(before) == 1 && before[0] == prev
 }
 
 // errPastCap is a log larger than the read cap: the part past it was not read.
