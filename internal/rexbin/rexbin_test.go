@@ -10,32 +10,27 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
-type fakeInfo struct {
+const me = 501
+
+type ent struct {
 	mode fs.FileMode
-	dir  bool
+	uid  int
 }
 
-func (fakeInfo) Name() string        { return "" }
-func (fakeInfo) Size() int64         { return 0 }
-func (i fakeInfo) Mode() fs.FileMode { return i.mode }
-func (fakeInfo) ModTime() time.Time  { return time.Time{} }
-func (i fakeInfo) IsDir() bool       { return i.dir }
-func (fakeInfo) Sys() any            { return nil }
+// fakeFS maps absolute paths to entries; fs.ModeDir in the mode marks a
+// directory.
+type fakeFS map[string]ent
 
-// fakeFS maps absolute paths to modes; a mode of fs.ModeDir marks a directory.
-type fakeFS map[string]fs.FileMode
-
-func (f fakeFS) Stat(name string) (fs.FileInfo, error) {
-	m, ok := f[name]
+func (f fakeFS) Stat(name string) (Info, error) {
+	e, ok := f[name]
 	if !ok {
-		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+		return Info{}, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
-	return fakeInfo{mode: m, dir: m&fs.ModeDir != 0}, nil
+	return Info{Mode: e.mode, IsDir: e.mode&fs.ModeDir != 0, UID: e.uid, UIDKnown: true}, nil
 }
 
 func (f fakeFS) Glob(pattern string) ([]string, error) {
@@ -51,11 +46,31 @@ func (f fakeFS) Glob(pattern string) ([]string, error) {
 	return out, nil
 }
 
+// tree builds a filesystem where each file has the given mode, owned by uid,
+// and every ancestor directory is 0755 owned by uid. "/Applications" itself is
+// root:admin 0775, as on macOS; it is above the bundle, so never checked.
+func tree(uid int, files map[string]fs.FileMode) fakeFS {
+	f := fakeFS{"/Applications": {fs.ModeDir | 0o775, 0}}
+	for p, m := range files {
+		f[p] = ent{m, uid}
+		for d := path.Dir(p); d != "/" && d != "/Applications" && d != "."; d = path.Dir(d) {
+			if _, ok := f[d]; !ok {
+				f[d] = ent{fs.ModeDir | 0o755, uid}
+			}
+		}
+	}
+	return f
+}
+
+func bin(app string) string {
+	return "/Applications/" + app + "/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+}
+
 const (
-	bundleBin = "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
-	pathBin   = "/opt/bin/rex"
-	cfgBin    = "/custom/rex"
-	goodJSON  = `{"rex_version":"0.1.0-preview.19","api_revision":14,"instance_id":"x"}`
+	pathBin  = "/opt/bin/rex"
+	cfgBin   = "/custom/rex"
+	goodJSON = `{"rex_version":"0.1.0-preview.19","api_revision":14,"instance_id":"x"}`
+	oldJSON  = `{"rex_version":"0.0.9","api_revision":13}`
 )
 
 func lookup(found string) func(string) (string, error) {
@@ -67,8 +82,16 @@ func lookup(found string) func(string) (string, error) {
 	}
 }
 
-func runner(replies map[string]string) *fexec.FakeRunner {
-	return &fexec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+// replies answers `<bin> whoami --json` from the map and `codesign` with
+// signErr(path). Anything else is an error.
+func runner(replies map[string]string, signErr func(string) error) *fexec.FakeRunner {
+	return &fexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "codesign" {
+			if signErr == nil {
+				return "", nil
+			}
+			return "", signErr(args[len(args)-1])
+		}
 		r, ok := replies[name]
 		if !ok {
 			return "", errors.New("unexpected binary " + name)
@@ -77,9 +100,24 @@ func runner(replies map[string]string) *fexec.FakeRunner {
 	}}
 }
 
+func resolver(fr *fexec.FakeRunner, f fakeFS, pathResult string, opts ...Option) *Resolver {
+	base := []Option{WithFS(f), WithLookPath(lookup(pathResult)), WithUID(me), WithGOOS("linux"),
+		WithHome("/Users/u", nil), WithBundlePatterns(DefaultBundlePatterns("")...)}
+	return New(fr, append(base, opts...)...)
+}
+
+func ran(fr *fexec.FakeRunner, name string) bool {
+	for _, c := range fr.Calls {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestResolveOrder(t *testing.T) {
-	all := fakeFS{cfgBin: 0o755, pathBin: 0o755, bundleBin: 0o755}
-	replies := map[string]string{cfgBin: goodJSON, pathBin: goodJSON, bundleBin: goodJSON}
+	all := tree(me, map[string]fs.FileMode{cfgBin: 0o755, pathBin: 0o755, bin("Rex Beta.app"): 0o755})
+	replies := map[string]string{cfgBin: goodJSON, pathBin: goodJSON, bin("Rex Beta.app"): goodJSON}
 	tests := []struct {
 		name       string
 		fs         fakeFS
@@ -90,15 +128,14 @@ func TestResolveOrder(t *testing.T) {
 	}{
 		{"config wins over PATH and bundle", all, cfgBin, pathBin, cfgBin, SourceConfig},
 		{"PATH wins over bundle", all, "", pathBin, pathBin, SourcePATH},
-		{"bundle last", fakeFS{bundleBin: 0o755}, "", "", bundleBin, SourceBundle},
-		{"non-executable PATH hit is skipped", fakeFS{pathBin: 0o644, bundleBin: 0o755}, "", pathBin, bundleBin, SourceBundle},
-		{"directory PATH hit is skipped", fakeFS{pathBin: fs.ModeDir | 0o755, bundleBin: 0o755}, "", pathBin, bundleBin, SourceBundle},
+		{"bundle last", tree(me, map[string]fs.FileMode{bin("Rex Beta.app"): 0o755}), "", "", bin("Rex Beta.app"), SourceBundle},
+		{"non-executable PATH hit is skipped", tree(me, map[string]fs.FileMode{pathBin: 0o644, bin("Rex Beta.app"): 0o755}), "", pathBin, bin("Rex Beta.app"), SourceBundle},
+		{"directory PATH hit is skipped", tree(me, map[string]fs.FileMode{bin("Rex Beta.app"): 0o755, pathBin + "/x": 0o755}), "", pathBin, bin("Rex Beta.app"), SourceBundle},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fr := runner(replies)
-			r := New(fr, WithFS(tt.fs), WithLookPath(lookup(tt.pathResult)), WithBundlePatterns("/Applications/Rex*.app/"+bundleRel))
-			got, err := r.Resolve(context.Background(), tt.config)
+			fr := runner(replies, nil)
+			got, err := resolver(fr, tt.fs, tt.pathResult).Resolve(context.Background(), tt.config)
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
@@ -115,20 +152,8 @@ func TestResolveOrder(t *testing.T) {
 	}
 }
 
-func TestBundleGlobSkipsNonExecutableMatch(t *testing.T) {
-	other := "/Applications/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
-	fsys := fakeFS{other: 0o644, bundleBin: 0o755}
-	r := New(runner(map[string]string{bundleBin: goodJSON}), WithFS(fsys), WithLookPath(lookup("")),
-		WithBundlePatterns("/Applications/Rex*.app/"+bundleRel))
-	got, err := r.Resolve(context.Background(), "")
-	if err != nil || got.Path != bundleBin {
-		t.Fatalf("got %+v, %v; want %s", got, err, bundleBin)
-	}
-}
-
 func TestNoneFoundListsEveryPlaceTried(t *testing.T) {
-	r := New(runner(nil), WithFS(fakeFS{}), WithLookPath(lookup("")),
-		WithBundlePatterns("/Applications/Rex*.app/x", "/home/u/Applications/Rex*.app/x"))
+	r := resolver(runner(nil, nil), tree(me, nil), "", WithBundlePatterns("/Applications/Rex*.app/x", "/home/u/Applications/Rex*.app/x"))
 	_, err := r.Resolve(context.Background(), "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -140,8 +165,8 @@ func TestNoneFoundListsEveryPlaceTried(t *testing.T) {
 	}
 }
 
-func TestNonExecutableCandidateIsNamedInRefusal(t *testing.T) {
-	r := New(runner(nil), WithFS(fakeFS{pathBin: 0o644}), WithLookPath(lookup(pathBin)), WithBundlePatterns())
+func TestNonExecutablePATHCandidateIsNamedInRefusal(t *testing.T) {
+	r := resolver(runner(nil, nil), tree(me, map[string]fs.FileMode{pathBin: 0o644}), pathBin, WithBundlePatterns())
 	_, err := r.Resolve(context.Background(), "")
 	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not executable") {
 		t.Fatalf("err = %v", err)
@@ -150,13 +175,12 @@ func TestNonExecutableCandidateIsNamedInRefusal(t *testing.T) {
 
 func TestUnusableConfigKeyIsRefusedNotReplaced(t *testing.T) {
 	for name, fsys := range map[string]fakeFS{
-		"missing":        {pathBin: 0o755},
-		"not executable": {cfgBin: 0o644, pathBin: 0o755},
+		"missing":        tree(me, map[string]fs.FileMode{pathBin: 0o755}),
+		"not executable": tree(me, map[string]fs.FileMode{cfgBin: 0o644, pathBin: 0o755}),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fr := runner(map[string]string{pathBin: goodJSON})
-			r := New(fr, WithFS(fsys), WithLookPath(lookup(pathBin)), WithBundlePatterns())
-			_, err := r.Resolve(context.Background(), cfgBin)
+			fr := runner(map[string]string{pathBin: goodJSON}, nil)
+			_, err := resolver(fr, fsys, pathBin).Resolve(context.Background(), cfgBin)
 			if err == nil || !strings.Contains(err.Error(), "binary_path") || !strings.Contains(err.Error(), cfgBin) {
 				t.Fatalf("err = %v, want a refusal naming the key and path", err)
 			}
@@ -164,6 +188,275 @@ func TestUnusableConfigKeyIsRefusedNotReplaced(t *testing.T) {
 				t.Errorf("ran %+v; a bad config key must not fall through", fr.Calls)
 			}
 		})
+	}
+}
+
+func TestConfigPathForms(t *testing.T) {
+	home := "/Users/u"
+	fsys := tree(me, map[string]fs.FileMode{home + "/bin/rex": 0o755, cfgBin: 0o755, "rel/rex": 0o755, "/Users/u/~/bin/rex": 0o755})
+	replies := map[string]string{home + "/bin/rex": goodJSON, cfgBin: goodJSON}
+	tests := []struct {
+		name, value string
+		homeErr     error
+		want        string // resolved path; empty means a refusal
+		errHas      string
+	}{
+		{"absolute works", cfgBin, nil, cfgBin, ""},
+		{"tilde expands", "~/bin/rex", nil, home + "/bin/rex", ""},
+		{"homeless tilde refuses", "~/bin/rex", errors.New("$HOME is not defined"), "", "no usable home directory"},
+		{"relative refuses", "bin/rex", nil, "", "must be an absolute path"},
+		{"dot-relative refuses", "./rex", nil, "", "must be an absolute path"},
+		{"other-user tilde refuses", "~root/rex", nil, "", "must be an absolute path"},
+		{"bare tilde is the home directory, not a binary", "~", nil, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fr := runner(replies, nil)
+			r := resolver(fr, fsys, "", WithHome(home, tt.homeErr), WithBundlePatterns())
+			got, err := r.Resolve(context.Background(), tt.value)
+			if tt.want != "" {
+				if err != nil || got.Path != tt.want || got.Source != SourceConfig {
+					t.Fatalf("got %+v, %v; want %s", got, err, tt.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "[surface.rex] binary_path") && tt.errHas != "" || !strings.Contains(err.Error(), tt.errHas) {
+				t.Fatalf("err = %v, want it to name the key and contain %q", err, tt.errHas)
+			}
+			if ran(fr, tt.want) || len(fr.Calls) != 0 {
+				t.Errorf("ran %+v on a refused value", fr.Calls)
+			}
+		})
+	}
+}
+
+func TestRelativeConfigNeverTouchesCwdFile(t *testing.T) {
+	// A file at rel/rex exists in the fake cwd-relative namespace; refusal must
+	// come before any Stat of it.
+	fsys := tree(me, map[string]fs.FileMode{"bin/rex": 0o755})
+	fr := runner(map[string]string{"bin/rex": goodJSON}, nil)
+	_, err := resolver(fr, fsys, "").Resolve(context.Background(), "bin/rex")
+	if err == nil || len(fr.Calls) != 0 {
+		t.Fatalf("err = %v, calls = %+v", err, fr.Calls)
+	}
+}
+
+func TestNonAbsoluteHomeIsRefused(t *testing.T) {
+	r := New(runner(nil, nil), WithFS(tree(me, nil)), WithLookPath(lookup("")), WithUID(me), WithHome("rel/home", nil))
+	for _, p := range r.patterns {
+		if strings.Contains(p, "rel/home") {
+			t.Errorf("pattern %q built from a relative home", p)
+		}
+	}
+	_, err := r.Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := r.Resolve(context.Background(), "~/rex"); err == nil || !strings.Contains(err.Error(), "no usable home directory") {
+		t.Errorf("tilde with relative home: err = %v", err)
+	}
+}
+
+func TestDefaultBundlePatterns(t *testing.T) {
+	rel := "Contents/Helpers/*.rex/Contents/MacOS/rex"
+	want := []string{
+		"/Applications/Rex.app/" + rel, "/Applications/Rex Beta.app/" + rel, "/Applications/Rex*.app/" + rel,
+		"/Users/u/Applications/Rex.app/" + rel, "/Users/u/Applications/Rex Beta.app/" + rel, "/Users/u/Applications/Rex*.app/" + rel,
+	}
+	if got := DefaultBundlePatterns("/Users/u"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("patterns =\n%s", strings.Join(got, "\n"))
+	}
+	if n := len(DefaultBundlePatterns("")); n != 3 {
+		t.Errorf("no home: %d patterns, want 3", n)
+	}
+	if n := len(DefaultBundlePatterns("relative")); n != 3 {
+		t.Errorf("relative home: %d patterns, want 3", n)
+	}
+	for _, p := range DefaultBundlePatterns("/Users/a*b[c]") {
+		if strings.Contains(p, "/a*b") || strings.Contains(p, "b[c") {
+			t.Errorf("unescaped glob metacharacters in %q", p)
+		}
+	}
+}
+
+func TestHomeGlobMetacharactersAreLiteral(t *testing.T) {
+	// A home containing * must not match another user's directory.
+	other := "/Users/ab/Applications/Rex.app/Contents/Helpers/x.rex/Contents/MacOS/rex"
+	fsys := tree(me, map[string]fs.FileMode{other: 0o755})
+	fr := runner(map[string]string{other: goodJSON}, nil)
+	r := New(fr, WithFS(fsys), WithLookPath(lookup("")), WithUID(me), WithGOOS("linux"), WithHome("/Users/a*", nil))
+	_, err := r.Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || len(fr.Calls) != 0 {
+		t.Fatalf("err = %v, calls = %+v; * in $HOME must not widen the search", err, fr.Calls)
+	}
+}
+
+func TestBundleOrdering(t *testing.T) {
+	files := map[string]fs.FileMode{bin("Rex Aaa.app"): 0o755, bin("Rex Beta.app"): 0o755, bin("Rex.app"): 0o755}
+	replies := map[string]string{bin("Rex Aaa.app"): goodJSON, bin("Rex Beta.app"): goodJSON, bin("Rex.app"): goodJSON}
+	t.Run("exact Rex.app beats Beta and a look-alike sorted first", func(t *testing.T) {
+		got, err := resolver(runner(replies, nil), tree(me, files), "").Resolve(context.Background(), "")
+		if err != nil || got.Path != bin("Rex.app") {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+	})
+	t.Run("Beta beats an unnamed look-alike", func(t *testing.T) {
+		f := map[string]fs.FileMode{bin("Rex Aaa.app"): 0o755, bin("Rex Beta.app"): 0o755}
+		got, err := resolver(runner(replies, nil), tree(me, f), "").Resolve(context.Background(), "")
+		if err != nil || got.Path != bin("Rex Beta.app") {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+	})
+	t.Run("other Rex apps are a sorted fallback", func(t *testing.T) {
+		f := map[string]fs.FileMode{bin("Rex Zed.app"): 0o755, bin("Rex Aaa.app"): 0o755}
+		r := map[string]string{bin("Rex Zed.app"): goodJSON, bin("Rex Aaa.app"): goodJSON}
+		got, err := resolver(runner(r, nil), tree(me, f), "").Resolve(context.Background(), "")
+		if err != nil || got.Path != bin("Rex Aaa.app") {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+	})
+}
+
+func TestFirstAppWrongRevisionSecondCompatible(t *testing.T) {
+	f := tree(me, map[string]fs.FileMode{bin("Rex.app"): 0o755, bin("Rex Beta.app"): 0o755})
+	fr := runner(map[string]string{bin("Rex.app"): oldJSON, bin("Rex Beta.app"): goodJSON}, nil)
+	got, err := resolver(fr, f, "").Resolve(context.Background(), "")
+	if err != nil || got.Path != bin("Rex Beta.app") {
+		t.Fatalf("got %+v, %v; want the compatible second app", got, err)
+	}
+}
+
+func TestNoneCompatibleListsEveryReason(t *testing.T) {
+	f := tree(me, map[string]fs.FileMode{bin("Rex.app"): 0o755, bin("Rex Beta.app"): 0o755})
+	fr := runner(map[string]string{bin("Rex.app"): oldJSON, bin("Rex Beta.app"): `{"rex_version":"0.2.0","api_revision":15}`}, nil)
+	_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+	if !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("err = %v, want ErrIncompatible", err)
+	}
+	for _, w := range []string{"Rex.app", "api_revision 13", "Rex Beta.app", "api_revision 15"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error lacks %q:\n%v", w, err)
+		}
+	}
+}
+
+func TestOwnershipGate(t *testing.T) {
+	genuine := bin("Rex.app")
+	bundle := "/Applications/Rex.app"
+	tests := []struct {
+		name   string
+		mutate func(fakeFS)
+		reason string
+	}{
+		{"file owned by another user", func(f fakeFS) { f[genuine] = ent{0o755, 999} }, "owned by uid 999"},
+		{"bundle dir owned by another user", func(f fakeFS) { f[bundle] = ent{fs.ModeDir | 0o755, 999} }, "owned by uid 999"},
+		{"group-writable parent", func(f fakeFS) { f[path.Dir(genuine)] = ent{fs.ModeDir | 0o775, me} }, "writable by group or other"},
+		{"world-writable bundle dir", func(f fakeFS) { f[bundle] = ent{fs.ModeDir | 0o757, me} }, "writable by group or other"},
+		{"group-writable file", func(f fakeFS) { f[genuine] = ent{0o775, me} }, "writable by group or other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			tt.mutate(f)
+			fr := runner(map[string]string{genuine: goodJSON}, nil)
+			_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), tt.reason) {
+				t.Fatalf("err = %v, want ErrNotFound naming %q", err, tt.reason)
+			}
+			if ran(fr, genuine) {
+				t.Error("an untrusted candidate was executed")
+			}
+		})
+	}
+	t.Run("root-owned is accepted", func(t *testing.T) {
+		f := tree(0, map[string]fs.FileMode{genuine: 0o755})
+		got, err := resolver(runner(map[string]string{genuine: goodJSON}, nil), f, "").Resolve(context.Background(), "")
+		if err != nil || got.Path != genuine {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+	})
+	t.Run("an unwritable /Applications above the bundle is not judged", func(t *testing.T) {
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		f["/Applications"] = ent{fs.ModeDir | 0o777, 999}
+		if _, err := resolver(runner(map[string]string{genuine: goodJSON}, nil), f, "").Resolve(context.Background(), ""); err != nil {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestPlantedLookAlikeIsSkippedAndRealAppWins(t *testing.T) {
+	planted, genuine := bin("Rex Aaa.app"), bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	for k, v := range tree(999, map[string]fs.FileMode{planted: 0o755}) {
+		if k != "/Applications" {
+			f[k] = v
+		}
+	}
+	fr := runner(map[string]string{genuine: goodJSON, planted: goodJSON}, nil)
+	got, err := resolver(fr, f, "").Resolve(context.Background(), "")
+	if err != nil || got.Path != genuine || ran(fr, planted) {
+		t.Fatalf("got %+v, %v; planted ran=%v", got, err, ran(fr, planted))
+	}
+	// With only the planted app present it is skipped and named, not run.
+	only := tree(999, map[string]fs.FileMode{planted: 0o755})
+	fr = runner(map[string]string{planted: goodJSON}, nil)
+	_, err = resolver(fr, only, "").Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "Rex Aaa.app") || ran(fr, planted) {
+		t.Fatalf("err = %v, planted ran=%v", err, ran(fr, planted))
+	}
+}
+
+func TestSignatureGate(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	bad := func(string) error { return errors.New("code failed to satisfy specified code requirement(s)") }
+
+	t.Run("darwin refuses a bad signature without running the binary", func(t *testing.T) {
+		fr := runner(map[string]string{genuine: goodJSON}, bad)
+		_, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(context.Background(), "")
+		if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "Team ID "+TeamID) || ran(fr, genuine) {
+			t.Fatalf("err = %v, ran=%v", err, ran(fr, genuine))
+		}
+	})
+	t.Run("darwin accepts a good signature and passes the requirement", func(t *testing.T) {
+		fr := runner(map[string]string{genuine: goodJSON}, nil)
+		if _, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(context.Background(), ""); err != nil {
+			t.Fatal(err)
+		}
+		first := fr.Calls[0]
+		want := []string{"--verify", "--strict", `-R=anchor apple generic and certificate leaf[subject.OU] = "AG92C3PT77"`, genuine}
+		if first.Name != "codesign" || strings.Join(first.Args, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("first call = %+v, want codesign before whoami", first)
+		}
+		if fr.Calls[len(fr.Calls)-1].Name != genuine {
+			t.Errorf("whoami did not run last: %+v", fr.Calls)
+		}
+	})
+	t.Run("other OSes skip the signature check", func(t *testing.T) {
+		fr := runner(map[string]string{genuine: goodJSON}, bad)
+		if _, err := resolver(fr, f, "", WithGOOS("linux")).Resolve(context.Background(), ""); err != nil {
+			t.Fatal(err)
+		}
+		if ran(fr, "codesign") {
+			t.Error("codesign ran off darwin")
+		}
+	})
+	t.Run("a pinned or PATH binary is not signature-checked", func(t *testing.T) {
+		g := tree(me, map[string]fs.FileMode{cfgBin: 0o755})
+		fr := runner(map[string]string{cfgBin: goodJSON}, bad)
+		if _, err := resolver(fr, g, "", WithGOOS("darwin")).Resolve(context.Background(), cfgBin); err != nil || ran(fr, "codesign") {
+			t.Fatalf("err = %v, codesign ran = %v", err, ran(fr, "codesign"))
+		}
+	})
+}
+
+func TestBundleOutsideAppIsRefused(t *testing.T) {
+	odd := "/Applications/Rex/Contents/rex"
+	f := tree(me, map[string]fs.FileMode{odd: 0o755})
+	fr := runner(map[string]string{odd: goodJSON}, nil)
+	_, err := resolver(fr, f, "", WithBundlePatterns("/Applications/Rex/Contents/rex")).Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not inside an .app bundle") || ran(fr, odd) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -184,14 +477,15 @@ func TestVettingRefusals(t *testing.T) {
 		{"missing api_revision", `{"rex_version":"0.1.0"}`, nil, []string{"no api_revision"}},
 		{"string api_revision", `{"rex_version":"0.1.0","api_revision":"14"}`, nil, []string{"did not return JSON"}},
 		{"whoami fails", "", errors.New("exit status 1"), []string{"whoami --json failed"}},
+		{"whoami times out on its own", "", context.DeadlineExceeded, []string{"whoami --json failed"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fr := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) { return tt.reply, tt.runErr }}
-			// A later candidate that would pass must not be reached.
-			r := New(fr, WithFS(fakeFS{pathBin: 0o755, bundleBin: 0o755}), WithLookPath(lookup(pathBin)),
-				WithBundlePatterns("/Applications/Rex*.app/"+bundleRel))
-			_, err := r.Resolve(context.Background(), "")
+			// A later candidate that would pass must not be reached: a PATH
+			// hit is an explicit choice, so a failed check refuses at once.
+			f := tree(me, map[string]fs.FileMode{pathBin: 0o755, bin("Rex.app"): 0o755})
+			_, err := resolver(fr, f, pathBin).Resolve(context.Background(), "")
 			if !errors.Is(err, ErrIncompatible) {
 				t.Fatalf("err = %v, want ErrIncompatible", err)
 			}
@@ -207,6 +501,53 @@ func TestVettingRefusals(t *testing.T) {
 	}
 }
 
+func TestCallerCancellationIsNotIncompatible(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fr := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		cancel()
+		return "", context.Canceled
+	}}
+	f := tree(me, map[string]fs.FileMode{pathBin: 0o755, bin("Rex.app"): 0o755})
+	for _, cfg := range []string{"", pathBin} {
+		_, err := resolver(fr, f, pathBin).Resolve(ctx, cfg)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrIncompatible) {
+			t.Fatalf("cfg=%q err = %v, want context.Canceled and not ErrIncompatible", cfg, err)
+		}
+	}
+	// A cancelled call during bundle candidates stops the walk.
+	fr2 := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		cancel()
+		return "", context.Canceled
+	}}
+	f2 := tree(me, map[string]fs.FileMode{bin("Rex.app"): 0o755, bin("Rex Beta.app"): 0o755})
+	_, err := resolver(fr2, f2, "").Resolve(ctx, "")
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrIncompatible) || len(fr2.Calls) != 1 {
+		t.Fatalf("err = %v, calls = %d", err, len(fr2.Calls))
+	}
+}
+
+func TestWhoamiGetsItsOwnDeadline(t *testing.T) {
+	var got bool
+	fr := &fexec.FakeRunner{}
+	r := resolver(fr, tree(me, map[string]fs.FileMode{pathBin: 0o755}), pathBin)
+	r.runner = ctxRunner{FakeRunner: fr, onRun: func(ctx context.Context) { _, got = ctx.Deadline() }}
+	_, _ = r.Resolve(context.Background(), "")
+	if !got {
+		t.Error("whoami ran without a deadline")
+	}
+}
+
+// ctxRunner exposes the context Run received.
+type ctxRunner struct {
+	*fexec.FakeRunner
+	onRun func(context.Context)
+}
+
+func (c ctxRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	c.onRun(ctx)
+	return goodJSON, nil
+}
+
 func TestVersionAcceptance(t *testing.T) {
 	for v, ok := range map[string]bool{
 		"0.1.0-preview.19": true, "1.2.3": true, "1.2.3+build.5": true,
@@ -218,23 +559,10 @@ func TestVersionAcceptance(t *testing.T) {
 	}
 }
 
-func TestDefaultBundlePatterns(t *testing.T) {
-	got := DefaultBundlePatterns("/Users/u")
-	if len(got) != 2 || got[0] != "/Applications/Rex*.app/Contents/Helpers/*.rex/Contents/MacOS/rex" ||
-		got[1] != "/Users/u/Applications/Rex*.app/Contents/Helpers/*.rex/Contents/MacOS/rex" {
-		t.Errorf("patterns = %q", got)
-	}
-	if n := len(DefaultBundlePatterns("")); n != 1 {
-		t.Errorf("no home: %d patterns, want 1", n)
-	}
-}
-
 func TestMissingHomeIsNamedInRefusal(t *testing.T) {
-	r := New(runner(nil), WithFS(fakeFS{}), WithLookPath(lookup("")))
-	r.homeErr = errors.New("$HOME is not defined")
-	r.patterns = []string{"/Applications/Rex*.app/x"}
+	r := resolver(runner(nil, nil), tree(me, nil), "", WithHome("", errors.New("$HOME is not defined")), WithBundlePatterns("/Applications/Rex*.app/x"))
 	_, err := r.Resolve(context.Background(), "")
-	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "no home directory: $HOME is not defined") {
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "no usable home directory: $HOME is not defined") {
 		t.Fatalf("err = %v", err)
 	}
 }
