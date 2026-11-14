@@ -30,6 +30,7 @@ type Executor struct {
 	dryRun     bool
 	recorder   Recorder
 	resumeFrom int
+	progress   func(i, n int, uses string)
 }
 
 // Option configures an Executor at construction.
@@ -45,6 +46,15 @@ func WithDryRun(dryRun bool) Option {
 // a crash mid-workflow leaves a resumable checkpoint on disk.
 func WithRecorder(r Recorder) Option {
 	return func(e *Executor) { e.recorder = r }
+}
+
+// WithProgress sets a callback invoked before each step that will execute (a
+// step skipped by WithResumeFrom does not call it). i is the 1-based position
+// in the plan and n is the plan's full length, so a resumed run reports 3/5,
+// not 1/3. The callback must not block; the workflow package stays ignorant of
+// what it feeds.
+func WithProgress(fn func(i, n int, uses string)) Option {
+	return func(e *Executor) { e.progress = fn }
 }
 
 // WithResumeFrom skips the first `from` steps: their checkpoints were validated
@@ -135,6 +145,9 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		if i < e.resumeFrom {
 			slog.Debug("Skipping checkpointed step (resume).", "stepIndex", i, "stepUse", step.Uses)
 			continue
+		}
+		if e.progress != nil {
+			e.progress(i+1, len(plan.Steps), step.Uses)
 		}
 		def, ok := e.registry[step.Uses]
 		if !ok {

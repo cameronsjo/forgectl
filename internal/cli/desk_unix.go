@@ -23,6 +23,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/progstatus"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tui"
 	"github.com/cameronsjo/forgectl/internal/workstate"
@@ -907,7 +908,7 @@ func stepView(r desk.StepStatus) deskStepJSON {
 	return s
 }
 
-func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, deadline, skip int) error {
+func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, deadline, skip int) (retErr error) {
 	if err := checkDeskName(name); err != nil {
 		return err
 	}
@@ -951,9 +952,15 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		defer cancel()
 	}
 	w := &stickyWriter{w: cmd.OutOrStdout()}
+	// OSC 7501: the existing NotifyContext above already turns a signal into
+	// an interrupted return, so the outcome mapping covers it and no
+	// re-raise handler is installed here (it would race the resume= line).
+	status := newProgramStatus()
+	defer func() { reportDeskWatchOutcome(status, name, retErr) }()
 	var rc *int
 	printed := 0
 	emit := func(line string) {
+		reportDeskEvent(status, name, line)
 		if w.err != nil {
 			return
 		}
@@ -968,7 +975,11 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 			rc = &v
 		}
 	}
-	state, seen, err := d.Watch(watchCtx, name, skip, deskWatchInterval, emit)
+	state, seen, err := d.WatchNotify(watchCtx, name, skip, deskWatchInterval, emit, func(st desk.WatchState) {
+		if st == desk.WatchWaiting {
+			status.Blocked("question", name+" waiting for approval")
+		}
+	})
 	switch {
 	case w.err != nil:
 		// stdout is gone, so the resume point goes in the error, on stderr.
@@ -1012,6 +1023,37 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		return fmt.Errorf("desk watch: %s finished with exit %d", name, *rc)
 	}
 	return nil
+}
+
+// reportDeskEvent turns a desk event line into an OSC 7501 working report.
+func reportDeskEvent(status *progstatus.Reporter, name, line string) {
+	verb, rest, _ := strings.Cut(line, " ")
+	switch verb {
+	case desk.EventRunStart:
+		status.Working(name+" running", -1)
+	case desk.EventStepStart:
+		for _, f := range strings.Fields(rest) {
+			if id, ok := strings.CutPrefix(f, "id="); ok {
+				status.Working(name+" "+id, -1)
+				return
+			}
+		}
+		status.Working(name+" running", -1)
+	}
+}
+
+// reportDeskWatchOutcome maps a desk watch's result: nil is done (RUN-END
+// rc=0), a --deadline expiry clears the record because the run outlives the
+// watch, and everything else (rc!=0, lost, skipped, interrupted) is an error.
+func reportDeskWatchOutcome(status *progstatus.Reporter, name string, err error) {
+	switch {
+	case err == nil:
+		status.Done(name + " finished")
+	case ExitCode(err) == deskExitTempFail:
+		status.Clear()
+	default:
+		status.Error(name + ": " + shortCause(err))
+	}
 }
 
 // runEndRC reads rc= from a RUN-END line.

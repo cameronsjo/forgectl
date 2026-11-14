@@ -177,7 +177,10 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 
 	// 7. Sign the exact bytes — this fires the presence prompt.
+	status := newProgramStatus()
+	status.Blocked("auth", "Touch ID: bless "+name)
 	env, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainWorkflow, src.Data, time.Now())
+	status.Clear() // every outcome, cancel and error included, ends the wait
 	if err != nil {
 		return err
 	}
@@ -330,7 +333,10 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 4. Sign the store (presence prompt) and write it plus its sidecar.
 	fmt.Fprintln(out, "Signing the trust store — approve the presence prompt…")
+	status := newProgramStatus()
+	status.Blocked("auth", "Touch ID: trust init")
 	storeEnv, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainTrust, storeBytes, time.Now())
+	status.Clear()
 	if err != nil {
 		return err
 	}
@@ -349,8 +355,11 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 5. Install the root-owned anchor LAST (interactive sudo).
 	fmt.Fprintln(out, "Installing the root-owned trust anchor — sudo may prompt…")
-	if err := installAnchor(ctx, deps.Runner, pubDER); err != nil {
-		return fmt.Errorf("install trust anchor: %w", err)
+	status.Blocked("auth", "sudo: install trust anchor")
+	anchorErr := installAnchor(ctx, deps.Runner, pubDER)
+	status.Clear()
+	if anchorErr != nil {
+		return fmt.Errorf("install trust anchor: %w", anchorErr)
 	}
 	fmt.Fprintf(out, "Trust anchor installed: %s\nThis machine is now the trust root and first blesser.\n", bless.AnchorPath)
 	return nil
@@ -480,7 +489,10 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	// 6. Sign the store (ONE presence prompt) and write it plus its sidecar. No
 	//    InstallAnchor, no sudo — the anchor is untouched.
 	fmt.Fprintln(out, "Signing the rebuilt trust store — approve the presence prompt…")
+	status := newProgramStatus()
+	status.Blocked("auth", "Touch ID: trust rebuild")
 	storeEnv, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, anchorFP, bless.DomainTrust, storeBytes, time.Now())
+	status.Clear()
 	if err != nil {
 		return err
 	}
