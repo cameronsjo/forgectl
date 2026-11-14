@@ -295,6 +295,7 @@ func TestServerSource_KindIsClosed(t *testing.T) {
 		{backend.CmuxEnvServer(), backend.KindCmux, "cmux-env"},
 		{backend.HerdrDefaultSessionServer(), backend.KindHerdr, "herdr-default-session"},
 		{backend.HerdrNamedSessionServer(), backend.KindHerdr, "herdr-named-session"},
+		{backend.RexDefaultServer(), backend.KindRex, "rex-default"},
 	}
 
 	for _, tc := range tests {
@@ -329,6 +330,7 @@ func TestRef_RoundTripsThroughJSON(t *testing.T) {
 		"tmux":  tmux,
 		"cmux":  cmuxRef(t),
 		"herdr": herdrRef(t),
+		"rex":   rexRef(t),
 	}
 
 	for name, ref := range refs {

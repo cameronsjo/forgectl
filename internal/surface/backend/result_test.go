@@ -338,6 +338,7 @@ func TestProbeResult_Matrix(t *testing.T) {
 	}{
 		{"present", backend.NewProbePresent(), backend.ProbePresent, true},
 		{"gone", backend.NewProbeGone(), backend.ProbeGone, true},
+		{"finished", backend.NewProbeFinished(3), backend.ProbeGone, true},
 		{"identity mismatch", backend.NewProbeIdentityMismatch(cause()), backend.ProbeIdentityMismatch, false},
 		{"unreadable", backend.NewProbeUnreadable(cause()), backend.ProbeUnreadable, false},
 	}
@@ -353,6 +354,20 @@ func TestProbeResult_Matrix(t *testing.T) {
 				t.Errorf("Conclusive() = %v, want %v", got, tc.conclusive)
 			}
 		})
+	}
+
+	// Only a finished probe reports an exit code; a plain gone one, which
+	// cannot tell finished from never-existed, does not claim one.
+	if code, ok := backend.NewProbeFinished(-1).Finished(); !ok || code != -1 {
+		t.Errorf("NewProbeFinished(-1).Finished() = %d, %v", code, ok)
+	}
+	for name, res := range map[string]backend.ProbeResult{
+		"gone": backend.NewProbeGone(), "present": backend.NewProbePresent(),
+		"unreadable": backend.NewProbeUnreadable(cause()),
+	} {
+		if _, ok := res.Finished(); ok {
+			t.Errorf("a %s probe reports a finished program", name)
+		}
 	}
 
 	// A ProbePresent carrying a cause is unconstructible from out here — the
