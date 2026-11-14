@@ -10,8 +10,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/progstatus"
 )
+
+func TestReportDeskWatchState(t *testing.T) {
+	var buf bytes.Buffer
+	r := progstatus.ForWriter(&buf, false)
+	reportDeskWatchState(r, "x", desk.WatchWaiting)
+	if got := buf.String(); !strings.Contains(got, "state=blocked") || !strings.Contains(got, ":kind=permission") {
+		t.Errorf("waiting = %q, want blocked with kind=permission", got)
+	}
+	buf.Reset()
+	reportDeskWatchState(r, "x", desk.WatchRunning)
+	if got := buf.String(); !strings.Contains(got, "state=working") || strings.Contains(got, "kind=") {
+		t.Errorf("running = %q, want working with no kind", got)
+	}
+}
 
 func TestReportDeskEvent(t *testing.T) {
 	cases := []struct {

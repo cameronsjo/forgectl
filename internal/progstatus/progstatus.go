@@ -87,13 +87,40 @@ func (r *Reporter) Done(msg string) { r.send("done", msg, "") }
 // Error reports state=error.
 func (r *Reporter) Error(msg string) { r.send("error", msg, "") }
 
-// Blocked reports state=blocked: the program waits on something other than
-// itself.
-func (r *Reporter) Blocked(msg string) { r.send("blocked", msg, "") }
+// Kind says what a blocked program waits for. The spec (rev 0.4) defines three
+// and allows kind only with state=blocked; a host treats an unrecognized value
+// as absent, so Blocked drops any other Kind rather than send it.
+type Kind string
 
-// BlockedAuth reports state=blocked with kind=auth: the program waits on a
-// credential or presence ceremony (Touch ID, sudo).
-func (r *Reporter) BlockedAuth(msg string) { r.send("blocked", msg, ":kind=auth") }
+const (
+	// KindNone sends no kind: blocked on something the three do not name.
+	KindNone Kind = ""
+	// KindPermission is an approval to do something (a pending desk item).
+	KindPermission Kind = "permission"
+	// KindQuestion is an answer the user must type.
+	KindQuestion Kind = "question"
+	// KindAuth is a login or credential: a presence ceremony (Touch ID, sudo).
+	KindAuth Kind = "auth"
+)
+
+// valid reports whether k is one the spec defines.
+func (k Kind) valid() bool {
+	switch k {
+	case KindPermission, KindQuestion, KindAuth:
+		return true
+	}
+	return false
+}
+
+// Blocked reports state=blocked: the program waits on something other than
+// itself. kind says on what; KindNone or an unknown Kind sends no kind key.
+func (r *Reporter) Blocked(kind Kind, msg string) {
+	extra := ""
+	if kind.valid() {
+		extra = ":kind=" + string(kind)
+	}
+	r.send("blocked", msg, extra)
+}
 
 // Clear removes forgectl's own record, and only that one.
 func (r *Reporter) Clear() { r.send("clear", "", "") }

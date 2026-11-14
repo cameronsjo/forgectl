@@ -11,7 +11,7 @@ func reportOnSignal(*progstatus.Reporter, string) (stop func()) { return func() 
 
 // reportBlocked reports blocked (kind=auth), runs fn, and clears the row on every return path.
 func reportBlocked(r *progstatus.Reporter, msg string, fn func() error) error {
-	r.BlockedAuth(msg)
+	r.Blocked(progstatus.KindAuth, msg)
 	defer r.Clear()
 	return fn()
 }

@@ -100,7 +100,7 @@ func reportOnSignal(r *progstatus.Reporter, name string) (stop func()) {
 // Ctrl-C during a presence prompt leaves an error row rather than a stale
 // blocked one.
 func reportBlocked(r *progstatus.Reporter, msg string, fn func() error) error {
-	r.BlockedAuth(msg)
+	r.Blocked(progstatus.KindAuth, msg)
 	stop := reportOnSignal(r, msg)
 	defer stop()
 	defer r.Clear()

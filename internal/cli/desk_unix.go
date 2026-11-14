@@ -146,7 +146,9 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	defer d.Close()           //nolint:errcheck // read side; nothing to flush
 	home, _ := deskUserHome() // display only: no home shows the full path
 	ascii := deskNoIcons(cmd, deps)
-	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: ascii})
+	onWaiting, release := newDeskSignal(deps).waitingRow(newProgramStatus())
+	defer release() // the row must not outlive the dashboard
+	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: ascii, OnWaiting: onWaiting})
 }
 
 // runDeskFrame is `desk --frame`: one frame, read through a read-only open, so
@@ -976,16 +978,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 			rc = &v
 		}
 	}
-	state, seen, err := d.WatchNotify(watchCtx, name, skip, deskWatchInterval, emit, func(st desk.WatchState) {
-		// WatchWaiting is a pending item or a claimed one that has not started
-		// yet; either way it is waiting on something other than the watcher.
-		switch st {
-		case desk.WatchWaiting:
-			status.Blocked(name + " waiting to start")
-		case desk.WatchRunning:
-			status.Working(name+" running", -1)
-		}
-	})
+	state, seen, err := d.WatchNotify(watchCtx, name, skip, deskWatchInterval, emit, func(st desk.WatchState) { reportDeskWatchState(status, name, st) })
 	switch {
 	case w.err != nil:
 		// stdout is gone, so the resume point goes in the error, on stderr.
@@ -1030,6 +1023,18 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 	}
 	finished = true
 	return nil
+}
+
+// reportDeskWatchState reports what the watched item is doing. WatchWaiting is
+// a pending item or a claimed one that has not started yet; either way it is
+// waiting on someone's approval, which the protocol calls kind=permission.
+func reportDeskWatchState(status *progstatus.Reporter, name string, st desk.WatchState) {
+	switch st {
+	case desk.WatchWaiting:
+		status.Blocked(progstatus.KindPermission, name+" waiting to start")
+	case desk.WatchRunning:
+		status.Working(name+" running", -1)
+	}
 }
 
 // reportDeskEvent turns a desk event line into an OSC 7501 working report.
