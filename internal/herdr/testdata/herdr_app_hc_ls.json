@@ -1,0 +1,134 @@
+{
+  "hidden_finished": 18,
+  "terminals": [
+    {
+      "address": "t4s",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/forge/beta",
+      "state": "live",
+      "status": "done",
+      "turn": 69,
+      "where": "Space 1"
+    },
+    {
+      "address": "t4w",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/forge/beta",
+      "state": "live",
+      "status": "blocked",
+      "turn": 35,
+      "where": "Space 1"
+    },
+    {
+      "address": "t4y",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/home/gamma",
+      "state": "live",
+      "status": "working",
+      "turn": 50,
+      "where": "Space 1"
+    },
+    {
+      "address": "t57",
+      "agent": "zsh",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "turn": 0,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5b",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "status": "working",
+      "turn": 15,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5k",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "status": "done",
+      "turn": 21,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5m",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "status": "working",
+      "turn": 4,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5n",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/misc/eps",
+      "parent": "t5k",
+      "state": "live",
+      "status": "working",
+      "turn": 12,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5p",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/misc/eps",
+      "parent": "t5k",
+      "state": "live",
+      "status": "working",
+      "turn": 3,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5q",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/forge/zeta/.claude/worktrees/x",
+      "parent": "t5k",
+      "state": "live",
+      "status": "working",
+      "turn": 4,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5r",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Documents/notes",
+      "parent": "t5k",
+      "state": "live",
+      "status": "working",
+      "turn": 2,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5t",
+      "agent": "claude-code",
+      "cwd": "/Users/example/.dotfiles",
+      "parent": "t4y",
+      "state": "live",
+      "status": "done",
+      "turn": 2,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5w",
+      "agent": "zsh",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "turn": 0,
+      "where": "Space 1"
+    },
+    {
+      "address": "t5x",
+      "agent": "claude-code",
+      "cwd": "/Users/example/Projects/home/delta",
+      "state": "live",
+      "status": "working",
+      "turn": 3,
+      "where": "Space 1"
+    }
+  ]
+}

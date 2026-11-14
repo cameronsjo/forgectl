@@ -25,4 +25,14 @@
 // known whether a freed id is reused. Re-list after every mutation and resolve
 // a target by terminal_id immediately before acting on it; terminal_id is
 // stable across moves.
+//
+// # Hosts
+//
+// [DetectHost] tells which host a process is in: a herdr 0.9 pane (HERDR_*
+// variables; the [Client]) or a herdr-app terminal (HC_TERMINAL_ID and no
+// HERDR_*; the [AppClient]). Both satisfy [Window], which is what `forgectl
+// herdr organize` reads and changes. [AppClient] documents how herdr-app's
+// spaces, tabs, ids and 1-based positions map onto the 0.9 model, and why it
+// cannot move a tab between spaces. Nothing on the worker launch path builds
+// an AppClient.
 package herdr
