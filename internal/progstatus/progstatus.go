@@ -12,6 +12,7 @@ package progstatus
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"unicode"
@@ -45,7 +46,7 @@ var isTerminal = func(fd uintptr) bool { return term.IsTerminal(int(fd)) }
 // Reporter writes OSC 7501 reports. The zero value and a nil *Reporter are
 // disabled no-ops.
 type Reporter struct {
-	f   *os.File
+	w   io.Writer
 	tmx bool
 }
 
@@ -61,11 +62,15 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	if getenv(mail.EnvWorker) != "" || getenv(mail.EnvDrainWorker) != "" {
 		return &Reporter{}
 	}
-	return &Reporter{f: f, tmx: getenv("TMUX") != ""}
+	return &Reporter{w: f, tmx: getenv("TMUX") != ""}
 }
 
+// ForWriter builds a Reporter that writes to w and skips every gate. It is for
+// tests and for a caller that has already decided to report; commands use New.
+func ForWriter(w io.Writer, tmux bool) *Reporter { return &Reporter{w: w, tmx: tmux} }
+
 // Enabled reports whether this Reporter will write.
-func (r *Reporter) Enabled() bool { return r != nil && r.f != nil }
+func (r *Reporter) Enabled() bool { return r != nil && r.w != nil }
 
 // Working reports state=working. progress < 0 omits the progress key.
 func (r *Reporter) Working(msg string, progress int) {
@@ -116,7 +121,7 @@ func (r *Reporter) send(state, msg, extra string) {
 	if r.tmx {
 		seq = ansi.TmuxPassthrough(seq)
 	}
-	_, _ = r.f.WriteString(seq)
+	_, _ = io.WriteString(r.w, seq)
 }
 
 // cleanMsg caps the text and strips every control rune, so the spec's

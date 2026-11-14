@@ -8,9 +8,9 @@ Runs a TOML step list: `forgectl workflow run <name> [--dry-run] [--resume] [--p
 
 | Command | Reports |
 |---|---|
-| `workflow run` | `working` with `<name> <i>/<n> <verb>` and progress before each step (a resumed run shows `3/5`), `done` on success, `error` on any failure or a Ctrl-C |
-| `desk watch` | `blocked` while the item waits for approval, `working` with the step name once it runs, `done` on `RUN-END rc=0`, `error` on any other end, a lost or skipped item, or an interrupt. A `--deadline` expiry clears the row, because the run outlives the watch. `--responses` reports nothing |
-| `workflow bless`, `trust init`, `trust rebuild` | `blocked` with `kind=auth` and `Touch ID: <what>` while the presence prompt is open; `trust init` does the same for the `sudo` leg. The row is cleared when the call returns, on every path |
+| `workflow run` | `working` with `<name> <i>/<n> <verb>` and progress before each step (a resumed run shows `3/5`), `done` on success, `error` on any failure, or `error` reading `interrupted` on Ctrl-C or SIGTERM (forgectl still dies by the signal) |
+| `desk watch` | `blocked` while the item waits to start (pending, or claimed with no run yet), `working` with the step name once it runs, `done` on `RUN-END rc=0`, `error` on any other end, a lost or skipped item, or an interrupt. A `--deadline` expiry clears the row, because the run outlives the watch. `--responses` reports nothing |
+| `workflow bless`, `trust init`, `trust rebuild` | `blocked` with `kind=auth` and `Touch ID: <what>` while the presence prompt is open; `trust init` does the same for the `sudo` leg. The row is cleared when the call returns, on every path, and Ctrl-C or SIGTERM at the prompt leaves an `error` row reading `interrupted` |
 
 - **Off switch:** set `FORGECTL_NO_PROGRAM_STATUS` to any non-empty value.
 - **Off by itself** when stderr is not a terminal, `TERM=dumb`, or `FORGECTL_WORKER` or `FORGECTL_DRAIN_WORKER` is set. forgectl reads OSC 7501 from worker panes to decide readiness, so it never writes it inside one.

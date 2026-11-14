@@ -101,8 +101,11 @@ func TestTmuxPassthrough(t *testing.T) {
 	forceTTY(t, true)
 	r, out := capture(t, map[string]string{"TMUX": "/tmp/tmux-1/default,1,0"})
 	r.Done("x")
-	if got := out(); !strings.HasPrefix(got, "\x1bPtmux;") {
-		t.Errorf("tmux output = %q, want ESC P tmux; prefix", got)
+	// Inside tmux's DCS passthrough every ESC is doubled and the whole thing ends in ST.
+	inner := "\x1b\x1b]7501;state=done:id=forgectl:app=forgectl:msg=" + b64("x") + "\x1b\x1b\\"
+	want := "\x1bPtmux;" + inner + "\x1b\\"
+	if got := out(); got != want {
+		t.Errorf("tmux output = %q, want %q", got, want)
 	}
 }
 

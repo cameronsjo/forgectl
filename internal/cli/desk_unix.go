@@ -976,8 +976,13 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		}
 	}
 	state, seen, err := d.WatchNotify(watchCtx, name, skip, deskWatchInterval, emit, func(st desk.WatchState) {
-		if st == desk.WatchWaiting {
-			status.Blocked("question", name+" waiting for approval")
+		// WatchWaiting is a pending item or a claimed one that has not started
+		// yet; either way it is waiting on something other than the watcher.
+		switch st {
+		case desk.WatchWaiting:
+			status.Blocked("question", name+" waiting to start")
+		case desk.WatchRunning:
+			status.Working(name+" running", -1)
 		}
 	})
 	switch {
