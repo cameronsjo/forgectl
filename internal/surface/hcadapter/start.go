@@ -12,7 +12,7 @@ import (
 // hc changed state.
 //
 // The bootstrap is the one operand after `--`; hc runs a single string under
-// `sh -c` (measured on 0.1.15). `--outlive-parent` keeps the worker running
+// `sh -c` (measured on 0.1.15, re-checked on 0.1.21 with additive drift only). `--outlive-parent` keeps the worker running
 // when the launcher's own terminal ends. The create reply has no creation
 // time, so a follow-up `hc get` reads it, and checks the label at the same
 // time.
