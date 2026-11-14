@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -44,10 +45,16 @@ func TestCatchableSignals_SkipsIgnored(t *testing.T) {
 	}
 }
 
-// slowWriter takes 100ms per write, like a terminal that is slow to drain.
-type slowWriter struct{}
+// slowWriter takes 100ms per write, like a terminal that is slow to drain, and
+// tells the test when its first write has begun: the handler has then taken the
+// signal and is mid-report, which is the moment the race needs.
+type slowWriter struct {
+	started chan struct{}
+	once    *sync.Once
+}
 
-func (slowWriter) Write(p []byte) (int, error) {
+func (w slowWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
 	time.Sleep(100 * time.Millisecond)
 	return len(p), nil
 }
@@ -58,14 +65,19 @@ func (slowWriter) Write(p []byte) (int, error) {
 func TestReportOnSignal_DiesBySignal(t *testing.T) {
 	if os.Getenv("FORGECTL_SIGNAL_HELPER") == "1" {
 		// A slow write holds the handler mid-report while the command returns.
-		r := progstatus.ForWriter(slowWriter{}, false)
+		w := slowWriter{started: make(chan struct{}), once: &sync.Once{}}
+		r := progstatus.ForWriter(w, false)
 		stop := reportOnSignal(r, "helper")
 		fmt.Println("ready")
-		// Simulate the command returning promptly once its children die from
-		// the same Ctrl-C: stop, then a normal exit(1).
-		time.Sleep(60 * time.Millisecond)
-		stop()
-		os.Exit(1)
+		// Return only once the handler is mid-write, as a command whose
+		// children died from the same Ctrl-C would: stop, then a normal exit(1).
+		select {
+		case <-w.started:
+			stop()
+			os.Exit(1)
+		case <-time.After(10 * time.Second):
+			os.Exit(3) // the signal never arrived; not the behavior under test
+		}
 	}
 	// The command is this very test binary with a fixed -test.run pattern; no input reaches it.
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestReportOnSignal_DiesBySignal$") //nolint:gosec // G204/G702: re-executes this test binary, fixed arguments
