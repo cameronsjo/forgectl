@@ -118,6 +118,8 @@ const logKeepDays = 7
 //	since = "2026-10-14"             # first day (UTC) whose merges and worker briefs count
 //	briefs = "/abs/path/to/briefs"   # one subdirectory per worker
 //	reviewers = ["pr-reviewer"]      # cadence-review marker names that count (a claim filter)
+//	[surface.rex]        # the Rex terminal multiplexer backend
+//	binary_path = ""                 # absolute path of the rex binary; empty = PATH, then the installed app bundle
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
