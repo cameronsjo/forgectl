@@ -7,7 +7,6 @@ package cli
 import (
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,17 +34,21 @@ func catchableSignals(ignored func(os.Signal) bool) []os.Signal {
 }
 
 // reportOnSignal installs a scoped SIGINT/SIGTERM handler that writes an error
-// report for name, then restores the default disposition and re-raises the
-// signal, so forgectl still dies by it exactly as before. It deliberately does
-// not touch any context: forgectl#788 declined a root signal context, and
-// children still get the terminal's Ctrl-C from the process group. With status
-// off, or with both signals ignored, it installs nothing.
+// report for name, then re-raises the signal, so forgectl still dies by it
+// exactly as before. It deliberately does not touch any context: forgectl#788
+// declined a root signal context, and children still get the terminal's Ctrl-C
+// from the process group. With status off, or with both signals ignored, it
+// installs nothing.
 //
 // The handler owns the exit. Children get the same Ctrl-C and usually return
 // first, so the command's own return path would reach os.Exit(1) before the
 // re-raise; the returned stop func therefore waits for a handler that has
-// already taken a signal, and re-raises one still queued, rather than letting
-// the command return normally.
+// taken a signal rather than letting the command return normally.
+//
+// The re-raise stops this handler's channel instead of resetting the signal, so
+// an in-process guard that also subscribed (sops's plaintext cleanup) still
+// receives it and owns the death. Do not enclose such a guard casually: it
+// would then decide when forgectl exits.
 func reportOnSignal(r *progstatus.Reporter, name string) (stop func()) {
 	if !r.Enabled() {
 		return func() {}
@@ -57,53 +60,37 @@ func reportOnSignal(r *progstatus.Reporter, name string) (stop func()) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, sigs...)
 	done := make(chan struct{})
-	var (
-		mu       sync.Mutex
-		stopped  bool
-		handling bool
-	)
+	exited := make(chan struct{}) // closed only when the goroutine ends by done
 	reraise := func(sig os.Signal) {
-		signal.Reset(sig)
+		signal.Stop(ch)
 		_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 	}
 	go func() {
 		select {
 		case sig := <-ch:
-			mu.Lock()
-			if stopped {
-				// The command already returned: nothing left to report.
-				mu.Unlock()
-				reraise(sig)
-				return
-			}
-			handling = true
-			mu.Unlock()
 			// If the write blocks, re-raise anyway once the deadline passes.
 			timer := time.AfterFunc(signalReportDeadline, func() { reraise(sig) })
 			r.Error(name + " interrupted")
 			timer.Stop()
 			reraise(sig)
 		case <-done:
+			close(exited)
 		}
 	}()
 	return func() {
 		signal.Stop(ch)
 		close(done)
-		mu.Lock()
-		stopped = true
-		taken := handling
-		mu.Unlock()
-		if taken {
-			// The handler holds a signal and will end the process; do not let
-			// the command's own exit path win the race.
-			time.Sleep(4 * signalReportDeadline)
-			return
-		}
-		// A signal that arrived just before Stop may still sit in ch.
 		select {
-		case sig := <-ch:
-			reraise(sig)
-		default:
+		case <-exited:
+			// The goroutine saw done. A signal queued before Stop is still ours.
+			select {
+			case sig := <-ch:
+				reraise(sig)
+			default:
+			}
+		case <-time.After(4 * signalReportDeadline):
+			// The goroutine took a signal and is ending the process; it never
+			// reaches exited. Do not let the command's exit path win the race.
 		}
 	}
 }

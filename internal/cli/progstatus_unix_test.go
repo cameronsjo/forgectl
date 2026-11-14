@@ -67,7 +67,8 @@ func TestReportOnSignal_DiesBySignal(t *testing.T) {
 		stop()
 		os.Exit(1)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestReportOnSignal_DiesBySignal$")
+	// The command is this very test binary with a fixed -test.run pattern; no input reaches it.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestReportOnSignal_DiesBySignal$") //nolint:gosec // G204/G702: re-executes this test binary, fixed arguments
 	cmd.Env = append(os.Environ(), "FORGECTL_SIGNAL_HELPER=1")
 	out, err := cmd.StdoutPipe()
 	if err != nil {

@@ -112,7 +112,7 @@ func TestTmuxPassthrough(t *testing.T) {
 func TestHostileMsgHasNoControlRunes(t *testing.T) {
 	forceTTY(t, true)
 	r, out := capture(t, nil)
-	r.Error("a\x1b]0;pwn\x07b\nc‮d\x7fe\u0085f")
+	r.Error("a\x1b]0;pwn\x07b\nc\u202ed\x7fe\u0085f")
 	got := out()
 	i := strings.Index(got, ":msg=")
 	if i < 0 {
