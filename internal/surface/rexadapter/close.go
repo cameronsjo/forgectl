@@ -79,11 +79,9 @@ const (
 	locateUnreadable
 )
 
-// located is the block a reference names, as Rex lists it, and every block in
-// its session.
+// located is the block a reference names, once locate has proven it.
 type located struct {
-	id     backend.RexIdentity
-	blocks []block
+	id backend.RexIdentity
 }
 
 // locate finds the block a reference names and proves it is forgectl's.
@@ -139,7 +137,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (located, locateS
 			return located{}, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 				errors.New("the rex block with this id does not carry forgectl's owner label for this reference"))
 		}
-		return located{id: id, blocks: blocks}, locateFound, backend.StartCause{}
+		return located{id: id}, locateFound, backend.StartCause{}
 	}
 	return located{}, locateAbsent, backend.StartCause{}
 }

@@ -5,10 +5,25 @@
 //
 // The shape follows hcadapter. Every call goes through the sensitive runner,
 // so the sealed cwd and display name reach rex's argv and nothing else, and no
-// log line or error string can render them. The bootstrap never reaches rex
-// at all: Start writes it into a private launch script (exec.NewLaunchScript)
-// and asks Rex to run `/bin/sh <script>`; start.go's decision comment says why
-// and what that leaves open.
+// log line or error string can render them.
+//
+// # The worker's environment and bootstrap
+//
+// Rex has no environment flag, and needs none: a worker's environment
+// (FORGECTL_DRAIN_WORKER and the rest) is part of the sealed invocation the
+// coordinator sends the trampoline over the bootstrap socket. What Rex must
+// start is the bootstrap line, and that never reaches rex at all: Start
+// writes it into a private launch script (exec.NewLaunchScript: a 0600 file
+// in a fresh 0700 directory, removed by its own first line once sh has opened
+// it, and by Start on every other path) and asks Rex to run `/bin/sh
+// <script>`. Rex records and reports only /bin/sh and a random path.
+//
+// Residual exposure: a process running as the operator's uid can read the
+// script for the milliseconds before sh opens it, and can read the
+// trampoline's argv, which holds the same line for as long as the worker runs
+// (true of every backend). A forgectl killed in that window leaves the 0600
+// file behind with a spent nonce. start.go's decision comment lists the
+// options refused (argv, initial_input, an env wrapper) and why.
 //
 // # What a worker is here
 //
