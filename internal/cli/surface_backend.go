@@ -208,8 +208,12 @@ const rexResolveTimeout = 60 * time.Second
 // because the pin chooses an executable.
 var locateRex rexLocator = resolveRex
 
-func resolveRex() (rexLocation, error) {
-	cfg := config.Load()
+func resolveRex() (rexLocation, error) { return resolveRexWith(config.Load) }
+
+// resolveRexWith is resolveRex with the config loader injected, so a test can
+// feed it a config that did not decode.
+func resolveRexWith(load func() config.Config) (rexLocation, error) {
+	cfg := load()
 	if err := cfg.DecodeError(); err != nil {
 		return rexLocation{}, fmt.Errorf("config file: %w", termsafe.Error(err))
 	}
@@ -237,6 +241,14 @@ type verifyingRunner struct {
 
 func (v verifyingRunner) RunSensitive(ctx context.Context, cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
 	if err := v.verify(ctx); err != nil {
+		// A caller that cancelled, or ran out of time, during the check is a
+		// cancel or a timeout to the adapter's classifier, not "unavailable".
+		switch {
+		case errors.Is(err, context.Canceled):
+			err = fmt.Errorf("%w: %w", exec.ErrCanceled, err)
+		case errors.Is(err, context.DeadlineExceeded):
+			err = fmt.Errorf("%w: %w", exec.ErrTimeout, err)
+		}
 		return exec.SensitiveResult{}, fmt.Errorf("rex binary no longer passes its checks: %w", err)
 	}
 	return v.inner.RunSensitive(ctx, cmd)
@@ -250,7 +262,14 @@ func newRexAdapter(locate rexLocator) (backend.Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}
-	var run exec.SensitiveRunner = exec.NewOSSensitiveRunner()
+	return buildRexAdapter(loc, exec.NewOSSensitiveRunner())
+}
+
+// buildRexAdapter builds the adapter on loc, over base. It wraps base so every
+// command is re-checked when loc carries a Verify. base is a parameter so a
+// test can watch what reaches the runner.
+func buildRexAdapter(loc rexLocation, base exec.SensitiveRunner) (backend.Adapter, error) {
+	run := base
 	if loc.Verify != nil {
 		run = verifyingRunner{inner: run, verify: loc.Verify}
 	}

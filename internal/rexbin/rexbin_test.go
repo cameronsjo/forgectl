@@ -171,7 +171,7 @@ func TestResolveOrder(t *testing.T) {
 			if got.Version != "0.1.0-preview.19" || got.APIRevision != 14 {
 				t.Errorf("version/revision = %q/%d", got.Version, got.APIRevision)
 			}
-			if len(fr.Calls) != 1 || fr.Calls[0].Name != tt.want || strings.Join(fr.Calls[0].Args, " ") != "whoami --json" {
+			if len(fr.Calls) != 1 || fr.Calls[0].Name != tt.want || strings.Join(fr.Calls[0].Args, " ") != "--autostart=false --color=never whoami --json" {
 				t.Errorf("calls = %+v, want one `%s whoami --json`", fr.Calls, tt.want)
 			}
 		})

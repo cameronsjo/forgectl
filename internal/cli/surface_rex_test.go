@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
@@ -71,6 +72,105 @@ func TestVerifyingRunner_ChecksBeforeEveryCommand(t *testing.T) {
 	if got := len(inner.Calls()); got != ran {
 		t.Errorf("inner runner saw %d calls after a failed check, want %d", got, ran)
 	}
+}
+
+// rexTestSpec is a valid launch spec for tests that only watch what reaches
+// the runner.
+func rexTestSpec(t *testing.T) backend.StartSpec {
+	t.Helper()
+	tag, err := backend.NewRecoveryTag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, err := backend.NewBootstrapCommand(exec.Opaque("'/bin/sh' '-c' 'true'"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := backend.NewStartSpec(cwd, "forgectl cli test", tag, boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec
+}
+
+// TestBuildRexAdapter_ReChecksBeforeAnyCommand: the adapter newRexAdapter
+// builds goes through the verifying runner, so a failed check means rex is
+// never run, and a passing one lets the command through (the positive control
+// that makes the first assertion mean something).
+func TestBuildRexAdapter_ReChecksBeforeAnyCommand(t *testing.T) {
+	t.Run("failed check runs nothing", func(t *testing.T) {
+		var base exec.FakeSensitiveRunner
+		a, err := buildRexAdapter(rexLocation{Path: rexTestPath, Verify: func(context.Context) error { return errors.New("swapped") }}, &base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := a.Start(t.Context(), rexTestSpec(t))
+		if res.Outcome() != backend.NotMutated {
+			t.Fatalf("Start = %v, want not-mutated", res)
+		}
+		if cause, _ := res.Cause(); cause.Class() != backend.FailureUnavailable {
+			t.Errorf("a failed check classified as %v, want unavailable", cause.Class())
+		}
+		if got := len(base.Calls()); got != 0 {
+			t.Fatalf("the runner saw %d calls after a failed check, want 0", got)
+		}
+	})
+	t.Run("passing check lets the command through", func(t *testing.T) {
+		var base exec.FakeSensitiveRunner
+		a, err := buildRexAdapter(rexLocation{Path: rexTestPath, Verify: func(context.Context) error { return nil }}, &base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = a.Start(t.Context(), rexTestSpec(t))
+		if len(base.Calls()) == 0 {
+			t.Fatal("a passing check still stopped every command")
+		}
+	})
+	t.Run("a cancel during the check is a cancel", func(t *testing.T) {
+		var base exec.FakeSensitiveRunner
+		a, err := buildRexAdapter(rexLocation{Path: rexTestPath, Verify: func(context.Context) error { return context.Canceled }}, &base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := a.Start(t.Context(), rexTestSpec(t))
+		if cause, _ := res.Cause(); cause.Class() != backend.FailureCanceled {
+			t.Errorf("a cancel during Verify classified as %v, want canceled", cause.Class())
+		}
+	})
+}
+
+// TestResolveRexWith_RefusesAnUnreadableConfig: a config file that did not
+// decode, or could not be located, is a refusal, never "no pin": the pin
+// chooses an executable. resolveRex checks DecodeError and DecodeDegraded; a
+// failed decode sets both, so each check covers the other and only removing
+// both turns this red.
+func TestResolveRexWith_RefusesAnUnreadableConfig(t *testing.T) {
+	t.Run("does not decode", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[surface.rex\nbinary_path = "), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := resolveRexWith(func() config.Config { return config.LoadPath(path) })
+		if err == nil || !strings.Contains(err.Error(), "config file") {
+			t.Fatalf("err = %v, want a config-file refusal", err)
+		}
+	})
+	t.Run("cannot be located", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("XDG_CONFIG_HOME", "")
+		cfg := config.Load()
+		if !cfg.DecodeDegraded() && cfg.DecodeError() == nil {
+			t.Skip("this platform locates a config path without HOME")
+		}
+		_, err := resolveRexWith(func() config.Config { return cfg })
+		if err == nil {
+			t.Fatal("resolveRexWith accepted a config it could not read")
+		}
+	})
 }
 
 // TestLiveResolveRex runs the real resolver with FORGECTL_LIVE_REX=1, with
