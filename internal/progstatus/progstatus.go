@@ -21,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/herdr"
+	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -33,7 +34,7 @@ const (
 	// a child record; a report with no id is the terminal's root record, and a
 	// clear with no id wipes every program's records on that terminal (measured
 	// on hc 0.1.21: it also removed another program's id'd record).
-	programID = "forgectl"
+	programID = meta.AppName
 	// maxMsgRunes keeps msg far under the spec's 2048-byte decoded cap.
 	maxMsgRunes = 200
 	// maxSeqBytes is the spec's whole-sequence cap; a longer report is
@@ -83,11 +84,13 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	// A herdr-core or herdr-app terminal reports as the root record, by the
 	// repo's own host detection (HC_TERMINAL_ID and none of the HERDR_*
 	// variables: a herdr 0.9 pane keeps the id'd record, which that host was
-	// not measured to need root for). Never under tmux, screen or zellij: a tmux server copies
-	// its starting environment into every pane, so HC_TERMINAL_ID can name an
-	// outer terminal that every pane shares, where forgectl is not the
-	// foreground program (the outer shell never returns to its prompt to clear
-	// the status) and a root clear would wipe other panes' records.
+	// not measured to need root for). Never under tmux, screen or zellij: a
+	// tmux server copies its starting environment into every pane, so
+	// HC_TERMINAL_ID can name an outer terminal that every pane shares, where
+	// forgectl is not the foreground program (the outer shell never returns to
+	// its prompt to clear the status) and a root clear would wipe other panes'
+	// records. screen and zellij panes inherit the same variable (inferred,
+	// not measured).
 	tmux := getenv("TMUX") != ""
 	// screen (STY) and zellij (ZELLIJ) panes inherit the same stale variable.
 	multiplexed := tmux || getenv("STY") != "" || getenv("ZELLIJ") != ""

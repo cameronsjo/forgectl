@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -288,7 +289,7 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 }
 
 // forgectlStatusApp is the app name forgectl's own status reports carry.
-const forgectlStatusApp = "forgectl"
+const forgectlStatusApp = meta.AppName
 
 // statusWord names a status for an error, "unknown" when hc gave none.
 func statusWord(s string) string {

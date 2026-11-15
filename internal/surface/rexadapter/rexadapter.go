@@ -46,17 +46,19 @@
 //     (backend.FingerprintRexServer). A restarted server is a new instance.
 //  2. The block: `rex block ls` in the reference's session must list the
 //     reference's full block id.
-//  3. The owner marker and creation time: the block's label must be
-//     forgectl.surface=<the reference's ownership name>, and the creation time
-//     its id embeds must equal the reference's.
+//  3. The owner marker: the block's label must be
+//     forgectl.surface=<the reference's ownership name>. The reference also
+//     stores the creation time its block id embeds, and a decoded reference
+//     whose time disagrees with its id is refused; at use time that is a
+//     consistency check on the id, not a second source, because both values
+//     come from the same string.
 //
 // A label is not authenticated. Any Rex client can rename a block, any client
 // can give a block forgectl's label, and labels are not unique. The label is
 // the same strength as hc's forgectl.surface label, which is why the check
-// also requires the full block id (UUIDv7, never handed out twice), the
-// creation time it embeds, and the server's instance_id: a forged label on
-// another block fails the id, and a relabeled worker fails the label, so close
-// refuses rather than guesses.
+// also requires the full block id (UUIDv7, never handed out twice) and the
+// server's instance_id: a forged label on another block fails the id, and a
+// relabeled worker fails the label, so close refuses rather than guesses.
 //
 // Close removes the block (`rex block close`), and then removes the session
 // only when it is the one Start created (its label is the ownership name) and
