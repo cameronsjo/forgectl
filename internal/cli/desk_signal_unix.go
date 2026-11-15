@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/notify"
+	"github.com/cameronsjo/forgectl/internal/progstatus"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -223,4 +224,47 @@ func (s deskSignal) attach(d *desk.Desk) {
 			refresh(m, false)
 		}
 	})
+}
+
+// waitingRow reports the waiting count over OSC 7501 for a host that has no
+// herdr 0.9 CLI (cmux, plain herdr without the fork, anything that reads the
+// Program Status Protocol). It returns the hook for tui.DeskOptions.OnWaiting
+// and a release to defer.
+//
+// Row lifetime: the dashboard process holds the row while it is open. The
+// signals above are raised by short-lived processes (desk add, and the verbs
+// that move an item out of pending), and a host drops a blocked row when the
+// reporting process exits, so a row set there would vanish at once, and one
+// left behind by a crashed process would stay stale. The dashboard is the one
+// long-lived process that watches the queue, so it sets the row when items are
+// waiting, clears it (id=forgectl) when none are, and release clears it on
+// every return from the dashboard, a panic included. A killed dashboard leaves
+// its row only where the host does not drop it (docs/commands/workflow.md).
+//
+// Inside a herdr session (herdr.CheckSession) it reports nothing: that path
+// already has the herdr notification and the pane's blocked state, and a
+// second report would double it. Opting out (FORGECTL_NO_PROGRAM_STATUS) and
+// the worker-pane guard live in the Reporter.
+func (s deskSignal) waitingRow(r *progstatus.Reporter) (onWaiting func(int), release func()) {
+	if !r.Enabled() || herdr.CheckSession(deskLookupEnv) == nil {
+		return nil, func() {}
+	}
+	raised := false
+	onWaiting = func(n int) {
+		switch {
+		case n > 0:
+			r.Blocked(progstatus.KindPermission, fmt.Sprintf("%d waiting", n))
+			raised = true
+		case raised:
+			r.Clear()
+			raised = false
+		}
+	}
+	release = func() {
+		if raised {
+			r.Clear()
+			raised = false
+		}
+	}
+	return onWaiting, release
 }

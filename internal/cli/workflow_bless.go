@@ -177,7 +177,12 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 
 	// 7. Sign the exact bytes — this fires the presence prompt.
-	env, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainWorkflow, src.Data, time.Now())
+	status := newProgramStatus()
+	var env bless.Envelope
+	err = reportBlocked(status, "Touch ID: bless "+name, func() (signErr error) {
+		env, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainWorkflow, src.Data, time.Now())
+		return signErr
+	})
 	if err != nil {
 		return err
 	}
@@ -330,7 +335,12 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 4. Sign the store (presence prompt) and write it plus its sidecar.
 	fmt.Fprintln(out, "Signing the trust store — approve the presence prompt…")
-	storeEnv, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainTrust, storeBytes, time.Now())
+	status := newProgramStatus()
+	var storeEnv bless.Envelope
+	err = reportBlocked(status, "Touch ID: trust init", func() (signErr error) {
+		storeEnv, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, keyID, bless.DomainTrust, storeBytes, time.Now())
+		return signErr
+	})
 	if err != nil {
 		return err
 	}
@@ -349,8 +359,11 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 5. Install the root-owned anchor LAST (interactive sudo).
 	fmt.Fprintln(out, "Installing the root-owned trust anchor — sudo may prompt…")
-	if err := installAnchor(ctx, deps.Runner, pubDER); err != nil {
-		return fmt.Errorf("install trust anchor: %w", err)
+	anchorErr := reportBlocked(status, "sudo: install trust anchor", func() error {
+		return installAnchor(ctx, deps.Runner, pubDER)
+	})
+	if anchorErr != nil {
+		return fmt.Errorf("install trust anchor: %w", anchorErr)
 	}
 	fmt.Fprintf(out, "Trust anchor installed: %s\nThis machine is now the trust root and first blesser.\n", bless.AnchorPath)
 	return nil
@@ -480,7 +493,12 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	// 6. Sign the store (ONE presence prompt) and write it plus its sidecar. No
 	//    InstallAnchor, no sudo — the anchor is untouched.
 	fmt.Fprintln(out, "Signing the rebuilt trust store — approve the presence prompt…")
-	storeEnv, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, anchorFP, bless.DomainTrust, storeBytes, time.Now())
+	status := newProgramStatus()
+	var storeEnv bless.Envelope
+	err = reportBlocked(status, "Touch ID: trust rebuild", func() (signErr error) {
+		storeEnv, signErr = bless.SignEnvelope(ctx, blesser, bless.KeyLabel, anchorFP, bless.DomainTrust, storeBytes, time.Now())
+		return signErr
+	})
 	if err != nil {
 		return err
 	}

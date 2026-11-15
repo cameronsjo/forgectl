@@ -31,6 +31,18 @@ Workflow files are **TOML**, with steps as an ordered `[[step]]` array of tables
 - **cmux-JSON-compatible (reuse `commands[]` templates).** Pros: reuses an existing template shape
   Cameron already uses. Cons: JSON is clunkier to hand-author and sign-review (no comments), and
   couples the DSL to cmux's schema.
+- **Embedded scripting language (Lua runtime, or a Starlark plan generator).** Declined
+  (2026-11-14). A Lua runtime breaks the blessing review model (a human can read a short step list
+  at a glance, not a program), the static `${param}` refusal in a `run` step (`CheckGuardedParamRefs`
+  is a bless-time scan; in Lua the equivalent is data-flow analysis), `--dry-run` (ADR-0002), and
+  resume's per-step hash (ADR-0007), because there is no plan until the script runs. A Starlark
+  plan generator keeps dry-run and resume, since it runs at plan time and returns a step list, but
+  not the injection boundary: a generator that receives param values emits literals, so a bless-time
+  scan finds nothing to refuse, and a generator that never sees param values cannot branch on them,
+  which is most of what control flow is for. No workflow needs control flow yet. If one does, take
+  it as an ADR that changes the ADR-0006 control, with a security-posture review, and bump
+  `dsl_version` (0004). If the pain is that TOML is clunky to write, the fix is authoring support
+  (`workflow new` scaffolding, `--dry-run` errors that name the field), not a language.
 
 ## Consequences
 

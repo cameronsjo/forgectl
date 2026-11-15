@@ -12,7 +12,8 @@
 // terminal: the core's id, the terminal's address and creation time, and the
 // forgectl.surface label carrying the ownership marker (see locate).
 //
-// The JSON shapes parsed here were measured on hc 0.1.15. The parsers are
+// The JSON shapes parsed here were measured on hc 0.1.15 and re-checked on 0.1.21, which
+// added fields only (docs/measurements/hc-0.1.21.md). The parsers are
 // strict and fail closed: anything they cannot read is unreadable, never gone.
 package hcadapter
 

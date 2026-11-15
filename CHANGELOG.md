@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.63.1](https://github.com/cameronsjo/forgectl/compare/v0.63.0...v0.63.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **desk:** mark non-first steps with no deps in desk show ([39306bf](https://github.com/cameronsjo/forgectl/commit/39306bf65a469e94baebd0830ba98ce8f1c22651))
+* **desk:** mark non-first steps with no deps in desk show ([c5f1bfa](https://github.com/cameronsjo/forgectl/commit/c5f1bfa3fad0c5fe584244d8c34329216c5df9e0))
+
 ## [0.63.0](https://github.com/cameronsjo/forgectl/compare/v0.62.0...v0.63.0) (2026-11-01)
 
 

@@ -245,14 +245,26 @@ func (w *Watcher) state() (WatchState, int, error) {
 // the run ends, is lost or skipped, or ctx is done. It returns the final state
 // and the number of lines seen (the resume point).
 func (d *Desk) Watch(ctx context.Context, name string, skip int, interval time.Duration, emit func(string)) (WatchState, int, error) {
+	return d.WatchNotify(ctx, name, skip, interval, emit, nil)
+}
+
+// WatchNotify is Watch that also calls onState (when non-nil) with the item's
+// state on the first poll and again whenever it changes, so a caller can tell
+// a pending item from a running one while the watch is still waiting.
+func (d *Desk) WatchNotify(ctx context.Context, name string, skip int, interval time.Duration, emit func(string), onState func(WatchState)) (WatchState, int, error) {
 	w, err := d.NewWatcher(name, skip)
 	if err != nil {
 		return WatchWaiting, skip, err
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	first, last := true, WatchWaiting
 	for {
 		lines, state, err := w.Poll()
+		if onState != nil && err == nil && (first || state != last) {
+			onState(state)
+		}
+		first, last = false, state
 		for _, l := range lines {
 			emit(l)
 		}

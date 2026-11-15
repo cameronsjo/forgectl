@@ -24,7 +24,10 @@ import (
 // instead of letting it take the terminal's Ctrl-C itself. And a verb that
 // never reads ctx would swallow a second Ctrl-C. The verbs that need a
 // graceful stop install their own scoped handler: docs serve, tasks mcp,
-// sops's guard, and the surface trampoline. The trampoline catches SIGINT and
+// sops's guard, and the surface trampoline. workflow run and the bless and
+// trust ceremonies install one too (internal/cli/progstatus_unix.go): it
+// writes an OSC 7501 error report, then restores the default disposition and
+// re-raises the signal, so forgectl still dies by it. The trampoline catches SIGINT and
 // SIGQUIT with signal.Notify and drains them, so its child still takes
 // Ctrl-C; it does not ignore them, because an ignored disposition would be
 // inherited across exec.

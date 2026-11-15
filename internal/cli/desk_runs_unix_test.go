@@ -91,12 +91,13 @@ func TestDeskShow_BatchFlowAndReplay(t *testing.T) {
 	}
 }
 
-// A step with no deps that is not first has nothing to say after "after":
-// the flow line omits the segment instead of printing a dangling one.
-func TestDeskShow_NoDepsStepHasNoAfter(t *testing.T) {
+// The flow line marks a non-first step with no deps "no deps" (a parallel
+// root), prints "after X" when the deps are not just the line above, and says
+// nothing for the first step or a step chained to the one above.
+func TestDeskShow_DepsMarkers(t *testing.T) {
 	dir := newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "roots.manifest",
-		"alpha -- true\nbeta -- true\ngamma after=alpha -- exit 1\n"),
+		"alpha -- true\nbeta -- true\ngamma after=alpha -- exit 1\ndelta after=gamma -- true\n"),
 		"--what", "two roots", "--why", "a test", "--json")
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -113,6 +114,8 @@ func TestDeskShow_NoDepsStepHasNoAfter(t *testing.T) {
 		"STEP-END id=beta rc=0 dur=0.4 reason=ok outputs= log=/x/beta.log",
 		"STEP-START id=gamma deps=alpha",
 		"STEP-END id=gamma rc=1 dur=0.1 reason=failed outputs= log=/x/gamma.log",
+		"STEP-START id=delta deps=gamma",
+		"STEP-END id=delta rc=0 dur=0.1 reason=ok outputs= log=/x/delta.log",
 	} {
 		if err := run.Events.Emit(l); err != nil {
 			t.Fatal(err)
@@ -124,20 +127,29 @@ func TestDeskShow_NoDepsStepHasNoAfter(t *testing.T) {
 
 	out, _, err = deskRunASCII(t, "show", a.Name)
 	wantExit(t, err, 0)
-	var beta, gamma string
+	lines := map[string]string{}
 	for _, l := range strings.Split(out, "\n") {
-		switch {
-		case strings.Contains(l, " beta "):
-			beta = l
-		case strings.Contains(l, " gamma "):
-			gamma = l
+		for _, id := range []string{"alpha", "beta", "gamma", "delta"} {
+			if strings.Contains(l, " "+id+" ") {
+				lines[id] = l
+			}
 		}
 	}
-	if beta == "" || strings.Contains(beta, "after") {
-		t.Errorf("beta line = %q, want it present with no after segment:\n%s", beta, out)
-	}
-	if !strings.HasSuffix(gamma, "after alpha") {
-		t.Errorf("gamma line = %q, want it to end in %q:\n%s", gamma, "after alpha", out)
+	for id, want := range map[string]string{"alpha": "", "beta": "no deps", "gamma": "after alpha", "delta": ""} {
+		l := lines[id]
+		if l == "" {
+			t.Fatalf("no %s line:\n%s", id, out)
+		}
+		switch want {
+		case "":
+			if strings.Contains(l, "no deps") || strings.Contains(l, "after") {
+				t.Errorf("%s line = %q, want no deps marker:\n%s", id, l, out)
+			}
+		default:
+			if !strings.HasSuffix(l, want) {
+				t.Errorf("%s line = %q, want it to end in %q:\n%s", id, l, want, out)
+			}
+		}
 	}
 }
 

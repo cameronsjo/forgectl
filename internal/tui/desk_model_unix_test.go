@@ -1672,3 +1672,26 @@ func TestDesk_HToggleSwapsTimelineAndHistory(t *testing.T) {
 		t.Errorf("? does not list h:\n%s", strings.Join(deskKeyLines(), "\n"))
 	}
 }
+
+func TestDesk_OnWaitingReportsTheCountWhenItChanges(t *testing.T) {
+	h := newDeskHarness(t)
+	var got []int
+	h.m.opts.OnWaiting = func(n int) { got = append(got, n) }
+	h.scan() // first scan: reports 0
+	h.scan() // unchanged: reports nothing
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.drop("02-beta.sh", plainScript("beta"))
+	h.scan()
+	h.scan()
+	h.press("s", "y") // skip the selected one
+	h.scan()
+	want := []int{0, 2, 1}
+	if len(got) != len(want) {
+		t.Fatalf("OnWaiting calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OnWaiting calls = %v, want %v", got, want)
+		}
+	}
+}

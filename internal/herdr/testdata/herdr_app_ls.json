@@ -1,0 +1,164 @@
+{
+  "spaces": [
+    {
+      "id": "sp8a41fc22e40d665646f4384830f2ff26",
+      "name": "Space 1",
+      "folder": "/Users/example/Projects/forge/alpha",
+      "machine": null,
+      "active": true,
+      "tabs": [
+        {
+          "id": "tb2519dc71b641cc165b66e1b785f9a29f",
+          "name": "tab-1",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t4s",
+              "pane": "pbe33c657560943262668716b39c5f7f8",
+              "status": "idle",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tba657915f02a55fb24163fc81d37f579b",
+          "name": "tab-2",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t4y",
+              "pane": "p47ca8bfc67e5cadbb2a51f27df3c26d7",
+              "status": "working",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": [
+                "t5t"
+              ]
+            },
+            {
+              "terminal": "t57",
+              "pane": "p07dad680d4918d756d0f8856141802ed",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb35764ac59096227d4cb640afbd3d830a",
+          "name": "tab-3",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t5m",
+              "pane": "p2631e7563b49aa661529843d91037d56",
+              "status": "working",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb5f1dbc8109a89aadadb78f5cefb95651",
+          "name": "tab-4",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t5n",
+              "pane": "pee566f0b657b6dab57bf1c7f79160095",
+              "status": "working",
+              "app": "claude-code",
+              "name": "agent-4",
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb3b1b9910e2c217c489c552c21c420f24",
+          "name": "tab-5",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t5k",
+              "pane": "p353c35a536c2e0378a5eb452a17035a7",
+              "status": "done",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": [
+                "t5n",
+                "t5p",
+                "t5q",
+                "t5r"
+              ]
+            },
+            {
+              "terminal": "t5w",
+              "pane": "p5685f381d3d0079894b2acf6f24f3eae",
+              "status": null,
+              "app": null,
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb32ace42cf398247cd006ff1377f23cd1",
+          "name": "tab-6",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t5x",
+              "pane": "p2bd942de7ffcb116f7a66c768b1dfc5e",
+              "status": "working",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb23e19309cbf2a46a2b1661ddc4854c32",
+          "name": "tab-7",
+          "active": true,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t5b",
+              "pane": "p4ecc9cf008ad6954c432d17089a77770",
+              "status": "working",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        },
+        {
+          "id": "tb7e602cc5af675d1ce24eea916a6e6bd2",
+          "name": "tab-8",
+          "active": false,
+          "settled": false,
+          "terminals": [
+            {
+              "terminal": "t4w",
+              "pane": "p678c3ba196043c210cc80074f72bb3ad",
+              "status": "blocked",
+              "app": "claude-code",
+              "name": null,
+              "sub_agents": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

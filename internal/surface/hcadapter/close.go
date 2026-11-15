@@ -88,7 +88,8 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 	// debt: locate checks identity in one hc call and kill/rm act on the
 	// address in the next, so an `hc rm` plus address reuse in between would
 	// hit another terminal; hc 0.1.15 has no expected-identity guard on kill,
-	// rm or send. Close the window when hc adds one.
+	// rm or send, and the 0.1.21 help offers none either (not exercised).
+	// Close the window when hc adds one.
 	if t.State == stateLive {
 		res, err := a.run.RunSensitive(ctx, a.command(exec.KindHcCleanup,
 			exec.MustFixed("kill"),

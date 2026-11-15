@@ -30,6 +30,11 @@ type Config struct {
 	Default        string
 	WorkspaceOrder []string
 	Rules          []Rule
+	// StayInSpace is set for a host that cannot move a tab to another
+	// workspace (herdr-app): every tab that wants a different workspace is
+	// planned as a blocked move, and the layout leaves it where it is, so tab
+	// and workspace ordering still work on what can be reordered.
+	StayInSpace bool
 }
 
 // Move relocates one tab to another workspace. From and To are workspace
@@ -44,6 +49,9 @@ type Move struct {
 	To            string
 	Blocked       bool
 	BlockedReason string
+	// Unsupported marks a blocked move the host can never make (Config.StayInSpace),
+	// as opposed to one herdr refuses because it would empty a workspace.
+	Unsupported bool
 }
 
 // LayoutTab is one tab in the desired final arrangement.
