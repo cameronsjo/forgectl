@@ -130,6 +130,17 @@ func TestBuildRexAdapter_ReChecksBeforeAnyCommand(t *testing.T) {
 			t.Fatal("a passing check still stopped every command")
 		}
 	})
+	t.Run("a deadline during the check is a timeout", func(t *testing.T) {
+		var base exec.FakeSensitiveRunner
+		a, err := buildRexAdapter(rexLocation{Path: rexTestPath, Verify: func(context.Context) error { return context.DeadlineExceeded }}, &base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := a.Start(t.Context(), rexTestSpec(t))
+		if cause, _ := res.Cause(); cause.Class() != backend.FailureTimeout {
+			t.Errorf("a deadline during Verify classified as %v, want timeout", cause.Class())
+		}
+	})
 	t.Run("a cancel during the check is a cancel", func(t *testing.T) {
 		var base exec.FakeSensitiveRunner
 		a, err := buildRexAdapter(rexLocation{Path: rexTestPath, Verify: func(context.Context) error { return context.Canceled }}, &base)
@@ -167,8 +178,10 @@ func TestResolveRexWith_RefusesAnUnreadableConfig(t *testing.T) {
 			t.Skip("this platform locates a config path without HOME")
 		}
 		_, err := resolveRexWith(func() config.Config { return cfg })
-		if err == nil {
-			t.Fatal("resolveRexWith accepted a config it could not read")
+		// The refusal's own text, so reaching the resolver (which fails for an
+		// unrelated reason on a machine without Rex) cannot pass this.
+		if err == nil || (!strings.Contains(err.Error(), "could not be located") && !strings.Contains(err.Error(), "config file")) {
+			t.Fatalf("err = %v, want the config refusal", err)
 		}
 	})
 }

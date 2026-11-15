@@ -502,7 +502,7 @@ func TestVettingRefusals(t *testing.T) {
 		{"empty rex_version", `{"rex_version":"","api_revision":14}`, nil, []string{"rex_version"}},
 		{"missing api_revision", `{"rex_version":"0.1.0"}`, nil, []string{"no api_revision"}},
 		{"string api_revision", `{"rex_version":"0.1.0","api_revision":"14"}`, nil, []string{"did not return JSON"}},
-		{"whoami fails", "", errors.New("exit status 1"), []string{"whoami --json failed"}},
+		{"whoami fails", "", errors.New("exit status 1"), []string{"whoami --json failed", "is the Rex app running"}},
 		{"whoami times out on its own", "", context.DeadlineExceeded, []string{"whoami --json failed"}},
 	}
 	for _, tt := range tests {
