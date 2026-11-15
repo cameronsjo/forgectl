@@ -83,13 +83,15 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	// A herdr-core or herdr-app terminal reports as the root record, by the
 	// repo's own host detection (HC_TERMINAL_ID and none of the HERDR_*
 	// variables: a herdr 0.9 pane keeps the id'd record, which that host was
-	// not measured to need root for). Never under tmux: a tmux server copies
+	// not measured to need root for). Never under tmux, screen or zellij: a tmux server copies
 	// its starting environment into every pane, so HC_TERMINAL_ID can name an
 	// outer terminal that every pane shares, where forgectl is not the
 	// foreground program (the outer shell never returns to its prompt to clear
 	// the status) and a root clear would wipe other panes' records.
 	tmux := getenv("TMUX") != ""
-	root := !tmux && herdr.DetectHost(func(k string) (string, bool) { v := getenv(k); return v, v != "" }) == herdr.HostApp
+	// screen (STY) and zellij (ZELLIJ) panes inherit the same stale variable.
+	multiplexed := tmux || getenv("STY") != "" || getenv("ZELLIJ") != ""
+	root := !multiplexed && herdr.DetectHost(func(k string) (string, bool) { v := getenv(k); return v, v != "" }) == herdr.HostApp
 	return &Reporter{w: f, tmx: tmux, root: root}
 }
 

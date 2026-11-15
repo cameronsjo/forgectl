@@ -263,6 +263,11 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 		return fmt.Errorf("%w: the program at %s has exited", ErrSendRefused, addr)
 	case t.Status.App == "":
 		return fmt.Errorf("%w: %s is not running an agent hc recognizes", ErrSendRefused, addr)
+	case t.Status.App == forgectlStatusApp:
+		// forgectl's own root report (internal/progstatus) sets app=forgectl on
+		// the terminal it runs in; that is a forgectl command, not an agent at
+		// its prompt, and a stale done there must not read as one.
+		return fmt.Errorf("%w: %s carries a status forgectl itself reported, not an agent's", ErrSendRefused, addr)
 	case !atPrompt(t.Status.State):
 		return fmt.Errorf("%w: %s is %s, not at its prompt", ErrSendRefused, addr, statusWord(t.Status.State))
 	}
@@ -281,6 +286,9 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 	}
 	return nil
 }
+
+// forgectlStatusApp is the app name forgectl's own status reports carry.
+const forgectlStatusApp = "forgectl"
 
 // statusWord names a status for an error, "unknown" when hc gave none.
 func statusWord(s string) string {

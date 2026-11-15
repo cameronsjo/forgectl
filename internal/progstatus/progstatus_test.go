@@ -160,6 +160,8 @@ func TestRootReportOnHerdrCoreHosts(t *testing.T) {
 		{"herdr 0.9 socket variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_SOCKET_PATH": "/tmp/s"}, true},
 		{"herdr 0.9 pane variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_PANE_ID": "p1"}, true},
 		{"inside tmux a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "TMUX": "/tmp/tmux-501/default,1,0"}, true},
+		{"inside screen a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "STY": "123.pts-0.host"}, true},
+		{"inside zellij a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "ZELLIJ": "0"}, true},
 		{"any other host", nil, true},
 	}
 	for _, tc := range cases {
