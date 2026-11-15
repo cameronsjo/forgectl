@@ -210,6 +210,16 @@ var locateRex rexLocator = resolveRex
 
 func resolveRex() (rexLocation, error) { return resolveRexWith(config.Load) }
 
+// rexConfigFileCheck judges the config file that a [surface.rex] binary_path
+// came from. A var so a test can aim it at a scratch file.
+var rexConfigFileCheck = func() error {
+	path, err := config.ConfigPath()
+	if err != nil {
+		return nil // the loader already refused a config it could not locate
+	}
+	return config.CheckExecChoiceFile(path)
+}
+
 // resolveRexWith is resolveRex with the config loader injected, so a test can
 // feed it a config that did not decode.
 func resolveRexWith(load func() config.Config) (rexLocation, error) {
@@ -219,6 +229,14 @@ func resolveRexWith(load func() config.Config) (rexLocation, error) {
 	}
 	if cfg.DecodeDegraded() {
 		return rexLocation{}, errors.New("the config file could not be located or read; not guessing where rex is")
+	}
+	// binary_path picks an executable, so a config file another user could have
+	// written must not set it. The signature gate would still judge the
+	// binary; this refuses before anything runs.
+	if cfg.Surface.Rex.BinaryPath != "" {
+		if err := rexConfigFileCheck(); err != nil {
+			return rexLocation{}, fmt.Errorf("[surface.rex] binary_path is not trusted: %w", err)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), rexResolveTimeout)
 	defer cancel()

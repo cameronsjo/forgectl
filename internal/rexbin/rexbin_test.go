@@ -1217,3 +1217,40 @@ func TestPathHitThatFailsItsGateFallsThroughToACleanBundle(t *testing.T) {
 		t.Error("the untrusted PATH link was run")
 	}
 }
+
+// TestErrorsCarryNoControlBytes: a failing rex or codesign prints whatever it
+// likes on stderr, and a path can hold any byte. None of it may reach the
+// terminal raw through a locator error.
+func TestErrorsCarryNoControlBytes(t *testing.T) {
+	const hostile = "\x1b]0;pwned\x07\x1b[2J"
+	noControl := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		for _, r := range err.Error() {
+			if r < 0x20 && r != '\n' || r == 0x7f {
+				t.Errorf("control byte %U in error: %q", r, err.Error())
+			}
+		}
+	}
+	t.Run("whoami stderr", func(t *testing.T) {
+		fr := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New(hostile) }}
+		f := tree(me, map[string]fs.FileMode{pathBin: 0o755})
+		_, err := resolver(fr, f, pathBin).Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	t.Run("codesign stderr", func(t *testing.T) {
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		fr := runner(map[string]string{genuine: goodJSON}, func(string) error { return errors.New(hostile) })
+		_, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	t.Run("stat of a pinned path", func(t *testing.T) {
+		pin := "/nope/" + hostile
+		fr := runner(nil, nil)
+		_, err := resolver(fr, tree(me, nil), "").Resolve(context.Background(), pin)
+		noControl(t, err)
+	})
+}

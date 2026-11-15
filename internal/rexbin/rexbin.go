@@ -293,7 +293,7 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 			if ctx.Err() != nil {
 				return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(abs, 0), ctx.Err())
 			}
-			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is refused as an app-bundle binary: %w", gerr)
+			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is refused as an app-bundle binary: %w", termsafe.Error(gerr))
 		}
 		got, verr := r.vet(ctx, abs, SourceConfig)
 		if verr == nil && gated {
@@ -312,7 +312,7 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 		case gerr != nil && ctx.Err() != nil:
 			return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(pathBin, 0), ctx.Err())
 		case gerr != nil:
-			pathErr = fmt.Errorf("PATH hit is refused as an app-bundle binary: %w", gerr)
+			pathErr = fmt.Errorf("PATH hit is refused as an app-bundle binary: %w", termsafe.Error(gerr))
 		default:
 			got, verr := r.vet(ctx, pathBin, SourcePATH)
 			if verr == nil && gated {
@@ -390,7 +390,7 @@ func (r *Resolver) configBinary(value string) (string, error) {
 	path := value
 	if value == "~" || strings.HasPrefix(value, "~/") {
 		if r.homeErr != nil {
-			return "", fmt.Errorf("cannot expand %s from %s: no usable home directory (%w); use an absolute path instead", q, key, r.homeErr)
+			return "", fmt.Errorf("cannot expand %s from %s: no usable home directory (%w); use an absolute path instead", q, key, termsafe.Error(r.homeErr))
 		}
 		path = filepath.Join(r.home, strings.TrimPrefix(strings.TrimPrefix(value, "~"), "/"))
 	}
@@ -399,7 +399,7 @@ func (r *Resolver) configBinary(value string) (string, error) {
 	}
 	path = filepath.Clean(path)
 	if err := r.usable(path); err != nil {
-		return "", fmt.Errorf("rex binary from %s is unusable: %w", key, err)
+		return "", fmt.Errorf("rex binary from %s is unusable: %w", key, termsafe.Error(err))
 	}
 	return path, nil
 }
@@ -409,7 +409,7 @@ func (r *Resolver) configBinary(value string) (string, error) {
 func (r *Resolver) fromPATH() (string, error) {
 	p, err := r.lookPath("rex")
 	if err != nil {
-		return "", fmt.Errorf("rex not found: %w", err)
+		return "", fmt.Errorf("rex not found: %w", termsafe.Error(err))
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -445,7 +445,7 @@ func (r *Resolver) gateAppPath(ctx context.Context, path string) (target string,
 func (r *Resolver) usable(path string) error {
 	info, err := r.fs.Stat(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", termsafe.QuoteArgMax(path, 0), err)
+		return fmt.Errorf("%s: %w", termsafe.QuoteArgMax(path, 0), termsafe.Error(err))
 	}
 	return checkFile(path, info)
 }
@@ -504,7 +504,7 @@ func (r *Resolver) trustedChain(path string) (Info, error) {
 	for p := path; ; p = filepath.Dir(p) {
 		info, err := r.fs.Lstat(p)
 		if err != nil {
-			return Info{}, fmt.Errorf("%s: %w", q, err)
+			return Info{}, fmt.Errorf("%s: %w", q, termsafe.Error(err))
 		}
 		pq := termsafe.QuoteArgMax(p, 0)
 		switch {
@@ -637,7 +637,7 @@ func (r *Resolver) appTarget(path string) (target string, inApp bool, err error)
 	}
 	if werr != nil {
 		if len(texts) > 0 || claims {
-			return "", false, fmt.Errorf("%s: cannot resolve its symlinks: %w", q, werr)
+			return "", false, fmt.Errorf("%s: cannot resolve its symlinks: %w", q, termsafe.Error(werr))
 		}
 		return "", false, nil
 	}
@@ -675,7 +675,7 @@ func (r *Resolver) verifySignature(ctx context.Context, path string) error {
 	if ctx.Err() == nil && runCtx.Err() != nil {
 		return fmt.Errorf("%s: code signature check did not finish within %s", q, r.signTimeout)
 	}
-	return fmt.Errorf("%s: code signature is not Team ID %s: %w", q, TeamID, err)
+	return fmt.Errorf("%s: code signature is not Team ID %s: %w", q, TeamID, termsafe.Error(err))
 }
 
 // whoami is the part of `rex whoami --json` the resolver reads; other fields
@@ -705,7 +705,7 @@ func (r *Resolver) vet(ctx context.Context, path string, src Source) (Resolved, 
 			// The caller cancelled or ran out of time: say so, not "incompatible".
 			return Resolved{}, fmt.Errorf("%s whoami --json: %w", q, ctx.Err())
 		}
-		return Resolved{}, fmt.Errorf("%w: %s whoami --json failed (is the Rex app running? it is never started for this check): %w", ErrIncompatible, q, err)
+		return Resolved{}, fmt.Errorf("%w: %s whoami --json failed (is the Rex app running? it is never started for this check): %w", ErrIncompatible, q, termsafe.Error(err))
 	}
 	var w whoami
 	if err := json.Unmarshal([]byte(out), &w); err != nil {

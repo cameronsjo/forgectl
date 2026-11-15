@@ -186,6 +186,32 @@ func TestResolveRexWith_RefusesAnUnreadableConfig(t *testing.T) {
 	})
 }
 
+// TestResolveRexWith_RefusesAPinFromAnUntrustedConfigFile: a binary_path from a
+// config file the check refuses runs nothing, and a config without one never
+// reaches the check.
+func TestResolveRexWith_RefusesAPinFromAnUntrustedConfigFile(t *testing.T) {
+	calls := 0
+	old := rexConfigFileCheck
+	t.Cleanup(func() { rexConfigFileCheck = old })
+	rexConfigFileCheck = func() error { calls++; return errors.New("config file is writable by group or other") }
+
+	var pinned config.Config
+	pinned.Surface.Rex.BinaryPath = "/nonexistent/rex"
+	_, err := resolveRexWith(func() config.Config { return pinned })
+	if err == nil || !strings.Contains(err.Error(), "binary_path is not trusted") || !strings.Contains(err.Error(), "writable by group or other") {
+		t.Fatalf("err = %v, want the untrusted-config refusal", err)
+	}
+	if calls != 1 {
+		t.Errorf("check ran %d times, want 1", calls)
+	}
+
+	calls = 0
+	_, _ = resolveRexWith(func() config.Config { return config.Config{} })
+	if calls != 0 {
+		t.Errorf("check ran %d times for a config with no binary_path, want 0", calls)
+	}
+}
+
 // TestLiveResolveRex runs the real resolver with FORGECTL_LIVE_REX=1, with
 // PATH emptied so the app bundle is the only way to find rex: it must find a
 // bundle binary that passes its own re-check. It starts nothing.
