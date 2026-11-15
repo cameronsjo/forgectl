@@ -154,9 +154,12 @@ func TestRootReportOnHerdrCoreHosts(t *testing.T) {
 		env    map[string]string
 		wantID bool
 	}{
-		{"herdr-core terminal", map[string]string{EnvHcTerminal: "t5b"}, false},
-		{"herdr 0.9 pane", map[string]string{EnvHerdr0: "1"}, true},
-		{"herdr 0.9 pane with an hc variable", map[string]string{EnvHcTerminal: "t5b", EnvHerdr0: "1"}, true},
+		{"herdr-core terminal", map[string]string{"HC_TERMINAL_ID": "t5b"}, false},
+		{"herdr 0.9 pane", map[string]string{"HERDR_ENV": "1"}, true},
+		{"herdr 0.9 pane with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": "1"}, true},
+		{"herdr 0.9 socket variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_SOCKET_PATH": "/tmp/s"}, true},
+		{"herdr 0.9 pane variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_PANE_ID": "p1"}, true},
+		{"inside tmux a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "TMUX": "/tmp/tmux-501/default,1,0"}, true},
 		{"any other host", nil, true},
 	}
 	for _, tc := range cases {

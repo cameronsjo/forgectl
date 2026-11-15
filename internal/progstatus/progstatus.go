@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 
+	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -27,17 +28,11 @@ import (
 // EnvOptOut turns reporting off when set to any non-empty value.
 const EnvOptOut = "FORGECTL_NO_PROGRAM_STATUS"
 
-// EnvHcTerminal is set in every terminal herdr-core runs, and so in a
-// herdr-app terminal. EnvHerdr0 is set in a herdr 0.9 pane.
-const (
-	EnvHcTerminal = "HC_TERMINAL_ID"
-	EnvHerdr0     = "HERDR_ENV"
-)
-
 const (
 	// programID is both the record id and the app name. A report with an id is
 	// a child record; a report with no id is the terminal's root record, and a
-	// clear with no id wipes every program's records on that terminal.
+	// clear with no id wipes every program's records on that terminal (measured
+	// on hc 0.1.21: it also removed another program's id'd record).
 	programID = "forgectl"
 	// maxMsgRunes keeps msg far under the spec's 2048-byte decoded cap.
 	maxMsgRunes = 200
@@ -62,7 +57,14 @@ type Reporter struct {
 	// you" badge, while the same report with an id shows nothing (measured on
 	// hc 0.1.21 and herdr-app 0.1.15). A terminal's status clears by itself
 	// when its interactive shell returns to the foreground, so the root record
-	// does not outlive the command.
+	// does not outlive the command (measured on hc 0.1.21 with an interactive
+	// shell: the status was set while a command ran and was gone when the
+	// command returned to the prompt).
+	//
+	// Root mode makes forgectl own the terminal's whole status for as long as
+	// it runs, and its Clear wipes every record on the terminal. That is right
+	// where forgectl is the foreground program of a herdr-core terminal, and
+	// wrong under tmux, where the terminal is shared by every pane: see New.
 	root bool
 }
 
@@ -78,11 +80,17 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	if getenv(mail.EnvWorker) != "" || getenv(mail.EnvDrainWorker) != "" {
 		return &Reporter{}
 	}
-	// A herdr-core or herdr-app terminal (HC_TERMINAL_ID) reports as the root
-	// record. A herdr 0.9 pane has HERDR_ENV and keeps the id'd record, which
-	// that host was not measured to need root for.
-	root := getenv(EnvHcTerminal) != "" && getenv(EnvHerdr0) == ""
-	return &Reporter{w: f, tmx: getenv("TMUX") != "", root: root}
+	// A herdr-core or herdr-app terminal reports as the root record, by the
+	// repo's own host detection (HC_TERMINAL_ID and none of the HERDR_*
+	// variables: a herdr 0.9 pane keeps the id'd record, which that host was
+	// not measured to need root for). Never under tmux: a tmux server copies
+	// its starting environment into every pane, so HC_TERMINAL_ID can name an
+	// outer terminal that every pane shares, where forgectl is not the
+	// foreground program (the outer shell never returns to its prompt to clear
+	// the status) and a root clear would wipe other panes' records.
+	tmux := getenv("TMUX") != ""
+	root := !tmux && herdr.DetectHost(func(k string) (string, bool) { v := getenv(k); return v, v != "" }) == herdr.HostApp
+	return &Reporter{w: f, tmx: tmux, root: root}
 }
 
 // ForWriter builds a Reporter that writes to w and skips every gate. It is for
