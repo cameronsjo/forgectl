@@ -323,6 +323,49 @@ func (d LaunchDefaults) BinaryFileError(harness string) error {
 	return nil
 }
 
+// WithBinaryTrustFrom carries the verdicts of base (the Config as LoadPath
+// read it) onto lc, a launch profile rebuilt from a second decode of the same
+// file (the legacy migration re-reads config.toml under its lock and decodes
+// it without a verdict). A key with no verdict of its own takes base's when
+// both hold the same path; a key set to a path base does not hold, with no
+// verdict, has no known source and is refused like a legacy path.
+func (lc LaunchConfig) WithBinaryTrustFrom(base LaunchConfig) LaunchConfig {
+	carry := func(path, basePath string, own, baseTrust *error) {
+		if path == "" || *own != nil {
+			return
+		}
+		if path == basePath {
+			*own = *baseTrust
+			return
+		}
+		*own = ErrLegacyBinaryPath
+	}
+	d, b := &lc.Defaults, base.Defaults
+	carry(d.BinaryPath, b.BinaryPath, &d.binaryTrust.claude, &b.binaryTrust.claude)
+	carry(d.CodexBinaryPath, b.CodexBinaryPath, &d.binaryTrust.codex, &b.binaryTrust.codex)
+	carry(d.PiBinaryPath, b.PiBinaryPath, &d.binaryTrust.pi, &b.binaryTrust.pi)
+	return lc
+}
+
+// WithoutLegacyBinaryPaths returns lc without the binary paths that were read
+// from the legacy file, and the config keys it dropped. The legacy migration
+// renders from this, so it never copies a path nothing judged into a
+// config.toml that LoadPath would then trust.
+func (lc LaunchConfig) WithoutLegacyBinaryPaths() (LaunchConfig, []string) {
+	var dropped []string
+	drop := func(key string, path *string, trust error) {
+		if *path != "" && errors.Is(trust, ErrLegacyBinaryPath) {
+			*path = ""
+			dropped = append(dropped, key)
+		}
+	}
+	d := &lc.Defaults
+	drop("binary_path", &d.BinaryPath, d.binaryTrust.claude)
+	drop("codex_binary_path", &d.CodexBinaryPath, d.binaryTrust.codex)
+	drop("pi_binary_path", &d.PiBinaryPath, d.binaryTrust.pi)
+	return lc, dropped
+}
+
 // untrustedLegacy marks every binary path in lc as read from the legacy file.
 func untrustedLegacy(lc LaunchConfig) LaunchConfig {
 	lc.Defaults.binaryTrust = binaryTrust{ErrLegacyBinaryPath, ErrLegacyBinaryPath, ErrLegacyBinaryPath}

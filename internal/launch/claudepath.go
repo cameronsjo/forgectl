@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,6 +59,10 @@ func resolveLayered(l layered) (ResolvedBinary, error) {
 	}
 	if l.configPath != "" {
 		if l.configTrust != nil {
+			// A legacy-sourced path never came from the table the label names.
+			if errors.Is(l.configTrust, config.ErrLegacyBinaryPath) {
+				return ResolvedBinary{}, fmt.Errorf("the %s binary: %w", l.name, l.configTrust)
+			}
 			return ResolvedBinary{}, fmt.Errorf("%s is not trusted: %w", l.configLabel, l.configTrust)
 		}
 		if err := homeless(l.configPath, home, homeErr, l.configLabel); err != nil {

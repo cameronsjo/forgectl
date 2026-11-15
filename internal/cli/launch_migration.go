@@ -350,11 +350,18 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 	}
 
 	shadow := locked.HasLaunchSection() || hasLaunchSection(raw)
-	intended := boundary.Source.Launch
+	// A binary path from the legacy file was never judged for who could write
+	// it, and the config.toml this writes would be trusted at the next load.
+	// Render without those keys; they stay in the backup, and the notice names
+	// them. effective is what this launch runs with, legacy marks included.
+	legacySource, droppedBinaryKeys := boundary.Source.Launch.WithoutLegacyBinaryPaths()
+	effective := boundary.Source.Launch
+	intended := legacySource
 	added := 0
 	var rendered []byte
 	if shadow {
-		intended, added = config.MergeLegacyIntoLaunch(locked, boundary.Source.Launch)
+		effective, _ = config.MergeLegacyIntoLaunch(locked, boundary.Source.Launch)
+		intended, added = config.MergeLegacyIntoLaunch(locked, legacySource)
 		if added == 0 {
 			rendered = bytes.Clone(raw)
 		} else {
@@ -362,7 +369,7 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 		}
 	} else {
 		if intended.IsZero() {
-			return MigrationResult{Effective: intended, Action: configUnchanged, Backup: backupNotAllocated, Retirement: retirementSourceRetained}
+			return MigrationResult{Effective: effective, Action: configUnchanged, Backup: backupNotAllocated, Retirement: retirementSourceRetained}
 		}
 		rendered, err = renderImportedLaunch(raw, intended, boundary.LegacyPath)
 	}
@@ -370,7 +377,7 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 		return refusalResult(boundary, locked, err)
 	}
 
-	result := MigrationResult{Effective: intended, Backup: backupNotAllocated, Retirement: retirementSourceRetained}
+	result := MigrationResult{Effective: effective, Backup: backupNotAllocated, Retirement: retirementSourceRetained}
 	if bytes.Equal(raw, rendered) {
 		result.Action = configConfirmed
 		if err := ops.confirmConfig(boundary.ConfigPath, raw, ops.atomic); err != nil {
@@ -467,6 +474,9 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 		result.Notice = fmt.Sprintf(
 			"merged %d addition(s) from claunch.conf into config.toml's [launch] section (old file kept as %s)",
 			added, filepath.Base(result.BackupPath))
+	}
+	if len(droppedBinaryKeys) > 0 {
+		result.Notice += fmt.Sprintf("; %s from claunch.conf were not migrated because nothing judged who could write that file: set them in [launch.defaults] in config.toml", strings.Join(droppedBinaryKeys, ", "))
 	}
 	return result
 }
