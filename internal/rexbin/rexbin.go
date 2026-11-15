@@ -293,7 +293,7 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 			if ctx.Err() != nil {
 				return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(abs, 0), ctx.Err())
 			}
-			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is inside an app bundle and fails its checks: %w", gerr)
+			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is refused as an app-bundle binary: %w", gerr)
 		}
 		got, verr := r.vet(ctx, abs, SourceConfig)
 		if verr == nil && gated {
@@ -312,7 +312,7 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 		case gerr != nil && ctx.Err() != nil:
 			return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(pathBin, 0), ctx.Err())
 		case gerr != nil:
-			pathErr = fmt.Errorf("PATH hit is inside an app bundle and fails its checks: %w", gerr)
+			pathErr = fmt.Errorf("PATH hit is refused as an app-bundle binary: %w", gerr)
 		default:
 			got, verr := r.vet(ctx, pathBin, SourcePATH)
 			if verr == nil && gated {
@@ -621,8 +621,8 @@ func (r *Resolver) walkLinks(path string) (resolved string, texts []string, err 
 // path claims to be a bundle binary, and it is refused unless it resolves into
 // an .app and passes the gates, because an attacker who can rewrite a
 // directory the link passes through could otherwise steer it back to a plain
-// executable file. ok is false, with no error, only for a binary that no .app
-// name touches.
+// executable file. inApp is false, with no error, only for a binary that no
+// .app name touches.
 func (r *Resolver) appTarget(path string) (target string, inApp bool, err error) {
 	if _, in := bundleDir(path); in {
 		return path, true, nil
