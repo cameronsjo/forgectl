@@ -50,6 +50,11 @@ type LaunchScript struct {
 	path string
 }
 
+// launchDirOwnerOK is ownedByCurrentUser, a variable only so a test can drive
+// the refusal through NewLaunchScript: os.MkdirTemp cannot produce a foreign
+// owner.
+var launchDirOwnerOK = ownedByCurrentUser
+
 // NewLaunchScript writes line, which must be opaque, into a new script in a
 // new private directory under base, which must be absolute.
 //
@@ -57,8 +62,9 @@ type LaunchScript struct {
 // a name nobody chose; the file is created exclusively with mode 0600
 // (sealed.WriteNewFile), so nothing already at the path, a symlink included,
 // is written through. The directory's mode is read back, and anything wider
-// than 0700 refuses, because a umask can only narrow it and anything else
-// means the directory is not the one MkdirTemp made.
+// than 0700, or not owned by the effective user, refuses, because a umask can
+// only narrow the mode and anything else means the directory is not the one
+// MkdirTemp made.
 func NewLaunchScript(base string, line Arg) (LaunchScript, error) {
 	if !line.Secret() || !line.v.Present() || !filepath.IsAbs(base) {
 		return LaunchScript{}, ErrLaunchScript
@@ -68,7 +74,7 @@ func NewLaunchScript(base string, line Arg) (LaunchScript, error) {
 		return LaunchScript{}, ErrLaunchScript
 	}
 	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&^0o700 != 0 {
+	if err != nil || !info.IsDir() || info.Mode().Perm()&^0o700 != 0 || !launchDirOwnerOK(info) {
 		_ = os.Remove(dir)
 		return LaunchScript{}, ErrLaunchScript
 	}

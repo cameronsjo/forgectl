@@ -130,6 +130,25 @@ func TestNewLaunchScript_Refuses(t *testing.T) {
 	}
 }
 
+// TestNewLaunchScript_RefusesAForeignOwnedDirectory drives the ownership
+// refusal through NewLaunchScript itself, and leaves nothing behind.
+func TestNewLaunchScript_RefusesAForeignOwnedDirectory(t *testing.T) {
+	old := launchDirOwnerOK
+	launchDirOwnerOK = func(os.FileInfo) bool { return false }
+	t.Cleanup(func() { launchDirOwnerOK = old })
+	base := t.TempDir()
+	if _, err := NewLaunchScript(base, Opaque("x")); !errors.Is(err, ErrLaunchScript) {
+		t.Fatalf("err = %v, want ErrLaunchScript", err)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a refused directory left %d entries under the base", len(entries))
+	}
+}
+
 // TestSealedWriteNewFileHasOneCaller pins, on every guard platform, that
 // sealed.WriteNewFile, the second reveal, is named only inside
 // NewLaunchScript, and there once, as a direct call: a second writer of
