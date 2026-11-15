@@ -6,6 +6,6 @@ package rexbin
 
 import "io/fs"
 
-// ownerOf has no answer off unix; the ownership gate then refuses every
+// sysInfo has no answer off unix; the ownership gate then refuses every
 // bundle candidate, which is the safe reading (Rex is macOS-only).
-func ownerOf(fs.FileInfo) (int, bool) { return 0, false }
+func sysInfo(fs.FileInfo) (int, uint64, uint64, bool) { return 0, 0, 0, false }

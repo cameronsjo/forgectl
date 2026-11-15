@@ -21,23 +21,43 @@
 //
 // Bundles are tried per root, /Applications first and then ~/Applications
 // (only when $HOME is absolute): the exact names Rex.app and Rex Beta.app, in
-// that order, then any other Rex*.app in sorted order. A planted look-alike
-// therefore cannot outrank a real install by sorting first.
+// that order, then any other Rex*.app in sorted order. The exact names come
+// first so a look-alike that merely sorts earlier does not get tried before a
+// genuine install; it is the gates below, not the order, that keep a planted
+// bundle from running.
 //
 // /Applications is writable by every admin account, so a discovered bundle is
 // not trusted by name. Before a bundle candidate is run it must pass:
 //
-//   - an executable regular file inside an .app directory;
-//   - an ownership and mode check on the file and every directory up to and
-//     including the .app bundle: owned by the current user or root, and not
-//     writable by group or other;
-//   - on darwin, `codesign --verify --strict` against a requirement that the
-//     leaf certificate's team is [TeamID], run through the [exec.Runner].
+//   - a chain of real components from the rex file up to the .app directory,
+//     judged with lstat: no symlink anywhere in it (the .app, a directory or
+//     the file), each component owned by the current user or root, and none
+//     writable by group or other. The mode check reads POSIX mode bits and
+//     ignores ACLs. The .app must be the one named like Rex*.app, or else the
+//     last .app in the path;
+//   - an executable regular file;
+//   - on darwin, `/usr/bin/codesign --verify --strict` against a requirement
+//     that the leaf certificate's team is [TeamID], run through the
+//     [exec.Runner] under its own 5 second timeout.
 //
 // A candidate that fails a gate is skipped without being run, and its reason
 // is listed if resolution fails. Every candidate that passes is tried in
 // order and the first whose `whoami --json` is compatible wins. If none is,
-// the error lists each candidate and why.
+// the error lists each candidate and why. The file's device, inode and
+// modification time are recorded by the gate and checked again after
+// `whoami` returns; a change refuses the candidate as "binary changed while
+// being verified". [Resolved].Path is the cleaned path that was gated, never a
+// symlink.
+//
+// # Residual race
+//
+// This narrows the window between check and use; it does not close it. The
+// directory that holds the .app (/Applications) is root:admin with mode 775
+// and no sticky bit, so any admin-group account can rename a bundle in or out
+// of it at any moment, and the gates judge a path name, not the bytes that
+// later run. Setups that need more should set `[surface.rex] binary_path` to a
+// binary in a directory only they can write; a pinned path is not gated, so
+// that choice is theirs to vouch for.
 //
 // # The compatibility check
 //

@@ -35,6 +35,9 @@ const TeamID = "AG92C3PT77"
 // hold resolution for as long as the caller's context allows.
 const whoamiTimeout = 5 * time.Second
 
+// signTimeout bounds one `codesign --verify` run, for the same reason.
+const signTimeout = 5 * time.Second
+
 // Source names the layer that supplied a resolved binary.
 type Source string
 
@@ -105,24 +108,30 @@ type Info struct {
 	// UID owns the file; meaningful only when UIDKnown.
 	UID      int
 	UIDKnown bool
+	// Dev and Ino identify the file on disk; meaningful only when UIDKnown.
+	Dev, Ino uint64
+	ModTime  time.Time
 }
 
 // FS is the slice of the filesystem the resolver reads; tests fake it. Stat
-// follows symlinks.
+// follows symlinks; Lstat does not.
 type FS interface {
 	Stat(name string) (Info, error)
+	Lstat(name string) (Info, error)
 	Glob(pattern string) ([]string, error)
 }
 
 type osFS struct{}
 
-func (osFS) Stat(name string) (Info, error) {
-	fi, err := os.Stat(name)
+func (osFS) Stat(name string) (Info, error)  { return infoOf(os.Stat(name)) }
+func (osFS) Lstat(name string) (Info, error) { return infoOf(os.Lstat(name)) }
+
+func infoOf(fi fs.FileInfo, err error) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	uid, known := ownerOf(fi)
-	return Info{Mode: fi.Mode(), IsDir: fi.IsDir(), UID: uid, UIDKnown: known}, nil
+	uid, dev, ino, known := sysInfo(fi)
+	return Info{Mode: fi.Mode(), IsDir: fi.IsDir(), UID: uid, UIDKnown: known, Dev: dev, Ino: ino, ModTime: fi.ModTime()}, nil
 }
 
 func (osFS) Glob(pattern string) ([]string, error) { return filepath.Glob(pattern) }
@@ -135,7 +144,9 @@ type Resolver struct {
 	patterns []string
 	uid      int
 	goos     string
-	home     string
+	// signTimeout bounds one codesign run.
+	signTimeout time.Duration
+	home        string
 	// homeErr is why there is no usable home directory, or nil.
 	homeErr error
 }
@@ -190,11 +201,12 @@ func (r *Resolver) setHome(home string, err error) {
 // [DefaultBundlePatterns].
 func New(runner fexec.Runner, opts ...Option) *Resolver {
 	r := &Resolver{
-		runner:   runner,
-		fs:       osFS{},
-		lookPath: exec.LookPath,
-		uid:      os.Getuid(),
-		goos:     runtime.GOOS,
+		runner:      runner,
+		fs:          osFS{},
+		lookPath:    exec.LookPath,
+		uid:         os.Getuid(),
+		goos:        runtime.GOOS,
+		signTimeout: signTimeout,
 	}
 	home, err := os.UserHomeDir()
 	r.setHome(home, err)
@@ -251,16 +263,27 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 			continue
 		}
 		for _, m := range matches {
+			m = filepath.Clean(m)
 			if seen[m] {
 				continue
 			}
 			seen[m] = true
-			if err := r.bundleCandidate(ctx, m); err != nil {
+			before, err := r.bundleCandidate(ctx, m)
+			if err != nil {
+				if ctx.Err() != nil {
+					return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(m, 0), ctx.Err())
+				}
 				tried = append(tried, err.Error())
 				continue
 			}
 			got, err := r.vet(ctx, m, SourceBundle)
 			if err == nil {
+				// The gates judged the file at one moment and whoami ran it at
+				// another: refuse if it is not the same file any more.
+				if cerr := r.unchanged(m, before); cerr != nil {
+					tried = append(tried, cerr.Error())
+					continue
+				}
 				return got, nil
 			}
 			if ctx.Err() != nil {
@@ -319,93 +342,153 @@ func (r *Resolver) fromPATH() (string, error) {
 	return abs, nil
 }
 
-// usable accepts an executable regular file. The exec-bit test does not apply
-// on Windows, where Stat reports every file as 0666; Rex is macOS-only.
+// usable accepts an executable regular file, following symlinks (the config
+// and PATH layers). The exec-bit test does not apply on Windows, where Stat
+// reports every file as 0666; Rex is macOS-only.
 func (r *Resolver) usable(path string) error {
-	q := termsafe.QuoteArgMax(path, 0)
 	info, err := r.fs.Stat(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", q, err)
+		return fmt.Errorf("%s: %w", termsafe.QuoteArgMax(path, 0), err)
 	}
-	if info.IsDir {
+	return checkFile(path, info)
+}
+
+// checkFile refuses a directory, a non-regular file, or a file with no exec bit.
+func checkFile(path string, info Info) error {
+	q := termsafe.QuoteArgMax(path, 0)
+	switch {
+	case info.IsDir:
 		return fmt.Errorf("%s is a directory", q)
-	}
-	if info.Mode.Perm()&0o111 == 0 {
+	case !info.Mode.IsRegular():
+		return fmt.Errorf("%s is not a regular file", q)
+	case info.Mode.Perm()&0o111 == 0:
 		return fmt.Errorf("%s is not executable", q)
 	}
 	return nil
 }
 
-// bundleCandidate gates a bundle-discovered binary before anything runs it:
-// an executable file, an ownership and mode check on the file and every
-// directory up to the .app bundle, and on darwin the code-signature check. The
-// returned error is the reason it was skipped, naming the path.
-func (r *Resolver) bundleCandidate(ctx context.Context, path string) error {
-	if err := r.usable(path); err != nil {
-		return err
+// bundleCandidate gates a bundle-discovered binary before anything runs it: a
+// chain of real (non-symlink) components from the file up to the .app
+// directory, each owned by the current user or root and not group- or
+// other-writable; an executable regular file; and on darwin the code-signature
+// check. It returns the file's identity as judged, for [Resolver.unchanged].
+// The returned error is the reason it was skipped, naming the path. path must
+// be clean.
+func (r *Resolver) bundleCandidate(ctx context.Context, path string) (Info, error) {
+	file, err := r.trustedChain(path)
+	if err != nil {
+		return Info{}, err
 	}
-	if err := r.trustedChain(path); err != nil {
-		return err
+	if err := checkFile(path, file); err != nil {
+		return Info{}, err
 	}
 	if r.goos == "darwin" {
 		if err := r.verifySignature(ctx, path); err != nil {
-			return err
+			return Info{}, err
 		}
 	}
-	return nil
+	return file, nil
 }
 
-// trustedChain requires the file and each directory from it up to and
-// including the .app bundle to be owned by the current user or root and not
-// writable by group or other: anyone who could write there could swap the
-// binary. Stat follows symlinks, so a symlinked component is judged by its
-// target's own metadata, not by the directories above the target.
-func (r *Resolver) trustedChain(path string) error {
+// trustedChain judges the file and each directory from it up to and including
+// the .app bundle with Lstat: none may be a symlink, each must be owned by the
+// current user or root, and none may be writable by group or other, because
+// anyone who could write there could swap the binary. It returns the file's
+// own Info. The mode check reads POSIX permission bits only and ignores ACLs.
+// The directory that holds the .app (/Applications) is not judged; see the
+// package doc for the rename race that leaves.
+func (r *Resolver) trustedChain(path string) (Info, error) {
 	q := termsafe.QuoteArgMax(path, 0)
 	bundle, ok := bundleDir(path)
 	if !ok {
-		return fmt.Errorf("%s: not inside an .app bundle", q)
+		return Info{}, fmt.Errorf("%s: not inside an .app bundle", q)
 	}
+	var file Info
 	for p := path; ; p = filepath.Dir(p) {
-		info, err := r.fs.Stat(p)
+		info, err := r.fs.Lstat(p)
 		if err != nil {
-			return fmt.Errorf("%s: %w", q, err)
+			return Info{}, fmt.Errorf("%s: %w", q, err)
 		}
 		pq := termsafe.QuoteArgMax(p, 0)
-		if !info.UIDKnown {
-			return fmt.Errorf("%s: cannot tell who owns %s", q, pq)
+		switch {
+		case info.Mode&fs.ModeSymlink != 0:
+			return Info{}, fmt.Errorf("%s: %s is a symlink", q, pq)
+		case !info.UIDKnown:
+			return Info{}, fmt.Errorf("%s: cannot tell who owns %s", q, pq)
+		case info.UID != r.uid && info.UID != 0:
+			return Info{}, fmt.Errorf("%s: %s is owned by uid %d, not you or root", q, pq, info.UID)
+		case info.Mode.Perm()&0o022 != 0:
+			return Info{}, fmt.Errorf("%s: %s is writable by group or other (mode %04o)", q, pq, info.Mode.Perm())
 		}
-		if info.UID != r.uid && info.UID != 0 {
-			return fmt.Errorf("%s: %s is owned by uid %d, not you or root", q, pq, info.UID)
-		}
-		if info.Mode.Perm()&0o022 != 0 {
-			return fmt.Errorf("%s: %s is writable by group or other (mode %04o)", q, pq, info.Mode.Perm())
+		if p == path {
+			file = info
 		}
 		if p == bundle {
-			return nil
+			return file, nil
+		}
+		if filepath.Dir(p) == p {
+			return Info{}, fmt.Errorf("%s: never reached the .app bundle", q)
 		}
 	}
 }
 
-// bundleDir returns the first path component that ends in ".app", with the
-// directories above it.
-func bundleDir(path string) (string, bool) {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	for i, c := range parts {
-		if i > 0 && strings.HasSuffix(c, ".app") {
-			return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
-		}
-	}
-	return "", false
-}
-
-// verifySignature runs the system code-signature check against TeamID.
-func (r *Resolver) verifySignature(ctx context.Context, path string) error {
-	req := `anchor apple generic and certificate leaf[subject.OU] = "` + TeamID + `"`
-	if _, err := r.runner.Run(ctx, "codesign", "--verify", "--strict", "-R="+req, path); err != nil {
-		return fmt.Errorf("%s: code signature is not Team ID %s: %w", termsafe.QuoteArgMax(path, 0), TeamID, err)
+// unchanged refuses when the file at path is no longer the one the gates
+// judged (device, inode or modification time differ, or it is a symlink now).
+func (r *Resolver) unchanged(path string, before Info) error {
+	now, err := r.fs.Lstat(path)
+	if err != nil || now.Mode&fs.ModeSymlink != 0 || now.Dev != before.Dev || now.Ino != before.Ino || !now.ModTime.Equal(before.ModTime) {
+		return fmt.Errorf("%s: binary changed while being verified", termsafe.QuoteArgMax(path, 0))
 	}
 	return nil
+}
+
+// bundleDir returns the directory the ownership chain must reach. It is the
+// outermost ".app" component whose name starts with "Rex" (so an .app nested
+// inside a Rex bundle cannot cut the chain short), else the last ".app"
+// component (so a $HOME under some other .app still gets the whole chain below
+// it). path must be clean.
+func bundleDir(path string) (string, bool) {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	last, rex := -1, -1
+	for i, c := range parts {
+		if i == 0 || !strings.HasSuffix(c, ".app") {
+			continue
+		}
+		last = i
+		if rex < 0 && strings.HasPrefix(c, "Rex") {
+			rex = i
+		}
+	}
+	i := last
+	if rex >= 0 {
+		i = rex
+	}
+	if i < 0 {
+		return "", false
+	}
+	return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
+}
+
+// codesignPath is the system code-signature tool, named absolutely so a
+// stand-in earlier on PATH cannot turn the check off.
+const codesignPath = "/usr/bin/codesign"
+
+// verifySignature runs the system code-signature check against TeamID, under
+// its own timeout. A caller that cancelled gets that back from Resolve; a
+// codesign that only hit its own timeout is a skipped candidate.
+func (r *Resolver) verifySignature(ctx context.Context, path string) error {
+	req := `anchor apple generic and certificate leaf[subject.OU] = "` + TeamID + `"`
+	runCtx, cancel := context.WithTimeout(ctx, r.signTimeout)
+	defer cancel()
+	_, err := r.runner.Run(runCtx, codesignPath, "--verify", "--strict", "-R="+req, path)
+	if err == nil {
+		return nil
+	}
+	q := termsafe.QuoteArgMax(path, 0)
+	if ctx.Err() == nil && runCtx.Err() != nil {
+		return fmt.Errorf("%s: code signature check did not finish within %s", q, r.signTimeout)
+	}
+	return fmt.Errorf("%s: code signature is not Team ID %s: %w", q, TeamID, err)
 }
 
 // whoami is the part of `rex whoami --json` the resolver reads; other fields

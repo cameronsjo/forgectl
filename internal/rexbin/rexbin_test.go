@@ -5,11 +5,13 @@ package rexbin
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"io/fs"
 	"path"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -25,16 +27,40 @@ type ent struct {
 // directory.
 type fakeFS map[string]ent
 
-func (f fakeFS) Stat(name string) (Info, error) {
+func (f fakeFS) Stat(name string) (Info, error) { return f.info(name) }
+
+// Lstat is Stat plus the symlink bit, which the fake keeps in the mode.
+func (f fakeFS) Lstat(name string) (Info, error) { return f.info(name) }
+
+func (f fakeFS) info(name string) (Info, error) {
+	name = path.Clean(name) // a real filesystem ignores doubled separators
 	e, ok := f[name]
 	if !ok {
 		return Info{}, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
-	return Info{Mode: e.mode, IsDir: e.mode&fs.ModeDir != 0, UID: e.uid, UIDKnown: true}, nil
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return Info{Mode: e.mode, IsDir: e.mode&fs.ModeDir != 0, UID: e.uid, UIDKnown: !f.unknownUIDs(),
+		Dev: 1, Ino: uint64(h.Sum32()) + uint64(f["\x00gen:"+name].uid)}, nil
 }
+
+// unknownUIDs reports whether the fake should hide ownership, as a non-unix
+// platform does.
+func (f fakeFS) unknownUIDs() bool { _, ok := f["\x00unknown-uids"]; return ok }
+
+// bump gives path a new inode, as a swap would.
+func (f fakeFS) bump(p string) { e := f["\x00gen:"+p]; e.uid++; f["\x00gen:"+p] = e }
 
 func (f fakeFS) Glob(pattern string) ([]string, error) {
 	var out []string
+	// A literal pattern is returned as written when it names something, as
+	// filepath.Glob does, even if it is not a clean path.
+	if !strings.ContainsAny(pattern, "*?[\\") {
+		if _, ok := f[path.Clean(pattern)]; ok {
+			return []string{pattern}, nil
+		}
+		return nil, nil
+	}
 	for p := range f {
 		if ok, err := path.Match(pattern, p); err != nil {
 			return nil, err
@@ -50,7 +76,7 @@ func (f fakeFS) Glob(pattern string) ([]string, error) {
 // and every ancestor directory is 0755 owned by uid. "/Applications" itself is
 // root:admin 0775, as on macOS; it is above the bundle, so never checked.
 func tree(uid int, files map[string]fs.FileMode) fakeFS {
-	f := fakeFS{"/Applications": {fs.ModeDir | 0o775, 0}}
+	f := fakeFS{"/": {fs.ModeDir | 0o755, 0}, "/Applications": {fs.ModeDir | 0o775, 0}}
 	for p, m := range files {
 		f[p] = ent{m, uid}
 		for d := path.Dir(p); d != "/" && d != "/Applications" && d != "."; d = path.Dir(d) {
@@ -86,7 +112,7 @@ func lookup(found string) func(string) (string, error) {
 // signErr(path). Anything else is an error.
 func runner(replies map[string]string, signErr func(string) error) *fexec.FakeRunner {
 	return &fexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name == "codesign" {
+		if name == codesignPath {
 			if signErr == nil {
 				return "", nil
 			}
@@ -220,7 +246,7 @@ func TestConfigPathForms(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "[surface.rex] binary_path") && tt.errHas != "" || !strings.Contains(err.Error(), tt.errHas) {
+			if err == nil || (!strings.Contains(err.Error(), "[surface.rex] binary_path") && tt.errHas != "") || !strings.Contains(err.Error(), tt.errHas) {
 				t.Fatalf("err = %v, want it to name the key and contain %q", err, tt.errHas)
 			}
 			if ran(fr, tt.want) || len(fr.Calls) != 0 {
@@ -425,7 +451,7 @@ func TestSignatureGate(t *testing.T) {
 		}
 		first := fr.Calls[0]
 		want := []string{"--verify", "--strict", `-R=anchor apple generic and certificate leaf[subject.OU] = "AG92C3PT77"`, genuine}
-		if first.Name != "codesign" || strings.Join(first.Args, "\x00") != strings.Join(want, "\x00") {
+		if first.Name != "/usr/bin/codesign" || strings.Join(first.Args, "\x00") != strings.Join(want, "\x00") {
 			t.Errorf("first call = %+v, want codesign before whoami", first)
 		}
 		if fr.Calls[len(fr.Calls)-1].Name != genuine {
@@ -437,15 +463,15 @@ func TestSignatureGate(t *testing.T) {
 		if _, err := resolver(fr, f, "", WithGOOS("linux")).Resolve(context.Background(), ""); err != nil {
 			t.Fatal(err)
 		}
-		if ran(fr, "codesign") {
+		if ran(fr, codesignPath) {
 			t.Error("codesign ran off darwin")
 		}
 	})
 	t.Run("a pinned or PATH binary is not signature-checked", func(t *testing.T) {
 		g := tree(me, map[string]fs.FileMode{cfgBin: 0o755})
 		fr := runner(map[string]string{cfgBin: goodJSON}, bad)
-		if _, err := resolver(fr, g, "", WithGOOS("darwin")).Resolve(context.Background(), cfgBin); err != nil || ran(fr, "codesign") {
-			t.Fatalf("err = %v, codesign ran = %v", err, ran(fr, "codesign"))
+		if _, err := resolver(fr, g, "", WithGOOS("darwin")).Resolve(context.Background(), cfgBin); err != nil || ran(fr, codesignPath) {
+			t.Fatalf("err = %v, codesign ran = %v", err, ran(fr, codesignPath))
 		}
 	})
 }
@@ -564,5 +590,241 @@ func TestMissingHomeIsNamedInRefusal(t *testing.T) {
 	_, err := r.Resolve(context.Background(), "")
 	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "no usable home directory: $HOME is not defined") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEveryChainDirectoryIsJudged(t *testing.T) {
+	genuine := bin("Rex.app")
+	dirs := []string{
+		"/Applications/Rex.app/Contents",
+		"/Applications/Rex.app/Contents/Helpers",
+		"/Applications/Rex.app/Contents/Helpers/Rex Server.rex",
+		"/Applications/Rex.app/Contents/Helpers/Rex Server.rex/Contents",
+		"/Applications/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS",
+	}
+	for _, d := range dirs {
+		for name, e := range map[string]ent{
+			"group-writable": {fs.ModeDir | 0o775, me},
+			"foreign-owned":  {fs.ModeDir | 0o755, 999},
+		} {
+			t.Run(name+" "+strings.TrimPrefix(d, "/Applications/Rex.app/"), func(t *testing.T) {
+				f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+				if _, ok := f[d]; !ok {
+					t.Fatalf("%s is not part of the fake tree", d)
+				}
+				f[d] = e
+				fr := runner(map[string]string{genuine: goodJSON}, nil)
+				_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+				if !errors.Is(err, ErrNotFound) || ran(fr, genuine) {
+					t.Fatalf("err = %v, ran = %v; want a refusal without running it", err, ran(fr, genuine))
+				}
+			})
+		}
+	}
+}
+
+func TestSymlinkAnywhereInTheChainIsRefused(t *testing.T) {
+	genuine := bin("Rex.app")
+	for _, p := range []string{
+		"/Applications/Rex.app",                  // the .app itself
+		"/Applications/Rex.app/Contents/Helpers", // a middle directory
+		genuine,                                  // the rex file
+	} {
+		t.Run(strings.TrimPrefix(p, "/Applications/"), func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			e := f[p]
+			e.mode |= fs.ModeSymlink
+			f[p] = e
+			fr := runner(map[string]string{genuine: goodJSON}, nil)
+			_, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(context.Background(), "")
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "is a symlink") {
+				t.Fatalf("err = %v, want ErrNotFound naming a symlink", err)
+			}
+			if ran(fr, genuine) || ran(fr, codesignPath) {
+				t.Errorf("a symlinked chain reached codesign or the binary: %+v", fr.Calls)
+			}
+		})
+	}
+}
+
+func TestBinaryChangedWhileBeingVerifiedIsRefused(t *testing.T) {
+	genuine := bin("Rex.app")
+	for name, swap := range map[string]func(fakeFS){
+		"new inode":     func(f fakeFS) { f.bump(genuine) },
+		"now a symlink": func(f fakeFS) { e := f[genuine]; e.mode |= fs.ModeSymlink; f[genuine] = e },
+		"removed":       func(f fakeFS) { delete(f, genuine) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			fr := &fexec.FakeRunner{RunFunc: func(n string, _ []string) (string, error) {
+				if n == genuine {
+					swap(f)
+				}
+				return goodJSON, nil
+			}}
+			_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "binary changed while being verified") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestResolvedPathIsTheCleanGatedPath(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	messy := "/Applications//Rex.app/./Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+	fr := runner(map[string]string{genuine: goodJSON}, nil)
+	got, err := resolver(fr, f, "", WithBundlePatterns(messy)).Resolve(context.Background(), "")
+	if err != nil || got.Path != genuine {
+		t.Fatalf("got %+v, %v; want the clean path %s", got, err, genuine)
+	}
+}
+
+func TestCancellationDuringSignatureCheckIsNotNotFound(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755, bin("Rex Beta.app"): 0o755})
+	ctx, cancel := context.WithCancel(context.Background())
+	fr := &fexec.FakeRunner{RunFunc: func(n string, _ []string) (string, error) {
+		if n == codesignPath {
+			cancel()
+			return "", context.Canceled
+		}
+		return goodJSON, nil
+	}}
+	_, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(ctx, "")
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrIncompatible) {
+		t.Fatalf("err = %v, want context.Canceled only", err)
+	}
+	if len(fr.Calls) != 1 {
+		t.Errorf("calls = %d, want the walk to stop at the first cancelled codesign", len(fr.Calls))
+	}
+}
+
+func TestSignatureCheckHasItsOwnTimeoutAndSkipsTheCandidate(t *testing.T) {
+	genuine, beta := bin("Rex.app"), bin("Rex Beta.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755, beta: 0o755})
+	fr := &fexec.FakeRunner{RunFunc: func(n string, args []string) (string, error) {
+		return goodJSON, nil
+	}}
+	r := resolver(fr, f, "", WithGOOS("darwin"))
+	r.signTimeout = 20 * time.Millisecond
+	r.runner = signRunner{FakeRunner: fr, run: func(ctx context.Context, name, path string) (string, error) {
+		if name != codesignPath {
+			return goodJSON, nil
+		}
+		if path == genuine {
+			select { // the tool hangs until its own timeout fires
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
+			return "", errors.New("signal: killed")
+		}
+		return "", nil
+	}}
+	got, err := r.Resolve(context.Background(), "")
+	if err != nil || got.Path != beta {
+		t.Fatalf("got %+v, %v; want the signed second app", got, err)
+	}
+	// With no second app the timeout is a listed skip, not a caller error.
+	delete(f, beta)
+	_, err = r.Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "did not finish within") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// signRunner routes Run through run so a test can see the context.
+type signRunner struct {
+	*fexec.FakeRunner
+	run func(ctx context.Context, name, path string) (string, error)
+}
+
+func (s signRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	return s.run(ctx, name, args[len(args)-1])
+}
+
+func TestTrustedChainTerminatesOnUncleanPath(t *testing.T) {
+	f := tree(me, map[string]fs.FileMode{"/x/y.app/z": 0o755})
+	r := resolver(runner(nil, nil), f, "")
+	done := make(chan error, 1)
+	go func() { _, err := r.trustedChain("/x//y.app/z"); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("an unclean path was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("trustedChain did not terminate")
+	}
+	// Through Resolve the path is cleaned first, so it is gated and run.
+	fr := runner(map[string]string{"/x/y.app/z": goodJSON}, nil)
+	got, err := resolver(fr, f, "", WithBundlePatterns("/x//y.app/z")).Resolve(context.Background(), "")
+	if err != nil || got.Path != "/x/y.app/z" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestBundleDirChoice(t *testing.T) {
+	for in, want := range map[string]string{
+		"/Applications/Rex.app/Contents/rex":                 "/Applications/Rex.app",
+		"/Users/u/Tools.app/Applications/Rex.app/Contents/x": "/Users/u/Tools.app/Applications/Rex.app",
+		"/Applications/Rex.app/Contents/Helpers/X.app/rex":   "/Applications/Rex.app",
+		"/Users/u/Tools.app/Applications/Rex Beta.app/a/rex": "/Users/u/Tools.app/Applications/Rex Beta.app",
+		"/a/Other.app/b/Third.app/rex":                       "/a/Other.app/b/Third.app",
+	} {
+		if got, ok := bundleDir(in); !ok || got != want {
+			t.Errorf("bundleDir(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	if _, ok := bundleDir("/opt/bin/rex"); ok {
+		t.Error("a path with no .app has a bundle dir")
+	}
+}
+
+func TestHomeUnderAnAppDirectoryStillExaminesBelowIt(t *testing.T) {
+	home := "/Users/u/Tools.app/h"
+	p := home + "/Applications/Rex.app/Contents/Helpers/a.rex/Contents/MacOS/rex"
+	f := tree(me, map[string]fs.FileMode{p: 0o755})
+	d := home + "/Applications/Rex.app/Contents"
+	f[d] = ent{fs.ModeDir | 0o775, me}
+	fr := runner(map[string]string{p: goodJSON}, nil)
+	_, err := resolver(fr, f, "", WithHome(home, nil)).Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || ran(fr, p) {
+		t.Fatalf("err = %v, ran = %v", err, ran(fr, p))
+	}
+}
+
+func TestUnknownOwnershipRefusesEveryBundle(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	f["\x00unknown-uids"] = ent{}
+	fr := runner(map[string]string{genuine: goodJSON}, nil)
+	_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "cannot tell who owns") || ran(fr, genuine) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNonRegularFilesAreRefused(t *testing.T) {
+	genuine := bin("Rex.app")
+	for name, mode := range map[string]fs.FileMode{
+		"socket": fs.ModeSocket | 0o755, "device": fs.ModeDevice | 0o755, "fifo": fs.ModeNamedPipe | 0o755,
+	} {
+		t.Run(name+" in a bundle", func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: mode})
+			fr := runner(map[string]string{genuine: goodJSON}, nil)
+			_, err := resolver(fr, f, "").Resolve(context.Background(), "")
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not a regular file") || ran(fr, genuine) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+		t.Run(name+" on PATH", func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{pathBin: mode})
+			_, err := resolver(runner(nil, nil), f, pathBin).Resolve(context.Background(), "")
+			if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("err = %v", err)
+			}
+		})
 	}
 }
