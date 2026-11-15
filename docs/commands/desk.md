@@ -580,3 +580,7 @@ The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could 
 | `STEP-WARN id=<step> msg=<text>` | a batch step's output could not be read cleanly |
 | `RUN-END rc=<rc> reason=<r> [ok=<n> failed=<n> skipped=<n>]` | the run ended; always the last line |
 | `RUN-LOST id=<name> pid=<pid>` | printed by `watch`, never written: the owner is gone with no `RUN-END` |
+
+## Program status (OSC 7501)
+
+`desk watch` reports its state over the Program Status Protocol, so cmux's sidebar and herdr's status line show it: `blocked` while the item waits to start, `working` with the step name once it runs, `done` on `RUN-END rc=0`, `error` on any other end, a lost or skipped item, or an interrupt. A `--deadline` expiry clears the row, because the run outlives the watch. `--responses` reports nothing. The off switch, the worker-pane and tmux rules, and the other commands that report are in [workflow](workflow.md#program-status-osc-7501).

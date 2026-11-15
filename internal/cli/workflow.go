@@ -115,6 +115,7 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			var runErr error // read by the deferred OSC 7501 outcome report
 
 			if dryRun && resume {
 				return fmt.Errorf("--dry-run and --resume are mutually exclusive: dry-run plans without running, resume continues a real run")
@@ -192,17 +193,30 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 				return nil
 			}
 
+			// Report progress over OSC 7501 (a no-op unless stderr is a terminal
+			// and this is not a worker pane). The deferred mapping reads the
+			// returned error, so Done is decided only after ClearState returns.
+			status := newProgramStatus()
+			stopSignals := reportOnSignal(status, plan.Name)
+			defer stopSignals()
+			finished := false // false at the deferred report means a panic is unwinding
+			defer func() { reportOutcome(status, plan.Name, runErr, finished) }()
+			opts = append(opts, workflow.WithProgress(func(i, n int, uses string) {
+				status.Working(fmt.Sprintf("%s %d/%d %s", plan.Name, i, n, uses), 100*(i-1)/n)
+			}))
+
 			exe := workflow.NewExecutor(deps.Runner, registry, opts...)
-			if err := exe.Run(cmd.Context(), plan, wctx); err != nil {
-				return err
+			if runErr = exe.Run(cmd.Context(), plan, wctx); runErr != nil {
+				return runErr
 			}
 
 			// A fully successful run needs no checkpoint — clear it so the next
 			// run starts clean and `status` reflects reality.
-			if err := workflow.ClearState(name); err != nil {
-				return err
+			if runErr = workflow.ClearState(name); runErr != nil {
+				return runErr
 			}
 			fmt.Fprintf(out, "workflow %q completed\n", plan.Name)
+			finished = true
 			return nil
 		},
 	}
