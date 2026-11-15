@@ -37,7 +37,8 @@
 //     last .app in the path;
 //   - an executable regular file;
 //   - on darwin, `/usr/bin/codesign --verify --strict` against a requirement
-//     that the leaf certificate's team is [TeamID], run through the
+//     that the certificate chain is a Developer ID one and the leaf
+//     certificate's team is [TeamID], run through the
 //     [exec.Runner] under its own 5 second timeout.
 //
 // A candidate that fails a gate is skipped without being run, and its reason
@@ -46,8 +47,8 @@
 // the error lists each candidate and why. The file's device, inode and
 // modification time are recorded by the gate and checked again after
 // `whoami` returns; a change refuses the candidate as "binary changed while
-// being verified". [Resolved].Path is the cleaned path that was gated, never a
-// symlink.
+// being verified". For a bundle, [Resolved].Path is the cleaned path that was
+// gated, never a symlink; a config or PATH hit is returned as found.
 //
 // # Residual race
 //
@@ -66,9 +67,9 @@
 //     [Resolver.Verify] right before each one; it repeats the gates and shrinks
 //     the window to the gap between Verify and exec.
 //
-// The directory holding a ~/Applications bundle is not judged either; the
-// default (a 0700 directory you own) is safe, a group-writable or symlinked
-// one is not. Setups that need more should set `[surface.rex] binary_path` to
+// The directory holding a ~/Applications bundle, and $HOME above it, are not
+// judged either; the default (a directory only you can write) is safe, a
+// group-writable or symlinked one is not. Setups that need more should set `[surface.rex] binary_path` to
 // a binary in a directory only they can write; a pinned path is not gated, so
 // that choice is theirs to vouch for.
 //

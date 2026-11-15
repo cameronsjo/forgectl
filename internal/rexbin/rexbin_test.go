@@ -862,3 +862,57 @@ func TestVerifyRefusesRelativePathAndNonBundleStaysUsable(t *testing.T) {
 		t.Fatal("verify accepted a PATH binary that lost its exec bit")
 	}
 }
+
+func TestVerifyGatesByPathNotByLabel(t *testing.T) {
+	genuine := bin("Rex.app")
+	for _, src := range []Source{SourceBundle, SourceConfig, SourcePATH} {
+		t.Run("group-writable chain, source "+string(src), func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			f["/Applications/Rex.app/Contents"] = ent{fs.ModeDir | 0o775, me}
+			r := resolver(runner(nil, nil), f, "")
+			if err := r.Verify(context.Background(), Resolved{Path: genuine, Source: src}); err == nil {
+				t.Fatal("verify accepted a bundle path with an untrusted chain")
+			}
+		})
+	}
+}
+
+func TestVerifyRefusesUnknownSourceAndUncleanPath(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	r := resolver(runner(nil, nil), f, "")
+	for name, res := range map[string]Resolved{
+		"empty source":   {Path: genuine},
+		"unknown source": {Path: genuine, Source: "bogus"},
+		"dotdot":         {Path: "/Applications/Rex.app/Contents/x/../Helpers/Rex Server.rex/Contents/MacOS/rex", Source: SourceBundle},
+		"doubled slash":  {Path: "/Applications//Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex", Source: SourceBundle},
+		"relative":       {Path: "Applications/Rex.app/rex", Source: SourceBundle},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := r.Verify(context.Background(), res); err == nil {
+				t.Fatalf("verify accepted %+v", res)
+			}
+		})
+	}
+}
+
+func TestVerifyRechecksSignatureAndHonorsCancellation(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	signErr := error(nil)
+	fr := runner(map[string]string{genuine: goodJSON}, func(string) error { return signErr })
+	r := resolver(fr, f, "", WithGOOS("darwin"))
+	res := Resolved{Path: genuine, Source: SourceBundle}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("verify with a good signature: %v", err)
+	}
+	signErr = errors.New("bad signature")
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("verify accepted a binary whose signature now fails")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.Verify(ctx, res); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled verify = %v, want context.Canceled", err)
+	}
+}

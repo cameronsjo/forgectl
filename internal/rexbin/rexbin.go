@@ -27,7 +27,7 @@ const APIRevision = 14
 
 // TeamID is the Apple Developer Team ID that signs the Rex app (Developer ID
 // Application: Superlogical, Inc.). A bundle-discovered candidate must satisfy
-// the code-signing requirement built from it. Measured with `codesign
+// the code-signing requirement built from it (together with the Developer ID certificate checks). Measured with `codesign
 // --verify` on Rex Beta 0.1.0-preview.19.
 const TeamID = "AG92C3PT77"
 
@@ -69,23 +69,38 @@ type Resolved struct {
 
 // Verify re-runs the trust gates on a previously resolved binary and reports
 // whether it may still be executed. Call it immediately before each exec of
-// [Resolved].Path: Resolve judged the file once, and /Applications can be
-// rewritten by any admin account at any time. A bundle binary is re-gated in
-// full (chain, regular executable file, signature); a config or PATH binary is
-// the operator's own choice and is only checked to still be an executable
-// regular file. It narrows the window to the time between Verify and exec; it
-// does not close it (see the package doc).
+// [Resolved].Path, and exec exactly that string: Resolve judged the file once,
+// and /Applications can be rewritten by any admin account at any time.
+//
+// The gate level follows the path, not the label. A path inside an .app is
+// re-gated in full (chain, regular executable file, signature) whatever its
+// Source says, so a pinned `binary_path` that names the bundle binary gets the
+// same check as a discovered one. Any other path must still be an executable
+// regular file. A Path that is not absolute and already clean (no `..`, no
+// doubled separators) is refused, because the kernel resolves `..` after
+// following symlinks and would open a different file than the one gated, and
+// a Source that is not one of the three constants is refused. Verify narrows
+// the window to the gap between Verify and exec; it does not close it (see the
+// package doc). It does not re-run `whoami`, so a bundle swapped for another
+// validly signed Rex build passes. The signature gate checks only the team and
+// the Developer ID certificate kind. Off darwin there is no signature check;
+// Rex is macOS-only.
 func (r *Resolver) Verify(ctx context.Context, res Resolved) error {
-	path := filepath.Clean(res.Path)
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%s: not an absolute path", termsafe.QuoteArgMax(res.Path, 0))
+	q := termsafe.QuoteArgMax(res.Path, 0)
+	switch res.Source {
+	case SourceConfig, SourcePATH, SourceBundle:
+	default:
+		return fmt.Errorf("%s: unknown source %s", q, termsafe.QuoteArgMax(string(res.Source), 0))
 	}
-	if res.Source != SourceBundle {
-		return r.usable(path)
+	if !filepath.IsAbs(res.Path) || filepath.Clean(res.Path) != res.Path {
+		return fmt.Errorf("%s: not an absolute, clean path", q)
 	}
-	if _, err := r.bundleCandidate(ctx, path); err != nil {
+	if _, inApp := bundleDir(res.Path); !inApp {
+		return r.usable(res.Path)
+	}
+	if _, err := r.bundleCandidate(ctx, res.Path); err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("%s: %w", termsafe.QuoteArgMax(path, 0), ctx.Err())
+			return fmt.Errorf("%s: %w", q, ctx.Err())
 		}
 		return err
 	}
