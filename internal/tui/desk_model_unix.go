@@ -47,6 +47,11 @@ type DeskOptions struct {
 	// herdr's, when the desk runs inside a herdr pane, and none otherwise.
 	// title and body are already inert, capped lines.
 	Notify func(ctx context.Context, title, body string) error
+	// OnWaiting is called with the number of waiting items (held and refused
+	// ones are not counted) after the first scan and after each scan that
+	// changes it, from the dashboard's event loop. It must return quickly. nil
+	// reports nothing.
+	OnWaiting func(waiting int)
 	// Poll is how often the desk re-reads the queue; 0 means deskPollEvery.
 	Poll time.Duration
 	// Runs is where the run view (r) reads runs from; RunDesk sets the
@@ -199,9 +204,13 @@ type deskModel struct {
 	runGen int
 
 	// seen is the waiting set at the last scan, for arrival bells.
-	seen     map[string]bool
-	scanned  bool
-	lastRing time.Time
+	seen    map[string]bool
+	scanned bool
+	// reported is the waiting count last handed to OnWaiting; haveReported is
+	// false until the first call.
+	reported     int
+	haveReported bool
+	lastRing     time.Time
 
 	notify func(ctx context.Context, title, body string) error
 	// ttyArgv builds the foreground command for a TTY item; tests replace it.
@@ -521,6 +530,10 @@ func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 	}
 	first := !m.scanned
 	m.seen, m.scanned = waiting, true
+	if n := len(waiting); m.opts.OnWaiting != nil && (!m.haveReported || n != m.reported) {
+		m.opts.OnWaiting(n)
+		m.reported, m.haveReported = n, true
+	}
 	switch {
 	case first:
 		m.lastRing = now
