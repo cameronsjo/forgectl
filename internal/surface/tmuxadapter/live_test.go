@@ -66,6 +66,8 @@ func TestLiveTmux(t *testing.T) {
 	// test's sessions into the operator's saved state). The runner copies the
 	// environment when it is built, so point HOME and XDG_CONFIG_HOME at an
 	// empty directory first. /etc/tmux.conf, the system file, still applies.
+	// (t.TempDir's removal runs before the kill-server cleanup above, which is
+	// harmless: the kill uses the socket path, in a different directory.)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
