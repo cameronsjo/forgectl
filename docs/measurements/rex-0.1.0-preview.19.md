@@ -106,7 +106,9 @@ Sending `state=working:id=measure:app=measure:msg=aGk=` into a block, then `bloc
 
 ## 8. Not measured
 
-The 250 ms quick-exit threshold timing, a `working` record cleared by process exit, `$REX_SESSION`, `$REX_BLOCK`, `$REX_SERVER` and `$REX_BIN_DIR` are measured since: Rex sets all four afresh in each block (see `docs/hosts.md`), and what forgectl's own `rex` calls do with an inherited `$REX_SERVER` is not, raw `api call` error codes, non-ASCII output, very large scrollback, and alternate-screen capture.
+The 250 ms quick-exit threshold timing, a `working` record cleared by process exit, raw `api call` error codes, non-ASCII output, very large scrollback, alternate-screen capture, and what forgectl's own `rex` calls do with an inherited `$REX_SERVER`.
+
+Measured since: `$REX_SESSION`, `$REX_BLOCK`, `$REX_SERVER` and `$REX_BIN_DIR` inside a Rex terminal. Rex sets all four afresh in each block, including a block in a session created by `rex new` from inside another block (see `docs/hosts.md`).
 
 ## Design problems for a Rex backend
 

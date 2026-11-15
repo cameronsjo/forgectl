@@ -50,6 +50,11 @@ type LaunchScript struct {
 	path string
 }
 
+// launchDirOwnerOK is ownedByCurrentUser, a variable only so a test can drive
+// the refusal through NewLaunchScript: os.MkdirTemp cannot produce a foreign
+// owner.
+var launchDirOwnerOK = ownedByCurrentUser
+
 // NewLaunchScript writes line, which must be opaque, into a new script in a
 // new private directory under base, which must be absolute.
 //
@@ -60,11 +65,6 @@ type LaunchScript struct {
 // than 0700, or not owned by the effective user, refuses, because a umask can
 // only narrow the mode and anything else means the directory is not the one
 // MkdirTemp made.
-// launchDirOwnerOK is ownedByCurrentUser, a variable only so a test can drive
-// the refusal through NewLaunchScript: os.MkdirTemp cannot produce a foreign
-// owner.
-var launchDirOwnerOK = ownedByCurrentUser
-
 func NewLaunchScript(base string, line Arg) (LaunchScript, error) {
 	if !line.Secret() || !line.v.Present() || !filepath.IsAbs(base) {
 		return LaunchScript{}, ErrLaunchScript
