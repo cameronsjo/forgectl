@@ -20,6 +20,9 @@ type layered struct {
 	envSource   BinarySource
 	configPath  string
 	configLabel string
+	// configTrust is why the file configPath came from cannot be trusted to
+	// choose an executable (config.LaunchDefaults.BinaryFileError); nil when it can.
+	configTrust error
 	configSrc   BinarySource
 	name        string
 }
@@ -54,6 +57,9 @@ func resolveLayered(l layered) (ResolvedBinary, error) {
 		return absolute(path, l.envSource, l.envKey)
 	}
 	if l.configPath != "" {
+		if l.configTrust != nil {
+			return ResolvedBinary{}, fmt.Errorf("%s is not trusted: %w", l.configLabel, l.configTrust)
+		}
 		if err := homeless(l.configPath, home, homeErr, l.configLabel); err != nil {
 			return ResolvedBinary{}, err
 		}

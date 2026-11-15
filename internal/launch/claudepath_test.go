@@ -3,6 +3,7 @@ package launch
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -112,5 +113,54 @@ func TestValidateBinary_RejectsANonExecutableFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "[launch.defaults] codex_binary_path") {
 		t.Fatalf("CodexPath error = %v, want source attribution", err)
+	}
+}
+
+// TestResolveBinary_RefusesAConfigPathFromAFileOthersCouldWrite: the verdict
+// reaches the resolver for every harness, the environment still outranks a
+// refused config key, and a key that is not set is never refused over a file.
+func TestResolveBinary_RefusesAConfigPathFromAFileOthersCouldWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the owner and mode check needs a Unix stat")
+	}
+	dir := t.TempDir()
+	good := filepath.Join(dir, "tool")
+	if err := os.WriteFile(good, []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // G306: the resolver requires an executable file
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "[launch.defaults]\nbinary_path = \"" + good + "\"\ncodex_binary_path = \"" + good + "\"\npi_binary_path = \"" + good + "\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"claude", "codex", "pi"} {
+		t.Setenv("FORGECTL_"+strings.ToUpper(h)+"_BIN", "")
+	}
+	trusted := config.LoadPath(cfgPath).Launch.Defaults
+	for _, h := range []string{"claude", "codex", "pi"} {
+		if _, err := ResolveBinary(h, trusted); err != nil {
+			t.Errorf("%s: trusted file refused: %v", h, err)
+		}
+	}
+	if err := os.Chmod(cfgPath, 0o666); err != nil { //nolint:gosec // G302: the test needs a loose mode to prove it is refused
+		t.Fatal(err)
+	}
+	loose := config.LoadPath(cfgPath).Launch.Defaults
+	for _, h := range []string{"claude", "codex", "pi"} {
+		_, err := ResolveBinary(h, loose)
+		if err == nil || !strings.Contains(err.Error(), "is not trusted") {
+			t.Errorf("%s: err = %v, want the untrusted-file refusal", h, err)
+		}
+		t.Setenv("FORGECTL_"+strings.ToUpper(h)+"_BIN", good)
+		if _, err := ResolveBinary(h, loose); err != nil {
+			t.Errorf("%s: the environment must outrank a refused config key: %v", h, err)
+		}
+		t.Setenv("FORGECTL_"+strings.ToUpper(h)+"_BIN", "")
+	}
+	// No key set: a loose file changes nothing about PATH resolution.
+	unset := loose
+	unset.BinaryPath = ""
+	if _, err := ResolveBinary("claude", unset); err != nil && strings.Contains(err.Error(), "is not trusted") {
+		t.Errorf("a loose file refused a harness with no configured path: %v", err)
 	}
 }

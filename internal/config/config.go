@@ -289,6 +289,44 @@ type LaunchDefaults struct {
 	BinaryPath      string            `toml:"binary_path"`       // explicit claude path; env FORGECTL_CLAUDE_BIN wins
 	CodexBinaryPath string            `toml:"codex_binary_path"` // env FORGECTL_CODEX_BIN wins
 	PiBinaryPath    string            `toml:"pi_binary_path"`    // env FORGECTL_PI_BIN wins
+
+	// binaryTrust is why the file each binary path came from cannot be trusted
+	// to choose an executable (BinaryFileError). Unexported, so the decoder
+	// leaves it alone; a copy of LaunchDefaults carries it.
+	binaryTrust binaryTrust
+}
+
+// binaryTrust holds one verdict per harness binary key. A key a legacy file
+// filled in a merge carries the legacy refusal, whatever config.toml's own
+// verdict is.
+type binaryTrust struct{ claude, codex, pi error }
+
+// ErrLegacyBinaryPath is the verdict on a binary path read from the legacy
+// claunch config: that reader cannot judge who could write the file, so a
+// path from it is refused rather than trusted.
+var ErrLegacyBinaryPath = errors.New("a binary path from the legacy claunch config is not judged for who could write the file; set it in [launch.defaults] in config.toml")
+
+// BinaryFileError says why the file the binary path for harness (claude,
+// codex or pi) came from cannot be trusted to choose an executable to run:
+// owned by someone other than you or root, writable by group or other, or a
+// legacy file. Nil when it can, when no file was read, or for any other
+// harness. It was decided from the descriptor LoadPath read.
+func (d LaunchDefaults) BinaryFileError(harness string) error {
+	switch harness {
+	case "claude":
+		return d.binaryTrust.claude
+	case "codex":
+		return d.binaryTrust.codex
+	case "pi":
+		return d.binaryTrust.pi
+	}
+	return nil
+}
+
+// untrustedLegacy marks every binary path in lc as read from the legacy file.
+func untrustedLegacy(lc LaunchConfig) LaunchConfig {
+	lc.Defaults.binaryTrust = binaryTrust{ErrLegacyBinaryPath, ErrLegacyBinaryPath, ErrLegacyBinaryPath}
+	return lc
 }
 
 // LaunchProject is one [[launch.project]] directory-keyed override block.
@@ -1205,6 +1243,7 @@ func LoadPath(path string) Config {
 	}
 	cfg, decodeErr := DecodeStrict(data)
 	cfg.execChoiceErr = trust
+	cfg.Launch.Defaults.binaryTrust = binaryTrust{trust, trust, trust}
 	if err == nil {
 		err = decodeErr
 	}
@@ -1900,7 +1939,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		}
 		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", termsafe.QuotePath(path), cause)
 	}
-	return stripLegacyUsageOptIn(lc), path, nil
+	return untrustedLegacy(stripLegacyUsageOptIn(lc)), path, nil
 }
 
 // MergeLegacyIntoLaunch performs the additive-only merge behind the
@@ -1930,9 +1969,17 @@ func MergeLegacyIntoLaunch(cfg Config, legacy LaunchConfig) (merged LaunchConfig
 	fillString(&d.PermissionMode, l.PermissionMode)
 	fillString(&d.ApprovalPolicy, l.ApprovalPolicy)
 	fillString(&d.Sandbox, l.Sandbox)
-	fillString(&d.BinaryPath, l.BinaryPath)
-	fillString(&d.CodexBinaryPath, l.CodexBinaryPath)
-	fillString(&d.PiBinaryPath, l.PiBinaryPath)
+	// A binary path filled from legacy carries the legacy refusal; one the
+	// config file already set keeps that file's own verdict.
+	fillBinary := func(dst *string, src string, trust *error) {
+		if *dst == "" && src != "" {
+			*trust = ErrLegacyBinaryPath
+		}
+		fillString(dst, src)
+	}
+	fillBinary(&d.BinaryPath, l.BinaryPath, &d.binaryTrust.claude)
+	fillBinary(&d.CodexBinaryPath, l.CodexBinaryPath, &d.binaryTrust.codex)
+	fillBinary(&d.PiBinaryPath, l.PiBinaryPath, &d.binaryTrust.pi)
 
 	if d.AllowDanger == nil && l.AllowDanger != nil {
 		v := *l.AllowDanger
