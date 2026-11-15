@@ -546,18 +546,25 @@ type whoami struct {
 
 var versionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
+// whoamiArgs is the one call the resolver makes of a candidate. --autostart=false
+// matters: without it `rex` starts a Rex server when none is running, and a
+// server started here would inherit this process's whole environment and hand
+// it to every block it later runs. With it, a missing server is a refusal
+// (the Rex app must be running), the same one the adapter makes.
+var whoamiArgs = []string{"--autostart=false", "--color=never", "whoami", "--json"}
+
 // vet runs `whoami --json` on path, which executes it, and checks the reply.
 func (r *Resolver) vet(ctx context.Context, path string, src Source) (Resolved, error) {
 	q := termsafe.QuoteArgMax(path, 0)
 	runCtx, cancel := context.WithTimeout(ctx, whoamiTimeout)
 	defer cancel()
-	out, err := r.runner.Run(runCtx, path, "whoami", "--json")
+	out, err := r.runner.Run(runCtx, path, whoamiArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The caller cancelled or ran out of time: say so, not "incompatible".
 			return Resolved{}, fmt.Errorf("%s whoami --json: %w", q, ctx.Err())
 		}
-		return Resolved{}, fmt.Errorf("%w: %s whoami --json failed: %w", ErrIncompatible, q, err)
+		return Resolved{}, fmt.Errorf("%w: %s whoami --json failed (is the Rex app running? it is never started for this check): %w", ErrIncompatible, q, err)
 	}
 	var w whoami
 	if err := json.Unmarshal([]byte(out), &w); err != nil {

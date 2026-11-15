@@ -69,9 +69,11 @@
 //
 // The directory holding a ~/Applications bundle, and $HOME above it, are not
 // judged either; the default (a directory only you can write) is safe, a
-// group-writable or symlinked one is not. Setups that need more should set `[surface.rex] binary_path` to
-// a binary in a directory only they can write; a pinned path is not gated, so
-// that choice is theirs to vouch for.
+// group-writable or symlinked one is not. Setups that need more should set
+// `[surface.rex] binary_path` to a binary in a directory only they can write.
+// A pinned path is not gated when it is first resolved, so that choice is
+// theirs to vouch for, but [Resolver.Verify] gates any path inside an .app
+// before each later use.
 //
 // # The compatibility check
 //
@@ -94,8 +96,8 @@
 // as that context error. An unusable `binary_path` is a plain error naming the
 // key.
 //
-// The package has no caller yet; the Rex surface backend will build one
-// Resolver and call Resolve:
+// The Rex surface backend (`--surface rex`) builds one Resolver, calls Resolve,
+// and calls Verify before every command:
 //
 //	r := rexbin.New(runner)
 //	bin, err := r.Resolve(ctx, cfg.Surface.Rex.BinaryPath)

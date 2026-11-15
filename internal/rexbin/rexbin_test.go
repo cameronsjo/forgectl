@@ -171,7 +171,7 @@ func TestResolveOrder(t *testing.T) {
 			if got.Version != "0.1.0-preview.19" || got.APIRevision != 14 {
 				t.Errorf("version/revision = %q/%d", got.Version, got.APIRevision)
 			}
-			if len(fr.Calls) != 1 || fr.Calls[0].Name != tt.want || strings.Join(fr.Calls[0].Args, " ") != "whoami --json" {
+			if len(fr.Calls) != 1 || fr.Calls[0].Name != tt.want || strings.Join(fr.Calls[0].Args, " ") != "--autostart=false --color=never whoami --json" {
 				t.Errorf("calls = %+v, want one `%s whoami --json`", fr.Calls, tt.want)
 			}
 		})
@@ -502,7 +502,7 @@ func TestVettingRefusals(t *testing.T) {
 		{"empty rex_version", `{"rex_version":"","api_revision":14}`, nil, []string{"rex_version"}},
 		{"missing api_revision", `{"rex_version":"0.1.0"}`, nil, []string{"no api_revision"}},
 		{"string api_revision", `{"rex_version":"0.1.0","api_revision":"14"}`, nil, []string{"did not return JSON"}},
-		{"whoami fails", "", errors.New("exit status 1"), []string{"whoami --json failed"}},
+		{"whoami fails", "", errors.New("exit status 1"), []string{"whoami --json failed", "is the Rex app running"}},
 		{"whoami times out on its own", "", context.DeadlineExceeded, []string{"whoami --json failed"}},
 	}
 	for _, tt := range tests {
