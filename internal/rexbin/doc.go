@@ -11,8 +11,14 @@
 //  1. the `[surface.rex] binary_path` config key (passed in as configPath).
 //     It must be an absolute path or start with `~/`; any other relative value
 //     is refused, never resolved against the working directory. The operator
-//     vouches for this binary, so no ownership or signature gate applies;
-//  2. `rex` on PATH, on the same terms;
+//     vouches for this binary, so no ownership or signature gate applies
+//     unless it lies inside an .app, directly or through a symlink, in which
+//     case it gets the bundle gates below before it is run;
+//  2. `rex` on PATH, on the same terms (a PATH hit that fails the bundle
+//     gates is skipped and listed). A symlink whose text names an .app but
+//     which resolves outside one, or which cannot be resolved, is refused, not
+//     treated as a plain binary: whoever can rewrite a directory the link
+//     passes through could otherwise steer it back to an unchecked file;
 //  3. the installed Rex app bundles, matched by glob (see
 //     [DefaultBundlePatterns]), never by one hard-coded path, because a Rex
 //     update can move the binary inside the bundle.
@@ -33,8 +39,9 @@
 //     judged with lstat: no symlink anywhere in it (the .app, a directory or
 //     the file), each component owned by the current user or root, and none
 //     writable by group or other. The mode check reads POSIX mode bits and
-//     ignores ACLs. The .app must be the one named like Rex*.app, or else the
-//     last .app in the path;
+//     ignores ACLs. The chain ends at the outermost component whose name ends
+//     in .app, compared without regard to case (APFS is case-insensitive), so
+//     an untrusted .app above the Rex bundle is judged too;
 //   - an executable regular file;
 //   - on darwin, `/usr/bin/codesign --verify --strict` against a requirement
 //     that the certificate chain is a Developer ID one and the leaf
@@ -71,9 +78,11 @@
 // judged either; the default (a directory only you can write) is safe, a
 // group-writable or symlinked one is not. Setups that need more should set
 // `[surface.rex] binary_path` to a binary in a directory only they can write.
-// A pinned path is not gated when it is first resolved, so that choice is
-// theirs to vouch for, but [Resolver.Verify] gates any path inside an .app
-// before each later use.
+// A pinned or PATH binary outside any .app is not gated: that choice is the
+// operator's to vouch for. One inside an .app, or a symlink whose target is,
+// is gated when it is resolved and again by [Resolver.Verify] before each
+// later use; the exec follows a symlink afresh, so repointing it after the
+// check is part of the race above.
 //
 // # The compatibility check
 //

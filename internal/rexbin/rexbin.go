@@ -72,9 +72,10 @@ type Resolved struct {
 // [Resolved].Path, and exec exactly that string: Resolve judged the file once,
 // and /Applications can be rewritten by any admin account at any time.
 //
-// The gate level follows the path, not the label. A path inside an .app is
-// re-gated in full (chain, regular executable file, signature) whatever its
-// Source says, so a pinned `binary_path` that names the bundle binary gets the
+// The gate level follows the path, not the label. A path inside an .app, or a
+// symlink that resolves into one, is re-gated in full (chain, regular
+// executable file, signature) whatever its Source says; a symlink that names an
+// .app but resolves outside one, or cannot be resolved, is refused, so a pinned `binary_path` that names the bundle binary gets the
 // same check as a discovered one. Any other path must still be an executable
 // regular file. A Path that is not absolute and already clean (no `..`, no
 // doubled separators) is refused, because the kernel resolves `..` after
@@ -95,10 +96,14 @@ func (r *Resolver) Verify(ctx context.Context, res Resolved) error {
 	if !filepath.IsAbs(res.Path) || filepath.Clean(res.Path) != res.Path {
 		return fmt.Errorf("%s: not an absolute, clean path", q)
 	}
-	if _, inApp := bundleDir(res.Path); !inApp {
+	target, inApp, aerr := r.appTarget(res.Path)
+	if aerr != nil {
+		return aerr
+	}
+	if !inApp {
 		return r.usable(res.Path)
 	}
-	if _, err := r.bundleCandidate(ctx, res.Path); err != nil {
+	if _, err := r.bundleCandidate(ctx, target); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s: %w", q, ctx.Err())
 		}
@@ -158,6 +163,8 @@ type Info struct {
 type FS interface {
 	Stat(name string) (Info, error)
 	Lstat(name string) (Info, error)
+	// Readlink returns the text of the symlink at name.
+	Readlink(name string) (string, error)
 	Glob(pattern string) ([]string, error)
 }
 
@@ -173,6 +180,8 @@ func infoOf(fi fs.FileInfo, err error) (Info, error) {
 	uid, dev, ino, known := sysInfo(fi)
 	return Info{Mode: fi.Mode(), IsDir: fi.IsDir(), UID: uid, UIDKnown: known, Dev: dev, Ino: ino, ModTime: fi.ModTime()}, nil
 }
+
+func (osFS) Readlink(name string) (string, error) { return os.Readlink(name) }
 
 func (osFS) Glob(pattern string) ([]string, error) { return filepath.Glob(pattern) }
 
@@ -276,13 +285,43 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 		if err != nil {
 			return Resolved{}, err
 		}
-		return r.vet(ctx, abs, SourceConfig)
+		// A pin inside an .app (or a symlink into one) gets the bundle checks
+		// before it is run, like a discovered bundle; any other pin is the
+		// operator's own choice and is only checked to be executable.
+		target, before, gated, gerr := r.gateAppPath(ctx, abs)
+		if gerr != nil {
+			if ctx.Err() != nil {
+				return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(abs, 0), ctx.Err())
+			}
+			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is refused as an app-bundle binary: %w", gerr)
+		}
+		got, verr := r.vet(ctx, abs, SourceConfig)
+		if verr == nil && gated {
+			if cerr := r.unchanged(target, before); cerr != nil {
+				return Resolved{}, cerr
+			}
+		}
+		return got, verr
 	}
 	tried := []string{"[surface.rex] binary_path (not set)"}
 
 	pathBin, pathErr := r.fromPATH()
 	if pathErr == nil {
-		return r.vet(ctx, pathBin, SourcePATH)
+		target, before, gated, gerr := r.gateAppPath(ctx, pathBin)
+		switch {
+		case gerr != nil && ctx.Err() != nil:
+			return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(pathBin, 0), ctx.Err())
+		case gerr != nil:
+			pathErr = fmt.Errorf("PATH hit is refused as an app-bundle binary: %w", gerr)
+		default:
+			got, verr := r.vet(ctx, pathBin, SourcePATH)
+			if verr == nil && gated {
+				if cerr := r.unchanged(target, before); cerr != nil {
+					return Resolved{}, cerr
+				}
+			}
+			return got, verr
+		}
 	}
 	tried = append(tried, "PATH: "+pathErr.Error())
 
@@ -380,6 +419,24 @@ func (r *Resolver) fromPATH() (string, error) {
 		return "", err
 	}
 	return abs, nil
+}
+
+// gateAppPath runs the bundle checks on path when it (or the file it resolves
+// to) is inside an .app, returning the gated target and its identity as
+// judged. gated is false, and nothing is checked, for a plain binary.
+func (r *Resolver) gateAppPath(ctx context.Context, path string) (target string, before Info, gated bool, err error) {
+	target, in, err := r.appTarget(path)
+	if err != nil {
+		return "", Info{}, false, err
+	}
+	if !in {
+		return "", Info{}, false, nil
+	}
+	before, err = r.bundleCandidate(ctx, target)
+	if err != nil {
+		return "", Info{}, false, err
+	}
+	return target, before, true, nil
 }
 
 // usable accepts an executable regular file, following symlinks (the config
@@ -482,31 +539,115 @@ func (r *Resolver) unchanged(path string, before Info) error {
 	return nil
 }
 
-// bundleDir returns the directory the ownership chain must reach. It is the
-// outermost ".app" component whose name starts with "Rex" (so an .app nested
-// inside a Rex bundle cannot cut the chain short), else the last ".app"
-// component (so a $HOME under some other .app still gets the whole chain below
-// it). path must be clean.
+// bundleDir returns the directory the ownership chain must reach: the
+// outermost component whose name ends in ".app", compared without regard to
+// case (APFS is case-insensitive, so `REX BETA.APP` names the same bundle).
+// Outermost, so an .app nested inside a Rex bundle cannot cut the chain short
+// and an .app above the Rex one (a pinned path under Other.app) is judged too.
+// path must be clean.
 func bundleDir(path string) (string, bool) {
 	parts := strings.Split(filepath.ToSlash(path), "/")
-	last, rex := -1, -1
 	for i, c := range parts {
-		if i == 0 || !strings.HasSuffix(c, ".app") {
+		if i > 0 && strings.EqualFold(filepath.Ext(c), ".app") {
+			return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
+		}
+	}
+	return "", false
+}
+
+// maxLinkHops bounds the symlinks one resolution follows (the kernel stops at
+// 32 on macOS).
+const maxLinkHops = 40
+
+// hasAppComponent reports whether any component of p names an .app, without
+// regard to case.
+func hasAppComponent(p string) bool {
+	for _, c := range strings.Split(filepath.ToSlash(p), "/") {
+		if strings.EqualFold(filepath.Ext(c), ".app") {
+			return true
+		}
+	}
+	return false
+}
+
+// walkLinks resolves path the way the kernel does, one component at a time
+// with Lstat and Readlink, and returns the resolved path and the text of every
+// symlink it followed, in any component. Unlike filepath.EvalSymlinks it keeps
+// going from what it has already seen, and it reports a failure together with
+// the link texts read before it.
+func (r *Resolver) walkLinks(path string) (resolved string, texts []string, err error) {
+	rest := strings.Split(strings.Trim(filepath.ToSlash(path), "/"), "/")
+	cur := "/"
+	for hops := 0; len(rest) > 0; {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
 			continue
 		}
-		last = i
-		if rex < 0 && strings.HasPrefix(c, "Rex") {
-			rex = i
+		next := filepath.Join(cur, c)
+		info, lerr := r.fs.Lstat(next)
+		if lerr != nil {
+			return "", texts, lerr
+		}
+		if info.Mode&fs.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		if hops++; hops > maxLinkHops {
+			return "", texts, fmt.Errorf("more than %d symlinks", maxLinkHops)
+		}
+		text, rerr := r.fs.Readlink(next)
+		if rerr != nil {
+			return "", texts, rerr
+		}
+		texts = append(texts, text)
+		if filepath.IsAbs(text) {
+			cur = "/"
+		}
+		rest = append(strings.Split(strings.Trim(filepath.ToSlash(text), "/"), "/"), rest...)
+	}
+	return cur, texts, nil
+}
+
+// appTarget decides whether path is a bundle binary and what to gate. A path
+// named inside an .app is gated as written (the Lstat chain then refuses any
+// symlink in it). Otherwise it is resolved through its symlinks: if the
+// resolved file is inside an .app, that file is the target. Fail closed: if
+// any symlink followed, or the resolution failing partway, names an .app, the
+// path claims to be a bundle binary, and it is refused unless it resolves into
+// an .app and passes the gates, because an attacker who can rewrite a
+// directory the link passes through could otherwise steer it back to a plain
+// executable file. inApp is false, with no error, only for a binary that no
+// .app name touches.
+func (r *Resolver) appTarget(path string) (target string, inApp bool, err error) {
+	if _, in := bundleDir(path); in {
+		return path, true, nil
+	}
+	q := termsafe.QuoteArgMax(path, 0)
+	resolved, texts, werr := r.walkLinks(path)
+	claims := false
+	for _, t := range texts {
+		if hasAppComponent(t) {
+			claims = true
 		}
 	}
-	i := last
-	if rex >= 0 {
-		i = rex
+	if werr != nil {
+		if len(texts) > 0 || claims {
+			return "", false, fmt.Errorf("%s: cannot resolve its symlinks: %w", q, werr)
+		}
+		return "", false, nil
 	}
-	if i < 0 {
-		return "", false
+	if _, in := bundleDir(resolved); in {
+		return resolved, true, nil
 	}
-	return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
+	if claims {
+		return "", false, fmt.Errorf("%s: a symlink in it names an app bundle but it resolves to %s, outside one", q, termsafe.QuoteArgMax(resolved, 0))
+	}
+	return "", false, nil
 }
 
 // codesignPath is the system code-signature tool, named absolutely so a

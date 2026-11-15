@@ -27,10 +27,41 @@ type ent struct {
 // directory.
 type fakeFS map[string]ent
 
-func (f fakeFS) Stat(name string) (Info, error) { return f.info(name) }
+// Stat resolves every registered symlink in the path (any component), as
+// os.Stat does.
+func (f fakeFS) Stat(name string) (Info, error) {
+	rest := strings.Split(strings.Trim(path.Clean(name), "/"), "/")
+	cur := "/"
+	for hops := 0; len(rest) > 0; {
+		c := rest[0]
+		rest = rest[1:]
+		if c == "" || c == "." {
+			continue
+		}
+		next := path.Join(cur, c)
+		t, ok := fakeLinks[next]
+		if !ok {
+			cur = next
+			continue
+		}
+		if hops++; hops > 40 {
+			return Info{}, &fs.PathError{Op: "stat", Path: name, Err: errors.New("too many links")}
+		}
+		if path.IsAbs(t) {
+			cur = "/"
+		}
+		rest = append(strings.Split(strings.Trim(path.Clean(t), "/"), "/"), rest...)
+	}
+	return f.info(cur)
+}
 
 // Lstat is Stat plus the symlink bit, which the fake keeps in the mode.
-func (f fakeFS) Lstat(name string) (Info, error) { return f.info(name) }
+func (f fakeFS) Lstat(name string) (Info, error) {
+	if err, ok := fakeLstatErr[path.Clean(name)]; ok {
+		return Info{}, err
+	}
+	return f.info(name)
+}
 
 func (f fakeFS) info(name string) (Info, error) {
 	name = path.Clean(name) // a real filesystem ignores doubled separators
@@ -50,6 +81,32 @@ func (f fakeFS) unknownUIDs() bool { _, ok := f["\x00unknown-uids"]; return ok }
 
 // bump gives path a new inode, as a swap would.
 func (f fakeFS) bump(p string) { e := f["\x00gen:"+p]; e.uid++; f["\x00gen:"+p] = e }
+
+// fakeLinks maps a symlink's path to its text for fakeFS.Readlink and Stat. The
+// tests are not parallel; each test registers its links and removes them at
+// test end.
+var fakeLinks = map[string]string{}
+
+// Readlink returns a registered symlink's text.
+func (f fakeFS) Readlink(name string) (string, error) {
+	if t, ok := fakeLinks[path.Clean(name)]; ok {
+		return t, nil
+	}
+	return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+}
+
+// fakeLstatErr makes Lstat of a path fail, as a path past the kernel's length
+// limit does.
+var fakeLstatErr = map[string]error{}
+
+// symlink registers path as a symlink to text (an entry the walk reads with
+// Lstat and Readlink); it is removed at test end.
+func symlink(t *testing.T, f fakeFS, name, text string) {
+	t.Helper()
+	f[name] = ent{fs.ModeSymlink | 0o777, me}
+	fakeLinks[name] = text
+	t.Cleanup(func() { delete(fakeLinks, name) })
+}
 
 func (f fakeFS) Glob(pattern string) ([]string, error) {
 	var out []string
@@ -768,10 +825,11 @@ func TestTrustedChainTerminatesOnUncleanPath(t *testing.T) {
 func TestBundleDirChoice(t *testing.T) {
 	for in, want := range map[string]string{
 		"/Applications/Rex.app/Contents/rex":                 "/Applications/Rex.app",
-		"/Users/u/Tools.app/Applications/Rex.app/Contents/x": "/Users/u/Tools.app/Applications/Rex.app",
+		"/Users/u/Tools.app/Applications/Rex.app/Contents/x": "/Users/u/Tools.app",
 		"/Applications/Rex.app/Contents/Helpers/X.app/rex":   "/Applications/Rex.app",
-		"/Users/u/Tools.app/Applications/Rex Beta.app/a/rex": "/Users/u/Tools.app/Applications/Rex Beta.app",
-		"/a/Other.app/b/Third.app/rex":                       "/a/Other.app/b/Third.app",
+		"/Users/u/Tools.app/Applications/Rex Beta.app/a/rex": "/Users/u/Tools.app",
+		"/a/Other.app/b/Third.app/rex":                       "/a/Other.app",
+		"/Applications/REX BETA.APP/Contents/rex":            "/Applications/REX BETA.APP",
 	} {
 		if got, ok := bundleDir(in); !ok || got != want {
 			t.Errorf("bundleDir(%q) = %q, %v; want %q", in, got, ok, want)
@@ -914,5 +972,248 @@ func TestVerifyRechecksSignatureAndHonorsCancellation(t *testing.T) {
 	cancel()
 	if err := r.Verify(ctx, res); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled verify = %v, want context.Canceled", err)
+	}
+}
+
+// TestCaseVariantAppIsStillGated: APFS is case-insensitive, so a path spelled
+// REX BETA.APP names the real bundle and must get the bundle checks, not just
+// the executable check.
+func TestCaseVariantAppIsStillGated(t *testing.T) {
+	p := "/Applications/REX BETA.APP/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+	f := tree(me, map[string]fs.FileMode{p: 0o755})
+	r := resolver(runner(map[string]string{p: goodJSON}, nil), f, "")
+	res := Resolved{Path: p, Source: SourceConfig}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("clean case-variant bundle refused: %v", err)
+	}
+	f["/Applications/REX BETA.APP/Contents"] = ent{fs.ModeDir | 0o775, me}
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("a case-variant .APP path with a group-writable directory skipped the bundle checks")
+	}
+}
+
+// TestSymlinkIntoBundleIsGated: a symlink on PATH or in the config whose
+// target is inside a bundle is judged by the target's chain, at resolve time
+// and at Verify, and a refused one is never run.
+func TestSymlinkIntoBundleIsGated(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	genuine := bin("Rex.app")
+	build := func(t *testing.T) (fakeFS, *fexec.FakeRunner) {
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+			f[d] = ent{fs.ModeDir | 0o755, 0}
+		}
+		symlink(t, f, link, genuine)
+		return f, runner(map[string]string{link: goodJSON, genuine: goodJSON}, nil)
+	}
+	t.Run("clean target resolves and verifies", func(t *testing.T) {
+		f, fr := build(t)
+		for name, cfg := range map[string]string{"config": link, "PATH": ""} {
+			res, err := resolver(fr, f, link).Resolve(context.Background(), cfg)
+			if err != nil || res.Path != link {
+				t.Fatalf("%s: Resolve = %+v, %v", name, res, err)
+			}
+			if err := resolver(fr, f, link).Verify(context.Background(), res); err != nil {
+				t.Fatalf("%s: Verify: %v", name, err)
+			}
+		}
+	})
+	t.Run("untrusted target is refused and not run", func(t *testing.T) {
+		f, fr := build(t)
+		f["/Applications/Rex.app/Contents"] = ent{fs.ModeDir | 0o775, me}
+		if _, err := resolver(fr, f, link).Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "app-bundle binary") {
+			t.Fatalf("config symlink into a bad bundle: err = %v", err)
+		}
+		if _, err := resolver(fr, f, link).Resolve(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "PATH hit is refused as an app-bundle binary") {
+			t.Fatalf("PATH symlink into a bad bundle: err = %v", err)
+		}
+		if ran(fr, link) || ran(fr, genuine) {
+			t.Error("a refused symlink target was run")
+		}
+		if err := resolver(fr, f, link).Verify(context.Background(), Resolved{Path: link, Source: SourcePATH}); err == nil {
+			t.Error("Verify accepted a symlink into a bundle with an untrusted chain")
+		}
+	})
+}
+
+// TestPinnedBundlePathIsGatedAtResolve: a config pin that names a bundle
+// binary gets the bundle checks before it is run, not only at Verify.
+func TestPinnedBundlePathIsGatedAtResolve(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	f["/Applications/Rex.app/Contents/Helpers"] = ent{fs.ModeDir | 0o775, me}
+	fr := runner(map[string]string{genuine: goodJSON}, nil)
+	if _, err := resolver(fr, f, "").Resolve(context.Background(), genuine); err == nil {
+		t.Fatal("a pinned bundle path with a group-writable directory was accepted")
+	}
+	if ran(fr, genuine) {
+		t.Error("a pinned bundle path that failed its checks was run")
+	}
+	f["/Applications/Rex.app/Contents/Helpers"] = ent{fs.ModeDir | 0o755, me}
+	if res, err := resolver(fr, f, "").Resolve(context.Background(), genuine); err != nil || res.Source != SourceConfig {
+		t.Fatalf("a clean pinned bundle path: %+v, %v", res, err)
+	}
+}
+
+// TestOuterAppAbovePinnedPathIsJudged: the chain runs up to the outermost
+// .app, so an untrusted Other.app above Rex.app is refused.
+func TestOuterAppAbovePinnedPathIsJudged(t *testing.T) {
+	p := "/Applications/Other.app/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+	f := tree(me, map[string]fs.FileMode{p: 0o755})
+	r := resolver(runner(map[string]string{p: goodJSON}, nil), f, "")
+	res := Resolved{Path: p, Source: SourceConfig}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("clean nested bundle refused: %v", err)
+	}
+	f["/Applications/Other.app"] = ent{fs.ModeDir | 0o775, me}
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("an untrusted outer .app above the Rex bundle was not judged")
+	}
+}
+
+// TestLinkThatNamesAnAppButResolvesOutIsRefused: the gate level must not come
+// from where the link ends up. A link whose text names an .app, with that .app
+// component replaced by a symlink to a plain directory, resolves outside any
+// .app; it is refused rather than treated as a plain executable.
+func TestLinkThatNamesAnAppButResolvesOutIsRefused(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	f := tree(me, map[string]fs.FileMode{"/tmp/t/plain/bin/rex": 0o755})
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+		f[d] = ent{fs.ModeDir | 0o755, 0}
+	}
+	f["/tmp/t/plain"] = ent{fs.ModeDir | 0o777, me}
+	symlink(t, f, "/tmp/t/Rex Beta.app", "/tmp/t/plain")
+	symlink(t, f, link, "/tmp/t/Rex Beta.app/bin/rex")
+	fr := runner(map[string]string{link: goodJSON, "/tmp/t/plain/bin/rex": goodJSON}, nil)
+	r := resolver(fr, f, link)
+	if _, err := r.Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "outside one") {
+		t.Fatalf("config: err = %v, want a refusal naming that it resolves outside an app", err)
+	}
+	if _, err := r.Resolve(context.Background(), ""); err == nil {
+		t.Fatal("PATH: a link naming an app that resolves outside one was accepted")
+	}
+	if err := r.Verify(context.Background(), Resolved{Path: link, Source: SourcePATH}); err == nil {
+		t.Fatal("Verify accepted it")
+	}
+	if ran(fr, link) || ran(fr, "/tmp/t/plain/bin/rex") {
+		t.Error("a refused link was run")
+	}
+}
+
+// TestUnresolvableLinkThatNamesAnAppIsRefused: a symlink whose text names an
+// .app and whose resolution fails (a path past the kernel's length limit) is
+// refused, not treated as a plain binary; so is any link whose resolution
+// fails.
+func TestUnresolvableLinkThatNamesAnAppIsRefused(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+		f[d] = ent{fs.ModeDir | 0o755, 0}
+	}
+	symlink(t, f, link, genuine)
+	fakeLstatErr["/Applications/Rex.app/Contents"] = errors.New("file name too long")
+	t.Cleanup(func() { delete(fakeLstatErr, "/Applications/Rex.app/Contents") })
+	fr := runner(map[string]string{link: goodJSON}, nil)
+	r := resolver(fr, f, link)
+	if _, err := r.Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "cannot resolve") {
+		t.Fatalf("err = %v, want a refusal that it cannot resolve the symlinks", err)
+	}
+	if ran(fr, link) {
+		t.Error("an unresolvable link was run")
+	}
+}
+
+// TestPinAndPathFileSwappedDuringWhoamiIsCaught: the identity re-check after
+// whoami covers a config pin and a PATH hit inside a bundle too. It swaps the
+// gated file, not a link: repointing a symlink between the check and the exec
+// is the documented race, which this does not close.
+func TestPinAndPathFileSwappedDuringWhoamiIsCaught(t *testing.T) {
+	genuine := bin("Rex.app")
+	for _, tc := range []struct {
+		name, cfg, pathResult string
+	}{
+		{"config pin", genuine, ""},
+		{"PATH hit", "", genuine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			fr := &fexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				f.bump(genuine) // the file is swapped while whoami runs
+				return goodJSON, nil
+			}}
+			_, err := resolver(fr, f, tc.pathResult).Resolve(context.Background(), tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "binary changed while being verified") {
+				t.Fatalf("err = %v, want the swap caught", err)
+			}
+		})
+	}
+}
+
+// TestWalkLinks pins walkLinks against the kernel's resolution rules: relative
+// and absolute link text, ".." applied to the already-resolved directory, a
+// link to a directory followed by more components, link text recorded for
+// every hop, and a loop refused by the hop limit.
+func TestWalkLinks(t *testing.T) {
+	f := tree(me, map[string]fs.FileMode{
+		"/w/real/dir/file": 0o755,
+		"/w/real/other":    0o644,
+	})
+	symlink(t, f, "/w/a", "real/dir")           // relative, to a directory
+	symlink(t, f, "/w/up", "real/dir/../other") // ".." after a directory
+	symlink(t, f, "/w/abs", "/w/real/dir")      // absolute
+	symlink(t, f, "/w/via", "a/../other")       // ".." after a link to a directory
+	symlink(t, f, "/w/chain1", "chain2")
+	symlink(t, f, "/w/chain2", "/w/a")
+	symlink(t, f, "/w/loop1", "loop2")
+	symlink(t, f, "/w/loop2", "loop1")
+	r := resolver(runner(nil, nil), f, "")
+	for _, tc := range []struct {
+		in, want string
+		texts    int
+	}{
+		{"/w/real/dir/file", "/w/real/dir/file", 0},
+		{"/w/a/file", "/w/real/dir/file", 1},
+		{"/w/up", "/w/real/other", 1},
+		// ".." follows the directory a link resolved to, not the link's own
+		// parent: text cleanup would land on /w/other, which does not exist.
+		{"/w/a/../other", "/w/real/other", 1},
+		{"/w/via", "/w/real/other", 2}, // the link, then the link it passes through
+		{"/w/abs/file", "/w/real/dir/file", 1},
+		{"/w/chain1/file", "/w/real/dir/file", 3},
+	} {
+		got, texts, err := r.walkLinks(tc.in)
+		if err != nil || got != tc.want || len(texts) != tc.texts {
+			t.Errorf("walkLinks(%q) = %q, %d texts, %v; want %q, %d texts", tc.in, got, len(texts), err, tc.want, tc.texts)
+		}
+	}
+	if _, _, err := r.walkLinks("/w/loop1/x"); err == nil {
+		t.Error("a symlink loop was resolved")
+	}
+	if _, _, err := r.walkLinks("/w/missing/x"); err == nil {
+		t.Error("a missing component was resolved")
+	}
+}
+
+// TestPathHitThatFailsItsGateFallsThroughToACleanBundle: a PATH symlink into
+// an untrusted bundle is skipped and listed, and a clean installed bundle
+// still resolves.
+func TestPathHitThatFailsItsGateFallsThroughToACleanBundle(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	bad := bin("Rex.app")
+	clean := bin("Rex Beta.app")
+	f := tree(me, map[string]fs.FileMode{bad: 0o755, clean: 0o755})
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+		f[d] = ent{fs.ModeDir | 0o755, 0}
+	}
+	f["/Applications/Rex.app/Contents"] = ent{fs.ModeDir | 0o775, me}
+	symlink(t, f, link, bad)
+	fr := runner(map[string]string{link: goodJSON, bad: goodJSON, clean: goodJSON}, nil)
+	res, err := resolver(fr, f, link).Resolve(context.Background(), "")
+	if err != nil || res.Path != clean || res.Source != SourceBundle {
+		t.Fatalf("Resolve = %+v, %v; want the clean bundle %s", res, err, clean)
+	}
+	if ran(fr, link) || ran(fr, bad) {
+		t.Error("the untrusted PATH link was run")
 	}
 }
