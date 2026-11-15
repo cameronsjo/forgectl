@@ -15,5 +15,7 @@ func sysInfo(fi fs.FileInfo) (uid int, dev, ino uint64, ok bool) {
 	if !ok {
 		return 0, 0, 0, false
 	}
-	return int(st.Uid), uint64(st.Dev), uint64(st.Ino), true
+	// Dev and Ino are compared for equality only, never ordered or used as sizes,
+	// so a sign-extended Dev (int32 on darwin) still identifies the same file.
+	return int(st.Uid), uint64(st.Dev), uint64(st.Ino), true //nolint:gosec // G115: identity tokens, compared for equality only
 }

@@ -41,7 +41,7 @@ func (f fakeFS) info(name string) (Info, error) {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(name))
 	return Info{Mode: e.mode, IsDir: e.mode&fs.ModeDir != 0, UID: e.uid, UIDKnown: !f.unknownUIDs(),
-		Dev: 1, Ino: uint64(h.Sum32()) + uint64(f["\x00gen:"+name].uid)}, nil
+		Dev: 1, Ino: uint64(h.Sum32()) + uint64(f["\x00gen:"+name].uid)}, nil //nolint:gosec // G115: a small non-negative test counter
 }
 
 // unknownUIDs reports whether the fake should hide ownership, as a non-unix
