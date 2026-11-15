@@ -1217,3 +1217,93 @@ func TestPathHitThatFailsItsGateFallsThroughToACleanBundle(t *testing.T) {
 		t.Error("the untrusted PATH link was run")
 	}
 }
+
+// TestErrorsCarryNoControlBytes: a failing rex or codesign prints whatever it
+// likes on stderr, and a path can hold any byte. None of it may reach the
+// terminal raw through a locator error.
+func TestErrorsCarryNoControlBytes(t *testing.T) {
+	const hostile = "\x1b]0;pwned\x07\x1b[2J"
+	noControl := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		for _, r := range err.Error() {
+			if r < 0x20 && r != '\n' || r == 0x7f {
+				t.Errorf("control byte %U in error: %q", r, err.Error())
+			}
+		}
+	}
+	t.Run("whoami stderr", func(t *testing.T) {
+		fr := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New(hostile) }}
+		f := tree(me, map[string]fs.FileMode{pathBin: 0o755})
+		_, err := resolver(fr, f, pathBin).Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	t.Run("codesign stderr", func(t *testing.T) {
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		fr := runner(map[string]string{genuine: goodJSON}, func(string) error { return errors.New(hostile) })
+		_, err := resolver(fr, f, "", WithGOOS("darwin")).Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	// Each route below ends in a different wrapper; Verify reaches the chain
+	// and symlink walk without the Resolve wrappers above them.
+	lstatFails := func(t *testing.T, at string) {
+		t.Helper()
+		fakeLstatErr[at] = errors.New(hostile)
+		t.Cleanup(func() { delete(fakeLstatErr, at) })
+	}
+	t.Run("verify: chain lstat", func(t *testing.T) {
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		lstatFails(t, "/Applications/Rex.app/Contents")
+		fr := runner(map[string]string{genuine: goodJSON}, nil)
+		err := resolver(fr, f, "").Verify(context.Background(), Resolved{Path: genuine, Source: SourceBundle})
+		noControl(t, err)
+	})
+	t.Run("verify: symlink walk", func(t *testing.T) {
+		const link = "/usr/local/bin/rex"
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+			f[d] = ent{fs.ModeDir | 0o755, 0}
+		}
+		symlink(t, f, link, genuine)
+		lstatFails(t, "/Applications/Rex.app/Contents")
+		fr := runner(map[string]string{link: goodJSON}, nil)
+		err := resolver(fr, f, "").Verify(context.Background(), Resolved{Path: link, Source: SourcePATH})
+		noControl(t, err)
+	})
+	t.Run("resolve: pinned bundle with a failing chain", func(t *testing.T) {
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		lstatFails(t, "/Applications/Rex.app/Contents")
+		_, err := resolver(runner(nil, nil), f, "").Resolve(context.Background(), genuine)
+		noControl(t, err)
+	})
+	t.Run("resolve: PATH hit with a failing chain", func(t *testing.T) {
+		genuine := bin("Rex.app")
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		lstatFails(t, "/Applications/Rex.app/Contents")
+		_, err := resolver(runner(map[string]string{genuine: goodJSON}, nil), f, genuine).Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	t.Run("lookPath error", func(t *testing.T) {
+		f := tree(me, nil)
+		r := resolver(runner(nil, nil), f, "", WithLookPath(func(string) (string, error) { return "", errors.New(hostile) }))
+		_, err := r.Resolve(context.Background(), "")
+		noControl(t, err)
+	})
+	t.Run("home error", func(t *testing.T) {
+		r := resolver(runner(nil, nil), tree(me, nil), "", WithHome("", errors.New(hostile)))
+		_, err := r.Resolve(context.Background(), "~/bin/rex")
+		noControl(t, err)
+	})
+	t.Run("stat of a pinned path", func(t *testing.T) {
+		pin := "/nope/" + hostile
+		fr := runner(nil, nil)
+		_, err := resolver(fr, tree(me, nil), "").Resolve(context.Background(), pin)
+		noControl(t, err)
+	})
+}

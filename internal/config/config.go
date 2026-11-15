@@ -162,6 +162,10 @@ type Config struct {
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
 	// than run against a silently-defaulted github.com — see DecodeDegraded.
 	decodeDegraded bool
+	// execChoiceErr is why the file just read cannot be trusted to pick an
+	// executable ([surface.rex] binary_path); nil when it can, or when no file
+	// was read. Judged on the descriptor LoadPath read.
+	execChoiceErr error
 	// decodeErr is the failure behind decodeDegraded, already worded for the
 	// operator: the file plus a line and column when it did not parse, or a
 	// fixed reason when it could not be read (forgectl#684). Nil when the file
@@ -177,6 +181,15 @@ type Config struct {
 // refuse with a config error instead.
 func (c Config) DecodeDegraded() bool {
 	return c.decodeDegraded
+}
+
+// ExecChoiceFileError says why the config file this Config was read from
+// cannot be trusted to choose an executable to run: it is owned by someone
+// other than you or root, or writable by group or other. Nil when the file is
+// acceptable, was not read, or the platform cannot judge. It was decided from
+// the descriptor LoadPath read, not from a later look at the path.
+func (c Config) ExecChoiceFileError() error {
+	return c.execChoiceErr
 }
 
 // DecodeError returns why config.toml failed to load, or nil when it loaded or
@@ -1186,11 +1199,12 @@ func Load() Config {
 // keeps Load's tolerant startup behavior while preventing migration callers
 // from recomputing HOME/XDG after their authoritative boundary was captured.
 func LoadPath(path string) Config {
-	data, err := ReadPath(path)
+	data, trust, err := readPathTrust(path)
 	if os.IsNotExist(err) {
 		return Config{}
 	}
 	cfg, decodeErr := DecodeStrict(data)
+	cfg.execChoiceErr = trust
 	if err == nil {
 		err = decodeErr
 	}

@@ -210,6 +210,21 @@ var locateRex rexLocator = resolveRex
 
 func resolveRex() (rexLocation, error) { return resolveRexWith(config.Load) }
 
+// rexPinRefusal refuses a [surface.rex] binary_path that came from a config
+// file another user could have written: the pin picks an executable, and a
+// pin outside any .app is gated by nothing else. The verdict was reached on
+// the descriptor config.Load read, so there is no gap to race. The parent
+// directory's owner and mode, and ACLs, are not judged.
+func rexPinRefusal(cfg config.Config) error {
+	if cfg.Surface.Rex.BinaryPath == "" {
+		return nil
+	}
+	if err := cfg.ExecChoiceFileError(); err != nil {
+		return fmt.Errorf("[surface.rex] binary_path is not trusted: %w", err)
+	}
+	return nil
+}
+
 // resolveRexWith is resolveRex with the config loader injected, so a test can
 // feed it a config that did not decode.
 func resolveRexWith(load func() config.Config) (rexLocation, error) {
@@ -219,6 +234,9 @@ func resolveRexWith(load func() config.Config) (rexLocation, error) {
 	}
 	if cfg.DecodeDegraded() {
 		return rexLocation{}, errors.New("the config file could not be located or read; not guessing where rex is")
+	}
+	if err := rexPinRefusal(cfg); err != nil {
+		return rexLocation{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), rexResolveTimeout)
 	defer cancel()
