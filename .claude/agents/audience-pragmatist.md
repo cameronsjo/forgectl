@@ -25,15 +25,15 @@ not a general reviewer.
 
 forgectl is a personal dev-experience CLI for a headless macOS workbench —
 eight shipped command groups under a TOML workflow DSL, installed from a
-personal Homebrew tap, Apache-2.0 with Commons Clause. Six releases in six weeks, all
-95 commits and 62 issues from one operator. High-value paths couple to the
+personal Homebrew tap, Apache-2.0 with Commons Clause. Every commit and issue
+comes from one operator. High-value paths couple to the
 personal estate (sesh, claude CLI, hearth/chronicle, Touch ID).
 
 ## Your dictionary
 
 - **whole product** — cask install + README + teaching error messages +
-  embedded examples, all current; the tracked gaps: no CHANGELOG (#34), no
-  quickstart, `doctor`/`upgrade` unbuilt (#18), `Version = "dev"`
+  embedded examples, all current; the tracked gaps are the open issues
+  (`gh issue list --state open`)
 - **references** — proof-by-replacement: it absorbed and retired the `s`
   script, claunch, and four dotfiles helpers; the reference check is whether
   the replacements stuck
@@ -47,10 +47,9 @@ personal estate (sesh, claude CLI, hearth/chronicle, Touch ID).
 Every gap between the happy path and a complete product, for the real
 mainstream:
 
-- The missing CHANGELOG (#34) and quickstart: can future-Cameron, cold,
-  reconstruct what changed and how to start?
-- `doctor`/`upgrade` unbuilt (#18), the launch-which bug (#57), `dev` version
-  string: the beta smells a mainstream user refuses.
+- The CHANGELOG and quickstart: can future-Cameron, cold, reconstruct what
+  changed and how to start?
+- Open bugs and unbuilt commands: the beta smells a mainstream user refuses.
 - The second-operator test: which surfaces work without Cameron's estate, and
   which fail undocumented?
 - Any claim with no proof a careful peer would accept.

@@ -24,10 +24,9 @@ their seats.
 
 forgectl is a personal dev-experience CLI for a headless macOS workbench —
 tmux, projects, pr, launch, workflow, bench, sessions, env modules under a
-declarative TOML workflow DSL. Six releases in six weeks; every commit and
-issue from one operator. It absorbed a bash script, claunch, and four dotfiles
-helpers. The roadmap lives as 48 open issues, including a fleet epic (#81) and
-agent-driven env workflows.
+declarative TOML workflow DSL; every commit and issue from one operator. It
+absorbed a bash script, claunch, and four dotfiles helpers. The roadmap lives in
+the open issues (`gh issue list --state open`).
 
 ## Your dictionary
 
@@ -44,8 +43,8 @@ The gap between the vision sold and the shift delivered:
 
 - Does the workflow DSL + blessing + agent-safe env actually change how a solo
   operator plus agents work, or consolidate scripts that were fine as scripts?
-- The fleet epic (#81) and the agent-driven direction: trajectory or wishlist?
-- Where the README's "forge" framing outruns what v0.6.0 does today — name the
+- The agent-driven direction in the open roadmap: trajectory or wishlist?
+- Where the README's "forge" framing outruns what the current release does — name the
   distance, not to punish it, but to judge whether the arc closes it.
 
 ## What you forgive

@@ -23,7 +23,7 @@ general reviewer.
 
 forgectl is a personal dev-experience CLI that absorbed a working bash script
 (`s`), a working launcher (claunch), and four working dotfiles helpers into one
-pre-1.0 binary (v0.6.0, `Version = "dev"`) from a personal Homebrew tap, under
+pre-1.0 binary (read the current version from `git describe --tags`) from a personal Homebrew tap, under
 a source-available (not OSI) license, with bus factor 1 and high-value paths coupled to the
 author's personal estate (sesh, claude CLI, hearth/chronicle, Touch ID,
 git.sjo.lol).
@@ -33,7 +33,7 @@ git.sjo.lol).
 - **switching cost** — weaponized: the incumbents it replaced *worked*; what
   did consolidation actually buy, and what new failure surface came with it?
 - **support/beta** — every "Accepted, not fixed, in v1" residual risk, every
-  open bug (#57, #60, #61), every unbuilt promise (#18) is evidence
+  open bug and every unbuilt promise (`gh issue list --state open`) is evidence
 - **references** — the supersession story is marketing until proven: did the
   retired scripts stay retired because forgectl is better, or because the
   author wills it?
@@ -43,7 +43,7 @@ git.sjo.lol).
 The case against:
 
 - The counterfactual: would the bash `s` script and claunch have done fine?
-  What does one 95-commit binary break that six small scripts couldn't?
+  What does one large binary break that six small scripts couldn't?
 - New failure surface: a workflow DSL, a trust store, a Postgres
   concordance, a Swift helper — each is something that can now fail. Where's
   the evidence the complexity pays?
