@@ -10,7 +10,7 @@ import (
 )
 
 // SurfaceConfig is the [surface] section: [surface.drain], [surface.intake],
-// [surface.merge] and [surface.profiles]. A surface launch still names its backend on every
+// [surface.merge], [surface.rex] and [surface.profiles]. A surface launch still names its backend on every
 // call.
 type SurfaceConfig struct {
 	Drain SurfaceDrainConfig `toml:"drain"`
@@ -20,6 +20,8 @@ type SurfaceConfig struct {
 	Merge SurfaceMergeConfig `toml:"merge"`
 	// Identity is the GitHub App workers act as; absent means the operator.
 	Identity SurfaceIdentityConfig `toml:"identity"`
+	// Rex is where the Rex backend finds its `rex` binary.
+	Rex RexConfig `toml:"rex"`
 	// Profiles are the named Claude config directories a worker can run
 	// under (`--profile <name>`), keyed by name.
 	Profiles map[string]SurfaceProfile `toml:"profiles"`
