@@ -413,7 +413,7 @@ func (r *Resolver) fromPATH() (string, error) {
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", termsafe.QuoteArgMax(p, 0), err)
+		return "", fmt.Errorf("%s: %w", termsafe.QuoteArgMax(p, 0), termsafe.Error(err))
 	}
 	if err := r.usable(abs); err != nil {
 		return "", err

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -186,29 +187,50 @@ func TestResolveRexWith_RefusesAnUnreadableConfig(t *testing.T) {
 	})
 }
 
-// TestResolveRexWith_RefusesAPinFromAnUntrustedConfigFile: a binary_path from a
-// config file the check refuses runs nothing, and a config without one never
-// reaches the check.
+// TestResolveRexWith_RefusesAPinFromAnUntrustedConfigFile reads a real file:
+// a binary_path from a config others can write is refused before anything
+// runs, and a trusted one gets past the check (and fails later, for lack of
+// that binary).
 func TestResolveRexWith_RefusesAPinFromAnUntrustedConfigFile(t *testing.T) {
-	calls := 0
-	old := rexConfigFileCheck
-	t.Cleanup(func() { rexConfigFileCheck = old })
-	rexConfigFileCheck = func() error { calls++; return errors.New("config file is writable by group or other") }
-
-	var pinned config.Config
-	pinned.Surface.Rex.BinaryPath = "/nonexistent/rex"
-	_, err := resolveRexWith(func() config.Config { return pinned })
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[surface.rex]\nbinary_path = \"/nonexistent/rex\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveRexWith(func() config.Config { return config.LoadPath(path) })
+	if err == nil || strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("err = %v, want the trusted file past the check and refused later", err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil { //nolint:gosec // G302: the test needs a loose mode to prove it is refused
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the owner and mode check needs a Unix stat")
+	}
+	_, err = resolveRexWith(func() config.Config { return config.LoadPath(path) })
 	if err == nil || !strings.Contains(err.Error(), "binary_path is not trusted") || !strings.Contains(err.Error(), "writable by group or other") {
 		t.Fatalf("err = %v, want the untrusted-config refusal", err)
 	}
-	if calls != 1 {
-		t.Errorf("check ran %d times, want 1", calls)
-	}
+}
 
-	calls = 0
-	_, _ = resolveRexWith(func() config.Config { return config.Config{} })
-	if calls != 0 {
-		t.Errorf("check ran %d times for a config with no binary_path, want 0", calls)
+// TestRexPinRefusal_OnlyAPinIsJudged: a loose config file with no binary_path
+// is not this check's business.
+func TestRexPinRefusal_OnlyAPinIsJudged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the owner and mode check needs a Unix stat")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("log_level = \"info\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil { //nolint:gosec // G302: see above
+		t.Fatal(err)
+	}
+	cfg := config.LoadPath(path)
+	if cfg.ExecChoiceFileError() == nil {
+		t.Fatal("the fixture is not loose; the test proves nothing")
+	}
+	if err := rexPinRefusal(cfg); err != nil {
+		t.Fatalf("refused a config with no pin: %v", err)
 	}
 }
 

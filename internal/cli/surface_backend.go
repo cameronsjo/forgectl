@@ -210,14 +210,19 @@ var locateRex rexLocator = resolveRex
 
 func resolveRex() (rexLocation, error) { return resolveRexWith(config.Load) }
 
-// rexConfigFileCheck judges the config file that a [surface.rex] binary_path
-// came from. A var so a test can aim it at a scratch file.
-var rexConfigFileCheck = func() error {
-	path, err := config.ConfigPath()
-	if err != nil {
-		return nil // the loader already refused a config it could not locate
+// rexPinRefusal refuses a [surface.rex] binary_path that came from a config
+// file another user could have written: the pin picks an executable, and a
+// pin outside any .app is gated by nothing else. The verdict was reached on
+// the descriptor config.Load read, so there is no gap to race. The parent
+// directory's owner and mode, and ACLs, are not judged.
+func rexPinRefusal(cfg config.Config) error {
+	if cfg.Surface.Rex.BinaryPath == "" {
+		return nil
 	}
-	return config.CheckExecChoiceFile(path)
+	if err := cfg.ExecChoiceFileError(); err != nil {
+		return fmt.Errorf("[surface.rex] binary_path is not trusted: %w", err)
+	}
+	return nil
 }
 
 // resolveRexWith is resolveRex with the config loader injected, so a test can
@@ -230,13 +235,8 @@ func resolveRexWith(load func() config.Config) (rexLocation, error) {
 	if cfg.DecodeDegraded() {
 		return rexLocation{}, errors.New("the config file could not be located or read; not guessing where rex is")
 	}
-	// binary_path picks an executable, so a config file another user could have
-	// written must not set it. The signature gate would still judge the
-	// binary; this refuses before anything runs.
-	if cfg.Surface.Rex.BinaryPath != "" {
-		if err := rexConfigFileCheck(); err != nil {
-			return rexLocation{}, fmt.Errorf("[surface.rex] binary_path is not trusted: %w", err)
-		}
+	if err := rexPinRefusal(cfg); err != nil {
+		return rexLocation{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), rexResolveTimeout)
 	defer cancel()
