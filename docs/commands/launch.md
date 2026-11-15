@@ -2,6 +2,8 @@
 
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
+What works on which host, with the version each result was measured on: [../hosts.md](../hosts.md).
+
 ```sh
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness

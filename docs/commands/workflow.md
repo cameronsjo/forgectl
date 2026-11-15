@@ -2,6 +2,8 @@
 
 Runs a TOML step list: `forgectl workflow run <name> [--dry-run] [--resume] [--param k=v]`. A workflow outside the built-ins must be blessed first with `forgectl workflow bless <name>`. The design is [ADR-0001](../adr/0001-workflow-dsl-toml-step-list.md) (the step list), [ADR-0006](../adr/0006-workflow-blessing-user-presence-signing.md) (blessing).
 
+Which hosts show the status this command reports, and what each was measured to do: [../hosts.md](../hosts.md).
+
 ## Program status (OSC 7501)
 
 `desk` (the dashboard and `desk watch`), `workflow run`, and the `workflow bless` and `workflow trust` ceremonies report their state to the terminal over the Program Status Protocol, so cmux's sidebar and herdr's status line show them the way they show an agent. Reports go to stderr, so `--json` and piped stdout stay clean, and each carries `id=forgectl:app=forgectl`, so `clear` removes only forgectl's own row.
