@@ -1162,6 +1162,7 @@ func TestWalkLinks(t *testing.T) {
 	symlink(t, f, "/w/a", "real/dir")           // relative, to a directory
 	symlink(t, f, "/w/up", "real/dir/../other") // ".." after a directory
 	symlink(t, f, "/w/abs", "/w/real/dir")      // absolute
+	symlink(t, f, "/w/via", "a/../other")       // ".." after a link to a directory
 	symlink(t, f, "/w/chain1", "chain2")
 	symlink(t, f, "/w/chain2", "/w/a")
 	symlink(t, f, "/w/loop1", "loop2")
@@ -1174,6 +1175,10 @@ func TestWalkLinks(t *testing.T) {
 		{"/w/real/dir/file", "/w/real/dir/file", 0},
 		{"/w/a/file", "/w/real/dir/file", 1},
 		{"/w/up", "/w/real/other", 1},
+		// ".." follows the directory a link resolved to, not the link's own
+		// parent: text cleanup would land on /w/other, which does not exist.
+		{"/w/a/../other", "/w/real/other", 1},
+		{"/w/via", "/w/real/other", 2}, // the link, then the link it passes through
 		{"/w/abs/file", "/w/real/dir/file", 1},
 		{"/w/chain1/file", "/w/real/dir/file", 3},
 	} {
