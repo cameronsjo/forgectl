@@ -33,6 +33,9 @@ func BuildPlan(cfg Config, snap Snapshot, projectsRoot string) Plan {
 	plan.Warnings = append(plan.Warnings, tabWarnings...)
 
 	moved, blockedIdx := orderMoves(entries, snap)
+	if cfg.StayInSpace {
+		moved, blockedIdx = nil, needMoveIndices(entries)
+	}
 	blocked := make(map[int]bool, len(blockedIdx))
 	for _, i := range blockedIdx {
 		blocked[i] = true
@@ -42,7 +45,12 @@ func BuildPlan(cfg Config, snap Snapshot, projectsRoot string) Plan {
 		plan.Moves = append(plan.Moves, moveFor(entries[i], labelOf, false))
 	}
 	for _, i := range blockedIdx {
-		plan.Moves = append(plan.Moves, moveFor(entries[i], labelOf, true))
+		m := moveFor(entries[i], labelOf, true)
+		if cfg.StayInSpace {
+			m.BlockedReason = "the host cannot move a tab to another workspace; move it by hand"
+			m.Unsupported = true
+		}
+		plan.Moves = append(plan.Moves, m)
 	}
 
 	for _, e := range entries {
@@ -169,6 +177,16 @@ func orderMoves(entries []entry, snap Snapshot) (moved, blocked []int) {
 		pending = still
 	}
 	return moved, pending
+}
+
+func needMoveIndices(entries []entry) []int {
+	var idx []int
+	for i, e := range entries {
+		if e.needMove {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 func moveFor(e entry, labelOf map[string]string, blocked bool) Move {

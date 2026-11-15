@@ -19,6 +19,7 @@ import (
 const (
 	envSession = "HERDR_ENV"
 	envSocket  = "HERDR_SOCKET_PATH"
+	envPane    = "HERDR_PANE_ID"
 	sessionOn  = "1" // the value of HERDR_ENV inside a pane
 )
 

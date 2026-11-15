@@ -33,8 +33,10 @@ var herdrModule = module.Manifest{
 var (
 	lookupHerdrEnv    = os.LookupEnv
 	herdrCheckSession = herdr.CheckSession
+	herdrCheckApp     = herdr.CheckApp
 	herdrProjectsRoot = projects.ResolveRoot
 	herdrUserHome     = os.UserHomeDir
+	herdrDetectHost   = herdr.DetectHost
 	herdrFileExists   = func(path string) bool { _, err := os.Stat(path); return err == nil }
 )
 
@@ -56,7 +58,7 @@ func newHerdrCmd(deps module.Deps) *cobra.Command {
 		Use:   "herdr",
 		Short: "Helpers for the herdr terminal multiplexer",
 		Long: `herdr holds forgectl's helpers for the herdr terminal multiplexer. Run them
-from inside a herdr pane.
+from inside a herdr pane or a herdr-app terminal.
 
   forgectl herdr organize      group tabs into workspaces by rule and order them`,
 	}
@@ -102,14 +104,17 @@ A glob follows shell rules (* ? [abc] [!x]) and is case-sensitive. herdr will
 not empty a workspace, so a move that would leave one with no tabs is reported
 as blocked.
 
-Run it inside a herdr pane. Moving tabs needs the cameronsjo/herdr fork; the
-report does not.`,
+Run it inside a herdr pane (HERDR_ENV) or a herdr-app terminal
+(HC_TERMINAL_ID). In a herdr pane, moving tabs needs the cameronsjo/herdr fork;
+the report does not. In herdr-app it reorders tabs within each space and orders
+the spaces, but it cannot move a tab to another space (herdr-app has no such
+command), so those moves are reported as blocked.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runHerdrOrganize(cmd, deps, opts)
 		},
 	}
-	cmd.Flags().BoolVar(&opts.apply, "apply", false, "make the moves (needs the cameronsjo/herdr fork); focus is restored and nothing asks first")
+	cmd.Flags().BoolVar(&opts.apply, "apply", false, "make the moves (a herdr pane needs the cameronsjo/herdr fork; herdr-app only reorders); focus is restored and nothing asks first")
 	cmd.Flags().BoolVar(&opts.explain, "explain", false, "show which rule caught each tab, and why unmatched tabs matched nothing")
 	cmd.Flags().BoolVar(&opts.asJSON, "json", false, "emit the plan (and, with --apply, the result) as one JSON object on stdout; the human report goes to stderr")
 	return cmd
@@ -125,8 +130,22 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	if err := organizeConfigProblem(deps.Cfg); err != nil {
 		problems = append(problems, err)
 	}
-	if err := herdrCheckSession(lookupHerdrEnv); err != nil {
-		problems = append(problems, err)
+	// A herdr-app terminal carries HC_TERMINAL_ID and none of the HERDR_*
+	// variables the 0.9 check gates on, so it has no session to check here;
+	// its first read fails if the window is closed.
+	host := herdrDetectHost(lookupHerdrEnv)
+	if host != herdr.HostApp {
+		if err := herdrCheckSession(lookupHerdrEnv); err != nil {
+			switch {
+			case host == herdr.HostNone:
+				err = fmt.Errorf("%w; or run it from a herdr-app terminal (HC_TERMINAL_ID is not set either)", err)
+			case hasHCTerminal(lookupHerdrEnv):
+				// Both sets of variables: herdr 0.9 wins, so a herdr-app
+				// launched from a 0.9 pane lands here with a dead socket.
+				err = fmt.Errorf("%w; HC_TERMINAL_ID is also set: a herdr-app launched from a herdr 0.9 pane inherits HERDR_ENV, HERDR_SOCKET_PATH and HERDR_PANE_ID, so run `unset HERDR_ENV HERDR_SOCKET_PATH HERDR_PANE_ID` first to run as herdr-app", err)
+			}
+			problems = append(problems, err)
+		}
 	}
 	if len(problems) > 0 {
 		// Joined on "; ", not errors.Join's newline: termsafe.Error flattens a
@@ -140,7 +159,7 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	}
 
 	if !opts.apply {
-		return organizeOnce(cmd, deps, opts)
+		return organizeOnce(cmd, deps, opts, host)
 	}
 
 	// --apply needs the lock that serializes it against other organize runs.
@@ -150,8 +169,13 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	}
 
 	// --apply gates twice, both before any change: the session (above), then
-	// the fork's `tab move`. Then it serializes against other organize runs.
-	if err := herdrCheckFork(cmd.Context(), deps.Runner); err != nil {
+	// the host's move command (the fork's `tab move`, or herdr-app's command
+	// list). Then it serializes against other organize runs.
+	if host == herdr.HostApp {
+		if err := herdrCheckApp(cmd.Context(), deps.Runner); err != nil {
+			return WithExitCode(termsafe.Error(err), exitUsage)
+		}
+	} else if err := herdrCheckFork(cmd.Context(), deps.Runner); err != nil {
 		return WithExitCode(termsafe.Error(forkRefusal(err)), exitUsage)
 	}
 	lockPath, err := herdrLockPath()
@@ -161,25 +185,42 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	notice := func() { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), lockWaitNotice) }
-	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts) })
+	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts, host) })
 }
 
 // organizeOnce reads the session, plans, and either reports (dry run) or
 // applies. Under --apply it runs inside the lock, so the snapshot it plans from
 // already reflects any organize run that held the lock before it.
-func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error {
+func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts, host herdr.Host) error {
 	cfg := deps.Cfg.Herdr.Organize
 	ctx := cmd.Context()
-	client := herdr.New(deps.Runner)
+	var client herdr.Window = herdr.New(deps.Runner)
+	ocfg := toOrganizeConfig(cfg)
+	if host == herdr.HostApp {
+		client = herdr.NewApp(deps.Runner)
+		ocfg.StayInSpace = true
+	}
 	snap, err := takeSnapshot(ctx, client)
 	if err != nil {
 		return termsafe.Error(err)
+	}
+	var windowNote string
+	if host == herdr.HostApp {
+		// Mutations go to whichever window herdr-app reports, so check it is
+		// the window this terminal is in before the first one.
+		if id, _ := lookupHerdrEnv("HC_TERMINAL_ID"); !snapshotHasTerminal(snap, strings.TrimSpace(id)) {
+			const why = "this terminal is not in the window herdr-app reports; run it from a terminal that window shows"
+			if opts.apply {
+				return WithExitCode(termsafe.Error(errors.New(why)), exitUsage)
+			}
+			windowNote = "note: " + why + "\n"
+		}
 	}
 	root, err := herdrProjectsRoot()
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, root)
+	plan := organize.BuildPlan(ocfg, snap, root)
 
 	human := cmd.OutOrStdout()
 	if opts.asJSON {
@@ -191,6 +232,9 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 		home = ""
 	}
 	r := organizeReport{w: human, home: home}
+	if windowNote != "" {
+		r.printf("%s", windowNote)
+	}
 
 	if !opts.apply {
 		r.dryRun(cfg, snap, plan, opts.explain)
@@ -258,6 +302,23 @@ func organizeConfigProblem(c config.Config) error {
 	return errors.New(b.String())
 }
 
+func hasHCTerminal(lookup func(string) (string, bool)) bool {
+	v, ok := lookup("HC_TERMINAL_ID")
+	return ok && strings.TrimSpace(v) != ""
+}
+
+func snapshotHasTerminal(snap organize.Snapshot, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, p := range snap.Panes {
+		if p.TerminalID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func toOrganizeConfig(o config.HerdrOrganizeConfig) organize.Config {
 	cfg := organize.Config{Default: o.Default, WorkspaceOrder: o.WorkspaceOrder}
 	for _, r := range o.Rules {
@@ -268,7 +329,7 @@ func toOrganizeConfig(o config.HerdrOrganizeConfig) organize.Config {
 
 // takeSnapshot reads the session once: workspaces, each one's tabs, and every
 // pane, in herdr's own list order.
-func takeSnapshot(ctx context.Context, c *herdr.Client) (organize.Snapshot, error) {
+func takeSnapshot(ctx context.Context, c herdr.Window) (organize.Snapshot, error) {
 	wss, err := c.Workspaces(ctx)
 	if err != nil {
 		return organize.Snapshot{}, err
@@ -371,6 +432,10 @@ func (r organizeReport) preamble(cfg config.HerdrOrganizeConfig, plan organize.P
 
 func (r organizeReport) blocked(m organize.Move) {
 	r.printf("blocked  %s  %s -> %s: %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), r.safe(m.BlockedReason))
+	if m.Unsupported {
+		r.printf("         fix: move it by hand; herdr-app has no command to move a tab to another space\n")
+		return
+	}
 	r.printf("         fix: open another tab in %s, or move it by hand\n", r.safe(m.From))
 }
 
@@ -546,6 +611,9 @@ type organizeMoveJSON struct {
 	To            string `json:"to"`
 	Blocked       bool   `json:"blocked"`
 	BlockedReason string `json:"blocked_reason,omitempty"`
+	// Unsupported marks a blocked move the host can never make (herdr-app has
+	// no cross-space move), as opposed to one herdr refuses at run time.
+	Unsupported bool `json:"unsupported,omitempty"`
 }
 
 type organizeLayoutJSON struct {
@@ -581,7 +649,7 @@ type organizeResultJSON struct {
 func moveJSON(m organize.Move) organizeMoveJSON {
 	return organizeMoveJSON{
 		TerminalID: m.TerminalID, TabID: m.TabID, Title: m.Title, CWD: m.CWD,
-		From: m.From, To: m.To, Blocked: m.Blocked, BlockedReason: m.BlockedReason,
+		From: m.From, To: m.To, Blocked: m.Blocked, BlockedReason: m.BlockedReason, Unsupported: m.Unsupported,
 	}
 }
 

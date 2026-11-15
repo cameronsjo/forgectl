@@ -1,6 +1,6 @@
 # herdr
 
-forgectl's native helpers for the [herdr](https://github.com/cameronsjo/herdr) terminal multiplexer. Run them from a herdr pane. The client they share is described in [../herdr.md](../herdr.md).
+forgectl's native helpers for the [herdr](https://github.com/cameronsjo/herdr) terminal multiplexer. Run them from a herdr pane or a herdr-app terminal. The client they share is described in [../herdr.md](../herdr.md).
 
 ```bash
 forgectl herdr organize             # report how tabs would be grouped and ordered (changes nothing)
@@ -11,10 +11,10 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 ## Requirements
 
-- **A herdr pane.** The command needs `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` naming a live socket, which herdr sets in every pane it hosts.
+- **A herdr pane or a herdr-app terminal.** In a herdr 0.9 pane the command needs `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` naming a live socket, which herdr sets in every pane it hosts. A herdr-app terminal carries `HC_TERMINAL_ID` and none of those variables; the command takes that as herdr-app and drives the `herdr-app` and `hc` binaries on `PATH`. When both sets of variables are present it uses herdr 0.9. With neither it refuses (exit 2) and names both.
 - **Rules in `config.toml`.** `forgectl herdr organize` refuses to run with none (exit 2) and says what it found. `forgectl init` adds a commented `[herdr.organize]` section.
 - **A Unix build, to move tabs.** `--apply` serializes runs with a file lock that forgectl has only on Unix; elsewhere it refuses with exit 2 before any change. The report works everywhere.
-- **The `cameronsjo/herdr` fork, to move tabs.** Upstream herdr has no `tab move`, and `--apply` needs it. It checks before changing anything and refuses with exit 2 on stock herdr. The report only lists, so it works on stock herdr. Restart the herdr server after upgrading its binary: the check reads the CLI, not the running server.
+- **The `cameronsjo/herdr` fork, to move tabs in a herdr pane.** Upstream herdr has no `tab move`, and `--apply` needs it there. herdr-app needs no fork: `--apply` checks that `herdr-app commands` lists `tab.move`, `space.move`, `tab.select` and `space.select`, and refuses with exit 2 if not. It checks before changing anything and refuses with exit 2 on stock herdr. The report only lists, so it works on stock herdr. Restart the herdr server after upgrading its binary: the check reads the CLI, not the running server.
 
 ## organize
 
@@ -45,12 +45,24 @@ workspace = "forge"
 | Line | Meaning |
 |---|---|
 | `move` | this tab would move to another workspace |
-| `blocked` | the move would leave its workspace with no tabs, and herdr refuses that; open another tab there or move it by hand |
+| `blocked` | the move would leave its workspace with no tabs, and herdr refuses that (open another tab there or move it by hand); in herdr-app, every move to another space, which herdr-app cannot make |
 | `order` | this tab would change position, or the workspaces would reorder; a label that more than one workspace carries is followed by the workspace's number (`forge #3`) |
 | `unmatched` | tabs no rule matched, filed under `default` (`--explain` shows each one's match key) |
 | `organized: N tabs in M workspaces; nothing to do` | nothing is pending |
 
 When moves are pending the report says `tab order will be rechecked after the moves`: the order within a workspace can only be known once the moves have run.
+
+### In herdr-app
+
+herdr-app calls workspaces spaces, and its `tab.move` only changes a tab's position within its own space; it has no command that takes a tab to another space or makes a space for one. So in herdr-app:
+
+- the report and `--apply` read `herdr-app ls` and take each terminal's folder from `hc ls`, matching on terminal id (`herdr-app ls` has no folder per terminal). The tab's name stands in for the terminal title in the `"<cwd> :: <title>"` match key, and a tab with no name is called `tab N` by its position;
+- a tab whose rule points at another workspace is a `blocked` move that says to move it by hand. In `--json` that move carries `"unsupported": true` (the field is left out of every other move, so the herdr 0.9 output is unchanged), which tells it apart from a move herdr refuses at run time. Nothing in the layout assumes it moved, so the order steps below still apply to what each space holds;
+- `--apply` also refuses (exit 2) before changing anything unless `$HC_TERMINAL_ID` is a terminal in the `herdr-app ls` reply, so it cannot reorder a window other than the one the terminal is in; the report prints a note instead. It also refuses when `hc` is not on `PATH`.
+- `--apply` reorders tabs within each space (`tab.move`, one move at a time, positions counted from 1) and orders the spaces (`space.move`), takes the same lock, and restores focus with `tab.select`, then always `space.select` on the space you were in, because `tab.select` is only documented as showing a tab;
+- an `order` line's position is the same 1-based position herdr-app uses.
+
+`hc` is read-only here. Worker launch (`forgectl launch`, `forgectl desk`) never calls herdr-app; only `organize` does.
 
 ### Applying
 
@@ -84,7 +96,7 @@ With `--json`, `result` carries `applied`, `blocked`, `not_run`, `warnings`, and
 |---|---|
 | 0 | done, or a report, including moves it predicts herdr will block |
 | 1 | herdr failed or declined a call |
-| 2 | not in a herdr pane, no rules configured, an invalid config, `--apply` on stock herdr or off Unix, or a usage error |
+| 2 | not in a herdr pane or herdr-app terminal, no rules configured, an invalid config, `--apply` on stock herdr, on a herdr-app without the needed commands, or off Unix, or a usage error |
 
 ### Moving from the `forgectl-herdr` script
 

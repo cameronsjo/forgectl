@@ -161,6 +161,11 @@ func runOrganize(t *testing.T, cfg config.Config, w *herdrWorld, args ...string)
 	if w != nil {
 		fake = w.runner(t)
 	}
+	return runOrganizeWith(t, cfg, fake, args...)
+}
+
+func runOrganizeWith(t *testing.T, cfg config.Config, fake *exec.FakeRunner, args ...string) organizeRun {
+	t.Helper()
 	cmd := newHerdrCmd(module.Deps{Cfg: cfg, Runner: fake})
 	// The real root sets both (root.go); a standalone command would otherwise
 	// print usage into stdout on any error and corrupt a --json document.

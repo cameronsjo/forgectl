@@ -127,7 +127,7 @@ func snapshotFocus(snap organize.Snapshot) focusState {
 // after each call that can renumber ids (a tab moving between workspaces, a
 // workspace reorder); a tab is found again by its terminal id, which does not
 // change. Focus is restored on every exit, error paths included.
-func applyPlan(ctx context.Context, c *herdr.Client, snap organize.Snapshot, plan organize.Plan) (res applyResult) {
+func applyPlan(ctx context.Context, c herdr.Window, snap organize.Snapshot, plan organize.Plan) (res applyResult) {
 	focus := snapshotFocus(snap)
 	defer func() { res.FocusTitle, res.FocusTab, res.FocusErr = restoreFocus(ctx, c, focus) }()
 
@@ -204,7 +204,7 @@ func paneByTerminal(panes []herdr.Pane) map[string]herdr.Pane {
 // workspaces renumbers tab ids and can create a workspace, while a tab that
 // was gone, already placed, or declined changed nothing, so the last read
 // still holds.
-func runMoves(ctx context.Context, c *herdr.Client, moves []organize.Move, res *applyResult) error {
+func runMoves(ctx context.Context, c herdr.Window, moves []organize.Move, res *applyResult) error {
 	created := map[string]string{}
 	var (
 		panes []herdr.Pane
@@ -263,7 +263,7 @@ func failStage(res *applyResult, notRun []organize.Move, stage string, err error
 	return err
 }
 
-func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
+func runWorkspaceOrder(ctx context.Context, c herdr.Window, plan organize.Plan, res *applyResult) error {
 	// One step per pass, re-reading the workspace list between passes: a
 	// workspace move renumbers workspaces and its reply is not decoded, so a
 	// later step must not act on the numbering from before it.
@@ -324,7 +324,7 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 // carries the workspace's tab list in the new order, which the next pass uses
 // instead of listing again. A reply whose list is empty or lacks the moved tab
 // is not trusted, and the tabs are listed again.
-func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
+func runTabOrder(ctx context.Context, c herdr.Window, plan organize.Plan, res *applyResult) error {
 	for _, lw := range plan.Layout.Workspaces {
 		stage := "ordering tabs in " + lw.Label
 		wss, err := c.Workspaces(ctx)
@@ -403,7 +403,7 @@ func titleOf(lw organize.LayoutWorkspace, terminal string) string {
 // herdr has no focus-by-pane, so a focused pane inside a split tab is not
 // restored to pane grain. A tab that left its workspace is not the workspace's
 // active tab any more and is skipped, as is one that is gone.
-func restoreFocus(ctx context.Context, c *herdr.Client, fs focusState) (title, tabID string, err error) {
+func restoreFocus(ctx context.Context, c herdr.Window, fs focusState) (title, tabID string, err error) {
 	if fs.caller == "" && len(fs.active) == 0 {
 		return "", "", nil
 	}
@@ -422,19 +422,27 @@ func restoreFocus(ctx context.Context, c *herdr.Client, fs focusState) (title, t
 			errs = append(errs, err)
 		}
 	}
+	// herdr-app documents `tab.select` as showing a tab, not as switching to
+	// its space, so there the restore always ends by selecting the caller's
+	// space. On 0.9 `tab focus` is assumed to switch workspace, and that path
+	// is unchanged.
+	needSpace := false
+	if n, ok := c.(interface{ FocusNeedsSpace() bool }); ok {
+		needSpace = n.FocusNeedsSpace()
+	}
 	if p, ok := byTerminal[fs.caller]; ok {
 		if err := c.FocusTab(ctx, p.TabID); err != nil {
 			errs = append(errs, err)
 		} else {
 			title, tabID = p.TerminalTitleStripped, p.TabID
 		}
-	} else {
-		// The caller's own tab is gone: leave the UI in the workspace it was
-		// looking at rather than on whichever workspace was restored last.
-		if fs.focusedWS != "" {
-			if err := c.FocusWorkspace(ctx, fs.focusedWS); err != nil {
-				errs = append(errs, err)
-			}
+	}
+	if (needSpace || byTerminal[fs.caller].TerminalID == "") && fs.focusedWS != "" {
+		// The caller's own tab is gone (or the host needs it): leave the UI in
+		// the workspace it was looking at rather than on whichever workspace
+		// was restored last.
+		if err := c.FocusWorkspace(ctx, fs.focusedWS); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return title, tabID, errors.Join(errs...)
