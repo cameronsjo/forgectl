@@ -24,6 +24,9 @@ type server struct {
 	InstanceID string
 	Version    string
 	Revision   int
+	// TailnetOpen is true unless the server reports Tailscale sharing as
+	// disabled and tailnet members as not allowed.
+	TailnetOpen bool
 }
 
 // parseWhoami reads `rex whoami --json`. Every field is required; the
@@ -36,14 +39,20 @@ func parseWhoami(raw []byte) (server, error) {
 		InstanceID  *string `json:"instance_id"`
 		RexVersion  *string `json:"rex_version"`
 		APIRevision *int    `json:"api_revision"`
+		Tailscale   *struct {
+			State               *string `json:"state"`
+			AllowTailnetMembers *bool   `json:"allow_tailnet_members"`
+		} `json:"tailscale"`
 	}
 	if err := decodeOne(raw, &w); err != nil {
 		return server{}, err
 	}
-	if w.Endpoint == nil || w.HostID == nil || w.InstanceID == nil || w.RexVersion == nil || w.APIRevision == nil {
+	if w.Endpoint == nil || w.HostID == nil || w.InstanceID == nil || w.RexVersion == nil || w.APIRevision == nil ||
+		w.Tailscale == nil || w.Tailscale.State == nil || w.Tailscale.AllowTailnetMembers == nil {
 		return server{}, errUnreadable
 	}
-	s := server{Endpoint: *w.Endpoint, HostID: *w.HostID, InstanceID: *w.InstanceID, Version: *w.RexVersion, Revision: *w.APIRevision}
+	s := server{Endpoint: *w.Endpoint, HostID: *w.HostID, InstanceID: *w.InstanceID, Version: *w.RexVersion, Revision: *w.APIRevision,
+		TailnetOpen: *w.Tailscale.State != "disabled" || *w.Tailscale.AllowTailnetMembers}
 	if s.Endpoint == "" || len(s.Endpoint) > maxEndpointLen || !printable(s.Endpoint) ||
 		!serverIDShape(s.HostID) || !serverIDShape(s.InstanceID) || s.Version == "" || !printable(s.Version) {
 		return server{}, errUnreadable

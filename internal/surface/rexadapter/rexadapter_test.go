@@ -151,6 +151,15 @@ func TestStartRefusesBeforeCreating(t *testing.T) {
 		"remote server": {func(f *fakeRex) {
 			f.whoami = strings.Replace(f.whoami, `"unix:///Users`, `"tcp://100.64.0.1:7777/Users`, 1)
 		}, backend.FailureIncompatible},
+		"tailnet sharing enabled": {func(f *fakeRex) {
+			f.whoami = strings.Replace(f.whoami, `"state": "disabled"`, `"state": "enabled"`, 1)
+		}, backend.FailureIncompatible},
+		"tailnet members allowed": {func(f *fakeRex) {
+			f.whoami = strings.Replace(f.whoami, `"allow_tailnet_members": false`, `"allow_tailnet_members": true`, 1)
+		}, backend.FailureIncompatible},
+		"no tailscale report": {func(f *fakeRex) {
+			f.whoami = strings.Replace(f.whoami, `"tailscale"`, `"x"`, 1)
+		}, backend.FailureMalformedResponse},
 		"no instance id": {func(f *fakeRex) {
 			f.whoami = strings.Replace(f.whoami, `"instance_id"`, `"instance"`, 1)
 		}, backend.FailureMalformedResponse},

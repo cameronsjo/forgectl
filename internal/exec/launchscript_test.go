@@ -4,6 +4,9 @@ package exec
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"os"
 	osexec "os/exec"
@@ -146,6 +149,66 @@ func TestSealedWriteNewFileHasOneCaller(t *testing.T) {
 		}
 		for _, f := range callShapeFindings(c, write, "", "NewLaunchScript") {
 			t.Errorf("[%s] %s", p, f)
+		}
+	}
+}
+
+// TestWriteNewFileIsNamedNowhereInsideSealedOrValidated closes the gap the
+// type-based guard above leaves: it scans internal/exec's production files, but
+// sealed and validated can both import sealed, so a call tucked inside an
+// existing function of either (for example sealed.Start or validated.New)
+// would turn nothing red. WriteNewFile may appear in sealed only as its own
+// declaration, and nowhere in validated.
+//
+// Mutation that turns it red: `_ = WriteNewFile("x", "", Value{}, "")` inside
+// sealed.Start, or `_ = sealed.WriteNewFile(...)` inside validated.New.
+func TestWriteNewFileIsNamedNowhereInsideSealedOrValidated(t *testing.T) {
+	for _, tc := range []struct {
+		dir     string
+		allowed func(*ast.Ident, *ast.FuncDecl) bool
+	}{
+		{"internal/sealed", func(id *ast.Ident, fn *ast.FuncDecl) bool { return fn != nil && fn.Name == id }},
+		{"internal/validated", func(*ast.Ident, *ast.FuncDecl) bool { return false }},
+	} {
+		entries, err := os.ReadDir(tc.dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.dir, err)
+		}
+		files := 0
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			files++
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, filepath.Join(tc.dir, name), nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s/%s: %v", tc.dir, name, err)
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "WriteNewFile" && tc.allowed(fn.Name, fn) {
+					// The declaration itself is the one allowed mention; its
+					// body must not name it either.
+					if fn.Body != nil {
+						ast.Inspect(fn.Body, func(m ast.Node) bool {
+							if id, ok := m.(*ast.Ident); ok && id.Name == "WriteNewFile" {
+								t.Errorf("%s/%s: WriteNewFile names itself inside its own body", tc.dir, name)
+							}
+							return true
+						})
+					}
+					return false
+				}
+				if id, ok := n.(*ast.Ident); ok && id.Name == "WriteNewFile" {
+					t.Errorf("%s: %s names WriteNewFile; only NewLaunchScript in internal/exec may call it",
+						fset.Position(id.Pos()), tc.dir)
+				}
+				return true
+			})
+		}
+		if files == 0 {
+			t.Fatalf("%s has no production files; the scan checked nothing", tc.dir)
 		}
 	}
 }

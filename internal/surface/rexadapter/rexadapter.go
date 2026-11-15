@@ -132,6 +132,9 @@ const (
 // localEndpointPrefix is the only endpoint scheme accepted. Rex can be pointed
 // at a remote home server; a worker's cwd and name must not travel to another
 // machine, and the bootstrap's socket would not reach this one from there.
+// A unix endpoint says only how this CLI reaches the server, not who else may:
+// the server must also report Tailscale sharing disabled (see parseWhoami),
+// because a tailnet member sees every block's cwd and label.
 const localEndpointPrefix = "unix://"
 
 // Script consumption bounds: how long Start waits for the launch script to

@@ -275,6 +275,11 @@ func (a *Adapter) readiness(ctx context.Context) (backend.ServerID, *backend.Sta
 			errors.New("the rex server is not a local unix-socket server; forgectl launches workers on this machine only"))
 		return backend.ServerID{}, &c
 	}
+	if s.TailnetOpen {
+		c := backend.NewStartCause(backend.FailureIncompatible,
+			errors.New("the rex server shares sessions with tailnet members (or does not report that it does not); forgectl launches workers only on a server no other machine can see"))
+		return backend.ServerID{}, &c
+	}
 	id, ferr := backend.FingerprintRexServer(s.Endpoint, s.HostID, s.InstanceID)
 	if ferr != nil {
 		c := backend.NewStartCause(backend.FailureMalformedResponse, ferr)
