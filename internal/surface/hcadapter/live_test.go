@@ -47,7 +47,9 @@ func TestLiveHc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, err := osexec.Command(hcPath, "--version").Output(); err == nil { //nolint:gosec,noctx // G204: the operator's hc binary, fixed argument
+	if v, err := osexec.Command(hcPath, "--version").Output(); err != nil { //nolint:gosec,noctx // G204: the operator's hc binary, fixed argument
+		t.Logf("hc --version failed: %v", err)
+	} else {
 		t.Logf("hc version: %s", string(v))
 	}
 	a, err := New(exec.NewOSSensitiveRunner(), hcPath, os.Getenv)
@@ -116,36 +118,55 @@ func liveStart(t *testing.T, a *Adapter, program string) backend.Ref {
 	}
 	res := a.Start(t.Context(), spec)
 	ref, has := res.Ref()
+	if has {
+		// A result can carry a ref and a cause (the terminal exists but a
+		// later step failed): close it through the adapter whatever happens
+		// next, before deciding whether the Start counts as a failure.
+		id, err := ref.HcIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("started %s as %s (created %s)", id.Terminal(), name, time.UnixMilli(id.CreatedMS()).UTC().Format(time.RFC3339Nano))
+		t.Cleanup(func() {
+			// Close checks the terminal's identity before it kills or removes
+			// anything, so a reused address is refused rather than hit. It is
+			// idempotent: already-gone is the normal answer after a passing
+			// phase.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if c := a.Close(ctx, ref); c.State() != backend.CloseClosed && c.State() != backend.CloseAlreadyGone {
+				cause, _ := c.Cause()
+				t.Errorf("cleanup Close of %s = %v (%v); remove the terminal named %s with hc", id.Terminal(), c, cause, name)
+			}
+		})
+	}
 	if !has || res.Failed() {
 		c, _ := res.Cause()
-		// A terminal named like this may exist; say so, so a person can
-		// remove it by name. Nothing here removes it by a guess.
+		// Without a ref nothing here can be closed by identity; say the name
+		// so a person can look. Nothing removes it by a guess.
 		t.Fatalf("Start of %q = %v (%v); if a terminal with that name exists, remove it with hc", name, res, c)
 	}
-	id, err := ref.HcIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("started %s as %s (created %s)", id.Terminal(), name, time.UnixMilli(id.CreatedMS()).UTC().Format(time.RFC3339Nano))
-	t.Cleanup(func() {
-		// Close checks the terminal's identity before it kills or removes
-		// anything, so a reused address is refused rather than hit. It is
-		// idempotent: already-gone is the normal answer after a passing phase.
-		if c := a.Close(context.Background(), ref); c.State() != backend.CloseClosed && c.State() != backend.CloseAlreadyGone {
-			cause, _ := c.Cause()
-			t.Errorf("cleanup Close of %s = %v (%v); remove the terminal named %s with hc", id.Terminal(), c, cause, name)
-		}
-	})
 	return ref
 }
 
 // liveClose closes ref and checks it is gone, and that a second Close agrees.
+// Closing a live terminal can answer "still stopping, retry" (hc's kill
+// returns before the program has exited); that is retried once, because the
+// documented retry is part of what this run checks.
 func liveClose(t *testing.T, a *Adapter, ref backend.Ref) {
 	t.Helper()
-	if c := a.Close(t.Context(), ref); c.State() != backend.CloseClosed {
+	c := a.Close(t.Context(), ref)
+	if c.State() != backend.CloseClosed && c.State() != backend.CloseAlreadyGone {
+		cause, _ := c.Cause()
+		t.Logf("first Close = %v (%v); retrying once", c, cause)
+		time.Sleep(500 * time.Millisecond)
+		c = a.Close(t.Context(), ref)
+	}
+	if c.State() != backend.CloseClosed && c.State() != backend.CloseAlreadyGone {
 		cause, _ := c.Cause()
 		t.Fatalf("Close = %v (%v)", c, cause)
 	}
+	t.Logf("Close settled as %v", c)
 	if p := a.Probe(t.Context(), ref); p.State() != backend.ProbeGone {
 		t.Errorf("Probe after Close = %v, want gone", p)
 	}
