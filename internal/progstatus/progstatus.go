@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 
+	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -28,9 +29,10 @@ import (
 const EnvOptOut = "FORGECTL_NO_PROGRAM_STATUS"
 
 const (
-	// programID is both the record id and the app name. A report with no id is
-	// the terminal's root record, and a clear with no id would wipe every
-	// program's records on that terminal.
+	// programID is both the record id and the app name. A report with an id is
+	// a child record; a report with no id is the terminal's root record, and a
+	// clear with no id wipes every program's records on that terminal (measured
+	// on hc 0.1.21: it also removed another program's id'd record).
 	programID = "forgectl"
 	// maxMsgRunes keeps msg far under the spec's 2048-byte decoded cap.
 	maxMsgRunes = 200
@@ -48,6 +50,22 @@ var isTerminal = func(fd uintptr) bool { return term.IsTerminal(int(fd)) }
 type Reporter struct {
 	w   io.Writer
 	tmx bool
+	// root sends reports with no id, as the terminal's root record. herdr-core
+	// sets a terminal's status only from root reports (an id'd record is a
+	// child record and leaves `status` empty), and herdr-app shows only that
+	// status: a plain terminal with a root `blocked` is listed with a "Needs
+	// you" badge, while the same report with an id shows nothing (measured on
+	// hc 0.1.21 and herdr-app 0.1.15). A terminal's status clears by itself
+	// when its interactive shell returns to the foreground, so the root record
+	// does not outlive the command (measured on hc 0.1.21 with an interactive
+	// shell: the status was set while a command ran and was gone when the
+	// command returned to the prompt).
+	//
+	// Root mode makes forgectl own the terminal's whole status for as long as
+	// it runs, and its Clear wipes every record on the terminal. That is right
+	// where forgectl is the foreground program of a herdr-core terminal, and
+	// wrong under tmux, where the terminal is shared by every pane: see New.
+	root bool
 }
 
 // New builds a Reporter over f (callers pass os.Stderr, so piped stdout and
@@ -62,12 +80,27 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	if getenv(mail.EnvWorker) != "" || getenv(mail.EnvDrainWorker) != "" {
 		return &Reporter{}
 	}
-	return &Reporter{w: f, tmx: getenv("TMUX") != ""}
+	// A herdr-core or herdr-app terminal reports as the root record, by the
+	// repo's own host detection (HC_TERMINAL_ID and none of the HERDR_*
+	// variables: a herdr 0.9 pane keeps the id'd record, which that host was
+	// not measured to need root for). Never under tmux, screen or zellij: a tmux server copies
+	// its starting environment into every pane, so HC_TERMINAL_ID can name an
+	// outer terminal that every pane shares, where forgectl is not the
+	// foreground program (the outer shell never returns to its prompt to clear
+	// the status) and a root clear would wipe other panes' records.
+	tmux := getenv("TMUX") != ""
+	// screen (STY) and zellij (ZELLIJ) panes inherit the same stale variable.
+	multiplexed := tmux || getenv("STY") != "" || getenv("ZELLIJ") != ""
+	root := !multiplexed && herdr.DetectHost(func(k string) (string, bool) { v := getenv(k); return v, v != "" }) == herdr.HostApp
+	return &Reporter{w: f, tmx: tmux, root: root}
 }
 
 // ForWriter builds a Reporter that writes to w and skips every gate. It is for
 // tests and for a caller that has already decided to report; commands use New.
 func ForWriter(w io.Writer, tmux bool) *Reporter { return &Reporter{w: w, tmx: tmux} }
+
+// ForWriterRoot is ForWriter for a host that needs root reports (see Reporter).
+func ForWriterRoot(w io.Writer, tmux bool) *Reporter { return &Reporter{w: w, tmx: tmux, root: true} }
 
 // Enabled reports whether this Reporter will write.
 func (r *Reporter) Enabled() bool { return r != nil && r.w != nil }
@@ -122,7 +155,8 @@ func (r *Reporter) Blocked(kind Kind, msg string) {
 	r.send("blocked", msg, extra)
 }
 
-// Clear removes forgectl's own record, and only that one.
+// Clear removes forgectl's own record, and only that one; for a root reporter
+// it clears the terminal's root record, which forgectl owns while it runs.
 func (r *Reporter) Clear() { r.send("clear", "", "") }
 
 func (r *Reporter) send(state, msg, extra string) {
@@ -131,7 +165,10 @@ func (r *Reporter) send(state, msg, extra string) {
 	}
 	var b strings.Builder
 	b.WriteString("state=" + state)
-	b.WriteString(":id=" + programID + ":app=" + programID)
+	if !r.root {
+		b.WriteString(":id=" + programID)
+	}
+	b.WriteString(":app=" + programID)
 	b.WriteString(extra)
 	if msg = cleanMsg(msg); msg != "" {
 		b.WriteString(":msg=" + base64.StdEncoding.EncodeToString([]byte(msg)))

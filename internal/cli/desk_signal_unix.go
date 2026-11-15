@@ -237,7 +237,7 @@ func (s deskSignal) attach(d *desk.Desk) {
 // reporting process exits, so a row set there would vanish at once, and one
 // left behind by a crashed process would stay stale. The dashboard is the one
 // long-lived process that watches the queue, so it sets the row when items are
-// waiting, clears it (id=forgectl) when none are, and release clears it on
+// waiting, clears it when none are, and release clears it on
 // every return from the dashboard, a panic included. A killed dashboard leaves
 // its row only where the host does not drop it (docs/commands/workflow.md).
 //

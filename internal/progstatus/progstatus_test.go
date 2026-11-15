@@ -143,3 +143,53 @@ func TestMsgIsCapped(t *testing.T) {
 		t.Errorf("sequence is %d bytes, want it capped well under the spec limit", len(got))
 	}
 }
+
+// TestRootReportOnHerdrCoreHosts: in a herdr-core or herdr-app terminal
+// (HC_TERMINAL_ID) the report is the terminal's root record, with no id, which
+// is the only kind herdr-core turns into a status and herdr-app shows; in a
+// herdr 0.9 pane (HERDR_ENV) and everywhere else it keeps the id'd record.
+func TestRootReportOnHerdrCoreHosts(t *testing.T) {
+	cases := []struct {
+		name   string
+		env    map[string]string
+		wantID bool
+	}{
+		{"herdr-core terminal", map[string]string{"HC_TERMINAL_ID": "t5b"}, false},
+		{"herdr 0.9 pane", map[string]string{"HERDR_ENV": "1"}, true},
+		{"herdr 0.9 pane with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": "1"}, true},
+		{"herdr 0.9 socket variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_SOCKET_PATH": "/tmp/s"}, true},
+		{"herdr 0.9 pane variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_PANE_ID": "p1"}, true},
+		{"inside tmux a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "TMUX": "/tmp/tmux-501/default,1,0"}, true},
+		{"inside screen a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "STY": "123.pts-0.host"}, true},
+		{"inside zellij a stale hc variable keeps the id", map[string]string{"HC_TERMINAL_ID": "t5b", "ZELLIJ": "0"}, true},
+		{"any other host", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forceTTY(t, true)
+			r, out := capture(t, tc.env)
+			r.Blocked(KindPermission, "x")
+			r.Clear()
+			got := out()
+			if hasID := strings.Contains(got, ":id=forgectl"); hasID != tc.wantID {
+				t.Errorf("id present = %v, want %v in %q", hasID, tc.wantID, got)
+			}
+			if !strings.Contains(got, "state=blocked:") || !strings.Contains(got, ":app=forgectl") || !strings.Contains(got, "state=clear:") {
+				t.Errorf("unexpected bytes %q", got)
+			}
+		})
+	}
+}
+
+// TestRootReporterExactBytes pins the bytes: no id, same app, same msg.
+func TestRootReporterExactBytes(t *testing.T) {
+	var sb strings.Builder
+	r := ForWriterRoot(&sb, false)
+	r.Working("a", 5)
+	r.Clear()
+	want := "\x1b]7501;state=working:app=forgectl:progress=5:msg=" + b64("a") + "\x1b\\" +
+		"\x1b]7501;state=clear:app=forgectl\x1b\\"
+	if sb.String() != want {
+		t.Errorf("got %q, want %q", sb.String(), want)
+	}
+}

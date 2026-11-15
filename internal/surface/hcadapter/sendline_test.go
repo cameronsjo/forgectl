@@ -24,6 +24,7 @@ func TestSendLineTypesOnlyIntoAnAgentAtItsPrompt(t *testing.T) {
 		{"done agent", getReply("t9", "", 100, "live", agent("done")), true, false},
 		{"working agent", getReply("t9", "", 100, "live", agent("working")), false, false},
 		{"blocked agent", getReply("t9", "", 100, "live", agent("blocked")), false, false},
+		{"forgectl's own root done", getReply("t9", "", 100, "live", `{"app":"forgectl","state":"done"}`), false, false},
 		{"plain shell", getReply("t9", "", 100, "live", `null`), false, false},
 		{"no app", getReply("t9", "", 100, "live", `{"state":"idle"}`), false, false},
 		{"exited", getReply("t9", "", 100, "finished", agent("done")), false, false},
