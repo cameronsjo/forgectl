@@ -27,10 +27,41 @@ type ent struct {
 // directory.
 type fakeFS map[string]ent
 
-func (f fakeFS) Stat(name string) (Info, error) { return f.info(name) }
+// Stat resolves every registered symlink in the path (any component), as
+// os.Stat does.
+func (f fakeFS) Stat(name string) (Info, error) {
+	rest := strings.Split(strings.Trim(path.Clean(name), "/"), "/")
+	cur := "/"
+	for hops := 0; len(rest) > 0; {
+		c := rest[0]
+		rest = rest[1:]
+		if c == "" || c == "." {
+			continue
+		}
+		next := path.Join(cur, c)
+		t, ok := fakeLinks[next]
+		if !ok {
+			cur = next
+			continue
+		}
+		if hops++; hops > 40 {
+			return Info{}, &fs.PathError{Op: "stat", Path: name, Err: errors.New("too many links")}
+		}
+		if path.IsAbs(t) {
+			cur = "/"
+		}
+		rest = append(strings.Split(strings.Trim(path.Clean(t), "/"), "/"), rest...)
+	}
+	return f.info(cur)
+}
 
 // Lstat is Stat plus the symlink bit, which the fake keeps in the mode.
-func (f fakeFS) Lstat(name string) (Info, error) { return f.info(name) }
+func (f fakeFS) Lstat(name string) (Info, error) {
+	if err, ok := fakeLstatErr[path.Clean(name)]; ok {
+		return Info{}, err
+	}
+	return f.info(name)
+}
 
 func (f fakeFS) info(name string) (Info, error) {
 	name = path.Clean(name) // a real filesystem ignores doubled separators
@@ -51,26 +82,30 @@ func (f fakeFS) unknownUIDs() bool { _, ok := f["\x00unknown-uids"]; return ok }
 // bump gives path a new inode, as a swap would.
 func (f fakeFS) bump(p string) { e := f["\x00gen:"+p]; e.uid++; f["\x00gen:"+p] = e }
 
-// fakeLinks maps a symlink's path to its target for fakeFS.EvalSymlinks. The
+// fakeLinks maps a symlink's path to its text for fakeFS.Readlink and Stat. The
 // tests are not parallel; each test registers its links and removes them at
 // test end.
 var fakeLinks = map[string]string{}
 
-// EvalSymlinks follows the symlink at the final component, up to a few hops;
-// intermediate components are taken as written.
-func (f fakeFS) EvalSymlinks(name string) (string, error) {
-	name = path.Clean(name)
-	for i := 0; i < 8; i++ {
-		t, ok := fakeLinks[name]
-		if !ok {
-			if _, exists := f[name]; !exists {
-				return "", &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
-			}
-			return name, nil
-		}
-		name = path.Clean(t)
+// Readlink returns a registered symlink's text.
+func (f fakeFS) Readlink(name string) (string, error) {
+	if t, ok := fakeLinks[path.Clean(name)]; ok {
+		return t, nil
 	}
-	return "", &fs.PathError{Op: "evalsymlinks", Path: name, Err: errors.New("too many links")}
+	return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+}
+
+// fakeLstatErr makes Lstat of a path fail, as a path past the kernel's length
+// limit does.
+var fakeLstatErr = map[string]error{}
+
+// symlink registers path as a symlink to text (an entry the walk reads with
+// Lstat and Readlink); it is removed at test end.
+func symlink(t *testing.T, f fakeFS, name, text string) {
+	t.Helper()
+	f[name] = ent{fs.ModeSymlink | 0o777, me}
+	fakeLinks[name] = text
+	t.Cleanup(func() { delete(fakeLinks, name) })
 }
 
 func (f fakeFS) Glob(pattern string) ([]string, error) {
@@ -965,10 +1000,10 @@ func TestSymlinkIntoBundleIsGated(t *testing.T) {
 	genuine := bin("Rex.app")
 	build := func(t *testing.T) (fakeFS, *fexec.FakeRunner) {
 		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
-		f["/usr/local/bin"] = ent{fs.ModeDir | 0o755, 0}
-		f[link] = ent{0o755, me}
-		fakeLinks[link] = genuine
-		t.Cleanup(func() { delete(fakeLinks, link) })
+		for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+			f[d] = ent{fs.ModeDir | 0o755, 0}
+		}
+		symlink(t, f, link, genuine)
 		return f, runner(map[string]string{link: goodJSON, genuine: goodJSON}, nil)
 	}
 	t.Run("clean target resolves and verifies", func(t *testing.T) {
@@ -1033,5 +1068,82 @@ func TestOuterAppAbovePinnedPathIsJudged(t *testing.T) {
 	f["/Applications/Other.app"] = ent{fs.ModeDir | 0o775, me}
 	if err := r.Verify(context.Background(), res); err == nil {
 		t.Fatal("an untrusted outer .app above the Rex bundle was not judged")
+	}
+}
+
+// TestLinkThatNamesAnAppButResolvesOutIsRefused: the gate level must not come
+// from where the link ends up. A link whose text names an .app, with that .app
+// component replaced by a symlink to a plain directory, resolves outside any
+// .app; it is refused rather than treated as a plain executable.
+func TestLinkThatNamesAnAppButResolvesOutIsRefused(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	f := tree(me, map[string]fs.FileMode{"/tmp/t/plain/bin/rex": 0o755})
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+		f[d] = ent{fs.ModeDir | 0o755, 0}
+	}
+	f["/tmp/t/plain"] = ent{fs.ModeDir | 0o777, me}
+	symlink(t, f, "/tmp/t/Rex Beta.app", "/tmp/t/plain")
+	symlink(t, f, link, "/tmp/t/Rex Beta.app/bin/rex")
+	fr := runner(map[string]string{link: goodJSON, "/tmp/t/plain/bin/rex": goodJSON}, nil)
+	r := resolver(fr, f, link)
+	if _, err := r.Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "outside one") {
+		t.Fatalf("config: err = %v, want a refusal naming that it resolves outside an app", err)
+	}
+	if _, err := r.Resolve(context.Background(), ""); err == nil {
+		t.Fatal("PATH: a link naming an app that resolves outside one was accepted")
+	}
+	if err := r.Verify(context.Background(), Resolved{Path: link, Source: SourcePATH}); err == nil {
+		t.Fatal("Verify accepted it")
+	}
+	if ran(fr, link) || ran(fr, "/tmp/t/plain/bin/rex") {
+		t.Error("a refused link was run")
+	}
+}
+
+// TestUnresolvableLinkThatNamesAnAppIsRefused: a symlink whose text names an
+// .app and whose resolution fails (a path past the kernel's length limit) is
+// refused, not treated as a plain binary; so is any link whose resolution
+// fails.
+func TestUnresolvableLinkThatNamesAnAppIsRefused(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/bin"} {
+		f[d] = ent{fs.ModeDir | 0o755, 0}
+	}
+	symlink(t, f, link, genuine)
+	fakeLstatErr["/Applications/Rex.app/Contents"] = errors.New("file name too long")
+	t.Cleanup(func() { delete(fakeLstatErr, "/Applications/Rex.app/Contents") })
+	fr := runner(map[string]string{link: goodJSON}, nil)
+	r := resolver(fr, f, link)
+	if _, err := r.Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "cannot resolve") {
+		t.Fatalf("err = %v, want a refusal that it cannot resolve the symlinks", err)
+	}
+	if ran(fr, link) {
+		t.Error("an unresolvable link was run")
+	}
+}
+
+// TestPinAndPathSymlinkSwappedDuringWhoamiIsCaught: the identity re-check
+// after whoami covers a config pin and a PATH hit inside a bundle too.
+func TestPinAndPathSymlinkSwappedDuringWhoamiIsCaught(t *testing.T) {
+	genuine := bin("Rex.app")
+	for _, tc := range []struct {
+		name, cfg, pathResult string
+	}{
+		{"config pin", genuine, ""},
+		{"PATH hit", "", genuine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+			fr := &fexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				f.bump(genuine) // the file is swapped while whoami runs
+				return goodJSON, nil
+			}}
+			_, err := resolver(fr, f, tc.pathResult).Resolve(context.Background(), tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "binary changed while being verified") {
+				t.Fatalf("err = %v, want the swap caught", err)
+			}
+		})
 	}
 }

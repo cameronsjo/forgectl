@@ -15,7 +15,10 @@
 //     unless it lies inside an .app, directly or through a symlink, in which
 //     case it gets the bundle gates below before it is run;
 //  2. `rex` on PATH, on the same terms (a PATH hit that fails the bundle
-//     gates is skipped and listed);
+//     gates is skipped and listed). A symlink whose text names an .app but
+//     which resolves outside one, or which cannot be resolved, is refused, not
+//     treated as a plain binary: whoever can rewrite a directory the link
+//     passes through could otherwise steer it back to an unchecked file;
 //  3. the installed Rex app bundles, matched by glob (see
 //     [DefaultBundlePatterns]), never by one hard-coded path, because a Rex
 //     update can move the binary inside the bundle.
