@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"time"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/rexbin"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/cmuxadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
@@ -182,41 +186,78 @@ func newCmuxAdapter(warnings io.Writer) (backend.Adapter, error) {
 	return a, nil
 }
 
-// rexLocator finds the absolute path of the `rex` binary.
-type rexLocator func() (string, error)
-
-// locateRex is how a surface launch finds rex. Rex installs `rex` inside its
-// app bundle, not on PATH, so today this finds it only where the operator has
-// put it on PATH; the Rex locator (forgectl roadmap item F) replaces this
-// value, and nothing else here changes.
-var locateRex rexLocator = lookPathRex
-
-// lookPathRex resolves rexadapter.DefaultBinaryName on PATH to an absolute
-// path.
-func lookPathRex() (string, error) {
-	path, err := osexec.LookPath(rexadapter.DefaultBinaryName)
-	if err != nil {
-		return "", fmt.Errorf("rex not found on PATH: %w", err)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve rex path: %w", termsafe.Error(err))
-	}
-	return abs, nil
+// rexLocation is where `rex` was found and how to re-check it before use.
+type rexLocation struct {
+	// Path is absolute.
+	Path string
+	// Verify re-runs the trust gates on Path; nil means there is nothing to
+	// re-check (a test locator).
+	Verify func(context.Context) error
 }
 
-// newRexAdapter builds the Rex adapter on the path locate finds. The path is
-// resolved here, before any command runs, for the reason every backend's is:
-// the sensitive runner requires an absolute path.
+// rexLocator finds the `rex` binary.
+type rexLocator func() (rexLocation, error)
+
+// rexResolveTimeout bounds locating rex: a `whoami` and a signature check per
+// candidate, each with its own shorter limit inside rexbin.
+const rexResolveTimeout = 60 * time.Second
+
+// locateRex is how a surface launch finds rex: the `[surface.rex] binary_path`
+// key, then PATH, then the installed Rex app bundles (internal/rexbin). A
+// config file that did not decode is refused rather than read as "no pin",
+// because the pin chooses an executable.
+var locateRex rexLocator = resolveRex
+
+func resolveRex() (rexLocation, error) {
+	cfg := config.Load()
+	if err := cfg.DecodeError(); err != nil {
+		return rexLocation{}, fmt.Errorf("config file: %w", termsafe.Error(err))
+	}
+	if cfg.DecodeDegraded() {
+		return rexLocation{}, errors.New("the config file could not be located or read; not guessing where rex is")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rexResolveTimeout)
+	defer cancel()
+	r := rexbin.New(exec.OSRunner{})
+	res, err := r.Resolve(ctx, cfg.Surface.Rex.BinaryPath)
+	if err != nil {
+		return rexLocation{}, err
+	}
+	return rexLocation{Path: res.Path, Verify: func(ctx context.Context) error { return r.Verify(ctx, res) }}, nil
+}
+
+// verifyingRunner re-checks the rex binary before every command the Rex
+// adapter runs. The locator judged the file once, and the app bundle's parent
+// directory can be rewritten by any admin account at any time, so each use
+// repeats the gates; a failed check runs nothing.
+type verifyingRunner struct {
+	inner  exec.SensitiveRunner
+	verify func(context.Context) error
+}
+
+func (v verifyingRunner) RunSensitive(ctx context.Context, cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
+	if err := v.verify(ctx); err != nil {
+		return exec.SensitiveResult{}, fmt.Errorf("rex binary no longer passes its checks: %w", err)
+	}
+	return v.inner.RunSensitive(ctx, cmd)
+}
+
+// newRexAdapter builds the Rex adapter on the location locate finds. The path
+// is resolved here, before any command runs, for the reason every backend's
+// is: the sensitive runner requires an absolute path.
 func newRexAdapter(locate rexLocator) (backend.Adapter, error) {
-	path, err := locate()
+	loc, err := locate()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	var run exec.SensitiveRunner = exec.NewOSSensitiveRunner()
+	if loc.Verify != nil {
+		run = verifyingRunner{inner: run, verify: loc.Verify}
 	}
 	// Assigned and returned explicitly rather than forwarded, for the reason
 	// spelled out in newTmuxAdapter: a bare return converts a nil *Adapter
 	// into a NON-nil backend.Adapter holding a nil pointer.
-	a, err := rexadapter.New(exec.NewOSSensitiveRunner(), path)
+	a, err := rexadapter.New(run, loc.Path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}
