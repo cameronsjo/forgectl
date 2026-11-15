@@ -84,7 +84,7 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	if err := spec.Validate(); err != nil {
 		return backend.NewNotMutated(backend.NewStartCause(backend.FailureInternal, err))
 	}
-	srv, cause := a.readiness(ctx)
+	srv, cause := a.readiness(ctx, true)
 	if cause != nil {
 		return backend.NewNotMutated(*cause)
 	}
@@ -245,8 +245,13 @@ func (a *Adapter) reconcile(ctx context.Context, tag backend.RecoveryTag, srv ba
 
 // readiness runs `rex whoami --json` and fingerprints the server it reports.
 // It refuses, as incompatible, any API revision but APIRevision and any
-// endpoint that is not a local unix socket.
-func (a *Adapter) readiness(ctx context.Context) (backend.ServerID, *backend.StartCause) {
+// endpoint that is not a local unix socket. With launch set (Start only) it
+// also refuses a server shared with tailnet members, or one that does not say
+// it is not: a launch would put a worker's cwd and label where other machines
+// can read them. Close and Probe pass launch=false, because closing a block is
+// the remedy for sharing that was switched on after a launch, and the calls
+// carry only ids.
+func (a *Adapter) readiness(ctx context.Context, launch bool) (backend.ServerID, *backend.StartCause) {
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindRexReadiness,
 		exec.MustFixed("whoami"),
 		exec.MustFixed("--json"),
@@ -275,7 +280,7 @@ func (a *Adapter) readiness(ctx context.Context) (backend.ServerID, *backend.Sta
 			errors.New("the rex server is not a local unix-socket server; forgectl launches workers on this machine only"))
 		return backend.ServerID{}, &c
 	}
-	if s.TailnetOpen {
+	if launch && s.TailnetOpen {
 		c := backend.NewStartCause(backend.FailureIncompatible,
 			errors.New("the rex server shares sessions with tailnet members (or does not report that it does not); forgectl launches workers only on a server no other machine can see"))
 		return backend.ServerID{}, &c

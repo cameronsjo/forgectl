@@ -40,7 +40,8 @@
 // Every call that acts on a block checks, in order (locate):
 //
 //  1. The Rex server: `rex whoami` must report API revision 14 (APIRevision;
-//     any other refuses), a local unix-socket endpoint, and the instance_id
+//     any other refuses), a local unix-socket endpoint (Start also requires
+//     Tailscale sharing reported disabled, at launch time only), and the instance_id
 //     and host_id the reference was fingerprinted with
 //     (backend.FingerprintRexServer). A restarted server is a new instance.
 //  2. The block: `rex block ls` in the reference's session must list the
@@ -134,7 +135,8 @@ const (
 // machine, and the bootstrap's socket would not reach this one from there.
 // A unix endpoint says only how this CLI reaches the server, not who else may:
 // the server must also report Tailscale sharing disabled (see parseWhoami),
-// because a tailnet member sees every block's cwd and label.
+// because a tailnet member sees every block's cwd and label. That check is
+// made once, when a launch begins, and only for a launch.
 const localEndpointPrefix = "unix://"
 
 // Script consumption bounds: how long Start waits for the launch script to

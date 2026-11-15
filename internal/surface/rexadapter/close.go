@@ -90,7 +90,7 @@ type located struct {
 //
 //  1. The reference's source is the one this adapter selects, and the server
 //     `rex whoami` reports (API revision 14, local, this instance_id and
-//     host_id) fingerprints to the reference's server. A restarted server, or
+//     host_id; the tailnet refusal applies to Start only) fingerprints to the reference's server. A restarted server, or
 //     another one, is a mismatch.
 //  2. `rex block ls` in the reference's session lists its full block id. Rex
 //     reporting that exact session, or that block, not found on a matching
@@ -108,7 +108,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (located, locateS
 		return located{}, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the reference names a different rex server selection"))
 	}
-	srv, cause := a.readiness(ctx)
+	srv, cause := a.readiness(ctx, false)
 	if cause != nil {
 		return located{}, locateUnreadable, *cause
 	}

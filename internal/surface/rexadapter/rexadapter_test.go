@@ -157,6 +157,12 @@ func TestStartRefusesBeforeCreating(t *testing.T) {
 		"tailnet members allowed": {func(f *fakeRex) {
 			f.whoami = strings.Replace(f.whoami, `"allow_tailnet_members": false`, `"allow_tailnet_members": true`, 1)
 		}, backend.FailureIncompatible},
+		"tailnet state starting": {func(f *fakeRex) {
+			f.whoami = strings.Replace(f.whoami, `"state": "disabled"`, `"state": "starting"`, 1)
+		}, backend.FailureIncompatible},
+		"tailnet state null": {func(f *fakeRex) {
+			f.whoami = strings.Replace(f.whoami, `"state": "disabled"`, `"state": null`, 1)
+		}, backend.FailureMalformedResponse},
 		"no tailscale report": {func(f *fakeRex) {
 			f.whoami = strings.Replace(f.whoami, `"tailscale"`, `"x"`, 1)
 		}, backend.FailureMalformedResponse},
@@ -258,7 +264,7 @@ func TestReconcileFindsALabeledBlock(t *testing.T) {
 // fingerprint is the server id the fake's whoami reply fingerprints to.
 func fingerprint(t *testing.T, f *fakeRex) backend.ServerID {
 	t.Helper()
-	srv, cause := f.adapter().readiness(t.Context())
+	srv, cause := f.adapter().readiness(t.Context(), true)
 	if cause != nil {
 		t.Fatal(*cause)
 	}
@@ -500,5 +506,27 @@ func TestNewRefuses(t *testing.T) {
 	}
 	if _, err := New(&exec.FakeSensitiveRunner{}, "/rex", WithScriptDir("tmp")); err == nil {
 		t.Error("a relative script directory was accepted")
+	}
+}
+
+// TestCloseAndProbeStillWorkWhenTheServerBecomesShared: sharing switched on
+// after a launch must not leave the worker unclosable, because closing is the
+// remedy. A launch on the same server is still refused.
+func TestCloseAndProbeStillWorkWhenTheServerBecomesShared(t *testing.T) {
+	f := newFake(t)
+	a := f.adapter()
+	ref := start(t, f, a)
+	f.whoami = strings.Replace(f.whoami, `"allow_tailnet_members": false`, `"allow_tailnet_members": true`, 1)
+	if res := a.Probe(t.Context(), ref); res.State() != backend.ProbePresent {
+		t.Fatalf("Probe on a shared server = %v, want present", res)
+	}
+	if res := a.Close(t.Context(), ref); res.State() != backend.CloseClosed {
+		t.Fatalf("Close on a shared server = %v, want closed", res)
+	}
+	spec := testSpec(t)
+	f.wantOwner = spec.OwnershipName()
+	res := a.Start(t.Context(), spec)
+	if cause, _ := res.Cause(); res.Outcome() != backend.NotMutated || cause.Class() != backend.FailureIncompatible {
+		t.Fatalf("Start on a shared server = %v cause %v, want a not-mutated refusal", res, cause)
 	}
 }
