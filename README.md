@@ -192,7 +192,7 @@ forgectl resume hooks install      # install the launchd watcher that runs the h
 forgectl resume hooks status       # watcher installed/loaded, recorded versions, last hook runs (--json)
 
 # surface — start a harness inside a terminal manager without exposing its invocation
-forgectl surface launch <target> --surface tmux           # tmux, cmux, herdr, or hc — always explicit, never a default
+forgectl surface launch <target> --surface tmux           # tmux, cmux, herdr, hc, or rex — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude, codex, or pi)
 forgectl surface launch . --surface tmux --here      # start claude in the target, not at its repo root

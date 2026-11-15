@@ -1,0 +1,32 @@
+{
+  "blocks": [
+    {
+      "block_id": "block:01a1db33-daec-7000-8000-000000000005",
+      "label": "shell",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "00000000-0000-4000-8000-000000000002",
+      "placement": "placed",
+      "window_id": "window:01a1db33-db13-7000-8000-000000000004",
+      "owner": "client:01a1db33-dae8-7000-8000-000000000006"
+    },
+    {
+      "block_id": "block:01a1db34-3991-7000-8000-000000000007",
+      "label": "owner-probe",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "00000000-0000-4000-8000-000000000002",
+      "placement": "placed",
+      "window_id": "window:01a1db34-39a9-7000-8000-000000000008"
+    },
+    {
+      "block_id": "block:01a1db34-39dc-7000-8000-000000000009",
+      "label": "quick",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "00000000-0000-4000-8000-000000000002",
+      "placement": "placed",
+      "window_id": "window:01a1db34-39f3-7000-8000-00000000000a"
+    }
+  ]
+}

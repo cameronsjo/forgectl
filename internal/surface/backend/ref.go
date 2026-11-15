@@ -66,6 +66,7 @@ const (
 	sourceHerdrNamedSession
 	sourceHcDefaultSession
 	sourceHcNamedSession
+	sourceRexDefault
 	sourceCount
 )
 
@@ -79,6 +80,7 @@ var sourceNames = [sourceCount]string{
 	sourceHerdrNamedSession:   "herdr-named-session",
 	sourceHcDefaultSession:    "hc-default-session",
 	sourceHcNamedSession:      "hc-named-session",
+	sourceRexDefault:          "rex-default",
 }
 
 var sourceKinds = [sourceCount]Kind{
@@ -91,6 +93,7 @@ var sourceKinds = [sourceCount]Kind{
 	sourceHerdrNamedSession:   KindHerdr,
 	sourceHcDefaultSession:    KindHc,
 	sourceHcNamedSession:      KindHc,
+	sourceRexDefault:          KindRex,
 }
 
 // ServerSource names *how* an endpoint was selected, never the endpoint
@@ -142,6 +145,12 @@ func HcDefaultSessionServer() ServerSource { return ServerSource{code: sourceHcD
 // itself is not recorded here; it goes into the server fingerprint, so a
 // reference taken under one session does not match a core selected by another.
 func HcNamedSessionServer() ServerSource { return ServerSource{code: sourceHcNamedSession} }
+
+// RexDefaultServer selects the Rex server a bare `rex` command reaches: no -S
+// flag, so Rex's own home-server choice. The adapter accepts only a local
+// (unix-socket) server there, and the server it reaches goes into the
+// fingerprint, so a reference taken on one Rex server does not match another.
+func RexDefaultServer() ServerSource { return ServerSource{code: sourceRexDefault} }
 
 // Valid reports whether s names a real selection chain.
 func (s ServerSource) Valid() bool { return s.code > sourceInvalid && s.code < sourceCount }
@@ -352,6 +361,32 @@ func FingerprintHcCore(session, coreID string) (ServerID, error) {
 	return ServerID{digest: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
+// rexServerDomain separates a Rex server fingerprint from every other digest
+// in this package.
+const rexServerDomain = "forgectl-rex-server\x00"
+
+// FingerprintRexServer binds a reference to one Rex server process: the
+// endpoint `rex whoami` reports, its host_id, and its instance_id.
+//
+// instance_id is what turns over: Rex reports one per server process
+// (measured on 0.1.0-preview.19), so a restarted server is a new incarnation
+// and every reference taken on the old one stops matching. That is the
+// fail-closed direction: a restart that kept the block alive would make
+// close refuse rather than act, and a restart that lost it cannot be told
+// apart from a server that never ran it. The version is left out: it says
+// nothing about which process holds the blocks.
+func FingerprintRexServer(endpoint, hostID, instanceID string) (ServerID, error) {
+	if endpoint == "" || hostID == "" || instanceID == "" {
+		return ServerID{}, ErrInvalidServerID
+	}
+	h := sha256.New()
+	writeField(h, []byte(rexServerDomain))
+	writeField(h, []byte(endpoint))
+	writeField(h, []byte(hostID))
+	writeField(h, []byte(instanceID))
+	return ServerID{digest: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
 func writeField(w io.Writer, b []byte) {
 	writeUint(w, uint64(len(b)))
 	_, _ = w.Write(b)
@@ -523,6 +558,101 @@ func (i HcIdentity) Terminal() string { return i.terminal }
 // CreatedMS is the terminal's creation time, in Unix milliseconds.
 func (i HcIdentity) CreatedMS() int64 { return i.createdMS }
 
+// Rex typed-id prefixes, as Rex spells them (measured on 0.1.0-preview.19):
+// "session:<uuidv7>" and "block:<uuidv7>".
+const (
+	rexSessionPrefix = "session:"
+	rexBlockPrefix   = "block:"
+)
+
+// RexIdentity names one Rex block: the session it lives in, its full block
+// id, and the creation time that id embeds.
+//
+// Rex ids are UUIDv7 (RFC 9562 section 5.7): the first 48 bits are the Unix
+// time in milliseconds at which the server minted the id. That is the
+// creation time this identity records, in the part hc's created_ms plays for
+// an hc terminal. It is derived, never supplied: NewRexIdentity reads it out
+// of the block id, so a reference cannot carry a creation time its own id
+// contradicts, and a decoded reference whose created_ms disagrees with its id
+// is refused.
+//
+// Unlike an hc address, a full Rex id is not handed out again: 74 random bits
+// follow the timestamp. The creation time is checked anyway, by the adapter,
+// because it is the one part of the identity a person cannot change (a label
+// can be renamed), and because a parser that read the wrong record would have
+// to land on one created in the same millisecond to pass it.
+type RexIdentity struct {
+	session   string
+	block     string
+	createdMS int64
+}
+
+// NewRexIdentity validates a Rex session id and block id ("session:" or
+// "block:" and a lowercase UUIDv7) and derives the block's creation time.
+func NewRexIdentity(session, block string) (RexIdentity, error) {
+	if _, ok := rexIDCreatedMS(rexSessionPrefix, session); !ok {
+		return RexIdentity{}, fmt.Errorf("%w: rex session id", ErrInvalidIdentity)
+	}
+	created, ok := rexIDCreatedMS(rexBlockPrefix, block)
+	if !ok {
+		return RexIdentity{}, fmt.Errorf("%w: rex block id", ErrInvalidIdentity)
+	}
+	return RexIdentity{session: session, block: block, createdMS: created}, nil
+}
+
+// Session is the full Rex session id, such as "session:01a1db33-...".
+func (i RexIdentity) Session() string { return i.session }
+
+// Block is the full Rex block id, such as "block:01a1db33-...".
+func (i RexIdentity) Block() string { return i.block }
+
+// CreatedMS is the block's creation time, in Unix milliseconds, from its id.
+func (i RexIdentity) CreatedMS() int64 { return i.createdMS }
+
+// RexSessionCreatedMS reports the creation time a Rex session id embeds, and
+// false when s is not "session:" and a lowercase UUIDv7.
+func RexSessionCreatedMS(s string) (int64, bool) { return rexIDCreatedMS(rexSessionPrefix, s) }
+
+// RexBlockCreatedMS reports the creation time a Rex block id embeds, and false
+// when s is not "block:" and a lowercase UUIDv7.
+func RexBlockCreatedMS(s string) (int64, bool) { return rexIDCreatedMS(rexBlockPrefix, s) }
+
+// rexIDCreatedMS parses prefix + a UUIDv7 and returns its timestamp.
+//
+// The grammar is exact and lowercase, because that is what Rex prints and
+// the id is handed straight back to it: 8-4-4-4-12 hex digits, version 7 (the
+// first digit of the third group), and the RFC 9562 variant (8, 9, a or b as
+// the first digit of the fourth group). The timestamp is the first 12 hex
+// digits, the first two groups, read as a big-endian 48-bit integer; zero is
+// refused, since no server mints an id at the epoch.
+func rexIDCreatedMS(prefix, s string) (int64, bool) {
+	u, ok := strings.CutPrefix(s, prefix)
+	if !ok || len(u) != 36 {
+		return 0, false
+	}
+	for i := 0; i < len(u); i++ {
+		c := u[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return 0, false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return 0, false
+			}
+		}
+	}
+	if u[14] != '7' || !strings.ContainsRune("89ab", rune(u[19])) {
+		return 0, false
+	}
+	ms, err := strconv.ParseInt(u[0:8]+u[9:13], 16, 64)
+	if err != nil || ms <= 0 {
+		return 0, false
+	}
+	return ms, true
+}
+
 // validHcAddress accepts hc's local address shape: a "t" and then one or more
 // lowercase letters or digits. A name is not an address, so a name never
 // reaches a reference.
@@ -558,6 +688,7 @@ type Ref struct {
 	cmux  CMuxIdentity
 	herdr HerdrIdentity
 	hc    HcIdentity
+	rex   RexIdentity
 
 	// endpoint is a digest of the socket path the selection chain resolved
 	// to when the reference was taken, or zero for a reference from before
@@ -655,6 +786,15 @@ func NewHcRef(source ServerSource, server ServerID, tag RecoveryTag, id HcIdenti
 	return r, nil
 }
 
+// NewRexRef builds a reference to one Rex block.
+func NewRexRef(source ServerSource, server ServerID, tag RecoveryTag, id RexIdentity) (Ref, error) {
+	r := Ref{kind: KindRex, source: source, server: server, tag: tag, rex: id}
+	if err := r.Validate(); err != nil {
+		return Ref{}, err
+	}
+	return r, nil
+}
+
 // Validate reports whether this reference is complete and internally
 // consistent. It is the one gate every constructor and the decoder share, so
 // there is a single description of what a trustworthy reference is.
@@ -694,6 +834,9 @@ func (r Ref) Validate() error {
 	if r.hc != (HcIdentity{}) {
 		set++
 	}
+	if r.rex != (RexIdentity{}) {
+		set++
+	}
 	if set != 1 {
 		return fmt.Errorf("%w: expected exactly one backend identity, found %d", ErrInvalidRef, set)
 	}
@@ -720,6 +863,10 @@ func (r Ref) Validate() error {
 	case KindHc:
 		if r.hc == (HcIdentity{}) {
 			return fmt.Errorf("%w: hc reference has no terminal", ErrInvalidRef)
+		}
+	case KindRex:
+		if r.rex == (RexIdentity{}) {
+			return fmt.Errorf("%w: rex reference has no block", ErrInvalidRef)
 		}
 	case KindUnspecified:
 		return fmt.Errorf("%w: unknown backend", ErrInvalidRef)
@@ -790,6 +937,14 @@ func (r Ref) HcIdentity() (HcIdentity, error) {
 	return r.hc, nil
 }
 
+// RexIdentity returns the Rex block identity, or ErrRefKindMismatch.
+func (r Ref) RexIdentity() (RexIdentity, error) {
+	if r.kind != KindRex {
+		return RexIdentity{}, fmt.Errorf("%w: want rex, have %s", ErrRefKindMismatch, r.kind)
+	}
+	return r.rex, nil
+}
+
 // String renders the safe operator-facing form: what to look for, and where.
 func (r Ref) String() string {
 	if !r.Valid() {
@@ -830,6 +985,12 @@ type refWire struct {
 	// without a version change: an older build refuses kind "hc" outright.
 	Terminal  string `json:"terminal,omitempty"`
 	CreatedMS int64  `json:"created_ms,omitempty"`
+
+	// RexSession and Block are a Rex reference's identity, with CreatedMS
+	// the time its block id embeds. Also added without a version change: an
+	// older build refuses kind "rex" outright.
+	RexSession string `json:"rex_session,omitempty"`
+	Block      string `json:"block,omitempty"`
 }
 
 // MarshalJSON encodes a validated reference. An invalid reference refuses to
@@ -859,6 +1020,10 @@ func (r Ref) MarshalJSON() ([]byte, error) {
 	case KindHc:
 		w.Terminal = r.hc.terminal
 		w.CreatedMS = r.hc.createdMS
+	case KindRex:
+		w.RexSession = r.rex.session
+		w.Block = r.rex.block
+		w.CreatedMS = r.rex.createdMS
 	case KindUnspecified:
 		return nil, ErrInvalidRef
 	}
@@ -918,6 +1083,12 @@ func DecodeRef(data []byte) (Ref, error) {
 	// Validate would catch a populated foreign identity, but not a stray
 	// string that never became one — and a decoder that quietly drops a field
 	// it did not expect is the same defect as one that ignores an unknown key.
+	//
+	// A Rex identity's two fields are refused on every other kind here, once,
+	// rather than in each arm, so a backend added later inherits the refusal.
+	if kind != KindRex && (w.RexSession != "" || w.Block != "") {
+		return Ref{}, fmt.Errorf("%w: %s reference carries rex fields", ErrInvalidRef, kind)
+	}
 	switch kind {
 	case KindTmux:
 		if w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" || w.Terminal != "" || w.CreatedMS != 0 {
@@ -959,6 +1130,20 @@ func DecodeRef(data []byte) (Ref, error) {
 			return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
 		}
 		return NewHcRef(source, server, tag, id)
+	case KindRex:
+		if w.Session != "" || w.Workspace != "" || w.Tab != "" || w.Pane != "" || w.Endpoint != "" || w.Terminal != "" {
+			return Ref{}, fmt.Errorf("%w: rex reference carries foreign fields", ErrInvalidRef)
+		}
+		id, err := NewRexIdentity(w.RexSession, w.Block)
+		if err != nil {
+			return Ref{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
+		}
+		// The creation time is derived from the block id, so a stored one
+		// that disagrees is a hand-edited or foreign reference.
+		if w.CreatedMS != id.CreatedMS() {
+			return Ref{}, fmt.Errorf("%w: rex created_ms does not match the time its block id embeds", ErrInvalidRef)
+		}
+		return NewRexRef(source, server, tag, id)
 	case KindUnspecified:
 	}
 	return Ref{}, fmt.Errorf("%w: unknown backend", ErrInvalidRef)

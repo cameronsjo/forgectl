@@ -1,0 +1,24 @@
+{
+  "principal": {
+    "kind": "peer",
+    "transport": "unix",
+    "display": "uid 501",
+    "uid": 501,
+    "gid": 501,
+    "pid": 1000
+  },
+  "account": "operator",
+  "endpoint": "unix:///Users/operator/Library/Application%20Support/rex/server.sock",
+  "pid": 1000,
+  "instance_id": "00000000-0000-4000-8000-000000000001",
+  "host_id": "00000000-0000-4000-8000-000000000002",
+  "started_at": "2026-11-14T00:00:00Z",
+  "rex_version": "0.1.0-preview.19",
+  "api_revision": 14,
+  "exit_empty": false,
+  "session_count": 0,
+  "tailscale": {
+    "state": "disabled",
+    "allow_tailnet_members": false
+  }
+}

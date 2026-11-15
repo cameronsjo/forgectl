@@ -231,6 +231,10 @@ func TestProbeResult_SuccessMayNotCarryACause(t *testing.T) {
 		"present with a cause":     {state: ProbePresent, cause: internalCause()},
 		"gone with a cause":        {state: ProbeGone, cause: internalCause()},
 		"a state outside the enum": {state: ProbeState(200), cause: internalCause()},
+		// A finished program is a gone object; present, or a probe that
+		// learned nothing, cannot also report how the program ended.
+		"present and finished":    {state: ProbePresent, finished: true},
+		"unreadable and finished": {state: ProbeUnreadable, cause: internalCause(), finished: true},
 	}
 
 	for name, res := range tests {

@@ -3,6 +3,7 @@ file internal/exec/exec.go build=any
 file internal/exec/fake.go build=any
 file internal/exec/internal/sealed/sealed.go build=any
 file internal/exec/internal/validated/validated.go build=any
+file internal/exec/launchscript.go build=any
 file internal/exec/mask.go build=any
 file internal/exec/opaque.go build=any
 file internal/exec/pgroup.go build=any
@@ -52,6 +53,13 @@ const KindHerdrScreenRead CommandKind
 const KindHerdrSendKeys CommandKind
 const KindHerdrSendText CommandKind
 const KindHerdrSnapshot CommandKind
+const KindRexCleanup CommandKind
+const KindRexCreate CommandKind
+const KindRexLabel CommandKind
+const KindRexPreflight CommandKind
+const KindRexProbe CommandKind
+const KindRexReadiness CommandKind
+const KindRexReconcile CommandKind
 const KindSopsEdit CommandKind
 const KindSopsExtract CommandKind
 const KindTmuxCleanup CommandKind
@@ -87,6 +95,7 @@ func LauncherFocusEnv() []string
 func LauncherSessionHandleNames() (keys []string, prefixes []string)
 func MapOpaque(a Arg, t Transform) Arg
 func MustFixed(v constantArg) Arg
+func NewLaunchScript(base string, line Arg) (LaunchScript, error)
 func NewOSSensitiveRunner() *OSSensitiveRunner
 func Opaque(v string) Arg
 func PaneIdentityEnv(backend string) []string
@@ -179,6 +188,10 @@ method (EnvMutation) MarshalJSON() ([]byte, error)
 method (EnvMutation) MarshalText() ([]byte, error)
 method (EnvMutation) String() string
 method (EnvMutation) toValidated() github.com/cameronsjo/forgectl/internal/exec/internal/validated.Env
+method (LaunchScript) Consumed() (bool, error)
+method (LaunchScript) Dir() string
+method (LaunchScript) Path() string
+method (LaunchScript) Remove() error
 method (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error)
 method (OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error
@@ -263,6 +276,7 @@ type EnvMutation struct{key string; value SecretArg; op envOp}
 type EnvStreamingRunner interface{RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
 type FakeRunner struct{RunFunc func(name string, args []string) (string, error); InteractiveErr error; mu sync.Mutex; Calls []Call}
 type FakeSensitiveRunner struct{RunFunc func(cmd SensitiveCommand) (SensitiveResult, error); mu sync.Mutex; calls []SensitiveCommand}
+type LaunchScript struct{dir string; path string}
 type OSRunner struct{stdoutCeiling int}
 type OSSensitiveRunner struct{env []string; retireBound time.Duration; killDrainBound time.Duration; started sync/atomic.Int64; stdoutTap func(io.Reader) io.Reader}
 type Outcome uint8
@@ -296,6 +310,7 @@ type streamPipes struct{childEnds []*os.File; readEnds []*onceCloser; stdinW *on
 type tailBuffer struct{limit int; buf []byte; dropped int64}
 var ErrCanceled error
 var ErrInvalidCommand error
+var ErrLaunchScript error
 var ErrNonzeroExit error
 var ErrOutputLimit error
 var ErrOutputTooLarge error
@@ -305,6 +320,7 @@ var ErrTimeout error
 sealed: func New(v string) Value
 sealed: func Start(path Value, args []Value, env []string, set []EnvVar, stdout *os.File, stderr *os.File) (*Proc, error)
 sealed: func TmuxDirOperand() Transform
+sealed: func WriteNewFile(path string, prefix string, v Value, suffix string) error
 sealed: method (*Proc) Kill() error
 sealed: method (*Proc) Wait() error
 sealed: method (Value) Equal(other Value) bool

@@ -360,7 +360,25 @@ type ProbeResult struct {
 	// the reference was taken on, at the same endpoint: a restart (whatever
 	// ran in it is gone) or a live handoff (it may still be running).
 	restored bool
+	// finished marks a gone probe whose object is still listed, but whose
+	// program has exited with exitCode: a manager that keeps a finished
+	// terminal open (Rex with --keep-open) can say how it ended, where one
+	// that removes it cannot tell finished from never-existed.
+	finished bool
+	exitCode int
 }
+
+// NewProbeFinished reports an object whose program has exited with exitCode
+// while the manager still holds it. It is ProbeGone, because what the
+// reference started no longer runs, and the object still needs closing.
+func NewProbeFinished(exitCode int) ProbeResult {
+	return ProbeResult{state: ProbeGone, finished: true, exitCode: exitCode}
+}
+
+// Finished reports the exit code of a finished object, and false for any
+// probe that did not see one: a running object, an absent one, or a probe
+// that learned nothing.
+func (r ProbeResult) Finished() (exitCode int, ok bool) { return r.exitCode, r.finished }
 
 // NewProbePresent reports a confirmed existing object.
 func NewProbePresent() ProbeResult { return ProbeResult{state: ProbePresent} }
@@ -404,6 +422,9 @@ func (r ProbeResult) Validate() error {
 		}
 	default:
 		return fmt.Errorf("%w: unknown probe state %d", ErrInvalidResult, r.state)
+	}
+	if r.finished && r.state != ProbeGone {
+		return fmt.Errorf("%w: a %s probe reports a finished program", ErrInvalidResult, r.state)
 	}
 	return nil
 }

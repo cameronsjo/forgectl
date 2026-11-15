@@ -43,6 +43,10 @@ const (
 	// binaries have different verbs, and a stored reference must name exactly
 	// one of them.
 	KindHc
+	// KindRex is the Rex multiplexer, driven through its `rex` CLI. Its
+	// adapter is pinned to the one API revision it was measured on
+	// (rexadapter.APIRevision).
+	KindRex
 
 	kindCount
 )
@@ -53,6 +57,7 @@ var kindNames = [kindCount]string{
 	KindCmux:        "cmux",
 	KindHerdr:       "herdr",
 	KindHc:          "hc",
+	KindRex:         "rex",
 }
 
 // Valid reports whether k names a real backend. The zero value does not.

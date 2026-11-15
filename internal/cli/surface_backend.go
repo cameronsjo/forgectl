@@ -12,6 +12,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/cmuxadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/rexadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/tmuxadapter"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -84,6 +85,8 @@ func surfaceAdapterForWithWarnings(name string, warnings io.Writer) (backend.Ada
 		return newHerdrAdapter(warnings)
 	case backend.KindHc:
 		return newHcAdapter()
+	case backend.KindRex:
+		return newRexAdapter(locateRex)
 	case backend.KindUnspecified:
 	}
 	return nil, fmt.Errorf("%w: %s (forgectl#332)", errBackendNotImplemented, kind)
@@ -179,6 +182,47 @@ func newCmuxAdapter(warnings io.Writer) (backend.Adapter, error) {
 	return a, nil
 }
 
+// rexLocator finds the absolute path of the `rex` binary.
+type rexLocator func() (string, error)
+
+// locateRex is how a surface launch finds rex. Rex installs `rex` inside its
+// app bundle, not on PATH, so today this finds it only where the operator has
+// put it on PATH; the Rex locator (forgectl roadmap item F) replaces this
+// value, and nothing else here changes.
+var locateRex rexLocator = lookPathRex
+
+// lookPathRex resolves rexadapter.DefaultBinaryName on PATH to an absolute
+// path.
+func lookPathRex() (string, error) {
+	path, err := osexec.LookPath(rexadapter.DefaultBinaryName)
+	if err != nil {
+		return "", fmt.Errorf("rex not found on PATH: %w", err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve rex path: %w", termsafe.Error(err))
+	}
+	return abs, nil
+}
+
+// newRexAdapter builds the Rex adapter on the path locate finds. The path is
+// resolved here, before any command runs, for the reason every backend's is:
+// the sensitive runner requires an absolute path.
+func newRexAdapter(locate rexLocator) (backend.Adapter, error) {
+	path, err := locate()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	// Assigned and returned explicitly rather than forwarded, for the reason
+	// spelled out in newTmuxAdapter: a bare return converts a nil *Adapter
+	// into a NON-nil backend.Adapter holding a nil pointer.
+	a, err := rexadapter.New(exec.NewOSSensitiveRunner(), path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	return a, nil
+}
+
 // parseBackendKind resolves the closed set of names.
 func parseBackendKind(name string) (backend.Kind, error) {
 	switch name {
@@ -190,10 +234,12 @@ func parseBackendKind(name string) (backend.Kind, error) {
 		return backend.KindHerdr, nil
 	case "hc":
 		return backend.KindHc, nil
+	case "rex":
+		return backend.KindRex, nil
 	default:
 		// The supplied name is not echoed. It is not secret, but it is
 		// command-line input to a message that gets printed to a terminal, and
 		// every other refusal in this package is category-only for that reason.
-		return backend.Kind(0), fmt.Errorf("%w: expected one of tmux, cmux, herdr, hc", errUnknownBackend)
+		return backend.Kind(0), fmt.Errorf("%w: expected one of tmux, cmux, herdr, hc, rex", errUnknownBackend)
 	}
 }

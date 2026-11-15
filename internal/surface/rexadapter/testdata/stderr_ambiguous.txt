@@ -1,0 +1,3 @@
+Error: block target "quick" is ambiguous
+  quick  …000009  window 2
+  quick  …00000c  window 6
