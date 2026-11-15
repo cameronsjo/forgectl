@@ -60,6 +60,11 @@ type LaunchScript struct {
 // than 0700, or not owned by the effective user, refuses, because a umask can
 // only narrow the mode and anything else means the directory is not the one
 // MkdirTemp made.
+// launchDirOwnerOK is ownedByCurrentUser, a variable only so a test can drive
+// the refusal through NewLaunchScript: os.MkdirTemp cannot produce a foreign
+// owner.
+var launchDirOwnerOK = ownedByCurrentUser
+
 func NewLaunchScript(base string, line Arg) (LaunchScript, error) {
 	if !line.Secret() || !line.v.Present() || !filepath.IsAbs(base) {
 		return LaunchScript{}, ErrLaunchScript
@@ -69,7 +74,7 @@ func NewLaunchScript(base string, line Arg) (LaunchScript, error) {
 		return LaunchScript{}, ErrLaunchScript
 	}
 	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&^0o700 != 0 || !ownedByCurrentUser(info) {
+	if err != nil || !info.IsDir() || info.Mode().Perm()&^0o700 != 0 || !launchDirOwnerOK(info) {
 		_ = os.Remove(dir)
 		return LaunchScript{}, ErrLaunchScript
 	}

@@ -14,7 +14,7 @@ Hosts: **tmux**, **cmux**, **herdr 0.9** (the `herdr` CLI, session server), **he
 ## Versions this was measured on
 
 - tmux 3.8.
-- Rex `REX_SESSION`, `REX_BLOCK`, `REX_SERVER` and `REX_BIN_DIR` (0.1.0-preview.19): Rex sets them afresh in every block, including a block in a new session created by a `rex new` run from inside another block, so a launched worker never inherits its launcher's session or block handles. The adapter passes explicit ids and checks the server's identity, so a launcher's `REX_SERVER` that points elsewhere makes it refuse rather than act.
+- Rex `REX_SESSION`, `REX_BLOCK`, `REX_SERVER` and `REX_BIN_DIR` (0.1.0-preview.19): Rex sets all four afresh in every block, including a block in a new session created by a `rex new` run from inside another block, so a launched worker's own block never carries its launcher's session or block handles. Not measured: what forgectl's own `rex` calls do with an inherited `REX_SERVER`. The adapter does not strip it. On a launch it takes the server `rex whoami` reports if that server is local, on API revision 14 and not shared with the tailnet; on close and probe it refuses a server whose fingerprint differs from the reference's. A local unix socket that forwards to another machine passes these checks (cameronsjo/forgectl#1426).
 - herdr-core `hc` 0.1.21 (the adapter's parsers were written against 0.1.15; the 0.1.21 comparison found additive drift only: cameronsjo/forgectl#1408).
 - Rex 0.1.0-preview.19, API revision 14; the adapter refuses any other revision and any server shared with tailnet members.
 - herdr-app 0.1.15: `tab.move` exists as a stock command and `herdr-app commands` lists no notification command (read on this machine).
@@ -23,7 +23,7 @@ Hosts: **tmux**, **cmux**, **herdr 0.9** (the `herdr` CLI, session server), **he
 
 - The OSC 7501 report was probed on hc and Rex with a small program that uses forgectl's reporter (not a full `workflow run` or `desk watch`). herdr-app's sidebar was captured with `herdr-app shot` (see the herdr-app cells); herdr 0.9, an agent pane in herdr-app and the other hosts' windows still need a person looking at the screen: cameronsjo/forgectl#1404.
 - `organize --apply` in a window with more than one space: space ordering (`space.move`) and focus restore across spaces. A move between spaces is not owed: herdr-app has no command for it, so it is reported as unsupported.
-- The Rex work that is left: commands that act on a running worker (#1422), forgetting a row after a server restart (#1423) and whether a launch should strip `REX_SESSION` and `REX_BLOCK` (#1424).
+- The Rex work that is left: commands that act on a running worker (#1422), forgetting a row after a server restart (#1423) and what a launch does with an inherited `REX_SERVER` (#1424, narrowed: the handles a worker's block carries were measured).
 - tmux launch, probe and close is measured (above). The cmux and herdr 0.9 cells are blank: cmux was not running on the machine used for the measurements, and herdr 0.9 was not run. Their behavior is documented on the command pages and was not re-measured here. The tmux and cmux cells in the desk-signal and `organize` rows are blank too, and the tmux, cmux and herdr 0.9 status cells say "built", not observed.
 
 Update a cell only after running it, and change its version in the same edit.
