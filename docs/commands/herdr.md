@@ -2,6 +2,8 @@
 
 forgectl's native helpers for the [herdr](https://github.com/cameronsjo/herdr) terminal multiplexer. Run them from a herdr pane or a herdr-app terminal. The client they share is described in [../herdr.md](../herdr.md).
 
+What works on which host, with the version each result was measured on: [../hosts.md](../hosts.md).
+
 ```bash
 forgectl herdr organize             # report how tabs would be grouped and ordered (changes nothing)
 forgectl herdr organize --explain   # also show which rule caught each tab, and why unmatched tabs matched nothing
