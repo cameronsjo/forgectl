@@ -51,6 +51,28 @@ func (f fakeFS) unknownUIDs() bool { _, ok := f["\x00unknown-uids"]; return ok }
 // bump gives path a new inode, as a swap would.
 func (f fakeFS) bump(p string) { e := f["\x00gen:"+p]; e.uid++; f["\x00gen:"+p] = e }
 
+// fakeLinks maps a symlink's path to its target for fakeFS.EvalSymlinks. The
+// tests are not parallel; each test registers its links and removes them at
+// test end.
+var fakeLinks = map[string]string{}
+
+// EvalSymlinks follows the symlink at the final component, up to a few hops;
+// intermediate components are taken as written.
+func (f fakeFS) EvalSymlinks(name string) (string, error) {
+	name = path.Clean(name)
+	for i := 0; i < 8; i++ {
+		t, ok := fakeLinks[name]
+		if !ok {
+			if _, exists := f[name]; !exists {
+				return "", &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
+			}
+			return name, nil
+		}
+		name = path.Clean(t)
+	}
+	return "", &fs.PathError{Op: "evalsymlinks", Path: name, Err: errors.New("too many links")}
+}
+
 func (f fakeFS) Glob(pattern string) ([]string, error) {
 	var out []string
 	// A literal pattern is returned as written when it names something, as
@@ -768,10 +790,11 @@ func TestTrustedChainTerminatesOnUncleanPath(t *testing.T) {
 func TestBundleDirChoice(t *testing.T) {
 	for in, want := range map[string]string{
 		"/Applications/Rex.app/Contents/rex":                 "/Applications/Rex.app",
-		"/Users/u/Tools.app/Applications/Rex.app/Contents/x": "/Users/u/Tools.app/Applications/Rex.app",
+		"/Users/u/Tools.app/Applications/Rex.app/Contents/x": "/Users/u/Tools.app",
 		"/Applications/Rex.app/Contents/Helpers/X.app/rex":   "/Applications/Rex.app",
-		"/Users/u/Tools.app/Applications/Rex Beta.app/a/rex": "/Users/u/Tools.app/Applications/Rex Beta.app",
-		"/a/Other.app/b/Third.app/rex":                       "/a/Other.app/b/Third.app",
+		"/Users/u/Tools.app/Applications/Rex Beta.app/a/rex": "/Users/u/Tools.app",
+		"/a/Other.app/b/Third.app/rex":                       "/a/Other.app",
+		"/Applications/REX BETA.APP/Contents/rex":            "/Applications/REX BETA.APP",
 	} {
 		if got, ok := bundleDir(in); !ok || got != want {
 			t.Errorf("bundleDir(%q) = %q, %v; want %q", in, got, ok, want)
@@ -914,5 +937,101 @@ func TestVerifyRechecksSignatureAndHonorsCancellation(t *testing.T) {
 	cancel()
 	if err := r.Verify(ctx, res); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled verify = %v, want context.Canceled", err)
+	}
+}
+
+// TestCaseVariantAppIsStillGated: APFS is case-insensitive, so a path spelled
+// REX BETA.APP names the real bundle and must get the bundle checks, not just
+// the executable check.
+func TestCaseVariantAppIsStillGated(t *testing.T) {
+	p := "/Applications/REX BETA.APP/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+	f := tree(me, map[string]fs.FileMode{p: 0o755})
+	r := resolver(runner(map[string]string{p: goodJSON}, nil), f, "")
+	res := Resolved{Path: p, Source: SourceConfig}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("clean case-variant bundle refused: %v", err)
+	}
+	f["/Applications/REX BETA.APP/Contents"] = ent{fs.ModeDir | 0o775, me}
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("a case-variant .APP path with a group-writable directory skipped the bundle checks")
+	}
+}
+
+// TestSymlinkIntoBundleIsGated: a symlink on PATH or in the config whose
+// target is inside a bundle is judged by the target's chain, at resolve time
+// and at Verify, and a refused one is never run.
+func TestSymlinkIntoBundleIsGated(t *testing.T) {
+	const link = "/usr/local/bin/rex"
+	genuine := bin("Rex.app")
+	build := func(t *testing.T) (fakeFS, *fexec.FakeRunner) {
+		f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+		f["/usr/local/bin"] = ent{fs.ModeDir | 0o755, 0}
+		f[link] = ent{0o755, me}
+		fakeLinks[link] = genuine
+		t.Cleanup(func() { delete(fakeLinks, link) })
+		return f, runner(map[string]string{link: goodJSON, genuine: goodJSON}, nil)
+	}
+	t.Run("clean target resolves and verifies", func(t *testing.T) {
+		f, fr := build(t)
+		for name, cfg := range map[string]string{"config": link, "PATH": ""} {
+			res, err := resolver(fr, f, link).Resolve(context.Background(), cfg)
+			if err != nil || res.Path != link {
+				t.Fatalf("%s: Resolve = %+v, %v", name, res, err)
+			}
+			if err := resolver(fr, f, link).Verify(context.Background(), res); err != nil {
+				t.Fatalf("%s: Verify: %v", name, err)
+			}
+		}
+	})
+	t.Run("untrusted target is refused and not run", func(t *testing.T) {
+		f, fr := build(t)
+		f["/Applications/Rex.app/Contents"] = ent{fs.ModeDir | 0o775, me}
+		if _, err := resolver(fr, f, link).Resolve(context.Background(), link); err == nil || !strings.Contains(err.Error(), "app bundle") {
+			t.Fatalf("config symlink into a bad bundle: err = %v", err)
+		}
+		if _, err := resolver(fr, f, link).Resolve(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "PATH hit is inside an app bundle") {
+			t.Fatalf("PATH symlink into a bad bundle: err = %v", err)
+		}
+		if ran(fr, link) || ran(fr, genuine) {
+			t.Error("a refused symlink target was run")
+		}
+		if err := resolver(fr, f, link).Verify(context.Background(), Resolved{Path: link, Source: SourcePATH}); err == nil {
+			t.Error("Verify accepted a symlink into a bundle with an untrusted chain")
+		}
+	})
+}
+
+// TestPinnedBundlePathIsGatedAtResolve: a config pin that names a bundle
+// binary gets the bundle checks before it is run, not only at Verify.
+func TestPinnedBundlePathIsGatedAtResolve(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	f["/Applications/Rex.app/Contents/Helpers"] = ent{fs.ModeDir | 0o775, me}
+	fr := runner(map[string]string{genuine: goodJSON}, nil)
+	if _, err := resolver(fr, f, "").Resolve(context.Background(), genuine); err == nil {
+		t.Fatal("a pinned bundle path with a group-writable directory was accepted")
+	}
+	if ran(fr, genuine) {
+		t.Error("a pinned bundle path that failed its checks was run")
+	}
+	f["/Applications/Rex.app/Contents/Helpers"] = ent{fs.ModeDir | 0o755, me}
+	if res, err := resolver(fr, f, "").Resolve(context.Background(), genuine); err != nil || res.Source != SourceConfig {
+		t.Fatalf("a clean pinned bundle path: %+v, %v", res, err)
+	}
+}
+
+// TestOuterAppAbovePinnedPathIsJudged: the chain runs up to the outermost
+// .app, so an untrusted Other.app above Rex.app is refused.
+func TestOuterAppAbovePinnedPathIsJudged(t *testing.T) {
+	p := "/Applications/Other.app/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+	f := tree(me, map[string]fs.FileMode{p: 0o755})
+	r := resolver(runner(map[string]string{p: goodJSON}, nil), f, "")
+	res := Resolved{Path: p, Source: SourceConfig}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("clean nested bundle refused: %v", err)
+	}
+	f["/Applications/Other.app"] = ent{fs.ModeDir | 0o775, me}
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("an untrusted outer .app above the Rex bundle was not judged")
 	}
 }

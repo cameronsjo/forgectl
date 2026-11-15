@@ -95,10 +95,11 @@ func (r *Resolver) Verify(ctx context.Context, res Resolved) error {
 	if !filepath.IsAbs(res.Path) || filepath.Clean(res.Path) != res.Path {
 		return fmt.Errorf("%s: not an absolute, clean path", q)
 	}
-	if _, inApp := bundleDir(res.Path); !inApp {
+	target, inApp := r.appTarget(res.Path)
+	if !inApp {
 		return r.usable(res.Path)
 	}
-	if _, err := r.bundleCandidate(ctx, res.Path); err != nil {
+	if _, err := r.bundleCandidate(ctx, target); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s: %w", q, ctx.Err())
 		}
@@ -158,6 +159,8 @@ type Info struct {
 type FS interface {
 	Stat(name string) (Info, error)
 	Lstat(name string) (Info, error)
+	// EvalSymlinks returns name with every symlink in it resolved.
+	EvalSymlinks(name string) (string, error)
 	Glob(pattern string) ([]string, error)
 }
 
@@ -173,6 +176,8 @@ func infoOf(fi fs.FileInfo, err error) (Info, error) {
 	uid, dev, ino, known := sysInfo(fi)
 	return Info{Mode: fi.Mode(), IsDir: fi.IsDir(), UID: uid, UIDKnown: known, Dev: dev, Ino: ino, ModTime: fi.ModTime()}, nil
 }
+
+func (osFS) EvalSymlinks(name string) (string, error) { return filepath.EvalSymlinks(name) }
 
 func (osFS) Glob(pattern string) ([]string, error) { return filepath.Glob(pattern) }
 
@@ -276,13 +281,43 @@ func (r *Resolver) Resolve(ctx context.Context, configPath string) (Resolved, er
 		if err != nil {
 			return Resolved{}, err
 		}
-		return r.vet(ctx, abs, SourceConfig)
+		// A pin inside an .app (or a symlink into one) gets the bundle checks
+		// before it is run, like a discovered bundle; any other pin is the
+		// operator's own choice and is only checked to be executable.
+		target, before, gated, gerr := r.gateAppPath(ctx, abs)
+		if gerr != nil {
+			if ctx.Err() != nil {
+				return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(abs, 0), ctx.Err())
+			}
+			return Resolved{}, fmt.Errorf("rex binary from [surface.rex] binary_path is inside an app bundle and fails its checks: %w", gerr)
+		}
+		got, verr := r.vet(ctx, abs, SourceConfig)
+		if verr == nil && gated {
+			if cerr := r.unchanged(target, before); cerr != nil {
+				return Resolved{}, cerr
+			}
+		}
+		return got, verr
 	}
 	tried := []string{"[surface.rex] binary_path (not set)"}
 
 	pathBin, pathErr := r.fromPATH()
 	if pathErr == nil {
-		return r.vet(ctx, pathBin, SourcePATH)
+		target, before, gated, gerr := r.gateAppPath(ctx, pathBin)
+		switch {
+		case gerr != nil && ctx.Err() != nil:
+			return Resolved{}, fmt.Errorf("%s: %w", termsafe.QuoteArgMax(pathBin, 0), ctx.Err())
+		case gerr != nil:
+			pathErr = fmt.Errorf("PATH hit is inside an app bundle and fails its checks: %w", gerr)
+		default:
+			got, verr := r.vet(ctx, pathBin, SourcePATH)
+			if verr == nil && gated {
+				if cerr := r.unchanged(target, before); cerr != nil {
+					return Resolved{}, cerr
+				}
+			}
+			return got, verr
+		}
 	}
 	tried = append(tried, "PATH: "+pathErr.Error())
 
@@ -380,6 +415,21 @@ func (r *Resolver) fromPATH() (string, error) {
 		return "", err
 	}
 	return abs, nil
+}
+
+// gateAppPath runs the bundle checks on path when it (or the file it resolves
+// to) is inside an .app, returning the gated target and its identity as
+// judged. gated is false, and nothing is checked, for a plain binary.
+func (r *Resolver) gateAppPath(ctx context.Context, path string) (target string, before Info, gated bool, err error) {
+	target, in := r.appTarget(path)
+	if !in {
+		return "", Info{}, false, nil
+	}
+	before, err = r.bundleCandidate(ctx, target)
+	if err != nil {
+		return "", Info{}, false, err
+	}
+	return target, before, true, nil
 }
 
 // usable accepts an executable regular file, following symlinks (the config
@@ -482,31 +532,41 @@ func (r *Resolver) unchanged(path string, before Info) error {
 	return nil
 }
 
-// bundleDir returns the directory the ownership chain must reach. It is the
-// outermost ".app" component whose name starts with "Rex" (so an .app nested
-// inside a Rex bundle cannot cut the chain short), else the last ".app"
-// component (so a $HOME under some other .app still gets the whole chain below
-// it). path must be clean.
+// bundleDir returns the directory the ownership chain must reach: the
+// outermost component whose name ends in ".app", compared without regard to
+// case (APFS is case-insensitive, so `REX BETA.APP` names the same bundle).
+// Outermost, so an .app nested inside a Rex bundle cannot cut the chain short
+// and an .app above the Rex one (a pinned path under Other.app) is judged too.
+// path must be clean.
 func bundleDir(path string) (string, bool) {
 	parts := strings.Split(filepath.ToSlash(path), "/")
-	last, rex := -1, -1
 	for i, c := range parts {
-		if i == 0 || !strings.HasSuffix(c, ".app") {
-			continue
-		}
-		last = i
-		if rex < 0 && strings.HasPrefix(c, "Rex") {
-			rex = i
+		if i > 0 && strings.EqualFold(filepath.Ext(c), ".app") {
+			return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
 		}
 	}
-	i := last
-	if rex >= 0 {
-		i = rex
+	return "", false
+}
+
+// appTarget returns the path to gate as a bundle binary when path, or the file
+// it resolves to through symlinks, lies inside an .app. ok is false for a
+// plain binary. A symlink into a bundle (the obvious way to put Rex on PATH)
+// is therefore judged by its target's whole chain and signature, not by Stat
+// alone; the exec still follows the link afresh, which is the documented
+// residual race.
+func (r *Resolver) appTarget(path string) (string, bool) {
+	if _, in := bundleDir(path); in {
+		return path, true
 	}
-	if i < 0 {
+	resolved, err := r.fs.EvalSymlinks(path)
+	if err != nil {
 		return "", false
 	}
-	return filepath.FromSlash(strings.Join(parts[:i+1], "/")), true
+	resolved = filepath.Clean(resolved)
+	if _, in := bundleDir(resolved); in {
+		return resolved, true
+	}
+	return "", false
 }
 
 // codesignPath is the system code-signature tool, named absolutely so a
