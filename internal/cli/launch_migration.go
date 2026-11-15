@@ -331,7 +331,10 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 	}
 	if err := ops.sourceRevalidate(boundary.Source); err != nil {
 		if errors.Is(err, config.ErrLegacySourceMissing) {
-			if authoritativePeerWinner(raw, locked, boundary.Source.Launch) {
+			// A peer running this code wrote its config without the legacy binary
+			// paths, so the proof compares against the source the same way.
+			peerSource, _ := boundary.Source.Launch.WithoutLegacyBinaryPaths()
+			if authoritativePeerWinner(raw, locked, peerSource) {
 				return MigrationResult{Effective: locked.Launch, Action: configUnchanged, Backup: backupNotAllocated, Retirement: retirementRemoved}
 			}
 			return unprovedMissingSourceResult(boundary, locked, err)
@@ -553,6 +556,8 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 		result.Err = err
 		return result
 	}
+	var importable config.LaunchConfig
+	var droppedBinaryKeys []string
 	err := ops.withLock(boundary.ConfigPath, func() error {
 		raw, locked, readErr := readLockedConfig(boundary.ConfigPath, ops.readFile)
 		if readErr != nil {
@@ -565,7 +570,10 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 		if recheckErr := ops.sourceRevalidate(boundary.Source); recheckErr != nil {
 			return recheckErr
 		}
-		rendered, renderErr := renderImportedLaunch(raw, boundary.Source.Launch, boundary.LegacyPath)
+		// Not the legacy binary paths: nothing judged who could write that
+		// file, and the config.toml written here is trusted at the next load.
+		importable, droppedBinaryKeys = boundary.Source.Launch.WithoutLegacyBinaryPaths()
+		rendered, renderErr := renderImportedLaunch(raw, importable, boundary.LegacyPath)
 		if renderErr != nil {
 			return renderErr
 		}
@@ -583,5 +591,8 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 		return result
 	}
 	result.Notice = fmt.Sprintf("Imported %d launch profile(s)", len(boundary.Source.Launch.Projects))
+	if len(droppedBinaryKeys) > 0 {
+		result.Notice += fmt.Sprintf("; %s from claunch.conf were not imported because nothing judged who could write that file: set them in [launch.defaults] in config.toml", strings.Join(droppedBinaryKeys, ", "))
+	}
 	return result
 }

@@ -75,3 +75,51 @@ func TestMigration_KeepsTheConfigFileVerdictForItsOwnKeys(t *testing.T) {
 		t.Errorf("the legacy-filled codex key is not refused: %v", eff.Defaults.BinaryFileError("codex"))
 	}
 }
+
+// TestExplicitMigration_DoesNotCopyALegacyBinaryPathIntoConfig: the explicit
+// `launch migrate` route renders on its own, and the same rule holds there.
+func TestExplicitMigration_DoesNotCopyALegacyBinaryPathIntoConfig(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nbinary_path = \"/legacy/claude\"\n"))
+	result := migrateLegacyExplicit(b, nativeMigrationTxnOps())
+	if result.Err != nil {
+		t.Fatalf("explicit migration error = %v", result.Err)
+	}
+	if got, err := os.ReadFile(b.ConfigPath); err != nil || strings.Contains(string(got), "/legacy/claude") || !strings.Contains(string(got), "sonnet") {
+		t.Fatalf("config.toml = %q, %v; want the model imported and the legacy path left out", got, err)
+	}
+	if !strings.Contains(result.Notice, "binary_path") {
+		t.Errorf("notice = %q, want it to name the dropped key", result.Notice)
+	}
+	if next := config.LoadPath(b.ConfigPath).Launch.Defaults; next.BinaryPath != "" {
+		t.Errorf("next load sees binary_path %q; the explicit migration laundered it", next.BinaryPath)
+	}
+}
+
+// TestMigrationConcurrent_WaiterRecognizesAPeerThatDroppedBinaryKeys: a peer
+// running this code writes config.toml without the legacy binary paths, so the
+// winner proof must compare against the source the same way.
+func TestMigrationConcurrent_WaiterRecognizesAPeerThatDroppedBinaryKeys(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nbinary_path = \"/legacy/claude\"\n"))
+	if err := os.MkdirAll(filepath.Dir(b.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.ConfigPath, []byte("[launch.defaults]\nmodel = \"winner\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := nativeMigrationTxnOps()
+	native := ops.sourceRevalidate
+	calls := 0
+	ops.sourceRevalidate = func(source *config.LegacySnapshot) error {
+		calls++
+		if calls == 3 {
+			return config.ErrLegacySourceMissing
+		}
+		return native(source)
+	}
+	result := migrateLegacyAutomatically(b, config.LoadPath(b.ConfigPath), ops)
+	if result.Err != nil || result.Effective.Defaults.Model != "winner" || result.Retirement != retirementRemoved {
+		t.Fatalf("waiter result=%+v", result)
+	}
+}
