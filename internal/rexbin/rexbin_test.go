@@ -450,7 +450,7 @@ func TestSignatureGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		first := fr.Calls[0]
-		want := []string{"--verify", "--strict", `-R=anchor apple generic and certificate leaf[subject.OU] = "AG92C3PT77"`, genuine}
+		want := []string{"--verify", "--strict", `-R=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "AG92C3PT77"`, genuine}
 		if first.Name != "/usr/bin/codesign" || strings.Join(first.Args, "\x00") != strings.Join(want, "\x00") {
 			t.Errorf("first call = %+v, want codesign before whoami", first)
 		}
@@ -826,5 +826,39 @@ func TestNonRegularFilesAreRefused(t *testing.T) {
 				t.Fatalf("err = %v", err)
 			}
 		})
+	}
+}
+
+func TestVerifyRegatesABundleBinary(t *testing.T) {
+	genuine := bin("Rex.app")
+	f := tree(me, map[string]fs.FileMode{genuine: 0o755})
+	fr := runner(map[string]string{genuine: goodJSON}, nil)
+	r := resolver(fr, f, "", WithGOOS("darwin"))
+	res, err := r.Resolve(context.Background(), "")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := r.Verify(context.Background(), res); err != nil {
+		t.Fatalf("verify on a clean chain: %v", err)
+	}
+	// The chain is rewritten after Resolve: Verify must refuse the same value.
+	f["/Applications/Rex.app/Contents"] = ent{fs.ModeDir | 0o775, me}
+	if err := r.Verify(context.Background(), res); err == nil {
+		t.Fatal("verify accepted a chain that became group-writable")
+	}
+}
+
+func TestVerifyRefusesRelativePathAndNonBundleStaysUsable(t *testing.T) {
+	f := tree(me, map[string]fs.FileMode{pathBin: 0o755})
+	r := resolver(runner(nil, nil), f, "")
+	if err := r.Verify(context.Background(), Resolved{Path: "rex", Source: SourcePATH}); err == nil {
+		t.Fatal("verify accepted a relative path")
+	}
+	if err := r.Verify(context.Background(), Resolved{Path: pathBin, Source: SourcePATH}); err != nil {
+		t.Fatalf("verify of a usable PATH binary: %v", err)
+	}
+	f[pathBin] = ent{0o644, me}
+	if err := r.Verify(context.Background(), Resolved{Path: pathBin, Source: SourcePATH}); err == nil {
+		t.Fatal("verify accepted a PATH binary that lost its exec bit")
 	}
 }

@@ -51,12 +51,25 @@
 //
 // # Residual race
 //
-// This narrows the window between check and use; it does not close it. The
-// directory that holds the .app (/Applications) is root:admin with mode 775
-// and no sticky bit, so any admin-group account can rename a bundle in or out
-// of it at any moment, and the gates judge a path name, not the bytes that
-// later run. Setups that need more should set `[surface.rex] binary_path` to a
-// binary in a directory only they can write; a pinned path is not gated, so
+// The gates narrow the window between check and use; they do not close it.
+// The directory that holds the .app (/Applications) is root:admin with mode
+// 775 and no sticky bit, so any admin-group account can rename a bundle in or
+// out of it at any moment, and the gates judge a path name, not the bytes that
+// later run. Two consequences:
+//
+//   - The device, inode and modification time check after `whoami` catches a
+//     swap that is left in place. It cannot stop the code from having run, and
+//     a swap that is reverted before the check (genuine bundle out after
+//     codesign, attacker in for the exec, genuine back) passes it. An
+//     admin-group account that wins that race runs its code as the operator.
+//   - Every later exec of [Resolved].Path has the same exposure. Call
+//     [Resolver.Verify] right before each one; it repeats the gates and shrinks
+//     the window to the gap between Verify and exec.
+//
+// The directory holding a ~/Applications bundle is not judged either; the
+// default (a 0700 directory you own) is safe, a group-writable or symlinked
+// one is not. Setups that need more should set `[surface.rex] binary_path` to
+// a binary in a directory only they can write; a pinned path is not gated, so
 // that choice is theirs to vouch for.
 //
 // # The compatibility check

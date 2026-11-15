@@ -67,6 +67,31 @@ type Resolved struct {
 	APIRevision int
 }
 
+// Verify re-runs the trust gates on a previously resolved binary and reports
+// whether it may still be executed. Call it immediately before each exec of
+// [Resolved].Path: Resolve judged the file once, and /Applications can be
+// rewritten by any admin account at any time. A bundle binary is re-gated in
+// full (chain, regular executable file, signature); a config or PATH binary is
+// the operator's own choice and is only checked to still be an executable
+// regular file. It narrows the window to the time between Verify and exec; it
+// does not close it (see the package doc).
+func (r *Resolver) Verify(ctx context.Context, res Resolved) error {
+	path := filepath.Clean(res.Path)
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s: not an absolute path", termsafe.QuoteArgMax(res.Path, 0))
+	}
+	if res.Source != SourceBundle {
+		return r.usable(path)
+	}
+	if _, err := r.bundleCandidate(ctx, path); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: %w", termsafe.QuoteArgMax(path, 0), ctx.Err())
+		}
+		return err
+	}
+	return nil
+}
+
 // bundleRel is where the rex binary sits inside a Rex app bundle.
 const bundleRel = "Contents/Helpers/*.rex/Contents/MacOS/rex"
 
@@ -477,7 +502,13 @@ const codesignPath = "/usr/bin/codesign"
 // its own timeout. A caller that cancelled gets that back from Resolve; a
 // codesign that only hit its own timeout is a skipped candidate.
 func (r *Resolver) verifySignature(ctx context.Context, path string) error {
-	req := `anchor apple generic and certificate leaf[subject.OU] = "` + TeamID + `"`
+	// Developer ID Application only: the intermediate and leaf OIDs below exist
+	// on Developer ID certificates and not on Apple Development or Apple
+	// Distribution ones, which the team ID alone would also accept. The bundle
+	// identifier is not pinned, because Rex.app and Rex Beta.app may differ.
+	req := `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */` +
+		` and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */` +
+		` and certificate leaf[subject.OU] = "` + TeamID + `"`
 	runCtx, cancel := context.WithTimeout(ctx, r.signTimeout)
 	defer cancel()
 	_, err := r.runner.Run(runCtx, codesignPath, "--verify", "--strict", "-R="+req, path)
