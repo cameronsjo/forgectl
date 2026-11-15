@@ -61,6 +61,15 @@ func TestLiveTmux(t *testing.T) {
 		}
 	})
 
+	// The private server still reads ~/.tmux.conf, and a config with
+	// remain-on-exit or a plugin would change what is measured (or write the
+	// test's sessions into the operator's saved state). The runner copies the
+	// environment when it is built, so point HOME and XDG_CONFIG_HOME at an
+	// empty directory first. /etc/tmux.conf, the system file, still applies.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+
 	getenv := func(k string) string {
 		if k == "TMUX" {
 			return socket + ",1,0"
@@ -76,7 +85,7 @@ func TestLiveTmux(t *testing.T) {
 		program string
 		finish  bool
 	}{
-		{"finished before close", "'/bin/sh' '-c' 'sleep 2; exit 7'", true},
+		{"finished before close", "'/bin/sh' '-c' 'sleep 4; exit 7'", true},
 		{"running at close", "'/bin/sh' '-c' 'sleep 120'", false},
 	} {
 		t.Run(ph.name, func(t *testing.T) {
@@ -119,28 +128,35 @@ func TestLiveTmux(t *testing.T) {
 				t.Fatalf("Probe while running = %v", p)
 			}
 			if ph.finish {
-				// What Probe says once the program has ended is what this
-				// phase measures; it is logged, and must be a definite answer.
+				// tmux removes a session when its only program ends, so Probe
+				// must say gone; anything else (unreadable, or still present
+				// long after a 4s program) fails the phase.
 				deadline := time.Now().Add(20 * time.Second)
 				for {
 					p := a.Probe(ctx, ref)
-					if p.State() == backend.ProbeUnreadable {
-						t.Fatalf("Probe after the program ended = %v, want a definite answer", p)
-					}
-					if p.State() != backend.ProbePresent {
+					if p.State() == backend.ProbeGone {
 						t.Logf("Probe after the program ended = %v", p)
 						break
 					}
+					if p.State() != backend.ProbePresent {
+						t.Fatalf("Probe after the program ended = %v, want gone", p)
+					}
 					if time.Now().After(deadline) {
-						t.Fatalf("session still present 20s after a 2s program")
+						t.Fatalf("session still present 20s after a 4s program")
 					}
 					time.Sleep(250 * time.Millisecond)
 				}
 			}
 			c := a.Close(ctx, ref)
-			if c.State() != backend.CloseClosed && c.State() != backend.CloseAlreadyGone {
+			// A session still running must report closed; one whose program
+			// has ended is already gone by now.
+			want := backend.CloseClosed
+			if ph.finish {
+				want = backend.CloseAlreadyGone
+			}
+			if c.State() != want {
 				cause, _ := c.Cause()
-				t.Fatalf("Close = %v (%v)", c, cause)
+				t.Fatalf("Close = %v (%v), want %v", c, cause, want)
 			}
 			t.Logf("Close settled as %v", c)
 			if p := a.Probe(ctx, ref); p.State() != backend.ProbeGone {
