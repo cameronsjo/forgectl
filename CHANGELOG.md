@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.64.0](https://github.com/cameronsjo/forgectl/compare/v0.63.1...v0.64.0) (2026-11-16)
+
+
+### Features
+
+* **cli:** find rex through the locator and re-check it before every command ([61362c2](https://github.com/cameronsjo/forgectl/commit/61362c2db3c09a6d86f0c2c3e0894ca4ecbe2b5c))
+* **cli:** wire the Rex locator into --surface rex (roadmap D and F together) ([7ffd691](https://github.com/cameronsjo/forgectl/commit/7ffd691d3b75ae8f7c8b7f359ea2ddccf8b08821))
+* **desk:** report waiting items over OSC 7501 ([62a1323](https://github.com/cameronsjo/forgectl/commit/62a13236c9e9a8c0764e2a54b0314d3e2d8282a5))
+* **herdr:** organize tabs through herdr-app ([89e8478](https://github.com/cameronsjo/forgectl/commit/89e8478962342e3f7e20f8c5f5832fdf80447281))
+* **progstatus:** report as the terminal root record on herdr-core and herdr-app ([0127f03](https://github.com/cameronsjo/forgectl/commit/0127f039fcc2a9c5b7ca88ae5f18cb14059526c8))
+* **progstatus:** report as the terminal's root record on herdr-core and herdr-app ([a8fe6ce](https://github.com/cameronsjo/forgectl/commit/a8fe6ce1dd3f7417c219d2ef5cd864f4164f90ef))
+* **rexbin:** add Verify to re-gate before each exec, pin Developer ID, correct the race doc ([b621dac](https://github.com/cameronsjo/forgectl/commit/b621dac8be6035ca25a9ac30a0c2d6bc8e03671f))
+* **surface:** add a Rex backend (roadmap D) ([7fe214e](https://github.com/cameronsjo/forgectl/commit/7fe214e69013d03129d79a10b20606b5b8d13c68))
+* **surface:** locate the rex binary when it is not on PATH ([9131464](https://github.com/cameronsjo/forgectl/commit/91314648391cb3ee760feba9dfe68b81f4fa1ebb))
+* **workflow,desk:** report program status over OSC 7501 ([5c3308f](https://github.com/cameronsjo/forgectl/commit/5c3308f4bd718d921fc11a3c9b355c417009af2d))
+
+
+### Bug Fixes
+
+* **cli:** never autostart Rex while locating it, and pin the new controls in tests ([a117981](https://github.com/cameronsjo/forgectl/commit/a1179811ced5803bce7348c202784bc3be514da9))
+* **config:** carry the binary-path verdict through the legacy migration and the config view ([646c5de](https://github.com/cameronsjo/forgectl/commit/646c5de24bf73a6b577426dc5255d74ae7b766a8)), closes [#1446](https://github.com/cameronsjo/forgectl/issues/1446)
+* **config:** judge the config file on the descriptor it read, and pin the rexbin error escapes ([e553d8b](https://github.com/cameronsjo/forgectl/commit/e553d8b6eb629b20865f2072faac664777c047ca)), closes [#1426](https://github.com/cameronsjo/forgectl/issues/1426)
+* **config:** keep legacy binary paths out of the explicit migration, and keep the peer-winner proof sound ([37c8bdc](https://github.com/cameronsjo/forgectl/commit/37c8bdc31dee6bcb32b85c4f394d80b81b8851ca)), closes [#1446](https://github.com/cameronsjo/forgectl/issues/1446)
+* **config:** refuse a launch binary path from a config file others could write ([9de77e1](https://github.com/cameronsjo/forgectl/commit/9de77e18e8cd5f65874a6a4c2044b42d62634f53))
+* **config:** refuse a launch binary path from a config file others could write ([6370962](https://github.com/cameronsjo/forgectl/commit/6370962e0c72590c95f96e6362dc06f2f5a91ea9)), closes [#1446](https://github.com/cameronsjo/forgectl/issues/1446)
+* narrow the REX_SERVER claim, pin the owner refusal through NewLaunchScript, fail closed off unix ([7a23e0d](https://github.com/cameronsjo/forgectl/commit/7a23e0ddc7de00669951e8672be2a7c932b3ee9b))
+* **progstatus,hcadapter:** off under screen and zellij; SendLine refuses forgectl's own status; docs match the measurements ([d345e9d](https://github.com/cameronsjo/forgectl/commit/d345e9dad250f84b7a93b64780ac535fb639cdf0))
+* **progstatus:** never report as the root record under tmux; use the repo's host detection; document what was measured ([908ec4b](https://github.com/cameronsjo/forgectl/commit/908ec4b842b82a6ca4d4621ee0e03d8a21f58534))
+* **rexbin:** case-folded .app names, symlinks into a bundle, an outer .app, and pinned bundle paths ([d76166d](https://github.com/cameronsjo/forgectl/commit/d76166de9a226e8b489692e8d99af0892777efb0))
+* **rexbin:** case-folded .app names, symlinks into a bundle, outer .app, pinned bundle paths ([ca77810](https://github.com/cameronsjo/forgectl/commit/ca7781019ec4a844648b54d8029c227509d93b29))
+* **rexbin:** escape error text from rex, codesign and the filesystem; refuse a binary_path from a config file others can write ([406d82a](https://github.com/cameronsjo/forgectl/commit/406d82ae56a060aa30c9c51a8952aad49b2eecee)), closes [#1426](https://github.com/cameronsjo/forgectl/issues/1426)
+* **rexbin:** gate Verify by path, refuse unknown sources and unclean paths ([e5f779e](https://github.com/cameronsjo/forgectl/commit/e5f779ea2971f66ca76ae568cec61381cf0fffa8))
+* **rexbin:** lstat the whole bundle chain, re-check identity after whoami, honor cancellation ([f6175b8](https://github.com/cameronsjo/forgectl/commit/f6175b86a497795f311ea80b8f1ac49e5c9efdbf))
+* **rexbin:** terminal-safe locator errors and a config-file check for binary_path ([ff38e79](https://github.com/cameronsjo/forgectl/commit/ff38e797b512ad512958d5b4d2dba2906bcd0217))
+* **rexbin:** walk symlinks and fail closed when a link names an .app but resolves outside one ([af7359c](https://github.com/cameronsjo/forgectl/commit/af7359c5f1144114e74055a79bd24a0e39588d31))
+* **surface:** apply the tailnet refusal to Start only, and pin unknown tailscale states ([b8d124a](https://github.com/cameronsjo/forgectl/commit/b8d124a3ca9c27a6de02e6e181167fb6828674fc))
+* **surface:** refuse a Rex server shared with the tailnet, pin WriteNewFile's callers inside sealed and validated ([c3b2915](https://github.com/cameronsjo/forgectl/commit/c3b2915536d68899278324ce53010d6025411c10))
+
 ## [0.63.1](https://github.com/cameronsjo/forgectl/compare/v0.63.0...v0.63.1) (2026-11-14)
 
 
