@@ -438,5 +438,8 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 				return termsafe.QuotePath(boundary.LegacyPath)
 			}(), "error", safeText(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
 	}
-	return result.Effective, result.Notice, result.EffectiveFrom
+	// The migration re-reads config.toml under its lock and decodes it with no
+	// verdict, so the launch it returns is given back the verdicts LoadPath
+	// recorded for the file as it was read.
+	return result.Effective.WithBinaryTrustFrom(cfg.Launch), result.Notice, result.EffectiveFrom
 }

@@ -103,7 +103,7 @@ func describeFile(path string) (Config, Report) {
 	// ReadPath, not toml.DecodeFile: `forgectl config` is a recovery verb the
 	// parse gate lets through, so it must report a file it cannot read rather
 	// than block on a FIFO or render the raw read error (forgectl#684).
-	data, err := ReadPath(path)
+	data, trust, err := readPathTrust(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Absent file is the normal defaults-only posture, not an error.
@@ -114,6 +114,8 @@ func describeFile(path string) (Config, Report) {
 		return cfg, rep
 	}
 	meta, err := toml.Decode(string(data), &cfg)
+	cfg.execChoiceErr = trust
+	cfg.Launch.Defaults.binaryTrust = binaryTrust{trust, trust, trust}
 	rep.Found = true
 	if err != nil {
 		rep.DecodeErr = tomlerr.Scrub(err)

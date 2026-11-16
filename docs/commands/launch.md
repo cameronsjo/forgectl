@@ -191,6 +191,8 @@ as an ordinary flag, `--here`.
 `FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`, or
 `FORGECTL_PI_BIN` / `pi_binary_path` / `pi`.
 
+A config key is refused when `config.toml` is owned by someone other than you or root, or is writable by group or other; the environment variable still wins, and a key you did not set is never refused over the file. A binary path read from the legacy `claunch.conf` is refused, and the automatic migration does not copy it into `config.toml` (it stays in the backup, and the migration notice names the key): set it in `[launch.defaults]` in `config.toml`. The verdict comes from the file as it was read; ACLs are not read and the parent directory is not judged.
+
 **On a network that requires a proxy**, set `[proxy] launch_profile` and
 `launch`, `resume`, `surface launch`, and the `forgectl pr` reviewer all inject
 that profile's variables into the harness environment — see [proxy](proxy.md),

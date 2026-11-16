@@ -135,7 +135,7 @@ func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 		keys = append(keys, "worker")
 	}
 	sort.Strings(keys)
-	return stripLegacyUsageOptIn(lc), keys, nil
+	return untrustedLegacy(stripLegacyUsageOptIn(lc)), keys, nil
 }
 
 type legacySnapshotPlatform interface {
