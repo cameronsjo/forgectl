@@ -31,6 +31,9 @@ func TestMigration_DoesNotCopyALegacyBinaryPathIntoConfig(t *testing.T) {
 	if !strings.Contains(notice, "binary_path") || !strings.Contains(notice, "[launch.defaults]") {
 		t.Errorf("notice = %q, want it to name the dropped key and the fix", notice)
 	}
+	if eff.Defaults.BinaryPath != "/legacy/claude" {
+		t.Errorf("this launch lost the legacy path (%q): it would fall through to PATH instead of being refused", eff.Defaults.BinaryPath)
+	}
 	if !errors.Is(eff.Defaults.BinaryFileError("claude"), config.ErrLegacyBinaryPath) {
 		t.Errorf("this launch's legacy path is not refused: %v", eff.Defaults.BinaryFileError("claude"))
 	}
@@ -65,6 +68,17 @@ func TestMigration_KeepsTheConfigFileVerdictForItsOwnKeys(t *testing.T) {
 	}
 
 	eff, _, _ := autoMigrateOrWarnLegacyLaunch(b, cfg)
+	// The shadow branch writes config.toml too: what it writes must not carry
+	// the legacy path, or the next load would trust it.
+	if got, err := os.ReadFile(b.ConfigPath); err != nil || strings.Contains(string(got), "/legacy/codex") {
+		t.Errorf("config.toml = %q, %v; want the legacy codex path left out", got, err)
+	}
+	if next := config.LoadPath(b.ConfigPath).Launch.Defaults; next.CodexBinaryPath != "" {
+		t.Errorf("next load sees codex_binary_path %q; the shadow migration laundered it", next.CodexBinaryPath)
+	}
+	if eff.Defaults.CodexBinaryPath != "/legacy/codex" {
+		t.Errorf("this launch lost the legacy codex path (%q)", eff.Defaults.CodexBinaryPath)
+	}
 	if eff.Defaults.BinaryPath != "/own/claude" {
 		t.Fatalf("effective binary_path = %q, want config.toml's own", eff.Defaults.BinaryPath)
 	}
