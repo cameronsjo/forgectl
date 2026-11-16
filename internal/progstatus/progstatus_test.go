@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+
+	"github.com/cameronsjo/forgectl/internal/meta"
 )
 
 func forceTTY(t *testing.T, v bool) {
@@ -156,6 +158,10 @@ func TestRootReportOnHerdrCoreHosts(t *testing.T) {
 	}{
 		{"herdr-core terminal", map[string]string{"HC_TERMINAL_ID": "t5b"}, false},
 		{"herdr 0.9 pane", map[string]string{"HERDR_ENV": "1"}, true},
+		// An empty HERDR_* value counts as unset here, unlike the plain
+		// os.LookupEnv reading elsewhere; the choice is pinned so a change to
+		// either side is deliberate.
+		{"an empty herdr 0.9 variable is read as unset", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": ""}, false},
 		{"herdr 0.9 pane with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": "1"}, true},
 		{"herdr 0.9 socket variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_SOCKET_PATH": "/tmp/s"}, true},
 		{"herdr 0.9 pane variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_PANE_ID": "p1"}, true},
@@ -191,5 +197,13 @@ func TestRootReporterExactBytes(t *testing.T) {
 		"\x1b]7501;state=clear:app=forgectl\x1b\\"
 	if sb.String() != want {
 		t.Errorf("got %q, want %q", sb.String(), want)
+	}
+}
+
+// TestProgramIDIsTheSharedAppName: hcadapter's own-status check reads the same
+// constant, so renaming the tool moves both sides together.
+func TestProgramIDIsTheSharedAppName(t *testing.T) {
+	if programID != meta.AppName {
+		t.Errorf("programID = %q, want meta.AppName %q", programID, meta.AppName)
 	}
 }
