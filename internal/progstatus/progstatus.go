@@ -94,6 +94,10 @@ func New(f *os.File, getenv func(string) string) *Reporter {
 	tmux := getenv("TMUX") != ""
 	// screen (STY) and zellij (ZELLIJ) panes inherit the same stale variable.
 	multiplexed := tmux || getenv("STY") != "" || getenv("ZELLIJ") != ""
+	// getenv returns a string, so an empty HERDR_* value cannot be told from an
+	// unset one here: it counts as unset, where herdr.DetectHost with
+	// os.LookupEnv would read it as set. No test can tell the two apart from this
+	// side, so none pins it; the choice is recorded here.
 	root := !multiplexed && herdr.DetectHost(func(k string) (string, bool) { v := getenv(k); return v, v != "" }) == herdr.HostApp
 	return &Reporter{w: f, tmx: tmux, root: root}
 }

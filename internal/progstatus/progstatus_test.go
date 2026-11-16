@@ -158,10 +158,6 @@ func TestRootReportOnHerdrCoreHosts(t *testing.T) {
 	}{
 		{"herdr-core terminal", map[string]string{"HC_TERMINAL_ID": "t5b"}, false},
 		{"herdr 0.9 pane", map[string]string{"HERDR_ENV": "1"}, true},
-		// An empty HERDR_* value counts as unset here, unlike the plain
-		// os.LookupEnv reading elsewhere; the choice is pinned so a change to
-		// either side is deliberate.
-		{"an empty herdr 0.9 variable is read as unset", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": ""}, false},
 		{"herdr 0.9 pane with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_ENV": "1"}, true},
 		{"herdr 0.9 socket variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_SOCKET_PATH": "/tmp/s"}, true},
 		{"herdr 0.9 pane variable alone with an hc variable", map[string]string{"HC_TERMINAL_ID": "t5b", "HERDR_PANE_ID": "p1"}, true},
