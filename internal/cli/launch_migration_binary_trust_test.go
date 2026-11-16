@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
@@ -135,5 +137,54 @@ func TestMigrationConcurrent_WaiterRecognizesAPeerThatDroppedBinaryKeys(t *testi
 	result := migrateLegacyAutomatically(b, config.LoadPath(b.ConfigPath), ops)
 	if result.Err != nil || result.Effective.Defaults.Model != "winner" || result.Retirement != retirementRemoved {
 		t.Fatalf("waiter result=%+v", result)
+	}
+}
+
+// TestMigrationNotice_NamesOnlyKeysConfigDidNotSet: a legacy key whose value
+// config.toml already sets would never have been used, so the notice does not
+// tell the operator to set it again; one key reads in the singular.
+func TestMigrationNotice_NamesOnlyKeysConfigDidNotSet(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nbinary_path = \"/legacy/claude\"\ncodex_binary_path = \"/legacy/codex\"\n"))
+	if err := os.MkdirAll(filepath.Dir(b.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.ConfigPath, []byte("[launch.defaults]\nmodel = \"opus\"\nbinary_path = \"/own/claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := migrateLegacyAutomatically(b, config.LoadPath(b.ConfigPath), nativeMigrationTxnOps())
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if len(result.DroppedBinaryKeys) != 1 || result.DroppedBinaryKeys[0] != "codex_binary_path" {
+		t.Fatalf("dropped = %v, want only codex_binary_path (config.toml sets binary_path itself)", result.DroppedBinaryKeys)
+	}
+	if !strings.Contains(result.Notice, "; codex_binary_path from claunch.conf was not migrated because nothing judged who could write that file: set it in [launch.defaults] in config.toml") {
+		t.Errorf("notice = %q, want the singular sentence for the one key", result.Notice)
+	}
+}
+
+func TestDroppedBinaryNoticeWording(t *testing.T) {
+	two := droppedBinaryNotice([]string{"binary_path", "pi_binary_path"}, "imported")
+	if want := "binary_path, pi_binary_path from claunch.conf were not imported because nothing judged who could write that file: set them in [launch.defaults] in config.toml"; two != want {
+		t.Errorf("plural = %q, want %q", two, want)
+	}
+}
+
+// TestExplicitMigration_ReportsTheKeysItLeftOut: the explicit verb prints its
+// own lines rather than the result's notice, so the dropped keys are on the
+// result and printed there.
+func TestExplicitMigration_ReportsTheKeysItLeftOut(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nbinary_path = \"/legacy/claude\"\n"))
+	var out strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := runLaunchMigrate(cmd, b); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "binary_path from claunch.conf was not imported because nothing judged who could write that file: set it in [launch.defaults] in config.toml") {
+		t.Errorf("output = %q, want the dropped key named", out.String())
 	}
 }

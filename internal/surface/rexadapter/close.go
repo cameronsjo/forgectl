@@ -97,8 +97,9 @@ type located struct {
 //     server is proof the block is gone; a session that lists without it is
 //     too.
 //  3. The listed block carries forgectl.surface=<the reference's ownership
-//     name> as its label, and the creation time its id embeds is the
-//     reference's.
+//     name> as its label. The creation time its id embeds is compared too,
+//     but only after the ids matched, so it is the same value read a second
+//     way and adds no independent check.
 func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (located, locateState, backend.StartCause) {
 	id, err := ref.RexIdentity()
 	if err != nil {

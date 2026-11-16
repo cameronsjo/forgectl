@@ -60,6 +60,39 @@ type MigrationResult struct {
 	// back the legacy profile, and without this the caller cannot tell it
 	// from a real [launch] section and credits config.toml for it (#418).
 	EffectiveFrom string
+	// DroppedBinaryKeys names the legacy binary-path keys the migration left
+	// out of config.toml because nothing judged who could write the legacy
+	// file; the operator sets them in [launch.defaults] by hand.
+	DroppedBinaryKeys []string
+}
+
+// binaryKeysNotUsed drops, from the legacy binary keys a migration left out,
+// the ones config.toml already sets: the merge would never have used the
+// legacy value there, so telling the operator to set them again misleads.
+func binaryKeysNotUsed(keys []string, own config.LaunchDefaults) []string {
+	ownValue := map[string]string{
+		"binary_path":       own.BinaryPath,
+		"codex_binary_path": own.CodexBinaryPath,
+		"pi_binary_path":    own.PiBinaryPath,
+	}
+	var out []string
+	for _, k := range keys {
+		if ownValue[k] == "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// droppedBinaryNotice is the sentence a migration appends when it left legacy
+// binary paths out: verb is "migrated" or "imported".
+func droppedBinaryNotice(keys []string, verb string) string {
+	were, them := "were", "them"
+	if len(keys) == 1 {
+		were, them = "was", "it"
+	}
+	return fmt.Sprintf("%s from claunch.conf %s not %s because nothing judged who could write that file: set %s in [launch.defaults] in config.toml",
+		strings.Join(keys, ", "), were, verb, them)
 }
 
 type migrationTxnOps struct {
@@ -357,7 +390,8 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 	// it, and the config.toml this writes would be trusted at the next load.
 	// Render without those keys; they stay in the backup, and the notice names
 	// them. effective is what this launch runs with, legacy marks included.
-	legacySource, droppedBinaryKeys := boundary.Source.Launch.WithoutLegacyBinaryPaths()
+	legacySource, legacyBinaryKeys := boundary.Source.Launch.WithoutLegacyBinaryPaths()
+	droppedBinaryKeys := binaryKeysNotUsed(legacyBinaryKeys, locked.Launch.Defaults)
 	effective := boundary.Source.Launch
 	intended := legacySource
 	added := 0
@@ -479,7 +513,8 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 			added, filepath.Base(result.BackupPath))
 	}
 	if len(droppedBinaryKeys) > 0 {
-		result.Notice += fmt.Sprintf("; %s from claunch.conf were not migrated because nothing judged who could write that file: set them in [launch.defaults] in config.toml", strings.Join(droppedBinaryKeys, ", "))
+		result.DroppedBinaryKeys = droppedBinaryKeys
+		result.Notice += "; " + droppedBinaryNotice(droppedBinaryKeys, "migrated")
 	}
 	return result
 }
@@ -573,6 +608,7 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 		// Not the legacy binary paths: nothing judged who could write that
 		// file, and the config.toml written here is trusted at the next load.
 		importable, droppedBinaryKeys = boundary.Source.Launch.WithoutLegacyBinaryPaths()
+		droppedBinaryKeys = binaryKeysNotUsed(droppedBinaryKeys, locked.Launch.Defaults)
 		rendered, renderErr := renderImportedLaunch(raw, importable, boundary.LegacyPath)
 		if renderErr != nil {
 			return renderErr
@@ -592,7 +628,8 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 	}
 	result.Notice = fmt.Sprintf("Imported %d launch profile(s)", len(boundary.Source.Launch.Projects))
 	if len(droppedBinaryKeys) > 0 {
-		result.Notice += fmt.Sprintf("; %s from claunch.conf were not imported because nothing judged who could write that file: set them in [launch.defaults] in config.toml", strings.Join(droppedBinaryKeys, ", "))
+		result.DroppedBinaryKeys = droppedBinaryKeys
+		result.Notice += "; " + droppedBinaryNotice(droppedBinaryKeys, "imported")
 	}
 	return result
 }
