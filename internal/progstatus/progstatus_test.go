@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+
+	"github.com/cameronsjo/forgectl/internal/meta"
 )
 
 func forceTTY(t *testing.T, v bool) {
@@ -191,5 +193,13 @@ func TestRootReporterExactBytes(t *testing.T) {
 		"\x1b]7501;state=clear:app=forgectl\x1b\\"
 	if sb.String() != want {
 		t.Errorf("got %q, want %q", sb.String(), want)
+	}
+}
+
+// TestProgramIDIsTheSharedAppName: hcadapter's own-status check reads the same
+// constant, so renaming the tool moves both sides together.
+func TestProgramIDIsTheSharedAppName(t *testing.T) {
+	if programID != meta.AppName {
+		t.Errorf("programID = %q, want meta.AppName %q", programID, meta.AppName)
 	}
 }
