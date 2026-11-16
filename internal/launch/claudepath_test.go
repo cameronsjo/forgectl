@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -162,5 +163,20 @@ func TestResolveBinary_RefusesAConfigPathFromAFileOthersCouldWrite(t *testing.T)
 	unset.BinaryPath = ""
 	if _, err := ResolveBinary("claude", unset); err != nil && strings.Contains(err.Error(), "is not trusted") {
 		t.Errorf("a loose file refused a harness with no configured path: %v", err)
+	}
+}
+
+// TestResolveBinary_LegacyRefusalNamesTheFix: a path that only the legacy file
+// supplied is refused with the legacy wording, not the config-file one, so the
+// message points at config.toml rather than blaming a table it never came from.
+func TestResolveBinary_LegacyRefusalNamesTheFix(t *testing.T) {
+	t.Setenv("FORGECTL_CLAUDE_BIN", "")
+	merged, _ := config.MergeLegacyIntoLaunch(config.Config{}, config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: "/legacy/claude"}})
+	_, err := ResolveBinary("claude", merged.Defaults)
+	if !errors.Is(err, config.ErrLegacyBinaryPath) {
+		t.Fatalf("err = %v, want the legacy refusal", err)
+	}
+	if strings.Contains(err.Error(), "[launch.defaults] binary_path is not trusted") || !strings.Contains(err.Error(), "set it in [launch.defaults] in config.toml") {
+		t.Errorf("err = %q, want the legacy wording that names the fix", err)
 	}
 }

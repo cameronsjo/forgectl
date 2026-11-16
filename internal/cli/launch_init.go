@@ -215,9 +215,12 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 	// read as a no-op, so it gets its own line.
 	if len(result.Effective.Projects) == 0 {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported launch defaults (no project profiles) from %s into %s\n", termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
-		return nil
+	} else {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
+	if len(result.DroppedBinaryKeys) > 0 {
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), droppedBinaryNotice(result.DroppedBinaryKeys, "imported"))
+	}
 	return nil
 }
 
