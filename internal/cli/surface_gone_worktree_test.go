@@ -32,7 +32,7 @@ func spacedRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"}} {
-		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+		if out, err := (fexec.OSRunner{}).Run(t.Context(), "git", append([]string{"-C", dir}, args...)...); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}

@@ -281,7 +281,9 @@ const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"editorMode":"n
 // file is the operator's [launch.worker] settings file, already read and
 // checked (nil for none); its keys are laid over the built-in settings by
 // mergeWorkerSettings, which never lets it change one forgectl sets.
-func withWorkerSettings(args []string, file *workerSettingsFile) ([]string, error) {
+// mcpOff names the project MCP servers the worker starts with turned off
+// (workermcp.go); none adds no key.
+func withWorkerSettings(args []string, file *workerSettingsFile, mcpOff []string) ([]string, error) {
 	if len(args) < 2 || args[0] != "--permission-mode" {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
@@ -294,6 +296,9 @@ func withWorkerSettings(args []string, file *workerSettingsFile) ([]string, erro
 	}
 	settings, err := mergeWorkerSettings(settings, file)
 	if err != nil {
+		return nil, err
+	}
+	if settings, err = withMCPOff(settings, mcpOff); err != nil {
 		return nil, err
 	}
 	out = append(out, "--settings", settings)
@@ -482,12 +487,19 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
+	env := buildEnv(req, profile)
 	if req.Worker && profile.Harness == "claude" {
 		var file *workerSettingsFile
 		if file, err = readWorkerSettingsFor(req.Config.Worker.Settings, os.UserHomeDir); err != nil {
 			return BuiltInvocation{}, err
 		}
-		if harnessArgs, err = withWorkerSettings(harnessArgs, file); err != nil {
+		// A worker runs in req.CWD (runDirectory), which is where Claude Code
+		// starts looking for .mcp.json files and project settings.
+		mcpOff := pendingProjectMCPServers(projectMCPServerNames(req.CWD), projectMCPApproval(req.CWD, workerClaudeConfigDir(env)))
+		if len(mcpOff) > 0 {
+			notes = append(notes, workerMCPOffNote(mcpOff))
+		}
+		if harnessArgs, err = withWorkerSettings(harnessArgs, file, mcpOff); err != nil {
 			return BuiltInvocation{}, err
 		}
 		tools, err := workerToolsArg(req.Config.Worker.Tools)
@@ -520,6 +532,34 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, err
 	}
 
+	dir := runDirectory(req, posture)
+	if dir != req.CWD {
+		// The harness inherits PWD; left alone it would still name the
+		// subfolder, and a shell the session starts trusts PWD when it names
+		// the directory it is in.
+		env = MergeEnv(env, map[string]string{"PWD": dir})
+	}
+
+	return BuiltInvocation{
+		Invocation: Invocation{
+			Harness: profile.Harness,
+			Binary:  binary,
+			Args:    harnessArgs,
+			Env:     env,
+			CWD:     dir,
+		},
+		Profile:       profile,
+		Posture:       posture,
+		SessionID:     req.SessionID,
+		Worker:        req.Worker,
+		Notes:         notes,
+		WorkerPosture: workerPosture,
+	}, nil
+}
+
+// buildEnv is the harness environment for req under the resolved profile,
+// before any PWD fix-up for the run directory.
+func buildEnv(req InvocationRequest, profile Profile) []string {
 	// One merge, one place: the injected defaults sit under the profile's env,
 	// and that single result overlays the process snapshot. Layering it anywhere
 	// else too would let an injected value beat the profile value that exists to
@@ -544,29 +584,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		// can remove or change it.
 		env = MergeEnv(env, map[string]string{DrainWorkerEnv: "1"})
 	}
-	dir := runDirectory(req, posture)
-	if dir != req.CWD {
-		// The harness inherits PWD; left alone it would still name the
-		// subfolder, and a shell the session starts trusts PWD when it names
-		// the directory it is in.
-		env = MergeEnv(env, map[string]string{"PWD": dir})
-	}
-
-	return BuiltInvocation{
-		Invocation: Invocation{
-			Harness: profile.Harness,
-			Binary:  binary,
-			Args:    harnessArgs,
-			Env:     env,
-			CWD:     dir,
-		},
-		Profile:       profile,
-		Posture:       posture,
-		SessionID:     req.SessionID,
-		Worker:        req.Worker,
-		Notes:         notes,
-		WorkerPosture: workerPosture,
-	}, nil
+	return env
 }
 
 // runDirectory is the directory the harness runs in. Claude Code reads
