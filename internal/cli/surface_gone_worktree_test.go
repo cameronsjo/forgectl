@@ -63,6 +63,18 @@ func TestOpenRepoLedgerFollowsAGoneWorktree(t *testing.T) {
 		t.Fatalf("no note naming the fallback: %q", warn.String())
 	}
 
+	// The same gone path spelled through a symlink to the repo's parent:
+	// both the resolver and RepoTop resolve symlinks, so it still matches.
+	link := filepath.Join(t.TempDir(), "via-link")
+	if err := os.Symlink(filepath.Dir(top), link); err != nil {
+		t.Fatal(err)
+	}
+	warn.Reset()
+	viaLink := worker.WorktreePath(filepath.Join(link, filepath.Base(top)), "cos-vault-subreddits")
+	if _, got, err := openRepoLedger(ctx, &warn, deps, viaLink, "hc:default"); err != nil || got != top {
+		t.Fatalf("openRepoLedger(%q) = %q, %v; want %q", viaLink, got, err, top)
+	}
+
 	warn.Reset()
 	if _, got, err := openRepoLedger(ctx, &warn, deps, top, "hc:default"); err != nil || got != top || warn.Len() != 0 {
 		t.Fatalf("the repo itself: top %q, err %v, warn %q; want %q and no note", got, err, warn.String(), top)
@@ -109,17 +121,30 @@ func TestForgetClearsAClosedRowOnceItsWorktreeIsGone(t *testing.T) {
 			t.Error("hc was asked about a closed row")
 			return "", nil
 		},
-		worktreeGone: func(ctx context.Context) (bool, error) {
-			f, err := worker.InspectWorktree(ctx, run, top, row.Name, wt.Base)
-			return !f.Present(), err
+		worktree: func(ctx context.Context) (worktreePresence, error) {
+			return readWorktreePresence(ctx, run, worker.WorktreePath(top, row.Name), top)
 		},
 		remove: func() error { removed = true; return nil },
 	}
 
-	if res := forgetWorker(ctx, row, row.StartedAt, false, steps); res.Forgotten || removed {
+	if res := forgetWorker(ctx, row, row.StartedAt, false, steps); res.Forgotten || removed || !strings.Contains(res.Reason, "run surface close again") {
 		t.Fatalf("a closed row whose worktree is still there was forgotten: %+v", res)
 	}
 	if err := worker.RemoveWorktree(ctx, run, top, wt.Path); err != nil {
+		t.Fatal(err)
+	}
+	// The leftover forgectl#1456 hit: files a harness wrote into its old cwd.
+	leftover := filepath.Join(wt.Path, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(leftover), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftover, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := forgetWorker(ctx, row, row.StartedAt, false, steps); res.Forgotten || removed || !strings.Contains(res.Reason, "remove it by hand") {
+		t.Fatalf("a leftover directory git does not list: %+v; want a refusal naming it", res)
+	}
+	if err := os.RemoveAll(wt.Path); err != nil {
 		t.Fatal(err)
 	}
 	if res := forgetWorker(ctx, row, row.StartedAt, false, steps); !res.Forgotten || !removed {

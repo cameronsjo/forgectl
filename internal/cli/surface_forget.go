@@ -140,12 +140,8 @@ func runSurfaceForget(cmd *cobra.Command, deps module.Deps, opts forgetOptions) 
 	defer cancel()
 	res := forgetWorker(ctx, row, time.Now(), opts.LegacyRow, forgetSteps{
 		abandoned: w.hc.Abandoned,
-		worktreeGone: func(ctx context.Context) (bool, error) {
-			facts, err := worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
-			if err != nil {
-				return false, err
-			}
-			return !facts.Present(), nil
+		worktree: func(ctx context.Context) (worktreePresence, error) {
+			return readWorktreePresence(ctx, deps.Runner, worker.WorktreePath(w.top, row.Name), w.top)
 		},
 		remove: func() error { return w.led.RemoveIf(row.Name, worker.SameRow(row)) },
 	})
@@ -160,12 +156,39 @@ type forgetSteps struct {
 	// selection: a reason when hc proves the terminal gone, an error
 	// otherwise.
 	abandoned func(ctx context.Context, ref backend.Ref, launched string, legacy bool) (string, error)
-	// worktreeGone reports that git does not list the worker's worktree and
-	// nothing exists at its path (worker.WorktreeFacts.Present). It is asked
-	// only for a row at stage closed.
-	worktreeGone func(ctx context.Context) (bool, error)
+	// worktree reports whether git lists the worker's worktree and whether
+	// anything exists at its path. It is asked only for a row at stage closed.
+	worktree func(ctx context.Context) (worktreePresence, error)
 	// remove drops the row, only if it is still the row forget read.
 	remove func() error
+}
+
+// worktreePresence is what forget needs to know about a closed row's
+// worktree path.
+type worktreePresence struct {
+	path string
+	// listed reports that git worktree list names path.
+	listed bool
+	// onDisk reports that something exists at path.
+	onDisk bool
+}
+
+// readWorktreePresence reads git's worktree list for top and stats path.
+// It reads nothing inside the worktree: forget only needs to know whether
+// one is still there.
+func readWorktreePresence(ctx context.Context, run worker.GitRunner, path, top string) (worktreePresence, error) {
+	p := worktreePresence{path: path}
+	listed, err := worker.ListedWorktrees(ctx, run, top)
+	if err != nil {
+		return p, err
+	}
+	p.listed = listed[path]
+	if _, err := os.Lstat(path); err == nil {
+		p.onDisk = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return p, fmt.Errorf("check %s: %w", path, err)
+	}
+	return p, nil
 }
 
 // removeRow drops the row through s.remove and reports the outcome in res.
@@ -197,13 +220,18 @@ func forgetWorker(ctx context.Context, row worker.Row, now time.Time, legacy boo
 		// An earlier close closed the terminal and kept the worktree. Once the
 		// worktree is gone too there is nothing left for close to do, so the
 		// row goes (forgectl#1456). hc is not asked: the terminal is closed.
-		gone, err := s.worktreeGone(ctx)
+		wt, err := s.worktree(ctx)
 		switch {
 		case err != nil:
 			return refuse("an earlier close already closed its terminal and kept the worktree, and git could not be read to see whether it is still there: " +
 				termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
-		case !gone:
+		case wt.listed:
 			return refuse("an earlier close already closed its terminal and kept the worktree; run surface close again once the work is saved")
+		case wt.onDisk:
+			// Not a worktree, so close keeps it too ("exists but git does not
+			// list it"), and neither verb would ever clear the row.
+			return refuse(termsafe.QuotePath(wt.path) + " exists but git does not list it as a worktree, so neither close nor forget will remove it; " +
+				"inspect it, remove it by hand, then run forget again")
 		}
 		return s.removeRow(res, "an earlier close closed its terminal, and its worktree no longer exists")
 	case len(row.Ref) == 0:

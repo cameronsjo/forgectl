@@ -296,7 +296,7 @@ Claude Code does not expose a session's live permission mode to the processes it
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`; to run them unattended, set `"auto"`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
-**Trimming a claude worker: `settings`.** A worker loads everything an interactive session loads. To give it less, point `[launch.worker] settings` at a JSON file. forgectl merges it into the `--settings` document every claude worker already gets:
+**Trimming a claude worker: `settings`.** A worker loads everything an interactive session loads, except project `.mcp.json` servers you have not approved, which it starts with turned off so no approval dialog stops it ([What a claude worker loads](../herdr.md#what-a-claude-worker-loads)). To give it less, point `[launch.worker] settings` at a JSON file. forgectl merges it into the `--settings` document every claude worker already gets:
 
 ```toml
 [launch.worker]

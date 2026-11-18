@@ -495,9 +495,9 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		}
 		// A worker runs in req.CWD (runDirectory), which is where Claude Code
 		// starts looking for .mcp.json files and project settings.
-		mcpOff := pendingProjectMCPServers(projectMCPServerNames(req.CWD), projectMCPApproval(req.CWD, workerClaudeConfigDir(env)))
-		if len(mcpOff) > 0 {
-			notes = append(notes, workerMCPOffNote(mcpOff))
+		mcpOff, mcpLeft := pendingProjectMCPServers(projectMCPServerNames(req.CWD), projectMCPApproval(req.CWD, workerClaudeConfigDir(env)))
+		if len(mcpOff) > 0 || mcpLeft > 0 {
+			notes = append(notes, workerMCPOffNote(mcpOff, mcpLeft))
 		}
 		if harnessArgs, err = withWorkerSettings(harnessArgs, file, mcpOff); err != nil {
 			return BuiltInvocation{}, err

@@ -52,20 +52,42 @@ type mcpApproval struct {
 // pendingProjectMCPServers returns the names in found the operator has not
 // approved, sorted and without duplicates: the servers Claude Code would ask
 // about at a worker's start.
-func pendingProjectMCPServers(found []string, approved mcpApproval) []string {
+//
+// The names come from repository files and ride one argv entry, which the
+// surface trampoline caps, so the list is bounded: a name longer than
+// maxMCPServerNameBytes is left out, and past maxMCPOffNames the rest are.
+// left counts what was left out; those servers can still prompt, and the
+// operator note says so.
+func pendingProjectMCPServers(found []string, approved mcpApproval) (off []string, left int) {
 	if approved.all {
-		return nil
+		return nil, 0
 	}
-	var out []string
 	for _, name := range found {
-		if strings.TrimSpace(name) == "" || slices.Contains(approved.names, name) || slices.Contains(out, name) {
+		if strings.TrimSpace(name) == "" || slices.Contains(approved.names, name) || slices.Contains(off, name) {
 			continue
 		}
-		out = append(out, name)
+		if len(name) > maxMCPServerNameBytes {
+			left++
+			continue
+		}
+		off = append(off, name)
 	}
-	slices.Sort(out)
-	return out
+	slices.Sort(off)
+	if len(off) > maxMCPOffNames {
+		left += len(off) - maxMCPOffNames
+		off = off[:maxMCPOffNames]
+	}
+	return off, left
 }
+
+// Bounds on the names a worker's --settings carries. JSON can spell one byte
+// in six (\u00XX), so the worst case is 64 × 128 × 6 = 48 KiB, well under the
+// surface trampoline's 128 KiB per argv entry (surface.maxEntryBytes). A real
+// .mcp.json names a handful of servers with short names.
+const (
+	maxMCPServerNameBytes = 128
+	maxMCPOffNames        = 64
+)
 
 // mcpFiles reads a file for the MCP lookups; a variable so tests never read
 // the host's files.
@@ -141,7 +163,12 @@ func projectMCPApproval(dir, configDir string) mcpApproval {
 // env loads: CLAUDE_CONFIG_DIR, else $HOME/.claude, else "" (unknown). It
 // reads the worker's own environment, not forgectl's.
 func workerClaudeConfigDir(env []string) string {
-	if dir := envLookup(env, "CLAUDE_CONFIG_DIR"); filepath.IsAbs(dir) {
+	if dir := envLookup(env, "CLAUDE_CONFIG_DIR"); dir != "" {
+		// A relative value is resolved by Claude Code against a directory
+		// forgectl does not pin; read nothing rather than a guess.
+		if !filepath.IsAbs(dir) {
+			return ""
+		}
 		return dir
 	}
 	if home := envLookup(env, "HOME"); filepath.IsAbs(home) {
@@ -183,7 +210,14 @@ func withMCPOff(settings string, names []string) (string, error) {
 
 // workerMCPOffNote is the operator note naming the servers a worker starts
 // with turned off.
-func workerMCPOffNote(names []string) string {
-	return "project MCP servers turned off for this worker, since nobody is there to approve them: " + strings.Join(names, ", ") +
+// left is how many servers were too many or too long to list; they can still
+// stop the worker at the dialog.
+func workerMCPOffNote(names []string, left int) string {
+	note := "project MCP servers turned off for this worker, since nobody is there to approve them: " + strings.Join(names, ", ") +
 		" (to keep one, approve it in your user settings: enabledMcpjsonServers, or enableAllProjectMcpServers)"
+	if left > 0 {
+		note += fmt.Sprintf("; %d more were not turned off (over %d servers, or a name over %d bytes) and may stop the worker at the approval dialog",
+			left, maxMCPOffNames, maxMCPServerNameBytes)
+	}
+	return note
 }

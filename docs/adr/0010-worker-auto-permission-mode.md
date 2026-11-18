@@ -148,3 +148,9 @@ Cameron's decision (cameronsjo/forgectl#1309): workers stop acting on GitHub as 
 - A mint failure refuses the launch rather than falling back to the operator.
 
 What it does not change: a worker still runs as the operator's uid, so it can read the operator's keychain `gh` login and the App key on purpose. This fixes attribution and accidents, not adversaries (cameronsjo/cadence-ecosystem ADR-0046). The sandbox in forgectl#1134 §4 remains the path to containment. Behavior: `openspec/changes/worker-github-app/`.
+
+## Amendment 2026-11-18: unapproved project MCP servers start off
+
+Cameron's report (cameronsjo/forgectl#1456): a worker waited about five hours on Claude Code's "new MCP servers found in this project" dialog. Claude Code reads `.mcp.json` in the directory it starts in and every directory above it, and keeps approvals per project directory, so each new worktree asks again with nobody there to answer.
+
+This narrows the 2026-10-08 amendment's "the branch's own `.mcp.json`": a claude worker's `--settings` sets `disabledMcpjsonServers` to every project `.mcp.json` server not approved in the worker's user settings or the worktree's own project or local settings, and the launch names them in a note. A server the operator approved, and every user-scope and plugin MCP server, still loads. `--strict-mcp-config` was not used, because it drops those too. To give workers a project server, approve it in user settings.

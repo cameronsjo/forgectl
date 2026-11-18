@@ -2,6 +2,7 @@ package launch
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -37,14 +38,45 @@ func writeJSON(t *testing.T, path, data string) {
 
 func TestPendingProjectMCPServers(t *testing.T) {
 	found := []string{"obsidian", "homelab", "obsidian", "", "approved"}
-	if got := pendingProjectMCPServers(found, mcpApproval{names: []string{"approved"}}); !slices.Equal(got, []string{"homelab", "obsidian"}) {
-		t.Errorf("pending = %q, want homelab and obsidian, sorted, once each", got)
+	if got, left := pendingProjectMCPServers(found, mcpApproval{names: []string{"approved"}}); !slices.Equal(got, []string{"homelab", "obsidian"}) || left != 0 {
+		t.Errorf("pending = %q (%d left), want homelab and obsidian, sorted, once each", got, left)
 	}
-	if got := pendingProjectMCPServers(found, mcpApproval{all: true}); got != nil {
-		t.Errorf("enableAllProjectMcpServers still turned off %q", got)
+	if got, left := pendingProjectMCPServers(found, mcpApproval{all: true}); got != nil || left != 0 {
+		t.Errorf("enableAllProjectMcpServers still turned off %q (%d left)", got, left)
 	}
-	if got := pendingProjectMCPServers(nil, mcpApproval{}); got != nil {
-		t.Errorf("no servers turned off %q", got)
+	if got, left := pendingProjectMCPServers(nil, mcpApproval{}); got != nil || left != 0 {
+		t.Errorf("no servers turned off %q (%d left)", got, left)
+	}
+}
+
+// TestPendingProjectMCPServersIsBounded: the names are repository content
+// riding one argv entry, so a long name and the names past the cap are left
+// out and counted, and the worst-case document stays under the trampoline's
+// per-entry cap.
+func TestPendingProjectMCPServersIsBounded(t *testing.T) {
+	var found []string
+	for i := range maxMCPOffNames + 5 {
+		found = append(found, fmt.Sprintf("s%03d", i))
+	}
+	found = append(found, strings.Repeat("x", maxMCPServerNameBytes+1))
+	off, left := pendingProjectMCPServers(found, mcpApproval{})
+	if len(off) != maxMCPOffNames || left != 6 {
+		t.Fatalf("off %d names, left %d; want %d and 6", len(off), left, maxMCPOffNames)
+	}
+	if note := workerMCPOffNote(off, left); !strings.Contains(note, "6 more were not turned off") {
+		t.Errorf("the note does not count what was left out: %q", note)
+	}
+
+	var worst []string
+	for i := range maxMCPOffNames {
+		worst = append(worst, fmt.Sprintf("%03d", i)+strings.Repeat("\x01", maxMCPServerNameBytes-3))
+	}
+	doc, err := withMCPOff(workerClaudeEditSettings, worst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if const128K := 128 << 10; len(doc) >= const128K {
+		t.Errorf("worst-case --settings is %d bytes, over the trampoline's %d", len(doc), const128K)
 	}
 }
 
@@ -110,6 +142,10 @@ func TestWorkerClaudeConfigDir(t *testing.T) {
 		if got := workerClaudeConfigDir(env); got != want {
 			t.Errorf("workerClaudeConfigDir(%q) = %q, want %q", env, got, want)
 		}
+	}
+	// A relative CLAUDE_CONFIG_DIR is not resolved against HOME's default.
+	if got := workerClaudeConfigDir([]string{"HOME=/h", "CLAUDE_CONFIG_DIR=rel"}); got != "" {
+		t.Errorf("a relative CLAUDE_CONFIG_DIR read %q, want unknown", got)
 	}
 }
 
