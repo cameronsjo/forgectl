@@ -83,6 +83,29 @@ func WorktreePath(top, name string) string {
 	return filepath.Join(append(append([]string{top}, worktreeDirs...), name)...)
 }
 
+// TopOfWorktreePath is WorktreePath's inverse: for an absolute path of the
+// form WorktreePath(top, name), with name a valid worker name, it returns top.
+// It reads nothing on disk, so it answers for a worktree that is gone, which
+// is when a caller holding only the worker's path needs it (forgectl#1456).
+func TopOfWorktreePath(path string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	path = filepath.Clean(path)
+	name := filepath.Base(path)
+	if ValidName(name) != nil {
+		return "", false
+	}
+	top := path
+	for range len(worktreeDirs) + 1 {
+		top = filepath.Dir(top)
+	}
+	if WorktreePath(top, name) != path {
+		return "", false
+	}
+	return top, true
+}
+
 // AddWorktree creates a worktree for branch at WorktreePath(top, name).
 //
 // Branch selection, in order: an existing local branch is checked out as is; a
