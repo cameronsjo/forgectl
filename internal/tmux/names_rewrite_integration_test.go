@@ -114,9 +114,11 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 // DisplayWindowListing counts it. That needs a tmux that renders the field
 // separator as `\037` (3.4 does under -u, which the Client always passes): the
 // stored name is the text `\037`, so the row splits. A tmux that renders it raw
-// (3.6a) leaves both windows readable, so the test asserts that and skips; see
-// rendersSeparatorEscaped. TestParseWindowRowsCountsDroppedRows covers the
-// counting there.
+// (3.6a) leaves both windows readable, so the test asserts that and then SKIPS
+// (a green run there is a skip, not a pass of the original check); see
+// rendersSeparatorEscaped. The ubuntu-24.04 CI leg (tmux 3.4) runs it with
+// requireEscapedSeparatorEnv set, so a skip there fails.
+// TestParseWindowRowsCountsDroppedRows covers the counting on every version.
 //
 // Mutation that turns it red: return 0 in place of the count from
 // parseWindowRows.
@@ -139,7 +141,7 @@ func TestWindowWithFieldSepIsCountedIsolated(t *testing.T) {
 		var cmdErr *internalexec.CommandError
 		if errors.As(err, &cmdErr) && strings.HasPrefix(cmdErr.Stderr, "invalid window name: ") {
 			version, _ := runner.Run(ctx, tmuxBin, "-V")
-			t.Skipf("%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
+			skipOrRequireEscaped(t, "%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
 		}
 		t.Fatalf("rename-window: %v", err)
 	}
