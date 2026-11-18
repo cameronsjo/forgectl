@@ -80,7 +80,7 @@ func TestStartDirectoryIsNotFormatExpandedIsolated(t *testing.T) {
 		if !found {
 			t.Fatalf("session %s is not listed", name)
 		}
-		if got := paneCwd(t, runner, tmuxBin, session.ID); got != dir {
+		if got := paneCwd(t, runner, tmuxBin, session.ID, dir); got != dir {
 			t.Errorf("session %s's pane started in %q, want exactly %q", name, got, dir)
 		}
 
@@ -88,7 +88,7 @@ func TestStartDirectoryIsNotFormatExpandedIsolated(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWindow(-c %q): %v", dir, err)
 		}
-		if got := paneCwd(t, runner, tmuxBin, window.ID); got != dir {
+		if got := paneCwd(t, runner, tmuxBin, window.ID, dir); got != dir {
 			t.Errorf("window in %s started in %q, want exactly %q", name, got, dir)
 		}
 	}
@@ -102,10 +102,20 @@ func TestStartDirectoryIsNotFormatExpandedIsolated(t *testing.T) {
 	}
 }
 
-// paneCwd reads the current path of the active pane in target, polling
-// briefly because a just-spawned shell may not have reached its cwd yet on
-// every platform.
-func paneCwd(t *testing.T, runner internalexec.Runner, tmuxBin, target string) string {
+// paneCwd reads the current path of the active pane in target, polling until
+// it equals want or five seconds pass, and returns the last reading.
+//
+// Polling for "non-empty" is not enough. On the ubuntu-26.04 runner (tmux
+// 3.6a) the test failed with the window panes of s0 and s1 and the pane of s4
+// reading the test's own directory, which is the directory the tmux server was
+// started in (CI run 44401411283). A just-forked pane reports that directory
+// until its child has changed into -c, and the first non-empty reading is
+// enough to end a poll for "non-empty". Reproduced with the previous helper:
+// 1 failure in 25 runs of the test under CPU load in an ubuntu:26.04 container
+// (tmux 3.6a), with the same symptom. Waiting for the expected value tolerates
+// the window, and a pane that never reaches want still fails: the caller
+// compares the last reading, so the mutations named on the test stay red.
+func paneCwd(t *testing.T, runner internalexec.Runner, tmuxBin, target, want string) string {
 	t.Helper()
 	var got string
 	deadline := time.Now().Add(5 * time.Second)
@@ -115,7 +125,7 @@ func paneCwd(t *testing.T, runner internalexec.Runner, tmuxBin, target string) s
 			t.Fatalf("display-message -t %s: %v", target, err)
 		}
 		got = strings.TrimRight(out, "\n")
-		if got != "" || time.Now().After(deadline) {
+		if got == want || time.Now().After(deadline) {
 			return got
 		}
 		time.Sleep(50 * time.Millisecond)

@@ -35,7 +35,12 @@ const FieldSep = "\x1f"
 //	3.5a  (alpine 3.21)  | \037       | \037         | \037
 //	3.7b  (alpine edge)  | _  (0x5f)  | raw 0x1f     | raw 0x1f
 //
-// (tmux next-3.4 on alpine 3.19 matches the 3.5a row.) Both the escaped and
+// (tmux next-3.4 on alpine 3.19 matches the 3.5a row.) The Client runs every
+// command with `-u` (see tmuxArgs), and measured with it, in a container whose
+// locale was unset: tmux 3.4 (ubuntu 24.04) renders the byte as `\037` and
+// tmux 3.6a (ubuntu 26.04) renders it raw, so a name stored as the text `\037`
+// splits a row on 3.4 and not on 3.6a (internal/tmux's rendersSeparatorEscaped
+// probes this). Both the escaped and
 // the raw rendering are live in the wild well above the 2.2 floor
 // CheckGenerationCapability enforces, and that floor gates on the FIELDS
 // EXISTING, not on how they come back, so every parser here must read both.
