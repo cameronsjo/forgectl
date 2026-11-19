@@ -69,3 +69,24 @@ A worker launch SHALL record its resolved posture in the ledger row before the w
 #### Scenario: Herdr worker
 - **WHEN** `--herdr-space` is given with `--surface herdr`
 - **THEN** the launch is refused with exit 2
+
+### Requirement: hc worker nested under its launcher
+`surface launch --worktree --surface hc --parent <address>` SHALL pass `--parent <address>` to `hc run`, keeping `--outlive-parent` and `--no-notify`, so herdr-app lists the worker under that terminal. The parent SHALL come only from the flag: the launcher's `HC_TERMINAL_*` stay dropped from every hc call. `--dry-run` SHALL show the parent.
+
+#### Scenario: Nested
+- **WHEN** an hc worker is launched with `--parent t11n`
+- **THEN** `hc run` carries `--parent t11n` and `--outlive-parent`
+
+### Requirement: Refused parent values
+A `--parent` value that is not a local terminal address (`t`, a digit, then `a-z 0-9`, up to 16 characters), `--parent` on a herdr worker, and `--parent` without `--worktree` MUST be refused as usage errors before anything is created.
+
+#### Scenario: Not an address
+- **WHEN** `--parent` is given as a terminal name or `m5/t7`
+- **THEN** the launch is refused with exit 2
+
+### Requirement: Claude worker session name
+A claude worker launch, on any worker surface and from the drain, SHALL pass `--name <worker name>` to the harness before the prompt, so the session is titled by the worker name. Other harnesses SHALL get no session name. `--dry-run` SHALL show the name the argv carries as `session_name`.
+
+#### Scenario: Claude worker
+- **WHEN** a claude worker named `cos-a` is launched
+- **THEN** its argv carries `--name cos-a` before the prompt's `--`

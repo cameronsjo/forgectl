@@ -206,6 +206,10 @@ func hcSelectionOf(a backend.Adapter) string {
 // shows every workspace already, and the label is herdr-app's.
 var errHerdrSpaceNeedsHc = errors.New("--herdr-space needs --surface hc; it labels an hc terminal for the herdr-app window")
 
+// errParentNeedsHc refuses --parent on a herdr worker: it names an hc
+// terminal, and herdr has no parent for a workspace.
+var errParentNeedsHc = errors.New("--parent needs --surface hc; it names the hc terminal the worker nests under")
+
 // sessionNamer is implemented by the herdr and hc adapters.
 type sessionNamer interface{ Session() string }
 
@@ -236,6 +240,8 @@ type workerSpec struct {
 	// herdrSpace is --herdr-space: the herdr-app space an hc worker's
 	// terminal is labeled for, or empty.
 	herdrSpace string
+	// parent is --parent: the hc terminal an hc worker nests under, or empty.
+	parent string
 }
 
 // surfaceName is the spec's worker surface, herdr when unset.
@@ -247,10 +253,12 @@ func (spec workerSpec) surfaceName() string {
 }
 
 // request is the build request for this worker at cwd: the one a surface
-// launch builds, plus the worker's profile config dir and model.
+// launch builds, plus the worker's profile config dir, model, and name as the
+// session name (a claude worker's --name; other harnesses ignore it).
 func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string) launch.InvocationRequest {
 	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
 	req.ConfigDir, req.Model, req.LauncherMode = spec.configDir, spec.model, spec.launcherMode
+	req.SessionName = spec.name
 	return req
 }
 
@@ -281,19 +289,34 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 		if err := checkHcName(spec.name); err != nil {
 			return workerSetup{}, err
 		}
+		// Checked here as well as in NestUnder so a bad --parent is a usage
+		// error even when no hc core answers (newHcAdapter fails first).
+		if spec.parent != "" && !hcadapter.ValidAddress(spec.parent) {
+			return workerSetup{}, WithExitCode(fmt.Errorf("--parent: %w", hcadapter.ErrBadParent), exitUsage)
+		}
 		adapter, err = newHcAdapter()
-		if err == nil && spec.herdrSpace != "" {
+		if err == nil && (spec.herdrSpace != "" || spec.parent != "") {
 			hc, ok := adapter.(*hcadapter.Adapter)
 			if !ok {
 				return workerSetup{}, errors.New("forgectl: the hc adapter has an unexpected type")
 			}
-			if err := hc.ShowInSpace(spec.herdrSpace); err != nil {
-				return workerSetup{}, WithExitCode(fmt.Errorf("--herdr-space: %w", err), exitUsage)
+			if spec.herdrSpace != "" {
+				if err := hc.ShowInSpace(spec.herdrSpace); err != nil {
+					return workerSetup{}, WithExitCode(fmt.Errorf("--herdr-space: %w", err), exitUsage)
+				}
+			}
+			if spec.parent != "" {
+				if err := hc.NestUnder(spec.parent); err != nil {
+					return workerSetup{}, WithExitCode(fmt.Errorf("--parent: %w", err), exitUsage)
+				}
 			}
 		}
 	case workerSurfaceHerdr:
 		if spec.herdrSpace != "" {
 			return workerSetup{}, WithExitCode(errHerdrSpaceNeedsHc, exitUsage)
+		}
+		if spec.parent != "" {
+			return workerSetup{}, WithExitCode(errParentNeedsHc, exitUsage)
 		}
 		adapter, err = newHerdrAdapter(warn)
 	default:
@@ -492,7 +515,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
-		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode, herdrSpace: opts.HerdrSpace}
+		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode, herdrSpace: opts.HerdrSpace, parent: opts.Parent}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
@@ -733,6 +756,22 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 			Brief:        in.hasBrief,
 			Posture:      posture,
 			postureOrder: order,
+			SessionName:  sessionNameArg(built.Invocation.Args),
+			Parent:       in.spec.parent,
 		},
 	}, opts.JSON)
+}
+
+// sessionNameArg is the value after --name in a harness argv, before the
+// prompt's `--`, or "". The preview reads it from the built argv, so it shows
+// what the launch would pass rather than a second copy of the rule that adds it.
+// It relies on --name being the only bare "--name" token before the prompt:
+// no other flag forgectl builds takes that literal as its value.
+func sessionNameArg(args []string) string {
+	for i := 0; i+1 < len(args) && args[i] != "--"; i++ {
+		if args[i] == "--name" {
+			return args[i+1]
+		}
+	}
+	return ""
 }

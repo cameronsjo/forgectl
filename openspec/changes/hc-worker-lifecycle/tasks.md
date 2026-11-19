@@ -22,6 +22,8 @@
 ## 4. herdr-app
 
 - [x] 4.1 `--herdr-space <id>` on hc worker launches labels the terminal `herdr.space=<id>`; refused for herdr workers and non-worker launches.
+- [x] 4.2 `--parent <address>` on hc worker launches passes `hc run --parent`, keeping `--outlive-parent` and `--no-notify`; refused for herdr workers, non-worker launches, and anything but a local address (forgectl#1455).
+- [x] 4.3 Claude workers get `--name <worker name>` on every surface and from the drain; `--dry-run` shows `session_name` and `parent` (forgectl#1455).
 
 ## 5. Docs
 

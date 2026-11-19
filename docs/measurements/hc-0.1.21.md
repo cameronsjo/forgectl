@@ -24,6 +24,16 @@ No other terminal and no server was touched.
 | `rm` | `rm --json -- ADDR` | `{"removed":"ADDR"}`; on a live terminal rc 1, kind `live`, hint "kill it first"; a second `rm` is rc 3 `not_found` | not parsed |
 | `events` | `events --json` (5 s sample) | a snapshot line, then notifications; includes `heartbeat` | ignored by the scanner |
 
+## `run --parent` (measured 2026-11-19)
+
+Measured against hc 0.1.21 for `surface launch --parent` (forgectl#1455), with one scratch terminal started from a live terminal and removed afterwards.
+
+| Argv measured | Result |
+| --- | --- |
+| `run --bg --json --no-notify --outlive-parent --parent <live addr> --name N --cwd C -- CMD` | rc 0; the record's `parent` is the given address, `get` shows `die_with_parent: false`, and herdr-app `ls` lists the child under the parent's `sub_agents` |
+| `run --bg --json --no-notify --outlive-parent --parent t999zz --name N --cwd C -- true` | rc 3, `{"error":{"kind":"not_found","message":"no terminal \"t999zz\""}}`; no terminal named `N` exists afterwards |
+| `run --bg --json --no-notify --outlive-parent --parent <live addr> --name N --cwd C -- "claude -n N"` (Claude Code 2.1.328), then `get` once idle | `title` is `N`. The same launch with plain `claude` reads `Claude Code`. herdr-app labels a terminal from this title (its `src/terminal.rs` `set_title`), so a worker started with `--name` shows its name |
+
 ## Additive fields
 
 - Terminal record (`get`, `kill`, `label`): `reported`, `status_ms`, `screen`, `identity`, `foreground`, `parent`, `keep`, `reason`, `signal`, `title`.
