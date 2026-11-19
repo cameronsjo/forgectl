@@ -287,6 +287,7 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 				InheritMode: inheritMode,
 				HerdrSpace:  herdrSpace,
 				Parent:      parent,
+				ParentGiven: cmd.Flags().Changed("parent"),
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -323,7 +324,7 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 	cmd.Flags().StringVar(&herdrSpace, "herdr-space", "",
 		"show the hc worker in this herdr-app space (an id from herdr-app ls) by labeling its terminal herdr.space=<id>; without it the worker stays out of the window (--worktree --surface hc only)")
 	cmd.Flags().StringVar(&parent, "parent", "",
-		"nest the hc worker under this hc terminal (an address such as t7; pass $HC_TERMINAL_ID for the launcher's own), shown as its child in herdr-app; the worker still outlives it (--worktree --surface hc only)")
+		"nest the hc worker under this hc terminal (an address such as t7; pass $HC_TERMINAL_ID for the launcher's own), shown as its child in herdr-app; the worker still outlives it; an empty value is refused (--worktree --surface hc only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -349,9 +350,13 @@ type surfaceLaunchOptions struct {
 	HerdrSpace string
 	// Parent is the hc terminal an hc worker nests under, or "".
 	Parent string
-	Here   bool
-	DryRun bool
-	JSON   bool
+	// ParentGiven reports that --parent was on the command line, so an
+	// explicit empty value (an unset $HC_TERMINAL_ID) is refused rather than
+	// read as no parent.
+	ParentGiven bool
+	Here        bool
+	DryRun      bool
+	JSON        bool
 }
 
 func firstArg(args []string) string {
@@ -374,6 +379,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
+	}
+	if opts.ParentGiven && opts.Parent == "" {
+		return WithExitCode(errors.New("--parent is empty; pass an hc terminal address such as t7 ($HC_TERMINAL_ID is set only inside an hc terminal), or leave --parent off"), exitUsage)
 	}
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)

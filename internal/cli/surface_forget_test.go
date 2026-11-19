@@ -132,6 +132,10 @@ func TestParentNeedsAnHcWorker(t *testing.T) {
 		"a name":       {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "orchestrator"},
 		"a remote":     {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "m5/t7"},
 		"flag-shaped":  {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "--no-parent"},
+		// An unset $HC_TERMINAL_ID expands to an empty --parent: refused,
+		// not read as no parent, on a worker and a non-worker launch alike.
+		"empty, worker":     {Backend: "hc", Worktree: "feat/x", DisplayName: "x", ParentGiven: true},
+		"empty, not worker": {Backend: "herdr", ParentGiven: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cmd := &cobra.Command{}
