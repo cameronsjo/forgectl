@@ -34,7 +34,21 @@ const FieldSep = "\x1f"
 //	---------------------+------------+--------------+-----------------
 //	3.5a  (alpine 3.21)  | \037       | \037         | \037
 //	3.7b  (alpine edge)  | _  (0x5f)  | raw 0x1f     | raw 0x1f
+//	3.4   (ubuntu 24.04) | \037       | \037         | \037 (a)
+//	3.6a  (ubuntu 26.04) | _  (0x5f)  | raw 0x1f     | raw 0x1f (a)
 //
+// (a) the container had no en_US.UTF-8 locale installed; tmux decides from the
+// text of LC_ALL/LANG, so the cell is the measured result, not a guess.
+//
+// The two ubuntu rows are the no-`-u` rows, measured the same way for
+// list-sessions, list-windows -a, list-panes -a and display-message -p: within
+// a version every command rendered alike.
+//
+// The Client runs every command with `-u` (see tmuxArgs), which moves the
+// 3.6a LANG=C cell from `_` to raw and changes nothing else: measured with
+// `-u`, tmux 3.4 renders `\037` in all three LANG columns and tmux 3.6a
+// renders raw in all three. So a name stored as the text `\037` splits a row
+// on 3.4 and not on 3.6a, which internal/tmux's rendersSeparatorEscaped probes.
 // (tmux next-3.4 on alpine 3.19 matches the 3.5a row.) Both the escaped and
 // the raw rendering are live in the wild well above the 2.2 floor
 // CheckGenerationCapability enforces, and that floor gates on the FIELDS

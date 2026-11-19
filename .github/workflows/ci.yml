@@ -160,6 +160,80 @@ jobs:
             exit 1
           fi
 
+  tmux-escaped-rendering:
+    # The real-tmux check of the unreadable-row path (forgectl#826, #836,
+    # #815). Only a tmux that renders the 0x1F field separator as the text
+    # `\037` can build an unreadable row from a hand-named window or session.
+    # tmux 3.4 does; the build-test job's tmux (3.6a on ubuntu-26.04) renders
+    # it raw and macos-test's (3.8) refuses the name, so on both the three
+    # tests assert the readable outcome and skip.
+    #
+    # debt: this leg exists only while GitHub offers an ubuntu-24.04 runner
+    # (tmux 3.4). When that image is retired the job can no longer be scheduled,
+    # which most likely shows as a check that stays pending or errors on an
+    # unsupported label (not verified), and the coverage is gone with it; remove
+    # or replace the job then. cameronsjo/forgectl#1461 is the long-term fix (a
+    # raw-0x1F vector on a current tmux, or a pinned tmux build).
+    #
+    # It reruns every *Isolated test, not only the three, on purpose: the other
+    # tmux grammar tests then also run on a second tmux version. The cost is
+    # about a minute.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          # Same reason as build-test: go.mod requires go1.26.8 and setup-go
+          # exports GOTOOLCHAIN=local.
+          check-latest: true
+
+      - name: Install tmux
+        # Bounded for the same reason as the build-test tmux step
+        # (forgectl#358): an unreachable apt mirror stops progress rather than
+        # failing.
+        timeout-minutes: 3
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Real-tmux unreadable-row tests (tmux 3.4)
+        # FORGECTL_REQUIRE_ESCAPED_SEPARATOR makes a skip in the three
+        # field-separator tests a failure (skipOrRequireEscaped), so this leg
+        # cannot go quiet by the image moving to a tmux that renders raw: a
+        # skip and a pass must not look alike here. FORGECTL_REQUIRE_TMUX does
+        # the same for a missing tmux. The grep then names each test, so a
+        # renamed or deleted test fails the leg too instead of dropping out of
+        # `-run Isolated` unnoticed. It names the pane test as well: that one
+        # builds an unreadable pane through `exec -a` and skips quietly where
+        # the platform reports a different command name, so a skip on this
+        # leg must fail it too. The test log goes to a file and is read back:
+        # a pipe into grep -q would turn a match into a SIGPIPE failure under
+        # pipefail.
+        env:
+          FORGECTL_REQUIRE_TMUX: '1'
+          FORGECTL_REQUIRE_ESCAPED_SEPARATOR: '1'
+        run: |
+          set -euo pipefail
+          tmux -V
+          go test -v -count=1 -run Isolated ./internal/tmux | tee "$RUNNER_TEMP/tmux-isolated.log"
+          for name in \
+            TestOnlyWindowWithFieldSepIsAnEmptyListingIsolated \
+            TestNeverAttachedUnreadableSessionIsEmptyIsolated \
+            TestWindowWithFieldSepIsCountedIsolated \
+            TestPaneWithFieldSepCommandIsCountedIsolated; do
+            grep -F -- "--- PASS: $name " "$RUNNER_TEMP/tmux-isolated.log" > /dev/null || {
+              echo "::error::$name did not PASS on this leg (skipped, missing, or failed)"
+              exit 1
+            }
+          done
+
   openspec:
     # openspec/ holds the capability specs and the change proposals (#1305).
     # A spec or change that the CLI cannot parse is silently skipped by

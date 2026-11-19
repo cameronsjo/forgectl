@@ -111,8 +111,14 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 
 // TestWindowWithFieldSepIsCountedIsolated is forgectl#815 item 1 on a real
 // tmux: a window renamed by hand to carry 0x1F drops out of the listing, and
-// DisplayWindowListing counts it. tmux 3.4 renders the byte as `\037` under a
-// non-UTF-8 locale and raw under a UTF-8 one; either splits the row.
+// DisplayWindowListing counts it. That needs a tmux that renders the field
+// separator as `\037` (3.4 does under -u, which the Client always passes): the
+// stored name is the text `\037`, so the row splits. A tmux that renders it raw
+// (3.6a) leaves both windows readable, so the test asserts that and then SKIPS
+// (a green run there is a skip, not a pass of the original check); see
+// rendersSeparatorEscaped. The ubuntu-24.04 CI leg (tmux 3.4) runs it with
+// requireEscapedSeparatorEnv set, so a skip there fails.
+// TestParseWindowRowsCountsDroppedRows covers the counting on every version.
 //
 // Mutation that turns it red: return 0 in place of the count from
 // parseWindowRows.
@@ -135,13 +141,29 @@ func TestWindowWithFieldSepIsCountedIsolated(t *testing.T) {
 		var cmdErr *internalexec.CommandError
 		if errors.As(err, &cmdErr) && strings.HasPrefix(cmdErr.Stderr, "invalid window name: ") {
 			version, _ := runner.Run(ctx, tmuxBin, "-V")
-			t.Skipf("%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
+			skipOrRequireEscaped(t, "%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
 		}
 		t.Fatalf("rename-window: %v", err)
 	}
 	windows, unreadable, err := c.DisplayWindowListing(ctx)
 	if err != nil {
 		t.Fatalf("DisplayWindowListing: %v", err)
+	}
+	if !rendersSeparatorEscaped(t, runner, tmuxBin) {
+		// The separator renders raw (see rendersSeparatorEscaped), so the
+		// stored text `\037` is plain: both windows are readable and none is
+		// counted as dropped.
+		wantName := "hid" + escapedFieldSep + "den"
+		renamed := 0
+		for _, w := range windows {
+			if w.Name == wantName {
+				renamed++
+			}
+		}
+		if len(windows) != 2 || unreadable != 0 || renamed != 1 {
+			t.Fatalf("tmux renders the separator raw, so the stored name is the text %q and DisplayWindowListing = %+v, %d unreadable; want 2 windows, one of them named so, and none unreadable", wantName, windows, unreadable)
+		}
+		skipUnreadableRowAbsent(t, runner, tmuxBin, "the renamed window's name")
 	}
 	if len(windows) != 1 || unreadable != 1 {
 		t.Fatalf("DisplayWindowListing = %d windows, %d unreadable; want 1 and 1", len(windows), unreadable)
