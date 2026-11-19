@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.65.0](https://github.com/cameronsjo/forgectl/compare/v0.64.0...v0.65.0) (2026-11-19)
+
+
+### Features
+
+* **surface:** nest hc workers under --parent and title claude workers by name ([#1464](https://github.com/cameronsjo/forgectl/issues/1464)) ([6093564](https://github.com/cameronsjo/forgectl/commit/6093564d0d7a1ce7a64122d6c2815ce34a5e32c1))
+
+
+### Bug Fixes
+
+* **launch:** start claude workers with unapproved project MCP servers off ([019f4d1](https://github.com/cameronsjo/forgectl/commit/019f4d1bd4c42766f0885a7329d32fd185f542bf)), closes [#1456](https://github.com/cameronsjo/forgectl/issues/1456)
+* start claude workers past the project MCP dialog, and let forget clear a gone worktree ([f543b00](https://github.com/cameronsjo/forgectl/commit/f543b001fba5e999e55414d4cfa38107846f67c9))
+* **surface,launch:** polish round for the worker MCP and forget fixes ([4a58455](https://github.com/cameronsjo/forgectl/commit/4a58455104fb70178b696103da735a4b3ca7bb97)), closes [#1456](https://github.com/cameronsjo/forgectl/issues/1456)
+* **surface:** let close and forget reach a worker whose worktree is gone ([af506e0](https://github.com/cameronsjo/forgectl/commit/af506e08a2321821e78417461c22380ad64a79d5)), closes [#1456](https://github.com/cameronsjo/forgectl/issues/1456)
+* **tmux:** make the real-tmux tests hold on tmux 3.6a (ubuntu-26.04) ([41cb07b](https://github.com/cameronsjo/forgectl/commit/41cb07bbb0edeaafa391cb79951bdf5789837d96))
+* **tmux:** make the real-tmux tests hold on tmux 3.6a (ubuntu-26.04) ([0447146](https://github.com/cameronsjo/forgectl/commit/0447146634df58f312f84a2e40e7829a90d89d72))
+
 ## [0.64.0](https://github.com/cameronsjo/forgectl/compare/v0.63.1...v0.64.0) (2026-11-16)
 
 
