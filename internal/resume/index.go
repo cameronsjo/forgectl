@@ -392,12 +392,6 @@ func repoName(cwd string) string {
 // promptWidth is how much of a prompt the picker can show on one row, in runes.
 const promptWidth = 90
 
-// firstLine reduces a prompt to a single truncated line. Prompts are
-// multi-line and carry pasted blocks; the picker has one row.
-//
-// The clip is by RUNE, not byte. A byte slice through a multi-byte character
-// leaves invalid UTF-8, which json.Marshal then silently rewrites to U+FFFD —
-// a mangled prompt in --json output with nothing to indicate why.
 // workerTask drops what forgectl puts before a worker's own text in a
 // prompt (forgectl#1466): the envelope's opening tag, and in a launch prompt
 // the line it sits on and the fixed preamble after it, so the picker shows
@@ -418,6 +412,12 @@ func workerTask(s string) string {
 	return rest
 }
 
+// firstLine reduces a prompt to a single truncated line. Prompts are
+// multi-line and carry pasted blocks; the picker has one row.
+//
+// The clip is by RUNE, not byte. A byte slice through a multi-byte character
+// leaves invalid UTF-8, which json.Marshal then silently rewrites to U+FFFD —
+// a mangled prompt in --json output with nothing to indicate why.
 func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]

@@ -153,6 +153,10 @@ func Envelope(from, kind, body string) string {
 // neutralized, which the cap counts and this figure does not.
 var typedBriefRoom = MaxTypedBrief - (utf8.RuneCountInString(TypedBrief("x", strings.Repeat("0", 2*markerBytes), strings.Repeat("x", maxSenderLen))) - 1)
 
+// TypedBriefRoom returns typedBriefRoom, the most characters a typed brief's
+// own text may have.
+func TypedBriefRoom() int { return typedBriefRoom }
+
 // TypedBrief is the one line forgectl types into a worker for a brief: the
 // text with its report instruction (Compose), in forgectl's envelope.
 func TypedBrief(text, marker, from string) string {

@@ -14,4 +14,6 @@ A worker's launch prompt and every follow-up `surface brief` arrive in its conve
 ## Impact
 
 - `internal/surface/worker/envelope.go` (new), `internal/surface/worker/brief.go`, `internal/cli/surface_worker.go`, `internal/cli/surface_brief.go`, `internal/cli/surface_hc.go`, `internal/surface/hcadapter/hcadapter.go`, `internal/surface/hcadapter/worker.go`, `internal/exec/sensitive.go`, `internal/exec/sensitive_run.go`, `internal/exec/internal/validated/validated.go`, `docs/herdr.md`.
-- Issues: #1466, #1462.
+- Resume picker (`internal/resume/index.go`): it shows each session's prompt by its first line, and every worker's launch prompt now opens with the same envelope tag and preamble, so every worker would have shown the same line. `workerTask` drops forgectl's opening tag and, for a launch prompt, the preamble, so the picker shows the task, not the tag.
+- Desk send (`hcadapter.SendLine`, the `DESK-RESPONSE` line from `desk ask --notify`): the send keeps `HC_TERMINAL_ID` and `HC_SCOPE`, so hc can tag the line with its sender. The line gets no forgectl envelope because it must stay inert at a shell prompt. The worker rule names a line that begins with `DESK-RESPONSE` among the kinds that never carry the operator's authority, so a bare one from outside hc cannot pass as the operator's.
+- Issues: #1466 (#1462 was its duplicate).

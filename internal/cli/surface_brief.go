@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,8 +108,9 @@ refusal reports refused; any other send failure reports unconfirmed.
 Each brief gets a new random marker and asks the worker to end its final
 message with a REPORT line naming it; read it with surface read --report.
 
-A typed brief is one line of at most 600 characters with the report
-instruction: Claude Code turns longer typed text into a paste placeholder,
+A typed brief is one line. Its own text may be at most ` + strconv.Itoa(worker.TypedBriefRoom()) + ` characters:
+forgectl adds the report instruction and its envelope to fit the ` + strconv.Itoa(worker.MaxTypedBrief) + `
+characters Claude Code types literally (longer becomes a paste placeholder),
 and a newline would be Enter. Put a long brief in a file in the worktree and
 brief the worker to read it. @file reads the brief from a file. A typed brief
 may not start with - / ! # ? @ or &, which herdr reads as an option or the
