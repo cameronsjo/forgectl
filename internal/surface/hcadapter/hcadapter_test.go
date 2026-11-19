@@ -858,12 +858,12 @@ func TestNestUnderPassesTheParent(t *testing.T) {
 // address, and flag-shaped text out of hc run's argv.
 func TestNestUnderRefusesAnythingButALocalAddress(t *testing.T) {
 	a := newTestAdapter(t, &fakeHC{coreID: "core1", terminals: map[string]string{}}, "")
-	for _, ok := range []string{"t7", "t11n", "t1r", "t0"} {
+	for _, ok := range []string{"t7", "t11n", "t1r", "t0", "t" + strings.Repeat("1", 15)} {
 		if err := a.NestUnder(ok); err != nil {
 			t.Errorf("NestUnder(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "t", "tx", "T7", "t7 ", "orchestrator", "m5/t7", "--no-parent", "-t7", "t7;rm", strings.Repeat("t1", 9)} {
+	for _, bad := range []string{"", "t", "tx", "T7", "t7 ", "orchestrator", "m5/t7", "--no-parent", "-t7", "t7;rm", "t" + strings.Repeat("1", 16)} {
 		if err := a.NestUnder(bad); !errors.Is(err, ErrBadParent) {
 			t.Errorf("NestUnder(%q) = %v, want ErrBadParent", bad, err)
 		}
