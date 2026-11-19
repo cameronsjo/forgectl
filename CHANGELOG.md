@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.66.0](https://github.com/cameronsjo/forgectl/compare/v0.65.0...v0.66.0) (2026-11-19)
+
+
+### Features
+
+* **surface:** wrap every worker launch prompt and typed brief in a sender envelope, and let the operator's untagged typed text direct one approval or merge ([ff25108](https://github.com/cameronsjo/forgectl/commit/ff25108c09ce292ec0de5b3159a229d85ef10ada))
+
 ## [0.65.0](https://github.com/cameronsjo/forgectl/compare/v0.64.0...v0.65.0) (2026-11-19)
 
 
