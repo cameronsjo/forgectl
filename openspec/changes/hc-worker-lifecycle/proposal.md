@@ -15,8 +15,10 @@ The hc worker surface (forgectl#1384) left five follow-ups in forgectl#1386 abou
 - The worker ledger row records the resolved posture: each field, its value, and its source. `surface list --json` prints it as `posture`.
 - `surface launch --worktree --surface hc --herdr-space <id>` labels the worker's terminal `herdr.space=<id>`, which herdr-app reads to show it in that space. Without the flag the worker stays out of the window, as herdr-app's guide asks of background workers.
 - An hc brief waits until one second has passed since the worker's last typed brief before its checks and Escape. An Escape whose delivery is unknown holds that second before the refusal returns.
+- `surface launch --worktree --surface hc --parent <address>` passes `hc run --parent <address>`, so herdr-app lists the worker under that terminal instead of at the top level. Every hc call drops the launcher's `HC_TERMINAL_*`, so hc cannot infer the parent itself (forgectl#1455).
+- A claude worker launch passes `--name <worker name>`, so its session is titled by the worker name rather than its brief; `--dry-run` shows `session_name` and `parent` (forgectl#1455).
 
-Part of forgectl#1386.
+Part of forgectl#1386, and forgectl#1455.
 
 ## Capabilities
 
@@ -26,7 +28,8 @@ Part of forgectl#1386.
 
 ## Impact
 
-- New verb: `surface forget`. New flag: `surface launch --herdr-space`.
+- New verb: `surface forget`. New flags: `surface launch --herdr-space` and `surface launch --parent`.
 - Ledger: a new `posture` field on worker rows, without a version change. An older binary refuses a ledger holding it, as with earlier added fields; upgrade every forgectl on the machine together.
 - `surface list --json`: a new `posture` key (additive).
+- `surface launch --dry-run --json`: new `worker.session_name` and `worker.parent` keys (additive).
 - Docs: `docs/herdr.md`.

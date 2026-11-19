@@ -225,7 +225,11 @@ func TestStartNameTakenIsNotMutated(t *testing.T) {
 func TestStartMissingParentReconciles(t *testing.T) {
 	f := &fakeHC{coreID: "core1", terminals: map[string]string{},
 		createExit: 3, createErr: `{"error":{"kind":"not_found","message":"no terminal \"t999\""}}`}
-	a := newTestAdapter(t, f, "")
+	run := f.runner()
+	a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := a.NestUnder("t999"); err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +239,15 @@ func TestStartMissingParentReconciles(t *testing.T) {
 	}
 	if f.verbs[len(f.verbs)-1] != "ls" {
 		t.Errorf("verbs = %v, want a reconciling ls last", f.verbs)
+	}
+	var create exec.SensitiveCommand
+	for _, c := range run.Calls() {
+		if c.Kind == exec.KindHcCreate {
+			create = c
+		}
+	}
+	if match, _ := hasParent(create, "t999"); !match {
+		t.Error("hc run did not carry --parent t999")
 	}
 }
 

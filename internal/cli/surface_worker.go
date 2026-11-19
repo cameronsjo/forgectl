@@ -765,6 +765,8 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 // sessionNameArg is the value after --name in a harness argv, before the
 // prompt's `--`, or "". The preview reads it from the built argv, so it shows
 // what the launch would pass rather than a second copy of the rule that adds it.
+// It relies on --name being the only bare "--name" token before the prompt:
+// no other flag forgectl builds takes that literal as its value.
 func sessionNameArg(args []string) string {
 	for i := 0; i+1 < len(args) && args[i] != "--"; i++ {
 		if args[i] == "--name" {
