@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -165,7 +166,7 @@ func openSurfaceLedger(ctx context.Context, warn io.Writer, deps module.Deps, re
 		if !ok {
 			return nil, errors.New("forgectl: the hc adapter has an unexpected type")
 		}
-		led, top, err := openRepoLedger(ctx, deps, repo, hc.Session())
+		led, top, err := openRepoLedger(ctx, warn, deps, repo, hc.Session())
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +180,7 @@ func openSurfaceLedger(ctx context.Context, warn io.Writer, deps module.Deps, re
 	if !ok {
 		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
 	}
-	led, top, err := openRepoLedger(ctx, deps, repo, herdr.Session())
+	led, top, err := openRepoLedger(ctx, warn, deps, repo, herdr.Session())
 	if err != nil {
 		return nil, err
 	}
@@ -192,20 +193,59 @@ func openSurfaceLedger(ctx context.Context, warn io.Writer, deps module.Deps, re
 
 // openRepoLedger resolves repo to its top and opens that top's ledger for
 // session. Every failure is a usage or setup error (exit 2).
-func openRepoLedger(ctx context.Context, deps module.Deps, repo, session string) (*worker.Ledger, string, error) {
-	target, err := projects.New(deps.Runner).ResolveTarget(repo)
+//
+// A worker's own worktree path resolves to its repository's top while the
+// worktree exists (worker.RepoTop), so a caller that names workers by that
+// path keeps naming them by it after close removes the worktree. Such a path,
+// once it no longer exists, resolves to the top it names, with a note on warn;
+// without this, close and forget could never reach the row again
+// (forgectl#1456).
+func openRepoLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo, session string) (*worker.Ledger, string, error) {
+	resolver := projects.New(deps.Runner)
+	target, err := resolver.ResolveTarget(repo)
+	gone := ""
 	if err != nil {
-		return nil, "", WithExitCode(err, exitUsage)
+		var ok bool
+		if gone, ok = goneWorktreeRepo(repo); !ok {
+			return nil, "", WithExitCode(err, exitUsage)
+		}
+		if target, err = resolver.ResolveTarget(gone); err != nil {
+			return nil, "", WithExitCode(err, exitUsage)
+		}
 	}
 	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
 		return nil, "", WithExitCode(err, exitUsage)
+	}
+	if gone != "" {
+		if top != target {
+			// The directory above the missing worktree is not a repository's
+			// top, so the path was never a worker's worktree there.
+			return nil, "", WithExitCode(fmt.Errorf("%s does not exist, and %s is not a repository top; pass --repo with the repository's path",
+				termsafe.QuotePath(repo), termsafe.QuotePath(gone)), exitUsage)
+		}
+		_, _ = fmt.Fprintf(warn, "forgectl: note: %s no longer exists; using its repository %s\n", termsafe.QuotePath(repo), termsafe.QuotePath(top))
 	}
 	led, err := worker.Open(top, session)
 	if err != nil {
 		return nil, "", WithExitCode(err, exitUsage)
 	}
 	return led, top, nil
+}
+
+// goneWorktreeRepo returns the repository top a --repo value names when the
+// value is a worker worktree path (worker.WorktreePath) that does not exist.
+// Anything else, including a path that exists but did not resolve, is left
+// to the resolver's own error.
+func goneWorktreeRepo(repo string) (string, bool) {
+	top, ok := worker.TopOfWorktreePath(repo)
+	if !ok {
+		return "", false
+	}
+	if _, err := os.Lstat(repo); !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	return top, true
 }
 
 func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) error {

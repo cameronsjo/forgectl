@@ -54,6 +54,9 @@ func TestForgetWorker(t *testing.T) {
 		row       func() worker.Row
 		abandoned func() (string, error)
 		removeErr error
+		// worktree scripts the closed-row presence read; nil means forget
+		// must not ask it.
+		worktree  func() (worktreePresence, error)
 		forgotten bool
 		asked     bool
 		reason    string
@@ -69,7 +72,23 @@ func TestForgetWorker(t *testing.T) {
 		"row changed": {row: func() worker.Row { return hcRow }, abandoned: func() (string, error) { return "gone", nil }, removeErr: worker.ErrRowChanged,
 			asked: true, reason: "changed or went away"},
 		"no ref": {row: func() worker.Row { r := hcRow; r.Ref = nil; r.Stage = worker.StageFailed; return r }, reason: "records no terminal"},
-		"closed": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r }, reason: "earlier close"},
+		"closed, worktree kept": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r },
+			worktree: func() (worktreePresence, error) { return worktreePresence{listed: true, onDisk: true}, nil }, reason: "run surface close again"},
+		// forgectl#1456: close removed the worktree after it had marked the
+		// row closed, so only forget can clear it, and hc is not asked.
+		"closed, worktree gone": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r },
+			worktree: func() (worktreePresence, error) { return worktreePresence{}, nil }, forgotten: true, reason: "no longer exists"},
+		"closed, worktree gone, row changed": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r },
+			worktree: func() (worktreePresence, error) { return worktreePresence{}, nil }, removeErr: worker.ErrRowChanged, reason: "changed or went away"},
+		// The leftover forgectl#1456 hit: close keeps a path git does not
+		// list, so forget names it rather than sending the operator to close.
+		"closed, leftover directory": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r },
+			worktree: func() (worktreePresence, error) {
+				return worktreePresence{path: "/r/.claude/worktrees/w", onDisk: true}, nil
+			},
+			reason: "remove it by hand, then run forget again"},
+		"closed, git unreadable": {row: func() worker.Row { r := hcRow; r.Stage = worker.StageClosed; return r },
+			worktree: func() (worktreePresence, error) { return worktreePresence{}, errors.New("git worktree list: boom") }, reason: "git could not be read"},
 		"in flight": {row: func() worker.Row {
 			r := hcRow
 			r.Ref, r.Stage, r.StartedAt = nil, worker.StageWorktree, now.Add(-time.Minute)
@@ -93,13 +112,25 @@ func TestForgetWorker(t *testing.T) {
 					}
 					return tc.abandoned()
 				},
+				worktree: func(context.Context) (worktreePresence, error) {
+					if tc.worktree == nil {
+						t.Error("forget read the worktree for a row not at stage closed")
+						return worktreePresence{}, errors.New("unscripted")
+					}
+					return tc.worktree()
+				},
 				remove: func() error { removed = true; return tc.removeErr },
 			})
 			if res.Forgotten != tc.forgotten || asked != tc.asked || !strings.Contains(res.Reason, tc.reason) {
 				t.Fatalf("forgotten %v asked %v reason %q; want forgotten %v asked %v reason containing %q", res.Forgotten, asked, res.Reason, tc.forgotten, tc.asked, tc.reason)
 			}
-			if !tc.asked && removed {
-				t.Fatal("a row refused before hc was asked was removed")
+			// forget tries the removal exactly when it decided to drop the
+			// row: a forgotten row, or one whose removal was scripted to fail.
+			if wantRemove := tc.forgotten || tc.removeErr != nil; removed != wantRemove {
+				t.Fatalf("removal attempted %v, want %v", removed, wantRemove)
+			}
+			if res.Forgotten && tc.worktree != nil && res.Note != "" {
+				t.Errorf("a row forgotten because its worktree is gone carries the keep-the-worktree note %q", res.Note)
 			}
 			if tc.abandoned != nil {
 				if _, err := tc.abandoned(); err != nil && removed {
