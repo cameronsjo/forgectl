@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/claudeproject"
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
 // The fixture $HOME is built programmatically rather than checked in as
@@ -628,6 +629,23 @@ func TestFirstLine_ClipsByRune(t *testing.T) {
 	}
 	if got := firstLine("first line\nsecond line"); got != "first line" {
 		t.Errorf("firstLine = %q, want just the first line", got)
+	}
+}
+
+// TestWorkerTask_ShowsTheTask: a worker's launch prompt and typed brief show
+// the task in the picker, not forgectl's envelope or preamble
+// (forgectl#1466); any other prompt is untouched.
+func TestWorkerTask_ShowsTheTask(t *testing.T) {
+	launch := worker.Envelope("t1k", worker.KindLaunch, worker.Compose("Fix the login bug.", "00112233aabb", worker.ViaLaunch))
+	typed := worker.TypedBrief("Run the tests.", "00112233aabb", "t1k")
+	for name, c := range map[string]struct{ in, want string }{
+		"launch":   {launch, "Fix the login bug."},
+		"typed":    {typed, "Run the tests. When you finish"},
+		"operator": {"<forgectlx> is not ours", "<forgectlx> is not ours"},
+	} {
+		if got := firstLine(workerTask(c.in)); !strings.HasPrefix(got, c.want) {
+			t.Errorf("%s: picker line %q, want it to start %q", name, got, c.want)
+		}
 	}
 }
 

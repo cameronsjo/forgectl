@@ -27,6 +27,7 @@ func TestConcurrentHcBriefsSpaceTheirEscapes(t *testing.T) {
 	var escapes []time.Time
 	steps := func() hcBriefSteps {
 		return hcBriefSteps{
+			compose: func(text, marker string) string { return worker.TypedBrief(text, marker, "t1k") },
 			status: func(context.Context) (hcadapter.Worker, error) {
 				return hcadapter.Worker{Live: true, Status: "idle", Turn: 1}, nil
 			},
@@ -118,6 +119,7 @@ func TestCanceledBriefWaitKeepsTheHoldersLock(t *testing.T) {
 	var sends []string
 	steps := func(who string, block bool) hcBriefSteps {
 		return hcBriefSteps{
+			compose: func(text, marker string) string { return worker.TypedBrief(text, marker, "t1k") },
 			status: func(context.Context) (hcadapter.Worker, error) {
 				return hcadapter.Worker{Live: true, Status: "idle", Turn: 1}, nil
 			},

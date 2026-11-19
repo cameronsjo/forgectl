@@ -191,12 +191,12 @@ func TestFindReportCapsLength(t *testing.T) {
 // the scan.
 func TestComposeLaunchCarriesTheWorkerRules(t *testing.T) {
 	got := Compose("Fix the login bug.", testMarker, ViaLaunch)
-	for _, want := range []string{"never post the merge policy's review marker", "never approve a pull request", "never merge one", "never create, comment on or mark done a board task"} {
+	for _, want := range []string{"never post the merge policy's review marker", "Never approve a pull request", "never merge one", "never create, comment on or mark done a board task"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch brief lacks %q:\n%s", want, got)
 		}
 	}
-	instruction, ok := strings.CutPrefix(got, "Fix the login bug.\n\n"+WorkerRules+"\n\n")
+	instruction, ok := strings.CutPrefix(got, LaunchPreamble+"\n\nFix the login bug.\n\n"+WorkerRules+"\n\n")
 	if !ok || !strings.HasPrefix(instruction, "When you finish") {
 		t.Fatalf("launch brief shape:\n%s", got)
 	}

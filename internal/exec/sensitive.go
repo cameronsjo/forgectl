@@ -157,15 +157,17 @@ const (
 	// KindHc* drive herdr-core's `hc`: readiness is `hc server status`,
 	// create is `hc run --bg`, reconcile is the labeled `hc ls` after an
 	// ambiguous create, probe is `hc get`, read is `hc read`, send is
-	// `hc send`, and cleanup is `hc kill` and `hc rm`. Create carries the
-	// sealed cwd, name and bootstrap; read and send carry worker screen text
-	// and brief text, which is why none of them goes through Runner.
+	// `hc send`, keys is `hc keys` (the Escape before a brief, no text),
+	// and cleanup is `hc kill` and `hc rm`. Create carries the sealed cwd,
+	// name and bootstrap; read and send carry worker screen text and brief
+	// text, which is why none of them goes through Runner.
 	KindHcReadiness
 	KindHcCreate
 	KindHcReconcile
 	KindHcProbe
 	KindHcRead
 	KindHcSend
+	KindHcKeys
 	KindHcCleanup
 
 	// KindRex* drive Rex's `rex`: readiness is `rex whoami`, preflight is the
@@ -246,6 +248,7 @@ var kindNames = [kindCount]string{
 	KindHcProbe:     "hc.probe",
 	KindHcRead:      "hc.read",
 	KindHcSend:      "hc.send",
+	KindHcKeys:      "hc.keys",
 	KindHcCleanup:   "hc.cleanup",
 
 	KindRexReadiness: "rex.readiness",
@@ -487,6 +490,7 @@ const (
 	envOpReplace             = validated.EnvOpReplace
 	envOpUnset               = validated.EnvOpUnset
 	envOpUnsetSessionHandles = validated.EnvOpUnsetSessionHandles
+	envOpKeepHcSender        = validated.EnvOpUnsetSessionHandlesKeepHcSender
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -544,6 +548,31 @@ func UnsetTmux() EnvMutation {
 // against its captured environment.
 func UnsetLauncherSessionHandles() EnvMutation {
 	return EnvMutation{op: envOpUnsetSessionHandles}
+}
+
+// hcSenderKeys are the two handles hc names a sender by: the terminal's
+// address and its per-terminal token (both set by hc in every terminal it
+// starts, measured on hc 0.1.15).
+var hcSenderKeys = []string{"HC_TERMINAL_ID", "HC_SCOPE"}
+
+// IsHcSenderKey reports whether key is one of hcSenderKeys.
+func IsHcSenderKey(key string) bool { return slices.Contains(hcSenderKeys, key) }
+
+// UnsetLauncherSessionHandlesKeepHcSender is UnsetLauncherSessionHandles that
+// keeps hcSenderKeys, for an `hc send` that carries text: with them hc can wrap
+// the text in its own tag naming the sending terminal
+// (<hc from="t1k">…</hc>); without them it treats the text as a person's
+// (forgectl#1466). forgectl does not rely on that tag for a brief. The plain form exists for an hc core that a call
+// might start and that would hand the launcher's handles on. Here every other
+// handle is still dropped, and hc sets both kept keys in each terminal it
+// starts (measured on hc 0.1.15), so a terminal of a core started here gets
+// its own. Not measured: a terminal-less program such a core runs. Both text
+// sends read hc with the plain form first, so a core is already running
+// unless it exits between that read and the send. SensitiveCommand.validated
+// refuses this op on any kind but KindHcSend, so run, server, keys
+// (KindHcKeys) and the rest keep the plain form.
+func UnsetLauncherSessionHandlesKeepHcSender() EnvMutation {
+	return EnvMutation{op: envOpKeepHcSender}
 }
 
 // paneIdentityEnvByBackend lists, per terminal manager, the variables that
@@ -851,6 +880,11 @@ func (c SensitiveCommand) validated() (validated.Command, error) {
 	}
 	env := make([]validated.Env, len(c.Env))
 	for i, m := range c.Env {
+		// Keeping hc's sender keys is for an hc send only: a call that can
+		// start something (run, server) must drop them with the rest.
+		if m.op == envOpKeepHcSender && c.Kind != KindHcSend {
+			return validated.Command{}, errors.New("keeping hc's sender keys is permitted only on an hc send")
+		}
 		env[i] = m.toValidated()
 	}
 	cmd, err := validated.New(c.Path.v, args, env, c.Kind == KindSopsEdit)

@@ -17,7 +17,7 @@ operated.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
 - **[`prompts.md`](prompts.md)** — how a cancelled picker or confirm ends: the line it prints and exit code 130.
-- **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, why ids move, worker readiness for `surface ready`, how `surface brief`, `wait` and `read --report` work, and how `surface list` and `close` decide.
+- **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, why ids move, worker readiness for `surface ready`, how `surface brief`, `wait` and `read --report` work, the envelope forgectl wraps worker text in, and how `surface list` and `close` decide.
 - **[`hosts.md`](hosts.md)** — which features work on tmux, cmux, herdr 0.9, herdr-core, herdr-app and Rex, with the version each result was measured on; blank means unverified.
 - **[`artificer-adaptations.md`](artificer-adaptations.md)** — where this repo
   bends the vendored Artificer design system, and why; each entry names the

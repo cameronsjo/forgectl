@@ -276,7 +276,10 @@ func vimModeShown(text string) bool {
 // hcBriefSteps is sendBriefHC's I/O, injected so each outcome is testable
 // without hc.
 type hcBriefSteps struct {
-	status func(context.Context) (hcadapter.Worker, error)
+	// compose builds the line sent for a brief (worker.BriefLine): always in
+	// forgectl's envelope; hc may add its own tag around it.
+	compose func(text, marker string) string
+	status  func(context.Context) (hcadapter.Worker, error)
 	// screen reads the worker's screen text, and promptShown judges it with
 	// the harness's prompt and dialog predicates (ready.Table.EvaluateText).
 	screen      func(context.Context) (string, error)
@@ -402,7 +405,7 @@ func sendBriefHC(ctx context.Context, s hcBriefSteps, text, marker string) brief
 		return refuse("record", "the brief could not be recorded in the worker ledger, so its text was not sent (the Escape before it was): "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
-	sent, err := s.send(ctx, worker.Compose(text, marker, worker.ViaTyped), before)
+	sent, err := s.send(ctx, s.compose(text, marker), before)
 	switch {
 	case errors.Is(err, hcadapter.ErrSendRefused):
 		return refuse("send", "hc refused the send and typed nothing; the brief is recorded in the ledger: "+

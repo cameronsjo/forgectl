@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,8 +108,9 @@ refusal reports refused; any other send failure reports unconfirmed.
 Each brief gets a new random marker and asks the worker to end its final
 message with a REPORT line naming it; read it with surface read --report.
 
-A typed brief is one line of at most 600 characters with the report
-instruction: Claude Code turns longer typed text into a paste placeholder,
+A typed brief is one line. Its own text may be at most ` + strconv.Itoa(worker.TypedBriefRoom()) + ` characters:
+forgectl adds the report instruction and its envelope to fit the ` + strconv.Itoa(worker.MaxTypedBrief) + `
+characters Claude Code types literally (longer becomes a paste placeholder),
 and a newline would be Enter. Put a long brief in a file in the worktree and
 brief the worker to read it. @file reads the brief from a file. A typed brief
 may not start with - / ! # ? @ or &, which herdr reads as an option or the
@@ -181,10 +183,11 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
 				return w.hc.SendBrief(ctx, w.ref, s, checked)
 			},
-			record: w.recordBrief,
-			now:    time.Now,
-			sleep:  resume.SleepContext,
-			start:  opts.Start,
+			record:  w.recordBrief,
+			now:     time.Now,
+			sleep:   resume.SleepContext,
+			start:   opts.Start,
+			compose: briefComposer(),
 			// --readback-timeout has no step under hc: hc's send pastes and
 			// submits in one call.
 			interval: briefPollInterval,
@@ -200,6 +203,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
+		compose:  briefComposer(),
 		readback: opts.Readback,
 		start:    opts.Start,
 		interval: briefPollInterval,
@@ -211,6 +215,8 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 // briefSteps is the send, with its I/O and clock injected so each refusal
 // can be tested without herdr.
 type briefSteps struct {
+	// compose builds the line typed for a brief (worker.BriefLine).
+	compose  func(text, marker string) string
 	read     func(context.Context) (ready.Screen, error)
 	evaluate func(ready.Screen) ready.Verdict
 	typeText func(context.Context, string) error
@@ -247,7 +253,7 @@ func sendBrief(ctx context.Context, s briefSteps, text, marker string) briefResu
 		return refuse("check", "the worker's input box already holds text; clear it in the worker's pane first", v)
 	}
 
-	composed := worker.Compose(text, marker, worker.ViaTyped)
+	composed := s.compose(text, marker)
 	if err := s.typeText(ctx, composed); err != nil {
 		return refuse("type", "typing the brief failed, so part of it may sit unsent in the input box: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
@@ -344,6 +350,17 @@ func reportBrief(cmd *cobra.Command, r briefResult, asJSON bool) error {
 	}
 	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }
+
+// briefComposer is the line a brief types or sends on either surface:
+// worker.BriefLine over forgectl's own environment.
+func briefComposer() func(text, marker string) string {
+	return func(text, marker string) string { return worker.BriefLine(text, marker, briefGetenv) }
+}
+
+// briefGetenv reads the environment that names forgectl's own terminal for
+// a brief's envelope (worker.Sender); a variable so tests can
+// pin it whichever terminal runs them.
+var briefGetenv = os.Getenv
 
 // readBriefArg returns arg, or the contents of the file it names after '@'.
 // The file must be a regular file of at most worker.MaxLaunchBrief bytes;

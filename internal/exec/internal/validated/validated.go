@@ -61,6 +61,10 @@ const (
 	// EnvOpUnsetSessionHandles names no key and carries no value: the runner
 	// drops every inherited key that names the launching session's handles.
 	EnvOpUnsetSessionHandles
+	// EnvOpUnsetSessionHandlesKeepHcSender is EnvOpUnsetSessionHandles that
+	// keeps the two keys hc names a sender by (HC_TERMINAL_ID, HC_SCOPE), for
+	// an hc send whose text hc should wrap in its own envelope.
+	EnvOpUnsetSessionHandlesKeepHcSender
 )
 
 // KeySopsTmpdir is the one key New restricts by command: it is permitted only
@@ -153,7 +157,7 @@ func (m Env) valid() bool {
 		return m.Key != "" && m.Value.Present()
 	case EnvOpUnset:
 		return m.Key != "" && !m.Value.Set()
-	case EnvOpUnsetSessionHandles:
+	case EnvOpUnsetSessionHandles, EnvOpUnsetSessionHandlesKeepHcSender:
 		return m.Key == "" && !m.Value.Set()
 	default:
 		return false

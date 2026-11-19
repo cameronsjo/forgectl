@@ -619,6 +619,9 @@ func TestPressEscapeSendsOneEsc(t *testing.T) {
 	if !last.Args[0].Equal(exec.MustFixed("keys")) || !last.Args[n-2].Equal(exec.Opaque("t1")) || !last.Args[n-1].Equal(exec.MustFixed("esc")) {
 		t.Fatal("PressEscape did not run hc keys <t1> esc")
 	}
+	if last.Kind != exec.KindHcKeys {
+		t.Fatalf("PressEscape ran as kind %v, want KindHcKeys, so the keep-sender form stays bound to hc send alone", last.Kind)
+	}
 	delete(f.terminals, "t1")
 	if err := a.PressEscape(context.Background(), ref, checked); !errors.Is(err, ErrSendRefused) {
 		t.Fatalf("Escape to a gone worker: %v, want ErrSendRefused", err)
@@ -678,11 +681,22 @@ func TestEveryHcCallDropsTheLauncherHandles(t *testing.T) {
 	if len(calls) < 6 {
 		t.Fatalf("only %d hc calls recorded", len(calls))
 	}
-	want := exec.UnsetLauncherSessionHandles()
+	// The one send that carries text keeps hc's sender keys, so hc wraps it
+	// in its own envelope (forgectl#1466); every other call drops them too.
+	plain, text := exec.UnsetLauncherSessionHandles(), exec.UnsetLauncherSessionHandlesKeepHcSender()
+	sends := 0
 	for i, c := range calls {
-		if len(c.Env) != 1 || !c.Env[0].Equal(want) {
-			t.Errorf("hc call %d (%s) does not drop the launcher's session handles", i, f.verbs[i])
+		want := plain
+		if f.verbs[i] == "send" {
+			want = text
+			sends++
 		}
+		if len(c.Env) != 1 || !c.Env[0].Equal(want) {
+			t.Errorf("hc call %d (%s) does not drop the launcher's session handles as its kind should", i, f.verbs[i])
+		}
+	}
+	if sends != 1 {
+		t.Errorf("%d text sends recorded, want 1", sends)
 	}
 }
 
