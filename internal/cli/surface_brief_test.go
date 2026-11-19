@@ -102,7 +102,7 @@ func (p *fakePane) steps() briefSteps {
 		},
 		now:      func() time.Time { return now },
 		sleep:    func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil },
-		from:     "w1-p2",
+		compose:  func(text, marker string) string { return worker.TypedBrief(text, marker, "w1-p2") },
 		readback: 3 * time.Second,
 		start:    5 * time.Second,
 		interval: 200 * time.Millisecond,

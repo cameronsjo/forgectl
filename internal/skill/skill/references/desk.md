@@ -59,7 +59,7 @@ forgectl desk ask --title "Approve the new deploy key" --steps-file ./steps.md \
 - `--bucket`: `now` (unblocks waiting work), `soon` (10 minutes), `optional`, `coming`.
 - Steps are markdown, written for a person on a phone: numbered, exact names to click, what "done" looks like.
 - `--allow` narrows the responses (`done,reply,link,snooze`); allow `reply` or `link` when you need something back.
-- `--notify self` types the answer into your own hc terminal as one `DESK-RESPONSE` line when you are at your prompt. It cannot name another terminal. Outside hc, leave it off.
+- `--notify self` types the answer into your own hc terminal as one `DESK-RESPONSE` line when you are at your prompt, inside hc's `<hc from="…">` envelope when the answer was recorded from an hc terminal, bare otherwise. It cannot name another terminal. Outside hc, leave it off.
 
 `ask` prints `id=` and a `watch=` line. Arm the Monitor tool on the watch line; it exits 0 once the ask is answered, with each response as a JSON line, and 75 with a `resume=` line on its deadline, like a run watch.
 

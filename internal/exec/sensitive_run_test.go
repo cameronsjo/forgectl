@@ -1023,9 +1023,23 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 	return g.r.Read(p)
 }
 
-// TestRunSensitive_UnsetLauncherSessionHandles: the launching session's
-// handles never reach the child, and the variables that select a core or a
-// home stay byte-exact.
+// TestKeepHcSenderOnlyOnAnHcSend: the keep-sender op is refused on any kind
+// but the hc send, so a call that can start a core never keeps the keys.
+//
+// Mutation that turns it red: drop the kind check in
+// SensitiveCommand.validated.
+func TestKeepHcSenderOnlyOnAnHcSend(t *testing.T) {
+	for _, k := range []CommandKind{KindHcReadiness, KindCmuxProbe} {
+		sc := helperCommand(k, "/bin/true", 4096, UnsetLauncherSessionHandlesKeepHcSender())
+		if _, err := sc.validated(); err == nil {
+			t.Errorf("kind %v took the keep-sender op", k)
+		}
+	}
+	if _, err := helperCommand(KindHcSend, "/bin/true", 4096, UnsetLauncherSessionHandlesKeepHcSender()).validated(); err != nil {
+		t.Fatalf("an hc send refused the keep-sender op: %v", err)
+	}
+}
+
 // TestRunSensitive_KeepHcSender pins the text-send form (forgectl#1466): the
 // two keys hc names a sender by reach the child, so hc can wrap the text in
 // its own envelope, and every other launcher handle is still dropped,
@@ -1063,6 +1077,9 @@ func TestRunSensitive_KeepHcSender(t *testing.T) {
 	}
 }
 
+// TestRunSensitive_UnsetLauncherSessionHandles: the launching session's
+// handles never reach the child, and the variables that select a core or a
+// home stay byte-exact.
 func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
 	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID", "HC_SCOPE",
 		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",

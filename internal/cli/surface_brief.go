@@ -185,8 +185,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			now:     time.Now,
 			sleep:   resume.SleepContext,
 			start:   opts.Start,
-			from:    worker.Sender(briefGetenv),
-			hcWraps: worker.HcWraps(briefGetenv),
+			compose: briefComposer(true),
 			// --readback-timeout has no step under hc: hc's send pastes and
 			// submits in one call.
 			interval: briefPollInterval,
@@ -202,7 +201,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
-		from:     worker.Sender(briefGetenv),
+		compose:  briefComposer(false),
 		readback: opts.Readback,
 		start:    opts.Start,
 		interval: briefPollInterval,
@@ -214,8 +213,8 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 // briefSteps is the send, with its I/O and clock injected so each refusal
 // can be tested without herdr.
 type briefSteps struct {
-	// from names the sender in the brief's envelope (worker.Sender).
-	from     string
+	// compose builds the line typed for a brief (worker.BriefLine).
+	compose  func(text, marker string) string
 	read     func(context.Context) (ready.Screen, error)
 	evaluate func(ready.Screen) ready.Verdict
 	typeText func(context.Context, string) error
@@ -252,7 +251,7 @@ func sendBrief(ctx context.Context, s briefSteps, text, marker string) briefResu
 		return refuse("check", "the worker's input box already holds text; clear it in the worker's pane first", v)
 	}
 
-	composed := worker.TypedBrief(text, marker, s.from)
+	composed := s.compose(text, marker)
 	if err := s.typeText(ctx, composed); err != nil {
 		return refuse("type", "typing the brief failed, so part of it may sit unsent in the input box: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
@@ -348,6 +347,12 @@ func reportBrief(cmd *cobra.Command, r briefResult, asJSON bool) error {
 		return err
 	}
 	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
+}
+
+// briefComposer is the line a brief types or sends: worker.BriefLine over
+// forgectl's own environment, with viaHc for the hc surface.
+func briefComposer(viaHc bool) func(text, marker string) string {
+	return func(text, marker string) string { return worker.BriefLine(text, marker, viaHc, briefGetenv) }
 }
 
 // briefGetenv reads the environment that names forgectl's own terminal for

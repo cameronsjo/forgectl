@@ -559,11 +559,15 @@ func IsHcSenderKey(key string) bool { return slices.Contains(hcSenderKeys, key) 
 // keeps hcSenderKeys, for an `hc send` that carries text: with them hc wraps
 // the text in its own envelope naming the sending terminal
 // (<hc from="t1k">…</hc>), and without them it delivers the text bare, as a
-// person's (forgectl#1466). It is safe where the plain form is needed for an
-// hc core that the call might start and that would hand the launcher's
-// handles on: every other handle is still dropped, and hc sets both kept keys
-// afresh in each terminal it starts, so a core started here passes neither
-// on. Calls that start something (run, server) keep the plain form.
+// person's (forgectl#1466). The plain form exists for an hc core that a call
+// might start and that would hand the launcher's handles on. Here every other
+// handle is still dropped, and hc sets both kept keys in each terminal it
+// starts (measured on hc 0.1.15), so a terminal of a core started here gets
+// its own. Not measured: a terminal-less program such a core runs. Both text
+// sends read hc with the plain form first, so a core is already running
+// unless it exits between that read and the send. SensitiveCommand.validated
+// refuses this op on any kind but KindHcSend, so run, server and the rest
+// keep the plain form.
 func UnsetLauncherSessionHandlesKeepHcSender() EnvMutation {
 	return EnvMutation{op: envOpKeepHcSender}
 }
@@ -873,6 +877,11 @@ func (c SensitiveCommand) validated() (validated.Command, error) {
 	}
 	env := make([]validated.Env, len(c.Env))
 	for i, m := range c.Env {
+		// Keeping hc's sender keys is for an hc send only: a call that can
+		// start something (run, server) must drop them with the rest.
+		if m.op == envOpKeepHcSender && c.Kind != KindHcSend {
+			return validated.Command{}, errors.New("keeping hc's sender keys is permitted only on an hc send")
+		}
 		env[i] = m.toValidated()
 	}
 	cmd, err := validated.New(c.Path.v, args, env, c.Kind == KindSopsEdit)

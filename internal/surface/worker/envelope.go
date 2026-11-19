@@ -3,6 +3,8 @@ package worker
 import (
 	"regexp"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // forgectl wraps all conversation text it puts into an agent session in an
@@ -61,32 +63,50 @@ func Sender(getenv func(string) string) string {
 	return DefaultSender
 }
 
-// HcWraps reports whether `hc send` run by this process wraps what it
-// delivers in hc's own envelope, so forgectl must not add its own. hc names
-// the sending terminal in that envelope (<hc from="t1k">), which it can do
-// only when the sender runs in an hc terminal; forgectl keeps that
-// terminal's id for its text sends
-// (exec.UnsetLauncherSessionHandlesKeepHcSender). Run from a plain shell,
-// hc delivers the text bare, and forgectl wraps it instead.
+// hcScopeEnv is hc's per-terminal token, which hc reads beside
+// HC_TERMINAL_ID to name the sender.
+const hcScopeEnv = "HC_SCOPE"
+
+// HcWraps reports whether `hc send` run by this process should wrap what it
+// delivers in hc's own envelope, so forgectl adds none. hc names the sending
+// terminal in that envelope (<hc from="t1k">), which it can do only when the
+// sender runs in an hc terminal; forgectl keeps that terminal's id and scope
+// for its text sends (exec.UnsetLauncherSessionHandlesKeepHcSender). Both
+// must be present and the id well formed: with either missing, hc would
+// deliver the text bare, so forgectl wraps it instead.
+//
+// debt: decided from forgectl's environment, not from what hc delivered; an
+// id hc does not know on the selected core (a terminal on another core)
+// could still arrive bare. Upgrade to nesting forgectl's envelope inside
+// hc's, or to reading hc's reply, if that is ever seen.
 func HcWraps(getenv func(string) string) bool {
-	return getenv(HcSenderEnv) != ""
+	id := getenv(HcSenderEnv)
+	return id != "" && len(id) <= maxSenderLen && senderShape.MatchString(id) && getenv(hcScopeEnv) != ""
 }
 
 // hcElement is hc's envelope element. A body forgectl hands to hc to wrap
 // must not close hc's envelope either.
 const hcElement = "hc"
 
-// envelopeTagLike matches anything in a body that could read as an opening
-// or closing tag of forgectl's element or hc's: any case, spaces after the
-// angle bracket or the slash, and the fullwidth and small-form angle
-// brackets. The word boundary keeps <html> and the like.
-var envelopeTagLike = regexp.MustCompile(`(?i)[<＜﹤]\s*/?\s*(?:` + EnvelopeElement + `|` + hcElement + `)\b`)
+// envelopeTagLike matches anything in an NFKC-folded body that could read as
+// an opening or closing tag of forgectl's element or hc's: any case, any
+// space after the bracket or the slash, and the angle-bracket look-alikes
+// NFKC leaves alone. NFKC has already turned fullwidth letters, brackets and
+// slashes, and the compatibility spaces, into ASCII. The word boundary keeps
+// <html> and the like.
+var envelopeTagLike = regexp.MustCompile(`(?i)[<〈‹˂⟨]` + `[\s\p{Zs}]*[/⁄∕]?[\s\p{Zs}]*(?:` + EnvelopeElement + `|` + hcElement + `)\b`)
 
 // neutralizeEnvelope rewrites each tag-like run of body so it cannot close an
-// envelope early or open a forged one: the angle bracket becomes "&lt;", which
-// no reader takes for a tag.
+// envelope early or open a forged one: the bracket becomes "&lt;", which no
+// reader takes for a tag. A body with a tag-like run in its NFKC fold is
+// folded first, as mail.CleanBody folds a message, so a fullwidth or
+// spaced spelling is caught; a body with none is left byte for byte.
 func neutralizeEnvelope(body string) string {
-	return envelopeTagLike.ReplaceAllStringFunc(body, func(m string) string {
+	folded := norm.NFKC.String(body)
+	if !envelopeTagLike.MatchString(folded) {
+		return body
+	}
+	return envelopeTagLike.ReplaceAllStringFunc(folded, func(m string) string {
 		_, size := utf8.DecodeRuneInString(m)
 		return "&lt;" + m[size:]
 	})
@@ -112,6 +132,18 @@ func Envelope(from, kind, body string) string {
 // text with its report instruction (Compose), in forgectl's envelope.
 func TypedBrief(text, marker, from string) string {
 	return Envelope(from, KindBrief, Compose(text, marker, ViaTyped))
+}
+
+// BriefLine is the line forgectl types or sends for a brief, decided from
+// the environment getenv reads: over hc from an hc terminal (viaHc and
+// HcWraps), the text for hc to wrap; everywhere else, forgectl's envelope
+// naming Sender. Every typed-brief path calls it, so the decision has one
+// home.
+func BriefLine(text, marker string, viaHc bool, getenv func(string) string) string {
+	if viaHc && HcWraps(getenv) {
+		return HcTypedBrief(text, marker)
+	}
+	return TypedBrief(text, marker, Sender(getenv))
 }
 
 // HcTypedBrief is the line forgectl hands `hc send` when hc wraps it in its

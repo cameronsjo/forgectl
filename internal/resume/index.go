@@ -36,6 +36,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/claudeproject"
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -363,12 +364,12 @@ func scanHistory(path string) (map[string]*Session, error) {
 		if !ok {
 			byID[rec.SessionID] = &Session{
 				ID: rec.SessionID, Cwd: rec.Project,
-				LastPrompt: firstLine(rec.Display), LastActive: ts,
+				LastPrompt: firstLine(workerTask(rec.Display)), LastActive: ts,
 			}
 			return false
 		}
 		if ts.After(s.LastActive) {
-			s.LastActive, s.LastPrompt = ts, firstLine(rec.Display)
+			s.LastActive, s.LastPrompt = ts, firstLine(workerTask(rec.Display))
 			if rec.Project != "" {
 				s.Cwd = rec.Project
 			}
@@ -397,6 +398,26 @@ const promptWidth = 90
 // The clip is by RUNE, not byte. A byte slice through a multi-byte character
 // leaves invalid UTF-8, which json.Marshal then silently rewrites to U+FFFD —
 // a mangled prompt in --json output with nothing to indicate why.
+// workerTask drops what forgectl puts before a worker's own text in a
+// prompt (forgectl#1466): the envelope's opening tag, and in a launch prompt
+// the line it sits on and the fixed preamble after it, so the picker shows
+// the task rather than the same opening for every worker. Any other prompt
+// is returned as it is.
+func workerTask(s string) string {
+	rest, ok := strings.CutPrefix(s, "<"+worker.EnvelopeElement+" ")
+	if !ok {
+		return s
+	}
+	_, rest, ok = strings.Cut(rest, ">")
+	if !ok {
+		return s
+	}
+	if after, ok := strings.CutPrefix(rest, "\n"); ok {
+		rest = strings.TrimPrefix(after, worker.LaunchPreamble+"\n\n")
+	}
+	return rest
+}
+
 func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]

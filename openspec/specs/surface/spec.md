@@ -42,7 +42,7 @@ A worker MUST inherit only an allowlisted environment (such as `PATH`, `HOME`, `
 - **THEN** the worker's environment does not contain it
 
 ### Requirement: Launch brief
-`--brief <text|@file>` (worktree only, files at most 64 KiB) SHALL pass the first brief as the harness's prompt argument after `--`, so nothing is typed into the pane, inside forgectl's launch envelope with the provenance note. Each brief MUST get a random marker recorded in the ledger before sending, and ask the worker to end with a `REPORT <marker>:` line. A pi launch MUST refuse a brief starting with `@`.
+`--brief <text|@file>` (worktree only, files at most 64 KiB) SHALL pass the first brief as the harness's prompt argument after `--`, so nothing is typed into the pane, inside forgectl's launch envelope with the provenance note. Each brief MUST get a random marker recorded in the ledger before sending, and ask the worker to end with a `REPORT <marker>:` line. The prompt a pi launch receives MUST NOT start with `@`.
 
 #### Scenario: Brief recorded before start
 - **WHEN** a worker launches with `--brief @task.md`
