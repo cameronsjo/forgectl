@@ -13,7 +13,8 @@ import (
 //
 // The bootstrap is the one operand after `--`; hc runs a single string under
 // `sh -c` (measured on 0.1.15). `--outlive-parent` keeps the worker running
-// when the launcher's own terminal ends. The create reply has no creation
+// when the launcher's own terminal ends, and `--parent` (NestUnder) nests it
+// under that terminal. The create reply has no creation
 // time, so a follow-up `hc get` reads it, and checks the label at the same
 // time.
 func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.StartResult {
@@ -45,6 +46,12 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	}
 	if a.space != "" {
 		args = append(args, exec.MustFixed("--label"), exec.Opaque(spaceLabel+"="+a.space))
+	}
+	if a.parent != "" {
+		// Measured on hc 0.1.21: with --outlive-parent the child is listed
+		// under its parent (herdr-app ls sub_agents) and die_with_parent
+		// stays false.
+		args = append(args, exec.MustFixed("--parent"), exec.Opaque(a.parent))
 	}
 	args = append(args, exec.EndOfOptions(), spec.Bootstrap().SensitiveArg())
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcCreate, args...))

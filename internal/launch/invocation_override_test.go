@@ -461,6 +461,54 @@ func TestBuildInvocation_WorkerSessionID(t *testing.T) {
 	}
 }
 
+// TestBuildInvocation_WorkerSessionName is forgectl#1455: a claude worker is
+// started with --name <worker name> before the prompt's `--`, so its session
+// is titled by the worker name rather than the brief. A codex worker and an
+// ordinary launch get no --name, and a name outside the worker grammar is
+// refused.
+func TestBuildInvocation_WorkerSessionName(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	claude := config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}
+	codex := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "on-request"}}
+	const name = "cos-review-a"
+
+	built, err := BuildInvocation(InvocationRequest{
+		StdoutTerminal: true, Config: claude, CWD: target, Worker: true, Resolve: bin, Prompt: "Fix it.", SessionName: name,
+	})
+	if err != nil {
+		t.Fatalf("BuildInvocation: %v", err)
+	}
+	args := built.Invocation.Args
+	i := slices.Index(args, "--name")
+	if i < 0 || i+1 >= len(args) || args[i+1] != name || i > slices.Index(args, "--") {
+		t.Fatalf("argv %q, want --name %s before the prompt's --", args, name)
+	}
+
+	for label, req := range map[string]InvocationRequest{
+		"not a worker":   {StdoutTerminal: true, Config: claude, CWD: target, Resolve: bin, SessionName: name},
+		"a codex worker": {StdoutTerminal: true, Config: codex, CWD: target, Worker: true, Resolve: bin, SessionName: name},
+	} {
+		t.Run("no --name for "+label, func(t *testing.T) {
+			b, err := BuildInvocation(req)
+			if err != nil {
+				t.Fatalf("BuildInvocation: %v", err)
+			}
+			if slices.Contains(b.Invocation.Args, "--name") || slices.Contains(b.Invocation.Args, name) {
+				t.Fatalf("argv %q carries the session name", b.Invocation.Args)
+			}
+		})
+	}
+	for _, bad := range []string{"-p", "--permission-mode", "Upper", "a b", "x;y", strings.Repeat("a", 49)} {
+		t.Run("refuses "+bad, func(t *testing.T) {
+			_, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, Config: claude, CWD: target, Worker: true, Resolve: bin, SessionName: bad})
+			if err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
 // TestWorkerClaudeSettingsJSON pins the worker settings as data: both parse,
 // turn off auto mode during plan, and deny exactly `forgectl tasks done`
 // (ADR-0010, 2026-10-20 amendment); only the acceptEdits settings pre-approve

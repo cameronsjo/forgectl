@@ -199,6 +199,7 @@ forgectl surface launch . --surface tmux --here      # start claude in the targe
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 forgectl surface launch . --surface herdr --worktree feat/x --name x --brief @brief.md   # first brief as the harness's prompt argument, nothing typed
 forgectl surface launch . --surface hc --worktree feat/x --name x --brief @brief.md      # the same worker in a herdr-core (hc) terminal; pass --surface hc to list/read/ready/wait/brief/close/forget
+forgectl surface launch . --surface hc --worktree feat/x --name x --parent "$HC_TERMINAL_ID"   # nest the hc worker under your own terminal in herdr-app (it still outlives it)
 forgectl surface ready x --json    # wait until worker x is at its input prompt; exit 1 naming any blocking dialog (never answers one)
 forgectl surface brief x "Now run the tests."   # type a one-line follow-up, read it back, then Enter; exit 1 if anything disagrees
 forgectl surface wait x --json     # wait until worker x's turn settles at its prompt

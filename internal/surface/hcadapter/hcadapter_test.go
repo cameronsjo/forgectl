@@ -218,6 +218,26 @@ func TestStartNameTakenIsNotMutated(t *testing.T) {
 	}
 }
 
+// A --parent hc has no terminal for is refused with not_found (measured on
+// hc 0.1.21, nothing created). One measured cause is not proof every
+// not_found leaves nothing behind, so Start reconciles it like any other
+// failure, and an empty listing reports not-mutated.
+func TestStartMissingParentReconciles(t *testing.T) {
+	f := &fakeHC{coreID: "core1", terminals: map[string]string{},
+		createExit: 3, createErr: `{"error":{"kind":"not_found","message":"no terminal \"t999\""}}`}
+	a := newTestAdapter(t, f, "")
+	if err := a.NestUnder("t999"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.Start(context.Background(), testSpec(t))
+	if res.Outcome() != backend.NotMutated {
+		t.Fatalf("Start = %v, want not-mutated", res)
+	}
+	if f.verbs[len(f.verbs)-1] != "ls" {
+		t.Errorf("verbs = %v, want a reconciling ls last", f.verbs)
+	}
+}
+
 func TestStartAmbiguousFailureReconciles(t *testing.T) {
 	f := &fakeHC{coreID: "core1", terminals: map[string]string{},
 		createExit: 1, createErr: `{"error":{"kind":"internal","message":"?"}}`}
@@ -765,6 +785,76 @@ func hasLabel(cmd exec.SensitiveCommand, want string) bool {
 		}
 	}
 	return false
+}
+
+// hasParent reports whether cmd carries --parent <want>, and whether it
+// carries --parent at all.
+func hasParent(cmd exec.SensitiveCommand, want string) (match, present bool) {
+	for i := 0; i < len(cmd.Args); i++ {
+		if !cmd.Args[i].Equal(exec.MustFixed("--parent")) {
+			continue
+		}
+		present = true
+		if i+1 < len(cmd.Args) && cmd.Args[i+1].Equal(exec.Opaque(want)) {
+			match = true
+		}
+	}
+	return match, present
+}
+
+// TestNestUnderPassesTheParent is forgectl#1455: forgectl drops the
+// launcher's HC_TERMINAL_* from every hc call, so hc cannot infer a parent and
+// a worker sits at the top level of herdr-app. A launch asked to nest passes
+// --parent <addr> to hc run and still passes --outlive-parent; one not asked
+// passes no --parent.
+func TestNestUnderPassesTheParent(t *testing.T) {
+	const parent = "t11n"
+	for _, nest := range []bool{true, false} {
+		f := &fakeHC{coreID: "core1", terminals: map[string]string{}}
+		run := f.runner()
+		a, err := New(run, "/usr/local/bin/hc", func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nest {
+			if err := a.NestUnder(parent); err != nil {
+				t.Fatal(err)
+			}
+		}
+		startWorker(t, f, a)
+		var create exec.SensitiveCommand
+		for _, c := range run.Calls() {
+			if c.Kind == exec.KindHcCreate {
+				create = c
+			}
+		}
+		if create.Kind != exec.KindHcCreate {
+			t.Fatal("hc run was not recorded")
+		}
+		match, present := hasParent(create, parent)
+		if match != nest || present != nest {
+			t.Errorf("nest=%v: hc run --parent %s = %v (any --parent: %v)", nest, parent, match, present)
+		}
+		if !slices.ContainsFunc(create.Args, func(a exec.Arg) bool { return a.Equal(exec.MustFixed("--outlive-parent")) }) {
+			t.Errorf("nest=%v: hc run lost --outlive-parent", nest)
+		}
+	}
+}
+
+// TestNestUnderRefusesAnythingButALocalAddress keeps a name, a remote
+// address, and flag-shaped text out of hc run's argv.
+func TestNestUnderRefusesAnythingButALocalAddress(t *testing.T) {
+	a := newTestAdapter(t, &fakeHC{coreID: "core1", terminals: map[string]string{}}, "")
+	for _, ok := range []string{"t7", "t11n", "t1r", "t0"} {
+		if err := a.NestUnder(ok); err != nil {
+			t.Errorf("NestUnder(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "t", "tx", "T7", "t7 ", "orchestrator", "m5/t7", "--no-parent", "-t7", "t7;rm", strings.Repeat("t1", 9)} {
+		if err := a.NestUnder(bad); !errors.Is(err, ErrBadParent) {
+			t.Errorf("NestUnder(%q) = %v, want ErrBadParent", bad, err)
+		}
+	}
 }
 
 // TestShowInSpaceLabelsTheTerminal is forgectl#1386: herdr-app shows an hc

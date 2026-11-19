@@ -104,6 +104,11 @@ type Adapter struct {
 	// space, when set, is the herdr-app space Start labels a worker for, so
 	// the window shows it. Empty leaves the worker out of the window.
 	space string
+	// parent, when set, is the hc terminal Start nests each worker under
+	// (hc run --parent), so herdr-app shows it as that terminal's child.
+	// Empty starts it with no parent: the launcher's HC_TERMINAL_* never
+	// reach hc (see command), so hc cannot infer one.
+	parent string
 	// selection is the digest of what picks the core (SelectionDigest).
 	selection string
 }
@@ -144,6 +149,44 @@ func (a *Adapter) ShowInSpace(id string) error {
 	}
 	a.space = id
 	return nil
+}
+
+// ErrBadParent reports a parent forgectl will not pass to hc.
+var ErrBadParent = errors.New("hc: a parent is a local terminal address such as t7 or t11n (the launcher's $HC_TERMINAL_ID), not a name or machine/t7")
+
+// maxAddressLen bounds an hc terminal address; hc's are "t" and a short
+// base-36 counter.
+const maxAddressLen = 16
+
+// NestUnder makes Start create each terminal as a child of the terminal at
+// addr (hc run --parent), so herdr-app shows the worker under the terminal
+// that launched it. --outlive-parent and --no-notify still apply: the worker
+// never ends with its parent or types notes into it. It refuses anything but a
+// local terminal address before anything runs.
+func (a *Adapter) NestUnder(addr string) error {
+	if !ValidAddress(addr) {
+		return ErrBadParent
+	}
+	a.parent = addr
+	return nil
+}
+
+// Parent is the terminal NestUnder set, or "".
+func (a *Adapter) Parent() string { return a.parent }
+
+// ValidAddress reports whether s has the shape of a local hc terminal
+// address: "t", a digit, then lowercase letters or digits ("t7", "t11n"), the
+// shape CheckName refuses as a name for the same reason.
+func ValidAddress(s string) bool {
+	if len(s) < 2 || len(s) > maxAddressLen || s[0] != 't' || s[1] < '0' || s[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		if !isLowerAlnum(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func validSpaceID(s string) bool {

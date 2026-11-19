@@ -121,6 +121,29 @@ func TestForgetIsHcOnly(t *testing.T) {
 	}
 }
 
+// TestParentNeedsAnHcWorker: --parent names the hc terminal an hc worker
+// nests under, so a herdr worker, a launch that is not a worker, and a value
+// that is not a local hc address are refused as usage errors before anything
+// is created (forgectl#1455).
+func TestParentNeedsAnHcWorker(t *testing.T) {
+	for name, opts := range map[string]surfaceLaunchOptions{
+		"herdr worker": {Backend: "herdr", Worktree: "feat/x", DisplayName: "x", Parent: "t7"},
+		"not a worker": {Backend: "hc", Parent: "t7"},
+		"a name":       {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "orchestrator"},
+		"a remote":     {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "m5/t7"},
+		"flag-shaped":  {Backend: "hc", Worktree: "feat/x", DisplayName: "x", Parent: "--no-parent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			err := runSurfaceLaunch(cmd, module.Deps{}, opts)
+			if code := ExitCode(err); code != exitUsage || err == nil || !strings.Contains(err.Error(), "--parent") {
+				t.Fatalf("exit code = %d (err %v), want 2 naming --parent", code, err)
+			}
+		})
+	}
+}
+
 // TestHerdrSpaceNeedsAnHcWorker: --herdr-space labels an hc terminal for the
 // herdr-app window, so a herdr worker or a launch that is not a worker
 // refuses it as a usage error before anything is created.
