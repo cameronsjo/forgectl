@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
@@ -186,6 +188,29 @@ func TestWorkerLaunchRecordsIdentityAndBranchFrom(t *testing.T) {
 	steps.identify = nil
 	if _, err := runWorkerSteps(context.Background(), testWorkerLedger(t), "w1", "feat/w1", steps); !errors.Is(err, errNoIdentityStep) {
 		t.Fatalf("no identity step: %v", err)
+	}
+}
+
+// The drain launches workers through the same request as the CLI, so a
+// drained claude worker is titled by its name too (forgectl#1455).
+func TestDrainSpecNamesTheSession(t *testing.T) {
+	req := drainSpec(worker.QueueRow{Name: "w1", Repo: "/r"}).request(config.LaunchConfig{}, "/r", nil, nil)
+	if req.SessionName != "w1" {
+		t.Fatalf("drain request SessionName = %q, want w1", req.SessionName)
+	}
+}
+
+// The launch's session-name check is a copy of worker.ValidName (launch
+// cannot import worker). Every name a worker may have must also pass it, or
+// a valid worker would fail at build time; and nothing the worker grammar
+// refuses may reach the argv.
+func TestSessionNameGrammarMatchesWorkerNames(t *testing.T) {
+	names := []string{"", "a", "w1", "9", "cos-review-a", "a-", "-a", "A", "a_b", "a.b", "a b", "t7", "a--b",
+		strings.Repeat("a", 47), strings.Repeat("a", 48), strings.Repeat("a", 49)}
+	for _, n := range names {
+		if (worker.ValidName(n) == nil) != launch.ValidSessionName(n) {
+			t.Errorf("%q: worker.ValidName ok=%v, launch.ValidSessionName=%v", n, worker.ValidName(n) == nil, launch.ValidSessionName(n))
+		}
 	}
 }
 

@@ -134,6 +134,11 @@ type InvocationRequest struct {
 	// the coordinator knows which transcript the worker writes. Only a claude
 	// worker takes one; it must be a lowercase UUID.
 	SessionID string
+	// SessionName, when set, is passed to a claude worker as --name, so its
+	// session (and a terminal manager's sidebar row) is titled by the worker
+	// name instead of a title derived from the brief. Other harnesses have no
+	// such flag and ignore it. It must pass ValidSessionName.
+	SessionName string
 	// Model, when set, replaces the matched profile's model for a worker
 	// launch (`--model`), and effort is derived again from it, as a harness
 	// override does. It must pass config.CheckModelName. Only a worker takes
@@ -370,6 +375,28 @@ func validSessionID(id string) bool {
 	return true
 }
 
+// maxSessionNameLen is the worker-name limit (worker.ValidName).
+const maxSessionNameLen = 48
+
+// ValidSessionName reports whether name has a worker name's shape
+// (worker.ValidName, which launch cannot import): 1-48 of a-z 0-9 -, not
+// starting with '-', so it can never read as a flag in the argv.
+func ValidSessionName(name string) bool {
+	if name == "" || len(name) > maxSessionNameLen {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // applyHarnessOverride switches p to harness while keeping every posture field.
 //
 // The model is the one field that does not carry across: a model chosen for
@@ -518,6 +545,12 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 			return BuiltInvocation{}, fmt.Errorf("launch: session id %q is not a lowercase UUID", req.SessionID)
 		}
 		harnessArgs = append(harnessArgs, "--session-id", req.SessionID)
+	}
+	if req.SessionName != "" && req.Worker && profile.Harness == "claude" {
+		if !ValidSessionName(req.SessionName) {
+			return BuiltInvocation{}, fmt.Errorf("launch: session name %q is not 1-%d of a-z 0-9 - starting with a letter or digit", req.SessionName, maxSessionNameLen)
+		}
+		harnessArgs = append(harnessArgs, "--name", req.SessionName)
 	}
 	if req.Prompt != "" {
 		// The `--` ends option parsing in every harness, so a prompt that

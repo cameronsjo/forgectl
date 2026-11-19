@@ -151,6 +151,7 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		model       string
 		inheritMode string
 		herdrSpace  string
+		parent      string
 		here        bool
 		dryRun      bool
 		asJSON      bool
@@ -222,11 +223,14 @@ branch reads as branch_from "new". The preview sees a branch another worktree
 has checked out, but git can still refuse the real worktree add for a reason
 only it sees, so a clean preview is not a promise. --json prints the preview as one object:
 {"dry_run","surface","name","target","harness","worker"}, where worker is
-{"repo","worktree","branch","branch_from","ledger_row","brief","posture"} for --worktree
-and absent otherwise. posture maps each field the harness takes (claude
+{"repo","worktree","branch","branch_from","ledger_row","brief","posture","session_name","parent"} for --worktree
+and absent otherwise. session_name is the --name a claude worker gets (absent
+for other harnesses); parent is --parent (absent without it). posture maps each field the harness takes (claude
 permission_mode; codex sandbox, approval_policy) to {"value","source"}, where
 source is default, launch.worker, repo-profile, or launcher; the text preview prints
-<field>= and <field>_source= lines.
+<field>= and <field>_source= lines, then session_name= and parent= when set.
+The preview checks --parent's shape only; a launch whose parent hc has no
+terminal for is refused by hc before anything is created in hc.
 
 Without --dry-run, --json prints what the launch created as one object:
 {"surface","name","target","harness","ref","workspace_id","tab_id",
@@ -238,6 +242,9 @@ after the launch and left out when that read fails. worker is
 If a worker starts but its ledger row cannot be read back or completed, the
 object is still printed, with the ids and the worktree, and the launch then
 exits 1: check the exit code before trusting the empty fields.
+
+A claude worker is started with --name <worker name>, so its session is
+titled by the worker name, not a title Claude Code derives from the brief.
 
 A worker launch also shows the worker's name in herdr's sidebar: it sets the
 workspace token "forgectl_worker" (herdr workspace report-metadata), which a
@@ -251,7 +258,11 @@ failed launch.
 not shaped like an address such as t7) and labeled forgectl.surface with the
 ownership marker. It stays out of the herdr-app window unless --herdr-space
 <id> (a space id from herdr-app ls) labels it herdr.space=<id>, which
-herdr-app reads to show it in that space. The worker verbs (list, read, ready,
+herdr-app reads to show it in that space. The launcher's HC_TERMINAL_*
+variables never reach hc, so hc cannot tell which terminal launched the
+worker; --parent <address> (such as $HC_TERMINAL_ID) passes it as hc run
+--parent, and herdr-app then shows the worker under that terminal. The
+worker still outlives it and types no notes into it. The worker verbs (list, read, ready,
 wait, brief, close, forget) take --surface hc to reach it; under hc, readiness
 needs hc's reported status and the harness's prompt on screen. forget drops a
 row whose terminal hc proves gone, such as one on a core whose state was wiped.
@@ -275,6 +286,8 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 				Model:       model,
 				InheritMode: inheritMode,
 				HerdrSpace:  herdrSpace,
+				Parent:      parent,
+				ParentGiven: cmd.Flags().Changed("parent"),
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -310,6 +323,8 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 		"the launching Claude Code session's permission mode: a ceiling on a claude worker's mode, and with [launch.worker] inherit_launcher_mode the worker's mode, capped at auto (--worktree only)")
 	cmd.Flags().StringVar(&herdrSpace, "herdr-space", "",
 		"show the hc worker in this herdr-app space (an id from herdr-app ls) by labeling its terminal herdr.space=<id>; without it the worker stays out of the window (--worktree --surface hc only)")
+	cmd.Flags().StringVar(&parent, "parent", "",
+		"nest the hc worker under this hc terminal (an address such as t7; pass $HC_TERMINAL_ID for the launcher's own), shown as its child in herdr-app; the worker still outlives it; an empty value is refused (--worktree --surface hc only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -333,9 +348,15 @@ type surfaceLaunchOptions struct {
 	InheritMode string
 	// HerdrSpace is the herdr-app space an hc worker is labeled for, or "".
 	HerdrSpace string
-	Here       bool
-	DryRun     bool
-	JSON       bool
+	// Parent is the hc terminal an hc worker nests under, or "".
+	Parent string
+	// ParentGiven reports that --parent was on the command line, so an
+	// explicit empty value (an unset $HC_TERMINAL_ID) is refused rather than
+	// read as no parent.
+	ParentGiven bool
+	Here        bool
+	DryRun      bool
+	JSON        bool
 }
 
 func firstArg(args []string) string {
@@ -359,14 +380,17 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
 	}
+	if opts.ParentGiven && opts.Parent == "" {
+		return WithExitCode(errors.New("--parent is empty; pass an hc terminal address such as t7 ($HC_TERMINAL_ID is set only inside an hc terminal), or leave --parent off"), exitUsage)
+	}
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)
 	}
 	if opts.Brief != "" {
 		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
 	}
-	if opts.Profile != "" || opts.Model != "" || opts.InheritMode != "" || opts.HerdrSpace != "" {
-		return WithExitCode(errors.New("--profile, --model, --inherit-mode and --herdr-space need --worktree; only a worker launch takes them"), exitUsage)
+	if opts.Profile != "" || opts.Model != "" || opts.InheritMode != "" || opts.HerdrSpace != "" || opts.Parent != "" {
+		return WithExitCode(errors.New("--profile, --model, --inherit-mode, --herdr-space and --parent need --worktree; only a worker launch takes them"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

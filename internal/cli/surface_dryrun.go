@@ -58,6 +58,12 @@ type workerLaunchPlan struct {
 	// names its source: "default" (built-in), "launch.worker", or
 	// "repo-profile" (a stricter matched project block).
 	Posture map[string]postureSetting `json:"posture"`
+	// SessionName is the --name a claude worker is started with (the worker
+	// name), so its session is titled by it. Absent for other harnesses.
+	SessionName string `json:"session_name,omitempty"`
+	// Parent is the hc terminal the worker nests under (--parent). Absent
+	// without --parent.
+	Parent string `json:"parent,omitempty"`
 	// postureOrder is the text preview's line order (the harness's fields).
 	postureOrder []string
 }
@@ -98,6 +104,12 @@ func renderLaunchPlan(out io.Writer, p launchPlan, asJSON bool) error {
 		for _, field := range wp.postureOrder {
 			s := wp.Posture[field]
 			w.printf("%s=%s\n%s_source=%s\n", field, termsafe.SafeLineMax(s.Value, 64), field, s.Source)
+		}
+		if wp.SessionName != "" {
+			w.printf("session_name=%s\n", termsafe.SafeLineMax(wp.SessionName, 64))
+		}
+		if wp.Parent != "" {
+			w.printf("parent=%s\n", termsafe.SafeLineMax(wp.Parent, 64))
 		}
 	}
 	return w.err

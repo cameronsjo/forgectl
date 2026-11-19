@@ -248,6 +248,86 @@ func TestPlanWorkerLaunchShowsThePosture(t *testing.T) {
 	}
 }
 
+// The preview names the session name a claude worker gets and the hc parent
+// it nests under, so a caller's launch gate can check both before anything
+// runs (forgectl#1455). A codex worker has no session name to show.
+func TestPlanWorkerLaunchShowsSessionNameAndParent(t *testing.T) {
+	top := dryRunRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // G306: a harness stub must be executable
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		lc               config.LaunchConfig
+		parent           string
+		wantSession      string
+		wantText, noText []string
+	}{
+		"claude nested": {
+			lc:          config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "claude", BinaryPath: claude}},
+			parent:      "t11n",
+			wantSession: "w1",
+			wantText:    []string{"session_name=w1\n", "parent=t11n\n"},
+		},
+		"codex unnested": {
+			lc:     config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", CodexBinaryPath: stubHarness(t), ApprovalPolicy: "on-request", Sandbox: "workspace-write"}},
+			noText: []string{"session_name=", "parent="},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			led, err := worker.Open(top, "default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			deps := module.Deps{Runner: exec.OSRunner{}, Cfg: config.Config{Launch: tc.lc}}
+			opts := surfaceLaunchOptions{Backend: "hc", DisplayName: "w1", Worktree: "feat/w1", AllowPATH: true}
+			in := workerPlanInputs{self: self, spec: workerSpec{name: "w1", parent: tc.parent}}
+			for _, asJSON := range []bool{true, false} {
+				opts.JSON = asJSON
+				cmd := &cobra.Command{}
+				var o bytes.Buffer
+				cmd.SetOut(&o)
+				cmd.SetErr(&bytes.Buffer{})
+				cmd.SetContext(t.Context())
+				if err := planWorkerLaunch(cmd, deps, opts, top, led, in); err != nil {
+					t.Fatalf("preview: %v", err)
+				}
+				out := o.String()
+				if asJSON {
+					var got struct {
+						Worker map[string]any `json:"worker"`
+					}
+					if err := json.Unmarshal([]byte(out), &got); err != nil {
+						t.Fatalf("not JSON: %v\n%s", err, out)
+					}
+					if s, _ := got.Worker["session_name"].(string); s != tc.wantSession {
+						t.Errorf("session_name = %q, want %q", s, tc.wantSession)
+					}
+					if p, _ := got.Worker["parent"].(string); p != tc.parent {
+						t.Errorf("parent = %q, want %q", p, tc.parent)
+					}
+					continue
+				}
+				for _, line := range tc.wantText {
+					if !strings.Contains(out, line) {
+						t.Errorf("text preview lacks %q:\n%s", line, out)
+					}
+				}
+				for _, line := range tc.noText {
+					if strings.Contains(out, line) {
+						t.Errorf("text preview has %q:\n%s", line, out)
+					}
+				}
+			}
+		})
+	}
+}
+
 func mapKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
