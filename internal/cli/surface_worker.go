@@ -618,6 +618,13 @@ func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID fu
 		req.Prompt = prompt + "\n\n" + note
 		rebuild = true
 	}
+	// The whole prompt, the note included, goes in forgectl's envelope, so
+	// the worker can tell it from what the operator types (forgectl#1466).
+	// hc's run does not wrap a launch prompt, so every surface needs this.
+	if req.Prompt != "" {
+		req.Prompt = worker.Envelope(worker.Sender(briefGetenv), worker.KindLaunch, req.Prompt)
+		rebuild = true
+	}
 	if rebuild {
 		if built, err = launch.BuildInvocation(req); err != nil {
 			return built, err

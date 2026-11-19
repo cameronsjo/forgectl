@@ -70,6 +70,11 @@ func TestSendLineTypesOnlyIntoAnAgentAtItsPrompt(t *testing.T) {
 			if has != tc.ifIdle {
 				t.Errorf("--if idle = %v, want %v", has, tc.ifIdle)
 			}
+			// The desk answer keeps hc's sender keys, so hc wraps the line in
+			// its own envelope (forgectl#1466).
+			if len(last.Env) != 1 || !last.Env[0].Equal(exec.UnsetLauncherSessionHandlesKeepHcSender()) {
+				t.Errorf("the desk answer's send does not keep hc's sender keys")
+			}
 		})
 	}
 }

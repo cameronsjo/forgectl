@@ -181,10 +181,12 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
 				return w.hc.SendBrief(ctx, w.ref, s, checked)
 			},
-			record: w.recordBrief,
-			now:    time.Now,
-			sleep:  resume.SleepContext,
-			start:  opts.Start,
+			record:  w.recordBrief,
+			now:     time.Now,
+			sleep:   resume.SleepContext,
+			start:   opts.Start,
+			from:    worker.Sender(briefGetenv),
+			hcWraps: worker.HcWraps(briefGetenv),
 			// --readback-timeout has no step under hc: hc's send pastes and
 			// submits in one call.
 			interval: briefPollInterval,
@@ -200,6 +202,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
+		from:     worker.Sender(briefGetenv),
 		readback: opts.Readback,
 		start:    opts.Start,
 		interval: briefPollInterval,
@@ -211,6 +214,8 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 // briefSteps is the send, with its I/O and clock injected so each refusal
 // can be tested without herdr.
 type briefSteps struct {
+	// from names the sender in the brief's envelope (worker.Sender).
+	from     string
 	read     func(context.Context) (ready.Screen, error)
 	evaluate func(ready.Screen) ready.Verdict
 	typeText func(context.Context, string) error
@@ -247,7 +252,7 @@ func sendBrief(ctx context.Context, s briefSteps, text, marker string) briefResu
 		return refuse("check", "the worker's input box already holds text; clear it in the worker's pane first", v)
 	}
 
-	composed := worker.Compose(text, marker, worker.ViaTyped)
+	composed := worker.TypedBrief(text, marker, s.from)
 	if err := s.typeText(ctx, composed); err != nil {
 		return refuse("type", "typing the brief failed, so part of it may sit unsent in the input box: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
@@ -344,6 +349,11 @@ func reportBrief(cmd *cobra.Command, r briefResult, asJSON bool) error {
 	}
 	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }
+
+// briefGetenv reads the environment that names forgectl's own terminal for
+// a brief's envelope (worker.Sender, worker.HcWraps); a variable so tests can
+// pin it whichever terminal runs them.
+var briefGetenv = os.Getenv
 
 // readBriefArg returns arg, or the contents of the file it names after '@'.
 // The file must be a regular file of at most worker.MaxLaunchBrief bytes;

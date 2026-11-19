@@ -102,6 +102,7 @@ func (p *fakePane) steps() briefSteps {
 		},
 		now:      func() time.Time { return now },
 		sleep:    func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil },
+		from:     "w1-p2",
 		readback: 3 * time.Second,
 		start:    5 * time.Second,
 		interval: 200 * time.Millisecond,
@@ -119,7 +120,7 @@ func TestSendBrief(t *testing.T) {
 		if r.Outcome != briefSent || p.enters != 1 || len(p.recorded) != 1 {
 			t.Fatalf("result %+v, enters %d, recorded %d", r, p.enters, len(p.recorded))
 		}
-		if want := worker.Compose("run the tests", testBriefMarker, worker.ViaTyped); p.typed[0] != want {
+		if want := `<forgectl from="w1-p2" kind="brief">` + worker.Compose("run the tests", testBriefMarker, worker.ViaTyped) + `</forgectl>`; p.typed[0] != want {
 			t.Fatalf("typed %q, want %q", p.typed[0], want)
 		}
 		if p.recorded[0].Marker != testBriefMarker || p.recorded[0].Via != worker.ViaTyped {
@@ -277,7 +278,7 @@ func TestLaunchBrief(t *testing.T) {
 	if b == nil || b.Count != 1 || b.Via != worker.ViaLaunch || !strings.Contains(p, b.Marker) {
 		t.Fatalf("prompt %q, brief %+v", p, b)
 	}
-	if !strings.HasPrefix(p, "Fix the login bug.\nThen open a PR.\n\n") {
+	if !strings.HasPrefix(p, worker.LaunchPreamble+"\n\nFix the login bug.\nThen open a PR.\n\n") {
 		t.Fatalf("prompt %q lost the brief's own lines", p)
 	}
 	if _, _, err := launchBrief("a\x1b[2Jb", now); !errors.Is(err, worker.ErrInvalidBrief) {
@@ -296,7 +297,7 @@ func TestComposeLaunchBrief(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b == nil || !strings.HasPrefix(p, "@/etc/hosts\n") {
+	if b == nil || !strings.Contains(p, "\n\n@/etc/hosts\n") {
 		t.Fatalf("prompt %q: the @ text was not kept as text", p)
 	}
 }

@@ -1026,6 +1026,43 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 // TestRunSensitive_UnsetLauncherSessionHandles: the launching session's
 // handles never reach the child, and the variables that select a core or a
 // home stay byte-exact.
+// TestRunSensitive_KeepHcSender pins the text-send form (forgectl#1466): the
+// two keys hc names a sender by reach the child, so hc can wrap the text in
+// its own envelope, and every other launcher handle is still dropped,
+// HC_TERMINAL_SOCKET included.
+//
+// Mutation that turns it red: make keepHcSender keep every HC_ key, or
+// drop IsHcSenderKey from buildEnv's handle check.
+func TestRunSensitive_KeepHcSender(t *testing.T) {
+	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+		"HERDR_PANE_ID", "FORGECTL_WORKER", "FORGECTL_DRAIN_WORKER", "HERDR_ACTIVE_PANE_ID", "HC_TERMINAL_SOCKET"}
+	kept := []string{"HC_TERMINAL_ID=t1k", "HC_SCOPE=scope-1", "HC_SESSION=work"}
+	extra := append([]string{}, kept...)
+	for _, k := range gone {
+		extra = append(extra, k+"=launcher-"+k)
+	}
+	runner, self := helperRunner(t, "env:"+strings.Join(gone, ",")+",HC_TERMINAL_ID,HC_SCOPE,HC_SESSION", defaultRetireBound, extra...)
+	res, err := runner.RunSensitive(context.Background(), helperCommand(KindHcSend, self, 8192, UnsetLauncherSessionHandlesKeepHcSender()))
+	if err != nil {
+		t.Fatalf("RunSensitive: %v", err)
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Fatal("environment probe output was truncated")
+	}
+	got := string(data)
+	for _, k := range gone {
+		if !strings.Contains(got, k+"=<unset>") {
+			t.Errorf("%s reached the child:\n%s", k, got)
+		}
+	}
+	for _, line := range kept {
+		if !strings.Contains(got, line) {
+			t.Errorf("child environment missing %q:\n%s", line, got)
+		}
+	}
+}
+
 func TestRunSensitive_UnsetLauncherSessionHandles(t *testing.T) {
 	gone := []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "HC_TERMINAL_ID", "HC_SCOPE",
 		"HERDR_PANE_ID", "TMUX_PANE", "CMUX_SURFACE_ID", "FORGECTL_WORKER", "FORGECTL_LEDGER", "FORGECTL_INBOX", "FORGECTL_DRAIN_WORKER",

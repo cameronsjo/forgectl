@@ -142,7 +142,7 @@ func (a *Adapter) SendBrief(ctx context.Context, ref backend.Ref, text string, c
 		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
 	}
 	args = append(args, exec.EndOfOptions(), exec.Opaque(t.Address), exec.Opaque(text))
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend, args...))
+	res, runErr := a.run.RunSensitive(ctx, a.textCommand(args...))
 	if runErr != nil {
 		switch kind := errorKind(res.Stderr); kind {
 		case kindBlocked, kindStatusMismatch, kindFinished:
@@ -277,7 +277,7 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
 	}
 	args = append(args, exec.EndOfOptions(), exec.Opaque(addr), exec.Opaque(text))
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend, args...))
+	res, runErr := a.run.RunSensitive(ctx, a.textCommand(args...))
 	if runErr != nil {
 		switch kind := errorKind(res.Stderr); kind {
 		case kindBlocked, kindStatusMismatch, kindFinished:

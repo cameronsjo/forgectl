@@ -487,6 +487,7 @@ const (
 	envOpReplace             = validated.EnvOpReplace
 	envOpUnset               = validated.EnvOpUnset
 	envOpUnsetSessionHandles = validated.EnvOpUnsetSessionHandles
+	envOpKeepHcSender        = validated.EnvOpUnsetSessionHandlesKeepHcSender
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -544,6 +545,27 @@ func UnsetTmux() EnvMutation {
 // against its captured environment.
 func UnsetLauncherSessionHandles() EnvMutation {
 	return EnvMutation{op: envOpUnsetSessionHandles}
+}
+
+// hcSenderKeys are the two handles hc names a sender by: the terminal's
+// address and its per-terminal token (both set by hc in every terminal it
+// starts, measured on hc 0.1.15).
+var hcSenderKeys = []string{"HC_TERMINAL_ID", "HC_SCOPE"}
+
+// IsHcSenderKey reports whether key is one of hcSenderKeys.
+func IsHcSenderKey(key string) bool { return slices.Contains(hcSenderKeys, key) }
+
+// UnsetLauncherSessionHandlesKeepHcSender is UnsetLauncherSessionHandles that
+// keeps hcSenderKeys, for an `hc send` that carries text: with them hc wraps
+// the text in its own envelope naming the sending terminal
+// (<hc from="t1k">…</hc>), and without them it delivers the text bare, as a
+// person's (forgectl#1466). It is safe where the plain form is needed for an
+// hc core that the call might start and that would hand the launcher's
+// handles on: every other handle is still dropped, and hc sets both kept keys
+// afresh in each terminal it starts, so a core started here passes neither
+// on. Calls that start something (run, server) keep the plain form.
+func UnsetLauncherSessionHandlesKeepHcSender() EnvMutation {
+	return EnvMutation{op: envOpKeepHcSender}
 }
 
 // paneIdentityEnvByBackend lists, per terminal manager, the variables that

@@ -89,6 +89,7 @@ func ClaudeConfigEnv() []string
 func EndOfOptions() Arg
 func HomebrewNoAutoUpdate() map[string]string
 func IsClaudeSessionKey(key string) bool
+func IsHcSenderKey(key string) bool
 func IsLaunchStripKey(key string) bool
 func IsLauncherFocusKey(key string) bool
 func IsLauncherSessionHandle(key string) bool
@@ -114,6 +115,7 @@ func SetCmuxQuiet() EnvMutation
 func TmuxDirOperand() Transform
 func TmuxSubcommand(args []string) []string
 func UnsetLauncherSessionHandles() EnvMutation
+func UnsetLauncherSessionHandlesKeepHcSender() EnvMutation
 func UnsetTmux() EnvMutation
 func WithMaskedAssignments(ctx context.Context, entries []string) context.Context
 func WithOpaqueArgs(ctx context.Context, from int, n int) context.Context
@@ -342,6 +344,7 @@ validated: const ArgUnset ArgKind
 validated: const EnvOpReplace EnvOp
 validated: const EnvOpUnset EnvOp
 validated: const EnvOpUnsetSessionHandles EnvOp
+validated: const EnvOpUnsetSessionHandlesKeepHcSender EnvOp
 validated: const EnvOpUnspecified EnvOp
 validated: const KeySopsTmpdir untyped string
 validated: func New(path github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value, args []Arg, env []Env, sopsEdit bool) (Command, error)
