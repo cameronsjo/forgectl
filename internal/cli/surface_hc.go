@@ -276,8 +276,8 @@ func vimModeShown(text string) bool {
 // hcBriefSteps is sendBriefHC's I/O, injected so each outcome is testable
 // without hc.
 type hcBriefSteps struct {
-	// compose builds the line sent for a brief (worker.BriefLine): the text
-	// for hc to wrap from an hc terminal, else forgectl's envelope.
+	// compose builds the line sent for a brief (worker.BriefLine): always in
+	// forgectl's envelope; hc may add its own tag around it.
 	compose func(text, marker string) string
 	status  func(context.Context) (hcadapter.Worker, error)
 	// screen reads the worker's screen text, and promptShown judges it with

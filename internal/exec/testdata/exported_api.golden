@@ -31,6 +31,7 @@ const KindCmuxReconcile CommandKind
 const KindCmuxSnapshot CommandKind
 const KindHcCleanup CommandKind
 const KindHcCreate CommandKind
+const KindHcKeys CommandKind
 const KindHcProbe CommandKind
 const KindHcRead CommandKind
 const KindHcReadiness CommandKind

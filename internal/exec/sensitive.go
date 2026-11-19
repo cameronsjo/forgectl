@@ -157,15 +157,17 @@ const (
 	// KindHc* drive herdr-core's `hc`: readiness is `hc server status`,
 	// create is `hc run --bg`, reconcile is the labeled `hc ls` after an
 	// ambiguous create, probe is `hc get`, read is `hc read`, send is
-	// `hc send`, and cleanup is `hc kill` and `hc rm`. Create carries the
-	// sealed cwd, name and bootstrap; read and send carry worker screen text
-	// and brief text, which is why none of them goes through Runner.
+	// `hc send`, keys is `hc keys` (the Escape before a brief, no text),
+	// and cleanup is `hc kill` and `hc rm`. Create carries the sealed cwd,
+	// name and bootstrap; read and send carry worker screen text and brief
+	// text, which is why none of them goes through Runner.
 	KindHcReadiness
 	KindHcCreate
 	KindHcReconcile
 	KindHcProbe
 	KindHcRead
 	KindHcSend
+	KindHcKeys
 	KindHcCleanup
 
 	// KindRex* drive Rex's `rex`: readiness is `rex whoami`, preflight is the
@@ -246,6 +248,7 @@ var kindNames = [kindCount]string{
 	KindHcProbe:     "hc.probe",
 	KindHcRead:      "hc.read",
 	KindHcSend:      "hc.send",
+	KindHcKeys:      "hc.keys",
 	KindHcCleanup:   "hc.cleanup",
 
 	KindRexReadiness: "rex.readiness",
@@ -556,18 +559,18 @@ var hcSenderKeys = []string{"HC_TERMINAL_ID", "HC_SCOPE"}
 func IsHcSenderKey(key string) bool { return slices.Contains(hcSenderKeys, key) }
 
 // UnsetLauncherSessionHandlesKeepHcSender is UnsetLauncherSessionHandles that
-// keeps hcSenderKeys, for an `hc send` that carries text: with them hc wraps
-// the text in its own envelope naming the sending terminal
-// (<hc from="t1k">…</hc>), and without them it delivers the text bare, as a
-// person's (forgectl#1466). The plain form exists for an hc core that a call
+// keeps hcSenderKeys, for an `hc send` that carries text: with them hc can wrap
+// the text in its own tag naming the sending terminal
+// (<hc from="t1k">…</hc>); without them it treats the text as a person's
+// (forgectl#1466). forgectl does not rely on that tag for a brief. The plain form exists for an hc core that a call
 // might start and that would hand the launcher's handles on. Here every other
 // handle is still dropped, and hc sets both kept keys in each terminal it
 // starts (measured on hc 0.1.15), so a terminal of a core started here gets
 // its own. Not measured: a terminal-less program such a core runs. Both text
 // sends read hc with the plain form first, so a core is already running
 // unless it exits between that read and the send. SensitiveCommand.validated
-// refuses this op on any kind but KindHcSend, so run, server and the rest
-// keep the plain form.
+// refuses this op on any kind but KindHcSend, so run, server, keys
+// (KindHcKeys) and the rest keep the plain form.
 func UnsetLauncherSessionHandlesKeepHcSender() EnvMutation {
 	return EnvMutation{op: envOpKeepHcSender}
 }

@@ -189,7 +189,7 @@ func (a *Adapter) PressEscape(ctx context.Context, ref backend.Ref, want Worker)
 		return fmt.Errorf("%w: the worker changed since it was checked (status %q turn %d, now %q turn %d)",
 			ErrSendRefused, want.Status, want.Turn, t.Status.State, t.Turn)
 	}
-	if _, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcSend,
+	if _, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHcKeys,
 		exec.MustFixed("keys"),
 		exec.MustFixed("--json"),
 		exec.EndOfOptions(),
@@ -277,6 +277,9 @@ func (a *Adapter) SendLine(ctx context.Context, addr, text string) error {
 		args = append(args, exec.MustFixed("--if"), exec.MustFixed("idle"))
 	}
 	args = append(args, exec.EndOfOptions(), exec.Opaque(addr), exec.Opaque(text))
+	// No forgectl envelope here, unlike a brief: the desk line must do
+	// nothing at a shell prompt, and a <…> tag is a shell redirect there. hc
+	// may still wrap it in its own tag, since this send keeps the sender keys.
 	res, runErr := a.run.RunSensitive(ctx, a.textCommand(args...))
 	if runErr != nil {
 		switch kind := errorKind(res.Stderr); kind {

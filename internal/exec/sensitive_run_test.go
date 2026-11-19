@@ -1029,7 +1029,7 @@ func (g *gatedReader) Read(p []byte) (int, error) {
 // Mutation that turns it red: drop the kind check in
 // SensitiveCommand.validated.
 func TestKeepHcSenderOnlyOnAnHcSend(t *testing.T) {
-	for _, k := range []CommandKind{KindHcReadiness, KindCmuxProbe} {
+	for _, k := range []CommandKind{KindHcKeys, KindHcCreate, KindHcReadiness, KindCmuxProbe} {
 		sc := helperCommand(k, "/bin/true", 4096, UnsetLauncherSessionHandlesKeepHcSender())
 		if _, err := sc.validated(); err == nil {
 			t.Errorf("kind %v took the keep-sender op", k)

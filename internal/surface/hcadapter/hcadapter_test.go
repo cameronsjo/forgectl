@@ -586,6 +586,9 @@ func TestPressEscapeSendsOneEsc(t *testing.T) {
 	if !last.Args[0].Equal(exec.MustFixed("keys")) || !last.Args[n-2].Equal(exec.Opaque("t1")) || !last.Args[n-1].Equal(exec.MustFixed("esc")) {
 		t.Fatal("PressEscape did not run hc keys <t1> esc")
 	}
+	if last.Kind != exec.KindHcKeys {
+		t.Fatalf("PressEscape ran as kind %v, want KindHcKeys, so the keep-sender form stays bound to hc send alone", last.Kind)
+	}
 	delete(f.terminals, "t1")
 	if err := a.PressEscape(context.Background(), ref, checked); !errors.Is(err, ErrSendRefused) {
 		t.Fatalf("Escape to a gone worker: %v, want ErrSendRefused", err)

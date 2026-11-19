@@ -185,7 +185,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 			now:     time.Now,
 			sleep:   resume.SleepContext,
 			start:   opts.Start,
-			compose: briefComposer(true),
+			compose: briefComposer(),
 			// --readback-timeout has no step under hc: hc's send pastes and
 			// submits in one call.
 			interval: briefPollInterval,
@@ -201,7 +201,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 		record:   w.recordBrief,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
-		compose:  briefComposer(false),
+		compose:  briefComposer(),
 		readback: opts.Readback,
 		start:    opts.Start,
 		interval: briefPollInterval,
@@ -349,14 +349,14 @@ func reportBrief(cmd *cobra.Command, r briefResult, asJSON bool) error {
 	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }
 
-// briefComposer is the line a brief types or sends: worker.BriefLine over
-// forgectl's own environment, with viaHc for the hc surface.
-func briefComposer(viaHc bool) func(text, marker string) string {
-	return func(text, marker string) string { return worker.BriefLine(text, marker, viaHc, briefGetenv) }
+// briefComposer is the line a brief types or sends on either surface:
+// worker.BriefLine over forgectl's own environment.
+func briefComposer() func(text, marker string) string {
+	return func(text, marker string) string { return worker.BriefLine(text, marker, briefGetenv) }
 }
 
 // briefGetenv reads the environment that names forgectl's own terminal for
-// a brief's envelope (worker.Sender, worker.HcWraps); a variable so tests can
+// a brief's envelope (worker.Sender); a variable so tests can
 // pin it whichever terminal runs them.
 var briefGetenv = os.Getenv
 

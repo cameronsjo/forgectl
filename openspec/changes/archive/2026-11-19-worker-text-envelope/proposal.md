@@ -4,7 +4,7 @@ A worker's launch prompt and every follow-up `surface brief` arrive in its conve
 
 ## What Changes
 
-- Everything forgectl puts into a worker as conversation text arrives in an envelope: `<forgectl from="<terminal>" kind="launch|brief">…</forgectl>`. The launch prompt (every surface and the drain) and the herdr typed brief carry forgectl's. The hc typed brief carries hc's own (`<hc from="…">`): the two `hc send` calls that carry text keep `HC_TERMINAL_ID` and `HC_SCOPE`, which every other hc call still drops. From a plain shell, where hc delivers bare, forgectl wraps the brief itself.
+- Everything forgectl puts into a worker as conversation text arrives in an envelope: `<forgectl from="<terminal>" kind="launch|brief">…</forgectl>`. The launch prompt (every surface and the drain) and every typed brief, on herdr and hc alike, carry it. The two `hc send` calls that carry text also keep `HC_TERMINAL_ID` and `HC_SCOPE`, which every other hc call (`hc keys` included) still drops, so hc can add its own `<hc from="…">` tag around the text; forgectl does not rely on it, so the text is never bare.
 - A body cannot close or forge an envelope: tag-like runs of `forgectl` or `hc` have their bracket rewritten to `&lt;`.
 - The 600-character typed cap counts the envelope, measured at the longest sender name, and its refusal names the room left for the caller's text.
 - The launch prompt opens with a plain statement that it is the worker's assignment from its launcher, not from the operator, and that later text from the same sender is the channel for fix rounds.

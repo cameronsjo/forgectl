@@ -135,11 +135,9 @@ func CheckBrief(text, via string) error {
 		// The envelope counts against the cap, measured with the longest
 		// sender name, so the room left for the caller's text is the same
 		// whichever terminal runs forgectl.
-		n := utf8.RuneCountInString(TypedBrief(text, strings.Repeat("0", 2*markerBytes), strings.Repeat("x", maxSenderLen)))
-		if n > MaxTypedBrief {
-			room := MaxTypedBrief - (n - utf8.RuneCountInString(text))
-			return fmt.Errorf("%w: the brief is %d characters and may be at most %d; forgectl adds its report instruction and envelope, %d more, to fit the %d typed limit (Claude Code collapses longer typed text into a paste placeholder)",
-				ErrInvalidBrief, utf8.RuneCountInString(text), room, n-utf8.RuneCountInString(text), MaxTypedBrief)
+		if n := utf8.RuneCountInString(TypedBrief(text, strings.Repeat("0", 2*markerBytes), strings.Repeat("x", maxSenderLen))); n > MaxTypedBrief {
+			return fmt.Errorf("%w: the brief is %d characters and may be at most %d, since forgectl adds its report instruction and envelope to fit the %d typed limit; each forgectl or hc tag written in it costs 3 more (Claude Code collapses longer typed text into a paste placeholder)",
+				ErrInvalidBrief, utf8.RuneCountInString(text), typedBriefRoom, MaxTypedBrief)
 		}
 	default:
 		return fmt.Errorf("%w: unknown delivery %q", ErrInvalidBrief, via)

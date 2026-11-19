@@ -279,8 +279,9 @@ func (a *Adapter) command(kind exec.CommandKind, args ...exec.Arg) exec.Sensitiv
 
 // textCommand is command for an `hc send` that carries text to an agent. It
 // keeps the launcher's hc terminal id and scope (and drops every other
-// handle), so hc wraps the text in its own envelope naming that terminal
-// instead of delivering it bare, as a person's (forgectl#1466). Why that is
+// handle), so hc can name that terminal in its own tag around the text
+// rather than delivering it as a person's (forgectl#1466). A brief is in
+// forgectl's envelope whether or not hc adds one. Why that is
 // safe: exec.UnsetLauncherSessionHandlesKeepHcSender.
 func (a *Adapter) textCommand(args ...exec.Arg) exec.SensitiveCommand {
 	c := a.command(exec.KindHcSend, args...)

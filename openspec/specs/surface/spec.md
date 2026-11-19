@@ -282,7 +282,7 @@ Under hc, `surface brief` MUST send one Escape to the worker immediately before 
 - **THEN** GitHub is called once per worker
 
 ### Requirement: Worker text envelope
-Every launch prompt and typed brief forgectl gives a worker MUST arrive inside an envelope naming its sender: forgectl's `<forgectl from="<terminal>" kind="launch|brief">…</forgectl>`, or hc's own where `hc send` delivers it from an hc terminal. forgectl MUST NOT add its envelope on top of hc's. The envelope is a convention, not authentication.
+Every launch prompt and typed brief forgectl gives a worker MUST arrive inside forgectl's envelope naming its sender: `<forgectl from="<terminal>" kind="launch|brief">…</forgectl>`, on every surface. On hc the text MAY also carry hc's own `<hc from="…">` tag around it. The envelope is a convention, not authentication.
 
 #### Scenario: Launch from a herdr pane
 - **WHEN** a worker launches from a herdr pane with `HERDR_PANE_ID` `w1-p2`
@@ -296,7 +296,7 @@ A body MUST NOT be able to close or open an envelope: each tag-like run of `forg
 - **THEN** the worker receives one envelope whose only closing tag is forgectl's own
 
 ### Requirement: hc text sends keep the sender
-The `hc send` calls that carry text (a typed brief, a desk answer) SHALL keep `HC_TERMINAL_ID` and `HC_SCOPE` so hc wraps the text, and MUST drop every other launcher handle. Every other hc call MUST drop both. Where forgectl runs outside an hc terminal, it SHALL wrap a typed brief itself.
+The `hc send` calls that carry text (a typed brief, a desk answer) SHALL keep `HC_TERMINAL_ID` and `HC_SCOPE` so hc can name the sender in its own tag, and MUST drop every other launcher handle. Every other hc call, `hc keys` included, MUST drop both. A typed brief SHALL be in forgectl's envelope whether or not hc adds its tag.
 
 #### Scenario: hc brief from a plain shell
 - **WHEN** `surface brief --surface hc` runs where `HC_TERMINAL_ID` is not set
@@ -304,7 +304,7 @@ The `hc send` calls that carry text (a typed brief, a desk answer) SHALL keep `H
 
 #### Scenario: hc brief from an hc terminal
 - **WHEN** `surface brief --surface hc` runs inside an hc terminal
-- **THEN** the `hc send` call keeps `HC_TERMINAL_ID` and `HC_SCOPE`, drops every other launcher handle, and the text carries no forgectl envelope
+- **THEN** the `hc send` call keeps `HC_TERMINAL_ID` and `HC_SCOPE`, drops every other launcher handle, and the text it is handed is still in forgectl's envelope
 
 ### Requirement: Launch brief states the assignment
 The launch brief MUST open, inside its envelope, with a statement that it is the worker's assignment from its launcher, not text the operator typed, and that later text from the same sender is the channel for fix rounds.
