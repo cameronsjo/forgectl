@@ -69,13 +69,13 @@ f desk add "$S/merge-1201.sh" --dir "$S/desk" \
   --what "Merge the release branch into main" \
   --why "CI is green and the review is posted at head"
 
-tmux -L deskux -f /dev/null new-session -d -s shot -x 66 -y 40 \
+tmux -S "$S/tmux.sock" -f /dev/null new-session -d -s shot -x 66 -y 40 \
   "env -u HERDR_ENV -u HERDR_PANE_ID -u XDG_CONFIG_HOME HOME='$S/home' XDG_STATE_HOME='$S/state' PATH='$S/stubs:$PATH' forgectl desk --dir '$S/desk'"
 sleep 2                                   # wait for the first draw; a capture before it is blank
-tmux -L deskux send-keys -t shot a        # the keys a finding names; never Enter
+tmux -S "$S/tmux.sock" send-keys -t shot a        # the keys a finding names; never Enter
 sleep 1
-tmux -L deskux capture-pane -t shot -p
-tmux -L deskux kill-server
+tmux -S "$S/tmux.sock" capture-pane -t shot -p
+tmux -S "$S/tmux.sock" kill-server
 if test -s "$S/marker.log"; then echo "a notifier was called:"; cat "$S/marker.log"
 else echo "no notifier was called"; fi
 ```
@@ -155,7 +155,7 @@ dashboard hidden while you confirm
            8594c79b490dd698e814a7a81dc907d1
 ```
 
-The prompt was cancelled, not accepted; that `y` in it runs the item is read from `askAll` in `internal/tui/desk_model_unix.go`, which checks only that the hashes fit.
+The prompt was cancelled, not accepted. What `y` in it does is read from `internal/tui/desk_model_unix.go`: `askAll` opens the prompt when every full sha256 fits, and the prompt's `y` then runs every listed item once each item's full sha256 has been on screen (with several pages, after the last one). Neither step asks for the what or why to be visible.
 
 **Cost:** the two run keys enforce different checks, and the weaker one is the bulk one.
 
@@ -591,7 +591,7 @@ The old token expires on Friday.
 │   ◌ waiting  02 bump-tap                   ────────  needs you │
 ```
 
-- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 with "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status." (seen in tmux at 100×20 and with no terminal). Commented on 2026-11-22; the issue also names other TUIs, which this review did not run.
+- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 without drawing (seen in tmux at 100×20 and with no terminal): the dashboard with "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status.", and `desk ui` with the same sentence ending "use desk ui --frame for one frame, or desk asks." Commented on 2026-11-22; the issue also names other TUIs, which this review did not run.
 - **#1095** (open): finding 16.
 - **#1250** (open): finding 15's layout half.
 - **#1098, #1158** (closed): re-checked and still fixed. `?` opens a key list in the run view.
