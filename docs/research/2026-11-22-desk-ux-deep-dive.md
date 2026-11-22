@@ -1,6 +1,6 @@
 # forgectl desk UI/UX deep dive
 
-Date: 2026-11-22. Build: `main` at `3278ee27` (0.69.0), built locally. Status: findings ranked, ranking not yet agreed, no issues filed.
+Date: 2026-11-22. Build: `main` at `3278ee27` (0.69.0), built locally. Status: ranking agreed with the operator on 2026-11-22; issues filed (see the table and § Rulings).
 
 ## Summary
 
@@ -10,26 +10,38 @@ The safety core holds. The 12-character sha256 survives every width down to 40 c
 
 What costs the operator is steps. The ranking rule, set by the operator on 2026-11-22, is **friction first**: a finding ranks by how many keys, screens and reads it adds between "an item is waiting" and "it ran", and no fix may add a confirm or a second screen. Safety findings rank above friction findings; polish ranks last.
 
-| # | Finding | Kind | Costs today |
-| --- | --- | --- | --- |
-| 1 | `a` runs items in a window where `y` refuses | safety | weaker check than `y` |
-| 2 | After `y` the cursor stays on the item that ran | friction | up to n-1 moves per approval |
-| 3 | `desk ui` lists scripts but cannot run them | friction | a second program |
-| 4 | The run-all confirm is 64 hex characters per item, no what | friction | 384 characters for 6 items |
-| 5 | Skip, clear and done are confirmed though they can be undone | friction | 1 extra key each |
-| 6 | A failed run shows no reason on the dashboard | friction | 1 extra screen |
-| 7 | `desk ui` opens with the cursor on a read-only row | friction | 1 move before any answer |
-| 8 | A changed item says so but shows no difference | friction | a manual compare |
-| 9 | The queue hides rows with no "more" marker | lost work | items not seen |
-| 10 | Footer hints: wrong keys dropped, labels differ, a dead Enter hint | friction | guessing |
-| 11 | `desk ui` cuts lines at the edge with no marker | lost facts | an option and half a hash hidden |
-| 12 | Overlays break words in the middle | polish | slower reading |
-| 13 | The header repeats the count and spends width on version and host | polish | the age is cut |
-| 14 | The timeline panel repeats the queue in the opposite order | polish | 14 rows of repeats |
-| 15 | The run view's events are raw machine lines | polish | paths cut mid-way |
-| 16 | Plain output disagrees with the dashboard on words and facts | polish | see #1095 |
-| 17 | `desk ui` smaller items | polish | - |
-| 18 | The refusal message is cut at 66 columns | polish | - |
+| # | Finding | Kind | Costs today | Issue |
+| --- | --- | --- | --- | --- |
+| 1 | `a` runs items in a window where `y` refuses | safety | weaker check than `y` | #1479 |
+| 2 | After `y` the cursor stays on the item that ran | friction | up to n-1 moves per approval | #1480 |
+| 3 | `desk ui` lists scripts but cannot run them | friction | a second program | #1481 |
+| 4 | The run-all confirm is 64 hex characters per item, no what | friction | 384 characters for 6 items | #1482 |
+| 5 | Skip, clear and done are confirmed though they can be undone | friction | 1 extra key each | #1483 |
+| 6 | A failed run shows no reason on the dashboard | friction | 1 extra screen | #1484 |
+| 7 | `desk ui` opens with the cursor on a read-only row | friction | 1 move before any answer | #1485 |
+| 8 | A changed item says so but shows no difference | friction | a manual compare | #1486 |
+| 9 | The queue hides rows with no "more" marker | lost work | items not seen | #1487 |
+| 10 | Footer hints: wrong keys dropped, labels differ, a dead Enter hint | friction | guessing | #1488 |
+| 11 | `desk ui` cuts lines at the edge with no marker | lost facts | an option and half a hash hidden | #1489 |
+| 12 | Overlays break words in the middle | polish | slower reading | #1490 |
+| 13 | The header repeats the count and spends width on version and host | polish | the age is cut | #1490 |
+| 14 | The timeline panel repeats the queue in the opposite order | polish | 14 rows of repeats | #1490 |
+| 15 | The run view's events are raw machine lines | polish | paths cut mid-way | #1490 |
+| 16 | Plain output disagrees with the dashboard on words and facts | polish | see #1095 | comment on #1095 |
+| 17 | `desk ui` smaller items | polish | - | #1490 |
+| 18 | The refusal message is cut at 66 columns | polish | - | #1490 |
+
+## Rulings
+
+The operator ruled on 2026-11-22:
+
+- **Filing shape.** One issue each for findings 1 to 11, one polish batch for 12 to 15, 17 and 18, and comments on #1095, #1202 and #1152.
+- **Finding 2.** After `y` the cursor moves to the next waiting item (#1480).
+- **Finding 4.** Once #1480 lands, `a` and its prompt are removed (#1482). That also makes finding 1 moot; #1479 stays separate because it can ship first.
+- **Finding 5.** Skip acts at once and keeps `u`; confirm only where there is no undo (#1483).
+- **Finding 3.** Filed as a design issue without picking the surviving surface (#1481).
+- **First view.** The trim direction; the approval card stays as a later option.
+- **Notifier notes.** Posted as one comment on #1476.
 
 ## How the frames were made
 
@@ -142,7 +154,7 @@ After a skip the cursor moves to the next waiting item, so the two keys behave d
 
 **Cost:** approving k items one at a time costs `y` plus up to n-1 presses of `k` each time. With seven waiting, the second approval is 7 moves away.
 
-**Direction:** after `y` the cursor goes to the next waiting item, as after `s`. The operator's call: this changes what is under the cursor after a run, which the "selection moved" guard already has rules for.
+**Direction:** after `y` the cursor goes to the next waiting item, as after `s`. Ruled: yes (§ Rulings). The "selection moved" guard already has rules for where the cursor lands after an action.
 
 ### 3. `desk ui` lists scripts but cannot run them
 
@@ -173,7 +185,7 @@ The dashboard, in turn, shows no asks. An operator with one ask and one script w
 
 **Cost:** a second program to approve something already on screen.
 
-**Direction:** one surface. Either the dashboard lists asks, or `desk ui` runs scripts under the same test as the dashboard. The operator's call which one survives.
+**Direction:** one surface. Either the dashboard lists asks, or `desk ui` runs scripts under the same test as the dashboard. Filed as a design issue; the surviving surface is not picked.
 
 ### 4. The run-all confirm is 64 hex characters per item, with no what
 
@@ -192,7 +204,7 @@ For the six runnable fixture items the prompt lists 384 hex characters and no wh
 
 **Cost:** nobody compares 384 characters, so the prompt is an extra screen that checks nothing.
 
-**Direction:** the operator's call, because it changes the run flow. Options that add no step: drop `a`; or let `a` run only the items whose focus panel the operator has already had on screen this session; or show each item's 12 characters and what on the same prompt.
+**Direction:** ruled: remove `a` once the cursor advances after `y` (§ Rulings). The options weighed were dropping `a`, letting it run only items whose focus panel had been on screen, and a shorter prompt; only the first removes a screen.
 
 ### 5. Skip, clear and done are confirmed though they can be undone
 
@@ -461,7 +473,7 @@ The step lines above are clear. The events below are key=value lines whose log p
 
 ### 16. Plain output disagrees with the dashboard on words and facts
 
-**Rank:** 16 (polish). A comment on #1095, not a new issue.
+**Rank:** 16 (polish). Posted as a comment on #1095, not a new issue.
 
 A failed run is "failed" on the dashboard and `state=done` in `desk status`:
 
@@ -532,14 +544,14 @@ The old token expires on Friday.
 
 ## Known issues touched
 
-- **#1202** (open; `--what` truncated, no order between items): the queue row shows the file name and an unlabeled bar, not the what. A comment, not a new issue.
+- **#1202** (open; `--what` truncated, no order between items): the queue row shows the file name and an unlabeled bar, not the what. Commented on 2026-11-22.
 
 ```text
 │ ▸ ◌ waiting  01 merge-1201                 ────────  needs you │
 │   ◌ waiting  02 bump-tap                   ────────  needs you │
 ```
 
-- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 with "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status." (seen in tmux at 100×20 and with no terminal). A comment on the issue so its desk half can be closed out; the issue also names other TUIs, which this review did not run.
+- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 with "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status." (seen in tmux at 100×20 and with no terminal). Commented on 2026-11-22; the issue also names other TUIs, which this review did not run.
 - **#1095** (open): finding 16.
 - **#1250** (open): finding 15's layout half.
 - **#1098, #1158** (closed): re-checked and still fixed. `?` opens a key list in the run view.
@@ -611,7 +623,7 @@ Three directions for the waiting-item screen at 66 columns were sketched for the
 
 ## Notifier observations
 
-Not filed. For the session working on clickable notifications.
+Posted as a comment on #1476 on 2026-11-22, for the session working on clickable notifications.
 
 - With both `[desk]` notify settings off and no herdr session in the environment, `desk add`, `desk ask`, `y`, `s` and `u` called no notifier program in about 30 adds and 10 runs.
 - A notification click will land on the first view above. What the operator needs there is the selected item to be the one the notification named; the dashboard opens with the cursor on the first row, which is the oldest waiting item, not the newest.
