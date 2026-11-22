@@ -61,11 +61,19 @@ var ErrUnsupportedMove = errors.New("herdr-app cannot move a tab to another spac
 // to report every cross-space move as blocked instead of attempting it.
 type AppClient struct {
 	runner exec.Runner
+	// bin is the herdr-app executable: AppBinary, found on PATH, unless
+	// NewAppAt named one.
+	bin string
 }
 
 // NewApp returns an AppClient over r. It performs no host check; see
 // [DetectHost] and [CheckApp].
-func NewApp(r exec.Runner) *AppClient { return &AppClient{runner: r} }
+func NewApp(r exec.Runner) *AppClient { return &AppClient{runner: r, bin: AppBinary} }
+
+// NewAppAt returns an AppClient that runs herdr-app from bin, an absolute
+// path: for a process started without the operator's PATH, such as a
+// notification click.
+func NewAppAt(r exec.Runner, bin string) *AppClient { return &AppClient{runner: r, bin: bin} }
 
 // The shapes below are the subset of `herdr-app ls` and `hc ls` the client
 // reads (recorded under testdata). Unknown fields are ignored.
@@ -111,7 +119,7 @@ func (a *AppClient) run(ctx context.Context, bin string, args ...string) (string
 }
 
 func (a *AppClient) ls(ctx context.Context) (appLS, error) {
-	out, err := a.run(ctx, AppBinary, "ls")
+	out, err := a.run(ctx, a.bin, "ls")
 	if err != nil {
 		return appLS{}, err
 	}
@@ -264,6 +272,29 @@ func (a *AppClient) folders(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
+// LocateTerminal finds the space and tab a terminal sits in, from
+// `herdr-app ls` alone (no `hc ls`, which Panes also runs). A terminal no tab
+// holds is an error naming it.
+func (a *AppClient) LocateTerminal(ctx context.Context, terminal string) (spaceID, tabID string, err error) {
+	if err := checkID("terminal id", terminal); err != nil {
+		return "", "", err
+	}
+	d, err := a.ls(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	for _, s := range d.Spaces {
+		for _, t := range s.Tabs {
+			for _, term := range t.Terminals {
+				if term.Terminal == terminal {
+					return s.ID, t.ID, nil
+				}
+			}
+		}
+	}
+	return "", "", fmt.Errorf("%s ls: no tab holds terminal %q", AppBinary, terminal)
+}
+
 // FocusNeedsSpace reports that selecting a tab is not known to switch the
 // space it is in, so a focus restore must finish by selecting the space.
 func (a *AppClient) FocusNeedsSpace() bool { return true }
@@ -326,7 +357,7 @@ func (a *AppClient) do(ctx context.Context, command string, args map[string]any)
 	if err != nil {
 		return err
 	}
-	out, err := a.run(ctx, AppBinary, "do", command, string(payload))
+	out, err := a.run(ctx, a.bin, "do", command, string(payload))
 	if err != nil {
 		return err
 	}

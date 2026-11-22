@@ -875,9 +875,11 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 }
 
 // hookNotify posts a desktop notification; a seam so tests can record the
-// call instead of running osascript.
+// call instead of running a sender. The watcher runs under launchd, in no
+// terminal, so a click only brings herdr-app forward.
 var hookNotify = func(ctx context.Context, deps module.Deps, title, body string) error {
-	return notify.New(deps.Runner).Notify(ctx, title, body)
+	_, err := notify.New(deps.Runner).Notify(ctx, notify.Message{Title: title, Body: body})
+	return err
 }
 
 // notifyRestartStart tells the operator, before the signal, that the watcher

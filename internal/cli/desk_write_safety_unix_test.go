@@ -17,6 +17,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/notify"
 )
 
 // addJSON runs `desk add FILE --json` with the flags given and decodes it.
@@ -287,12 +288,12 @@ func TestDeskAdd_RetryResignalsUntilTheFirstSignalWentOut(t *testing.T) {
 	inHerdr(t, "w1:p9")
 	rig := newSignalRig(t, config.DeskConfig{})
 	failing := true
-	deskMacNotify = func(context.Context, module.Deps, string, string) error {
+	deskMacNotify = func(context.Context, module.Deps, notify.Message) (notify.Sent, error) {
 		rig.mac++
 		if failing {
-			return errors.New("notification centre unavailable")
+			return notify.Sent{}, errors.New("notification centre unavailable")
 		}
-		return nil
+		return notify.Sent{Sender: notify.SenderOsascript}, nil
 	}
 	file := writeTemp(t, "merge.sh", "echo merge\n")
 	args := []string{"add", file, "--what", "w", "--why", "y"}
@@ -557,9 +558,9 @@ func TestDeskAdd_DuplicateWithAFailingSignalSaysSoPlainly(t *testing.T) {
 	newDeskDir(t)
 	inHerdr(t, "w1:p9")
 	rig := newSignalRig(t, config.DeskConfig{})
-	deskMacNotify = func(context.Context, module.Deps, string, string) error {
+	deskMacNotify = func(context.Context, module.Deps, notify.Message) (notify.Sent, error) {
 		rig.mac++
-		return errors.New("notification centre unavailable")
+		return notify.Sent{}, errors.New("notification centre unavailable")
 	}
 	args := []string{"add", writeTemp(t, "merge.sh", "echo merge\n"), "--what", "w", "--why", "y"}
 	if _, _, err := deskRun(t, rig.deps, args...); err != nil {

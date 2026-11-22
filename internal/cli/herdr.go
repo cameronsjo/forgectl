@@ -63,6 +63,7 @@ from inside a herdr pane or a herdr-app terminal.
   forgectl herdr organize      group tabs into workspaces by rule and order them`,
 	}
 	cmd.AddCommand(newHerdrOrganizeCmd(deps))
+	cmd.AddCommand(newHerdrFocusTerminalCmd(deps))
 	return cmd
 }
 
