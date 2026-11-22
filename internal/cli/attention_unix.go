@@ -420,8 +420,8 @@ func attentionDesk() ([]attention.DeskItem, string) {
 			continue
 		}
 		di := attention.DeskItem{Name: it.Name, What: it.What, SHA256: it.Meta.SHA256, SignalPane: it.Meta.SignalPane}
-		if hcadapter.ValidAddress(it.Meta.Terminal) {
-			di.Terminal = it.Meta.Terminal
+		if hcadapter.ValidAddress(it.Meta.Terminal) && hcadapter.ValidSelection(it.Meta.TerminalCore) {
+			di.Terminal, di.TerminalCore = it.Meta.Terminal, it.Meta.TerminalCore
 		}
 		if it.Meta.AddedAt != nil {
 			di.AddedAt = *it.Meta.AddedAt
@@ -485,6 +485,12 @@ type attentionCoreResult struct {
 // Detail then says why, cleaned and cut.
 var attentionCore = func(ctx context.Context, deps module.Deps) attention.Core {
 	c := attention.Core{}
+	sel, err := hcadapter.Selection(attentionGetenv)
+	if err != nil {
+		c.Detail = attention.Clean(err.Error(), attentionDetailMax)
+		return c
+	}
+	c.Selection = sel
 	if deps.Runner == nil {
 		c.Detail = "no command runner"
 		return c

@@ -227,6 +227,38 @@ func New(run exec.SensitiveRunner, hcPath string, getenv func(string) string) (*
 	return &Adapter{run: run, hcPath: hcPath, session: session, source: source, selection: selectionDigest(session, getenv)}, nil
 }
 
+// Selection is the digest of the hc core the environment selects, the same
+// value an adapter built from getenv reports as SelectionDigest, without a
+// runner or an hc path. Two processes with equal selections reach the same
+// core, so a terminal address recorded under one names the same terminal
+// under the other. It fails for an HC_SESSION New would refuse.
+func Selection(getenv func(string) string) (string, error) {
+	session := defaultSession
+	if s := getenv("HC_SESSION"); s != "" && s != defaultSession {
+		if !validSession(s) {
+			return "", fmt.Errorf("%w: HC_SESSION must be 1-%d letters, digits, hyphens, underscores or dots", ErrResolveSession, maxSessionLen)
+		}
+		session = s
+	}
+	return selectionDigest(session, getenv), nil
+}
+
+// ValidSelection reports whether s has the shape Selection returns: 32
+// lowercase hex characters.
+func ValidSelection(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ValidSession reports whether s is an HC_SESSION value this package
 // accepts: 1-64 letters, digits, '-', '_' or '.'.
 func ValidSession(s string) bool { return validSession(s) }

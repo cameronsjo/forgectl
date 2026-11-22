@@ -182,7 +182,9 @@ type DeskItem struct {
 	// Terminal is the hc terminal the item was queued from, already checked
 	// to have the shape of a local hc address.
 	Terminal string
-	AddedAt  time.Time
+	// TerminalCore is the selection of the hc core Terminal belongs to.
+	TerminalCore string
+	AddedAt      time.Time
 }
 
 // Core is what the caller's herdr-core (hc) reported. Known is false when it
@@ -190,7 +192,10 @@ type DeskItem struct {
 type Core struct {
 	Known  bool
 	Detail string
-	Live   map[string]bool
+	// Selection is the core that was asked (hcadapter.Selection): a desk
+	// item's terminal counts only when it was recorded under the same one.
+	Selection string
+	Live      map[string]bool
 }
 
 // SweepWorker and SweepPR are the parts of sweep.json the queue uses.
@@ -286,7 +291,7 @@ func Build(in Input) []Row {
 		if ValidPane(d.SignalPane) {
 			pane = d.SignalPane
 		}
-		if d.Terminal != "" && in.Core.Live[d.Terminal] {
+		if d.Terminal != "" && d.TerminalCore != "" && d.TerminalCore == in.Core.Selection && in.Core.Live[d.Terminal] {
 			r.Terminal = d.Terminal
 		}
 		if a, ok := byPane[pane]; ok && pane != "" {

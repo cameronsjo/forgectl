@@ -779,6 +779,31 @@ func TestAbandoned(t *testing.T) {
 	}
 }
 
+// Selection is the digest an adapter built from the same environment
+// reports, so a terminal recorded by desk add and the core attention list
+// asks are compared on one scale; a refused HC_SESSION is an error.
+func TestSelectionMatchesTheAdapter(t *testing.T) {
+	for _, env := range []map[string]string{nil, {"HC_SESSION": "work"}, {"HC_SOCKET": "/tmp/s.sock", "HOME": "/Users/x"}} {
+		getenv := func(k string) string { return env[k] }
+		a, err := New((&fakeHC{}).runner(), "/usr/local/bin/hc", getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Selection(getenv)
+		if err != nil || got != a.SelectionDigest() || !ValidSelection(got) {
+			t.Errorf("env %v: Selection = %q, %v; adapter says %q", env, got, err, a.SelectionDigest())
+		}
+	}
+	if _, err := Selection(func(k string) string {
+		if k == "HC_SESSION" {
+			return "a b"
+		}
+		return ""
+	}); err == nil {
+		t.Error("Selection accepted an HC_SESSION New refuses")
+	}
+}
+
 // TestSelectionDigestCoversTheCoreSelection: every variable that can move hc
 // to another core (HC_SESSION, HC_SOCKET, the XDG paths, HOME) changes the
 // digest, and the two spellings of the default session do not.

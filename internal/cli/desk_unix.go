@@ -300,8 +300,8 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	if pane, ok := sig.pane(); ok {
 		d.SetSignalPane(pane)
 	}
-	if term := deskQueuingTerminal(deskLookupEnv); term != "" {
-		d.SetTerminal(term)
+	if term, sel := deskQueuingTerminal(deskLookupEnv); term != "" {
+		d.SetTerminal(term, sel)
 	}
 	what, why := strings.TrimSpace(o.what), strings.TrimSpace(o.why)
 	signalWhat := what

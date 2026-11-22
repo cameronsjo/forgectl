@@ -26,6 +26,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 )
 
 const (
@@ -370,25 +371,30 @@ func TestAttentionListDeskTerminalFromCore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	add := func(name, term string) {
+	here, err := hcadapter.Selection(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(name, term, core string) {
 		body := "# WHAT: " + name + "\necho hi\n"
 		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".sh"), body)
 		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".meta.json"),
-			`{"added_at":"2026-10-01T00:00:00Z","sha256":"`+sha(body)+`","kind":"script","terminal":"`+term+`"}`)
+			`{"added_at":"2026-10-01T00:00:00Z","sha256":"`+sha(body)+`","kind":"script","terminal":"`+term+`","terminal_core":"`+core+`"}`)
 	}
-	add("01-live", "t148")
-	add("02-finished", "t99")
-	add("03-forged", "../../sh")
+	add("01-live", "t148", here)
+	add("02-finished", "t99", here)
+	add("03-forged", "../../sh", here)
+	add("04-othercore", "t148", "ffffffffffffffffffffffffffffffff")
 
 	l := attnList(t, module.Deps{Runner: hcLs("t148")})
-	if l.Sources.Core != sourceOK || len(l.Rows) != 3 {
+	if l.Sources.Core != sourceOK || len(l.Rows) != 4 {
 		t.Fatalf("core %q, rows %+v", l.Sources.Core, l.Rows)
 	}
 	got := map[string]string{}
 	for _, r := range l.Rows {
 		got[r.Tag] = r.Terminal
 	}
-	if got["01-live"] != "t148" || got["02-finished"] != "" || got["03-forged"] != "" {
+	if got["01-live"] != "t148" || got["02-finished"] != "" || got["03-forged"] != "" || got["04-othercore"] != "" {
 		t.Errorf("terminals = %v, want only 01-live at t148", got)
 	}
 
