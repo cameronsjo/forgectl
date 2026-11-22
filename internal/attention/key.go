@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 // RowDrain is the drain's stuck-hold row (derived from drain.json at read
@@ -40,7 +41,8 @@ func ValidKey(s string) bool { return keyRe.MatchString(s) }
 // later (pane, session on a desk row, worker on a desk row, origin) never
 // enter it, so a herdr flap or a sweep merge does not change a row's key.
 //
-//   - desk: the item name;
+//   - desk: the item name, its hash and when it was added (a name can be
+//     reused once done/ is emptied; the hash and time tell the two apart);
 //   - q / a: session, turn, item number (a new turn is a new ask);
 //   - worker: worker name and block;
 //   - pr: owner/repo#n;
@@ -49,7 +51,7 @@ func RowKey(r Row) string {
 	var parts []string
 	switch r.Kind {
 	case RowDesk:
-		parts = []string{r.Tag}
+		parts = []string{r.Tag, r.Hash, r.At.UTC().Format(time.RFC3339Nano)}
 	case KindQuestion, KindAction:
 		parts = []string{r.Session, r.Turn, strconv.Itoa(r.N)}
 	case RowWorker:
