@@ -240,6 +240,6 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 ## Deviations
 
 - 2026-11-22, T0 setup: the PingPlace cask (author's tap, v1.4.2) is self-signed and not notarized; Gatekeeper moved it to the Trash on every launch. PingPlace was instead built from source at tag v1.4.2 (`d244d121`, one Swift file, read first: no network or shell calls, banner titles logged only under debug logging), signed with the local Apple Development identity, and installed to `/Applications/PingPlace.app`. A rebuild under another identity needs a fresh Accessibility grant. The trial's Loop row covers removing it.
-- 2026-11-22, Live-state claim 2: confirmed on macOS 27.3. An osascript probe banner landed top-center, which Cameron called much better. Cosmetic: banners still slide off to the right when they leave. T0's 3-day count starts once #1476's clickable banners merge.
+- 2026-11-22, Live-state claim 2: confirmed on macOS 27.3. An osascript probe banner landed top-center on the external monitor, which Cameron called much better. The Mac was in clamshell mode, so only one screen was active; which display PingPlace uses with both screens on is still untested. Cosmetic: banners still slide off to the right when they leave. T0's 3-day count starts once #1476's clickable banners merge.
 
 ## Learnings
