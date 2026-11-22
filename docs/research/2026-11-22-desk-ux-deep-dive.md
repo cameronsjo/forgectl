@@ -155,7 +155,7 @@ dashboard hidden while you confirm
            8594c79b490dd698e814a7a81dc907d1
 ```
 
-The prompt was cancelled, not accepted. What `y` in it does is read from `internal/tui/desk_model_unix.go`: `askAll` opens the prompt when every full sha256 fits, and the prompt's `y` then runs every listed item once each item's full sha256 has been on screen (with several pages, after the last one). Neither step asks for the what or why to be visible.
+The prompt was cancelled, not accepted. What `y` in it does is read from `internal/tui/desk_model_unix.go`: `askAll` opens the prompt when every full sha256 fits, and the prompt's `y` then starts every listed item whose file still has the listed hash, once each item's full sha256 has been on screen (with several pages, after the last one). Neither step asks for the what or why to be visible.
 
 **Cost:** the two run keys enforce different checks, and the weaker one is the bulk one.
 
@@ -591,7 +591,7 @@ The old token expires on Friday.
 │   ◌ waiting  02 bump-tap                   ────────  needs you │
 ```
 
-- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 without drawing (seen in tmux at 100×20 and with no terminal): the dashboard with "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status.", and `desk ui` with the same sentence ending "use desk ui --frame for one frame, or desk asks." Commented on 2026-11-22; the issue also names other TUIs, which this review did not run.
+- **#1152** (open; `TERM=dumb` garbles the dashboard): no longer true for `desk` or `desk ui` on `main`. Both exit 2 without drawing. In tmux at 100×20 the dashboard says "TERM=dumb cannot draw a full-screen view; use desk --frame for one frame, or desk status.", and `desk ui` says the same sentence ending "use desk ui --frame for one frame, or desk asks." With no terminal at all both check for a terminal first and print the needs-a-terminal message instead. Commented on 2026-11-22; the issue also names other TUIs, which this review did not run.
 - **#1095** (open): finding 16.
 - **#1250** (open): finding 15's layout half.
 - **#1098, #1158** (closed): re-checked and still fixed. `?` opens a key list in the run view.
