@@ -16,7 +16,7 @@ What costs the operator is steps. The ranking rule, set by the operator on 2026-
 | 2 | After `y` the cursor stays on the item that ran | friction | up to n-1 moves per approval | #1480 |
 | 3 | `desk ui` lists scripts but cannot run them | friction | a second program | #1481 |
 | 4 | The run-all confirm is 64 hex characters per item, no what | friction | 384 characters for 6 items | #1482 |
-| 5 | Skip, clear and done are confirmed though they can be undone | friction | 1 extra key each | #1483 |
+| 5 | Skip is confirmed though `u` undoes it | friction | 1 extra key per skip | #1483 |
 | 6 | A failed run shows no reason on the dashboard | friction | 1 extra screen | #1484 |
 | 7 | `desk ui` opens with the cursor on a read-only row | friction | 1 move before any answer | #1485 |
 | 8 | A changed item says so but shows no difference | friction | a manual compare | #1486 |
@@ -38,7 +38,7 @@ The operator ruled on 2026-11-22:
 - **Filing shape.** One issue each for findings 1 to 11, one polish batch for 12 to 15, 17 and 18, and comments on #1095, #1202 and #1152.
 - **Finding 2.** After `y` the cursor moves to the next waiting item (#1480).
 - **Finding 4.** Once #1480 lands, `a` and its prompt are removed (#1482). That also makes finding 1 moot; #1479 stays separate because it can ship first.
-- **Finding 5.** Skip acts at once and keeps `u`; confirm only where there is no undo (#1483).
+- **Finding 5.** Skip acts at once and keeps `u`; confirm only where there is no undo (#1483). Clearing a lost run and marking an ask done have no undo today, so they keep their confirm.
 - **Finding 3.** Filed as a design issue without picking the surviving surface (#1481).
 - **First view.** The trim direction; the approval card stays as a later option.
 - **Notifier notes.** Posted as one comment on #1476.
@@ -246,7 +246,7 @@ For the six runnable fixture items the prompt lists 384 hex characters and no wh
 
 **Direction:** ruled: remove `a` once the cursor advances after `y` (§ Rulings). The options weighed were dropping `a`, letting it run only items whose focus panel had been on screen, and a shorter prompt; only the first removes a screen.
 
-### 5. Skip, clear and done are confirmed though they can be undone
+### 5. Skip is confirmed though `u` undoes it
 
 **Rank:** 5 (friction). Seen at 66×40 and 120×40.
 
@@ -262,11 +262,11 @@ For the six runnable fixture items the prompt lists 384 hex characters and no wh
 mark done? d or y confirms, any other key cancels
 ```
 
-A skip can be undone with `u` ("skipped 01 merge-1201 · u to undo", then "returned 01 merge-1201 to the queue"), and it is still confirmed first.
+A skip can be undone with `u` ("skipped 01 merge-1201 · u to undo", then "returned 01 merge-1201 to the queue"), and it is still confirmed first. The other two prompts are different: clearing a lost run is never offered to `u` (the code says so where it records the skip as lost), and marking an ask done has no undo, so those two confirms guard actions that cannot be taken back.
 
-**Cost:** one extra key on a routine action that already has an undo.
+**Cost:** one extra key on every skip, a routine action that already has an undo.
 
-**Direction:** skip acts at once and keeps `u`. Clearing a lost run and marking an ask done need the same look: confirm only where there is no undo.
+**Direction:** skip acts at once and keeps `u`. Clearing a lost run and marking an ask done keep their confirm under the rule "confirm only where there is no undo"; giving either an undo would let its confirm go too.
 
 ### 6. A failed run shows no reason on the dashboard
 
