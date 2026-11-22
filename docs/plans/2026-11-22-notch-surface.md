@@ -1,6 +1,6 @@
 ---
 status: in-progress
-next: "T0 waived by Cameron; T1 done (key, tier, herdrDetail, sweepGeneratedAt). Next: T2 drain row (own PR) → T3 jump, which must target herdr-app terminals (see Deviations) → S1 → T4 → T5 → S2 → T6 → T7 → T8."
+next: "T0 waived; T1 done; T2 drain row on feat/attention-drain-row (stacked on plan/notch-surface). Next: T3 jump, which must target herdr-app terminals (see Deviations) → S1 → T4 → T5 → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
 updated: 2026-11-22
@@ -190,7 +190,7 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
   - **Tests**: the key is stable across a herdr flap, a sweep merge and a new turn; two desk items with the same content get distinct keys; duplicate sweep entries collapse. Stage the break: make two rows share a key and confirm red.
   - **Live-state claim 4** is measured here first.
   - **File** the `--no-prune` follow-up issue.
-- [ ] **T2 Drain row (own PR).** Derive a `drain` row at read time. It exists only when all four hold: `drain.json` reads `running`, `slots_hold` is set, `drain.SlotsStuck` is true, and a `LOCK_SH|LOCK_NB` probe on `drain.lock` fails (the drain is alive). There is no new writer and no TTL. Text is fixed, with no free text from the drain. Tests: a crashed drain with a hold shows no row, a stale tick shows no row, and a live stuck drain shows one. Update `docs/commands/attention.md` (cost table, `drain` source).
+- [x] **T2 Drain row (own PR).** Derive a `drain` row at read time. It exists only when all four hold: `drain.json` reads `running`, `slots_hold` is set, `drain.SlotsStuck` is true, and a `LOCK_SH|LOCK_NB` probe on `drain.lock` fails (the drain is alive). There is no new writer and no TTL. Text is fixed, with no free text from the drain. Tests: a crashed drain with a hold shows no row, a stale tick shows no row, and a live stuck drain shows one. Update `docs/commands/attention.md` (cost table, `drain` source).
 - [ ] **T3 Jump.** `forgectl attention jump --key=K [--json]`:
   - It validates K, re-lists, and requires exactly one matching row.
   - It takes the pane from herdr only, resolves its tab, and calls the shared focus-tab function, which focuses the workspace too where `FocusNeedsSpace()`, then brings herdr-app forward.
@@ -245,5 +245,6 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 - 2026-11-22, T1 / Live-state claim 4, measured half: `forgectl attention list --json` under `env -i HOME=… PATH=/usr/bin:/bin:/usr/sbin:/sbin` exits 0 and reads the spool and desk. The herdr half could not be measured: no herdr server runs on sjomba (`herdr agent list` → `server_not_running`), because Cameron works in herdr-app, so `sources.herdr` is `unavailable` from a full shell too and no row gets a pane. The Workarounds row stays `fix first`, re-aimed at T3.
 - 2026-11-22, T3 premise moved: cameronsjo/forgectl#1476 now clicks through to a **herdr-app terminal** (`forgectl herdr _focus-terminal --terminal <HC_TERMINAL_ID> --herdr-app <abs path>`, shared function `focusTerminal` in `internal/cli/herdr_focus_terminal.go`), not a herdr 0.9 tab. T3 therefore resolves a row to a herdr-app terminal and calls `focusTerminal`; it needs a terminal source the queue does not read yet (desk items queued from a herdr-app terminal, and a session-to-terminal map). The herdr `pane focus` Loop row may become moot under herdr-app; T3 decides.
 - 2026-11-22, T1: `--no-prune` follow-up filed as cameronsjo/forgectl#1492.
+- 2026-11-22, T2 / Live-state claim 3: confirmed (`slots_hold` in drain.json, `drain.Effective` reports `stale`, `drain.lock` is held `LOCK_EX` for the drain's life). Improvement: the liveness check is pid plus process start time (`checkDrainSignalable`, the check `surface drain stop` makes), not a `LOCK_SH|LOCK_NB` probe. A shared-lock probe held at the moment a drain starts makes that start's `LOCK_EX|LOCK_NB` fail with `ErrDrainLocked`; a 30 s poller would hit that window eventually. Same intent (a crashed drain shows no row), no lock taken.
 
 ## Learnings

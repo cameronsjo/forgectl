@@ -23,6 +23,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/procstart"
+	"github.com/cameronsjo/forgectl/internal/surface/drain"
+	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
 const (
@@ -297,6 +300,9 @@ type attentionSources struct {
 	// cut. Empty when herdr answered.
 	HerdrDetail string `json:"herdrDetail,omitempty"`
 	Sweep       string `json:"sweep"`
+	// Drain is drain.json: ok, absent (no drain has run), error or
+	// malformed.
+	Drain string `json:"drain"`
 	// SweepGeneratedAt is when the sweep that sweep.json holds ran, so a
 	// reader can tell a stale sweep from an empty one. Absent unless sweep is
 	// ok.
@@ -351,8 +357,11 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	}
 	out.Skipped += sweepSkipped
 
+	hold, drainState := attentionDrain(now)
+	out.Sources.Drain = drainState
+
 	out.Rows = attention.Build(attention.Input{
-		Now: now, Records: recs, Herdr: h, Desk: items, Sweep: sw,
+		Now: now, Records: recs, Herdr: h, Desk: items, Sweep: sw, Drain: hold,
 		WorkerPrefix: deps.Cfg.Attention.Prefix(), Session: o.session,
 	})
 	if out.Rows == nil {
@@ -404,6 +413,47 @@ func attentionDesk() ([]attention.DeskItem, string) {
 		items = append(items, di)
 	}
 	return items, sourceOK
+}
+
+// attentionDrain reads drain.json read-only and returns the hold the queue
+// shows, if any (drainNeedsYou). It takes no lock and writes nothing.
+func attentionDrain(now time.Time) (*attention.DrainHold, string) {
+	files, err := worker.OpenDrainFiles()
+	if err != nil {
+		return nil, sourceError
+	}
+	data, err := files.ReadStatus()
+	if err != nil {
+		return nil, sourceError
+	}
+	if data == nil {
+		return nil, sourceAbsent
+	}
+	st, err := drain.DecodeStatus(data)
+	if err != nil {
+		return nil, sourceMalformed
+	}
+	return drainNeedsYou(st, now, attentionDrainAlive), sourceOK
+}
+
+// attentionDrainAlive reports whether drain.json's process is still the
+// drain that wrote it: the same check `surface drain stop` makes before a
+// signal (pid and process start time). It takes no lock, so a poll never
+// makes a starting drain's LOCK_EX|LOCK_NB fail.
+var attentionDrainAlive = func(st drain.Status) bool {
+	return checkDrainSignalable(st, procstart.Of) == nil
+}
+
+// drainNeedsYou is the drain row's rule: drain.json reads running and its
+// last tick is fresh (drain.Effective), a claude-slots fault hold has lasted
+// drain.SlotsStuckAfter (drain.SlotsStuck), and the process is still that
+// drain. A crashed drain, a stale tick or a full cap (the normal hold) gives
+// no row.
+func drainNeedsYou(st drain.Status, now time.Time, alive func(drain.Status) bool) *attention.DrainHold {
+	if drain.Effective(st, now) != drain.StatusRunning || !drain.SlotsStuck(st.SlotsHold, now) || !alive(st) {
+		return nil
+	}
+	return &attention.DrainHold{Since: st.SlotsHold.Since}
 }
 
 // attentionSweep reads `forgectl sweep`'s last result. Absent is no rows; a
