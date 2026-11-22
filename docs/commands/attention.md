@@ -38,7 +38,7 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 
 | Field | Meaning |
 | --- | --- |
-| `key` | a stable id for the wait: 16 hex characters of sha256 over the row's kind and the fields fixed when the wait was created (desk: item name; `q`/`a`: session, turn, item number; worker: name and block; PR: `owner/repo#n`). A herdr read, a worker merge or a session merge never changes it, so a consumer can tell a new wait from one it has seen. Two rows from one source with the same key are one wait, and only the first (lowest cost) is listed. The text view prints its first 6 characters. |
+| `key` | a stable id for the wait: 16 hex characters of sha256 over the row's kind and the fields fixed when the wait was created (desk: item name, hash and `added_at`; `q`/`a`: session, turn, item number; worker: name and block; PR: `owner/repo#n`). A herdr read, a worker merge or a session merge never changes it, so a consumer can tell a new wait from one it has seen. Two rows from one source with the same key are one wait, and only the first (lowest cost) is listed. The text view prints its first 6 characters. |
 | `tier` | what the wait earns on a glanceable surface: `raise` (desk item, blocked worker, stuck drain), `count` (marker-clean PR, `Action (Cameron)`) or `hidden` (questions, proposals). A `q` or `a` row never raises, whatever its `origin`. |
 | `kind` | `q`, `a`, `desk`, `worker`, `pr` or `drain` |
 | `session` | the Claude Code session id the row belongs to, when known |
