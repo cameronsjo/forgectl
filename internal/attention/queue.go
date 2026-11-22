@@ -76,8 +76,11 @@ type Row struct {
 	// Pane is where Jump goes: the herdr pane that `herdr agent list`
 	// reports for the row's session, or for a desk or worker row the pane it
 	// names when herdr lists it. Never a pane taken from a record alone.
-	Pane   string `json:"pane,omitempty"`
-	Worker string `json:"worker,omitempty"`
+	Pane string `json:"pane,omitempty"`
+	// Terminal is where Jump goes on herdr-app: the hc terminal a desk item
+	// was queued from, when hc lists it live now. Never part of the key.
+	Terminal string `json:"terminal,omitempty"`
+	Worker   string `json:"worker,omitempty"`
 	// Tag is "Q" or "A" on an item row, the item name on a desk row, the
 	// block on a worker row, and owner/repo#n on a PR row.
 	Tag   string `json:"tag,omitempty"`
@@ -176,7 +179,18 @@ type DeskItem struct {
 	What       string
 	SHA256     string
 	SignalPane string
-	AddedAt    time.Time
+	// Terminal is the hc terminal the item was queued from, already checked
+	// to have the shape of a local hc address.
+	Terminal string
+	AddedAt  time.Time
+}
+
+// Core is what the caller's herdr-core (hc) reported. Known is false when it
+// could not be asked; Live holds the addresses of its live terminals.
+type Core struct {
+	Known  bool
+	Detail string
+	Live   map[string]bool
 }
 
 // SweepWorker and SweepPR are the parts of sweep.json the queue uses.
@@ -207,6 +221,7 @@ type Input struct {
 	Now     time.Time
 	Records []Record
 	Herdr   Herdr
+	Core    Core
 	Desk    []DeskItem
 	Sweep   *Sweep
 	// Drain, when set, is a live drain whose claude launches have been held
@@ -270,6 +285,9 @@ func Build(in Input) []Row {
 		pane := ""
 		if ValidPane(d.SignalPane) {
 			pane = d.SignalPane
+		}
+		if d.Terminal != "" && in.Core.Live[d.Terminal] {
+			r.Terminal = d.Terminal
 		}
 		if a, ok := byPane[pane]; ok && pane != "" {
 			r.Pane = pane

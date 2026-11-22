@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -42,6 +44,8 @@ const (
 	attentionDetailMax = 200
 	// attentionShortKey is how much of a row key the text view prints.
 	attentionShortKey = 6
+	// attentionHcBinary is herdr-core's CLI.
+	attentionHcBinary = "hc"
 )
 
 // Source states reported by `list --json`.
@@ -300,6 +304,9 @@ type attentionSources struct {
 	// cut. Empty when herdr answered.
 	HerdrDetail string `json:"herdrDetail,omitempty"`
 	Sweep       string `json:"sweep"`
+	// Core is herdr-core (hc): ok, or unavailable with CoreDetail saying why.
+	Core       string `json:"core"`
+	CoreDetail string `json:"coreDetail,omitempty"`
 	// Drain is drain.json: ok, absent (no drain has run), error or
 	// malformed.
 	Drain string `json:"drain"`
@@ -357,11 +364,17 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	}
 	out.Skipped += sweepSkipped
 
+	core := attentionCore(cmd.Context(), deps)
+	out.Sources.Core = sourceOK
+	if !core.Known {
+		out.Sources.Core, out.Sources.CoreDetail = sourceUnavailable, core.Detail
+	}
+
 	hold, drainState := attentionDrain(now)
 	out.Sources.Drain = drainState
 
 	out.Rows = attention.Build(attention.Input{
-		Now: now, Records: recs, Herdr: h, Desk: items, Sweep: sw, Drain: hold,
+		Now: now, Records: recs, Herdr: h, Core: core, Desk: items, Sweep: sw, Drain: hold,
 		WorkerPrefix: deps.Cfg.Attention.Prefix(), Session: o.session,
 	})
 	if out.Rows == nil {
@@ -407,6 +420,9 @@ func attentionDesk() ([]attention.DeskItem, string) {
 			continue
 		}
 		di := attention.DeskItem{Name: it.Name, What: it.What, SHA256: it.Meta.SHA256, SignalPane: it.Meta.SignalPane}
+		if hcadapter.ValidAddress(it.Meta.Terminal) {
+			di.Terminal = it.Meta.Terminal
+		}
 		if it.Meta.AddedAt != nil {
 			di.AddedAt = *it.Meta.AddedAt
 		}
@@ -454,6 +470,44 @@ func drainNeedsYou(st drain.Status, now time.Time, alive func(drain.Status) bool
 		return nil
 	}
 	return &attention.DrainHold{Since: st.SlotsHold.Since}
+}
+
+// attentionCoreResult is the part of `hc ls --json` the queue reads.
+type attentionCoreResult struct {
+	Terminals *[]struct {
+		Address string `json:"address"`
+		State   string `json:"state"`
+	} `json:"terminals"`
+}
+
+// attentionCore asks herdr-core for its live terminals with `hc ls --json`.
+// Known is false when hc could not be asked or its reply does not parse;
+// Detail then says why, cleaned and cut.
+var attentionCore = func(ctx context.Context, deps module.Deps) attention.Core {
+	c := attention.Core{}
+	if deps.Runner == nil {
+		c.Detail = "no command runner"
+		return c
+	}
+	ctx, cancel := context.WithTimeout(ctx, attentionHerdrTimeout)
+	defer cancel()
+	out, err := deps.Runner.Run(ctx, attentionHcBinary, "ls", "--json")
+	if err != nil {
+		c.Detail = attention.Clean(err.Error(), attentionDetailMax)
+		return c
+	}
+	var r attentionCoreResult
+	if err := json.Unmarshal([]byte(out), &r); err != nil || r.Terminals == nil {
+		c.Detail = "hc ls --json: reply has no terminals list"
+		return c
+	}
+	c.Known, c.Live = true, map[string]bool{}
+	for _, t := range *r.Terminals {
+		if t.State == "live" && hcadapter.ValidAddress(t.Address) {
+			c.Live[t.Address] = true
+		}
+	}
+	return c
 }
 
 // attentionSweep reads `forgectl sweep`'s last result. Absent is no rows; a

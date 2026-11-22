@@ -77,6 +77,24 @@ func TestRowKeyForItems(t *testing.T) {
 	}
 }
 
+// A desk row takes its queuing terminal only while hc lists it live, and
+// the terminal never enters the key.
+func TestBuildDeskTerminalComesFromCore(t *testing.T) {
+	desk := []DeskItem{{Name: "05-x", What: "x", Terminal: "t148", AddedAt: t0}}
+	none := Build(Input{Now: t0, Desk: desk})
+	gone := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Live: map[string]bool{"t9": true}}})
+	live := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Live: map[string]bool{"t148": true}}})
+	if none[0].Terminal != "" || gone[0].Terminal != "" {
+		t.Errorf("terminal without hc vouching: none=%q gone=%q", none[0].Terminal, gone[0].Terminal)
+	}
+	if live[0].Terminal != "t148" {
+		t.Errorf("live terminal = %q, want t148", live[0].Terminal)
+	}
+	if none[0].Key != live[0].Key {
+		t.Errorf("terminal changed the key: %s -> %s", none[0].Key, live[0].Key)
+	}
+}
+
 func TestRowKeyDistinguishesSameContentDeskItems(t *testing.T) {
 	rows := Build(Input{Now: t0, Desk: []DeskItem{
 		{Name: "01-restart", What: "restart the box", SHA256: sha64, AddedAt: t0},

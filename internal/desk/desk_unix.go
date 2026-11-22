@@ -44,8 +44,10 @@ type Desk struct {
 	// signalPane is stamped into the meta of every item Add queues; onLeave
 	// runs when an item leaves pending/ (see SetSignalPane, OnLeavePending).
 	signalPane string
-	onLeave    func(Meta)
-	onReturn   func(Meta)
+	// terminal is stamped into the meta of every item Add queues.
+	terminal string
+	onLeave  func(Meta)
+	onReturn func(Meta)
 
 	// readOnly is set by OpenReadOnly: nothing below the desk is created,
 	// moved, chmodded or written, and Scan reports what it would have fixed.
@@ -55,6 +57,10 @@ type Desk struct {
 // SetSignalPane records pane, the herdr pane of the queuing session, in the
 // meta of every item this Desk adds from now on.
 func (d *Desk) SetSignalPane(pane string) { d.signalPane = pane }
+
+// SetTerminal records terminal, the herdr-app terminal of the queuing
+// session, in the meta of every item this Desk adds from now on.
+func (d *Desk) SetTerminal(terminal string) { d.terminal = terminal }
 
 // OnLeavePending registers fn to run, with the item's meta, after an item
 // leaves pending/ by a claim or a skip. It is how an operator signal raised

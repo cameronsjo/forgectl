@@ -137,7 +137,7 @@ func TestAttentionPutThenList(t *testing.T) {
 	if a := l.Rows[0]; a.Kind != attention.KindAction || a.Actor != attention.ActorCameron || a.NotOnDesk {
 		t.Errorf("action row = %+v", a)
 	}
-	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent, Drain: sourceAbsent}) {
+	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent, Drain: sourceAbsent, Core: sourceUnavailable, CoreDetail: "unexpected hc [ls --json]"}) {
 		t.Errorf("sources = %+v", l.Sources)
 	}
 }
@@ -340,6 +340,66 @@ func TestAttentionListKeysTiersAndSourceDetail(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, l.Rows[0].Key[:attentionShortKey]+" ") {
 		t.Errorf("text view does not lead with the short key:\n%s", out)
+	}
+}
+
+// hcLs is a fake runner answering hc ls --json with these live terminals,
+// and herdr agent list as not running.
+func hcLs(addrs ...string) *exec.FakeRunner {
+	var ts []map[string]any
+	for _, a := range addrs {
+		ts = append(ts, map[string]any{"address": a, "agent": "claude-code", "state": "live", "status": "idle", "cwd": "/x", "where": "s / t"})
+	}
+	ts = append(ts, map[string]any{"address": "t99", "state": "finished"})
+	body, _ := json.Marshal(map[string]any{"terminals": ts})
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == attentionHcBinary && strings.Join(args, " ") == "ls --json" {
+			return string(body), nil
+		}
+		return "", errors.New("herdr: not running")
+	}}
+}
+
+// A desk item queued from a herdr-app terminal points at that terminal while
+// hc lists it live; a finished or unlisted one gives no terminal, and hc
+// being down says why in sources.
+func TestAttentionListDeskTerminalFromCore(t *testing.T) {
+	e := newAttnEnv(t)
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(e.desk, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(name, term string) {
+		body := "# WHAT: " + name + "\necho hi\n"
+		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".sh"), body)
+		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".meta.json"),
+			`{"added_at":"2026-10-01T00:00:00Z","sha256":"`+sha(body)+`","kind":"script","terminal":"`+term+`"}`)
+	}
+	add("01-live", "t148")
+	add("02-finished", "t99")
+	add("03-forged", "../../sh")
+
+	l := attnList(t, module.Deps{Runner: hcLs("t148")})
+	if l.Sources.Core != sourceOK || len(l.Rows) != 3 {
+		t.Fatalf("core %q, rows %+v", l.Sources.Core, l.Rows)
+	}
+	got := map[string]string{}
+	for _, r := range l.Rows {
+		got[r.Tag] = r.Terminal
+	}
+	if got["01-live"] != "t148" || got["02-finished"] != "" || got["03-forged"] != "" {
+		t.Errorf("terminals = %v, want only 01-live at t148", got)
+	}
+
+	l = attnList(t, module.Deps{Runner: herdrDown()})
+	if l.Sources.Core != sourceUnavailable || l.Sources.CoreDetail == "" {
+		t.Errorf("hc down: core %q detail %q", l.Sources.Core, l.Sources.CoreDetail)
+	}
+	for _, r := range l.Rows {
+		if r.Terminal != "" {
+			t.Errorf("terminal %q with hc down", r.Terminal)
+		}
 	}
 }
 
