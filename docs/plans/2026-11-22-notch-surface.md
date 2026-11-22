@@ -2,7 +2,7 @@
 status: planned
 next: "T0 waits on cameronsjo/forgectl#1476 (clickable notifications, draft, build-test and macos-test red on 2026-11-22). After it merges: T0 banner trial → verdict. Build: T1 queue fields → T2 drain row → T3 jump → S1 security review → T4 NotchCore → T5 app → S2 security review → T6 cask/release → T7 docs → T8 decision issue. Not yet: write docs/research/2026-11-22-notch-surface.md and stop."
 branch: plan/notch-surface
-pr: "—"
+pr: cameronsjo/forgectl#1478
 updated: 2026-11-22
 date: 2026-11-22
 model: claude-opus-5-5
