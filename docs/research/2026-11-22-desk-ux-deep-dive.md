@@ -47,15 +47,53 @@ The operator ruled on 2026-11-22:
 
 Every frame comes from `tmux capture-pane -p` in a throwaway tmux server, with a fixture `HOME`, a temp desk directory per state, both desk notification settings off, and stub notifier programs first on `PATH` that log any call. The stub log stayed empty for the whole capture. Fixture items are `echo`, `sleep` and `exit 1` scripts. The frames are not committed; each finding carries the rows that show it. The host name and temp paths in the excerpts are replaced.
 
-To reproduce any dashboard frame:
+To reproduce a frame, keep the same isolation. Run it in a scratch directory; on macOS forgectl reads its config from `$HOME/Library/Application Support/forgectl/`, on Linux from `$HOME/.config/forgectl/`.
 
 ```bash
-desk=$(mktemp -d)
-forgectl desk add item.sh --dir "$desk" --what "…" --why "…"
-tmux new-session -d -s shot -x 66 -y 40 "forgectl desk --dir $desk"
-tmux send-keys -t shot a          # the keys named in the finding; never Enter
-tmux capture-pane -t shot -p
+S=$(mktemp -d); mkdir -p "$S/stubs" "$S/state" "$S/desk" \
+  "$S/home/Library/Application Support/forgectl" "$S/home/.config/forgectl"
+# both desk notifications off, in the fixture HOME
+printf '[desk]\nnotify_macos = false\nnotify_herdr = false\n' \
+  | tee "$S/home/Library/Application Support/forgectl/config.toml" \
+  > "$S/home/.config/forgectl/config.toml"
+# stub notifiers: a call is logged instead of shown; the log must stay empty
+for n in osascript terminal-notifier herdr; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s/marker.log"\n' "$n" "$S" > "$S/stubs/$n"
+  chmod +x "$S/stubs/$n"
+done
+f() { env -u HERDR_ENV -u HERDR_PANE_ID HOME="$S/home" XDG_STATE_HOME="$S/state" \
+        PATH="$S/stubs:$PATH" forgectl "$@"; }
+
+printf '#!/bin/sh\necho "merging the release branch"\nsleep 1\necho "done"\n' > "$S/merge-1201.sh"
+f desk add "$S/merge-1201.sh" --dir "$S/desk" \
+  --what "Merge the release branch into main" \
+  --why "CI is green and the review is posted at head"
+
+tmux -L deskux -f /dev/null new-session -d -s shot -x 66 -y 40 \
+  "env -u HERDR_ENV -u HERDR_PANE_ID HOME='$S/home' XDG_STATE_HOME='$S/state' PATH='$S/stubs:$PATH' forgectl desk --dir '$S/desk'"
+sleep 2                                   # wait for the first draw; a capture before it is blank
+tmux -L deskux send-keys -t shot a        # the keys a finding names; never Enter
+sleep 1
+tmux -L deskux capture-pane -t shot -p
+tmux -L deskux kill-server; test ! -s "$S/marker.log" && echo "no notifier was called"
 ```
+
+The other states come from more fixture items queued the same way:
+
+| State | How it was built |
+| --- | --- |
+| busy (nine rows) | nine `desk add` calls: short scripts, one with a 100-character `--what` |
+| failed | a script that prints an error and ends `exit 1`; `y` on it |
+| running | a script with `sleep 45`; `y` on it, captured while it runs |
+| held | `desk add … --after 03-fail-step` |
+| tty | `desk add … --tty` |
+| changed | a line appended to the item's file in `pending/` after `desk add` |
+| batch | a `.manifest` of three steps (`lint`, `test`, `publish after=lint,test`); a second one whose `test` step exits 3 |
+| lost | `y` on a `sleep 120` script, then `kill -9` on its `forgectl desk _supervise` process |
+| mixed days | a copy of the desk with the dates in `done/*.meta.json` rewritten |
+| asks | `desk ask --title … --bucket <name>` for each of `now`, `soon`, `optional` and `coming`; one with `--steps-file` and `--link`, one with `--allow reply,snooze` |
+
+`y` was pressed only on these fixture scripts. Every confirm was rendered and then cancelled.
 
 Two capture traps, so nobody files them as bugs: the renderer moves the cursor with hard tabs and tmux keeps them (a tab near the right edge stops at the last column, so a plain `expand` pushes the border out), and a capture taken before the first draw is blank.
 
@@ -324,7 +362,7 @@ The tab's "7 waiting" is the only clue. The timeline panel does mark its own ove
 
 ### 10. Footer hints: the wrong keys are dropped, labels differ, and one hint is dead
 
-**Rank:** 10 (friction). Seen at 40, 60 and 66 columns.
+**Rank:** 10 (friction). The footer cases were seen at 40, 60 and 66 columns; that Enter does nothing on the dashboard is read from the code (`"enter"` is handled only in the timeline view), since Enter was never pressed.
 
 At 40 columns the footer keeps run-all and drops skip and view:
 
@@ -585,7 +623,7 @@ The terminal-capability rows come from a probe that ran both programs in a pseud
 | Quit works on a terminal that answers no queries | pass | exits within 0.01 s of `q`, both programs |
 | Modes restored on quit and on Ctrl-C | pass | none left set |
 | `NO_COLOR` removes color | pass | 662 color escapes drop to 0 (dashboard), 65 to 0 (`desk ui`) |
-| `TERM=dumb` gets a refusal | pass | exit 2 and a next step; see #1152 below |
+| `TERM=dumb` gets a refusal | pass | exit 2 and a next step; see #1152 above |
 | Resize redraws cleanly | pass | 120×40 to 30×8 and back |
 | No terminal at all | pass | exit 2; `desk ui` uses the dashboard's message (finding 16) |
 | First-frame time, light theme, grapheme width, tmux/SSH behavior | not checked | need a real terminal |
