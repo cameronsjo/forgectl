@@ -302,6 +302,46 @@ func TestAttentionSweepFile(t *testing.T) {
 	}
 }
 
+// list --json carries each row's key and tier, says why herdr is
+// unavailable, and dates the sweep.
+func TestAttentionListKeysTiersAndSourceDetail(t *testing.T) {
+	e := newAttnEnv(t)
+	sweep := filepath.Join(e.state, "cadence", "sweep.json")
+	if err := os.MkdirAll(filepath.Dir(sweep), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	good := `{"schemaVersion":2,"generatedAt":"2026-10-16T12:00:00Z","workers":[{"name":"cos-w","blockedBy":"prompt"}],"prs":[{"repo":"acme/widget","number":3,"title":"Fix","state":"marker-clean"}]}`
+	if err := os.WriteFile(sweep, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := attnList(t, module.Deps{Runner: herdrDown()})
+	if len(l.Rows) != 2 {
+		t.Fatalf("rows = %+v", l.Rows)
+	}
+	if w := l.Rows[0]; !attention.ValidKey(w.Key) || w.Tier != attention.TierRaise {
+		t.Errorf("worker row key/tier = %q/%q", w.Key, w.Tier)
+	}
+	if p := l.Rows[1]; !attention.ValidKey(p.Key) || p.Tier != attention.TierCount {
+		t.Errorf("pr row key/tier = %q/%q", p.Key, p.Tier)
+	}
+	if l.Sources.Herdr != sourceUnavailable || !strings.Contains(l.Sources.HerdrDetail, "not running") {
+		t.Errorf("herdr source = %q, detail %q", l.Sources.Herdr, l.Sources.HerdrDetail)
+	}
+	want := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	if l.Sources.SweepGeneratedAt == nil || !l.Sources.SweepGeneratedAt.Equal(want) {
+		t.Errorf("sweepGeneratedAt = %v, want %v", l.Sources.SweepGeneratedAt, want)
+	}
+
+	// The text view leads each row with the short key.
+	out, _, err := attnRun(t, module.Deps{}, "", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, l.Rows[0].Key[:attentionShortKey]+" ") {
+		t.Errorf("text view does not lead with the short key:\n%s", out)
+	}
+}
+
 func TestAttentionRefusesABadConfig(t *testing.T) {
 	newAttnEnv(t)
 	deps := module.Deps{Cfg: config.Config{Attention: config.AttentionConfig{TTLHours: new(0)}}}

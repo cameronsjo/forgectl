@@ -35,6 +35,10 @@ const (
 	attentionSweepMax = 4 << 20
 	// attentionHerdrTimeout bounds the herdr agent list call.
 	attentionHerdrTimeout = 3 * time.Second
+	// attentionDetailMax caps a source's reason line.
+	attentionDetailMax = 200
+	// attentionShortKey is how much of a row key the text view prints.
+	attentionShortKey = 6
 )
 
 // Source states reported by `list --json`.
@@ -54,12 +58,14 @@ var (
 	attentionHerdr = func(ctx context.Context, deps module.Deps) attention.Herdr {
 		h := attention.Herdr{Socket: attentionGetenv("HERDR_SOCKET_PATH")}
 		if deps.Runner == nil {
+			h.Detail = "no command runner"
 			return h
 		}
 		ctx, cancel := context.WithTimeout(ctx, attentionHerdrTimeout)
 		defer cancel()
 		agents, err := herdr.New(deps.Runner).Agents(ctx)
 		if err != nil {
+			h.Detail = attention.Clean(err.Error(), attentionDetailMax)
 			return h
 		}
 		h.Known = true
@@ -287,7 +293,14 @@ type attentionSources struct {
 	Spool string `json:"spool"`
 	Desk  string `json:"desk"`
 	Herdr string `json:"herdr"`
-	Sweep string `json:"sweep"`
+	// HerdrDetail is why herdr is unavailable: herdr's own error, cleaned and
+	// cut. Empty when herdr answered.
+	HerdrDetail string `json:"herdrDetail,omitempty"`
+	Sweep       string `json:"sweep"`
+	// SweepGeneratedAt is when the sweep that sweep.json holds ran, so a
+	// reader can tell a stale sweep from an empty one. Absent unless sweep is
+	// ok.
+	SweepGeneratedAt *time.Time `json:"sweepGeneratedAt,omitempty"`
 }
 
 func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
@@ -303,6 +316,7 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	out := attentionList{Sources: attentionSources{Spool: sourceOK, Herdr: sourceOK}}
 	if !h.Known {
 		out.Sources.Herdr = sourceUnavailable
+		out.Sources.HerdrDetail = h.Detail
 	}
 
 	var recs []attention.Record
@@ -331,6 +345,10 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 
 	sw, sweepSkipped, sweepState := attentionSweep(attention.SweepPath(base))
 	out.Sources.Sweep = sweepState
+	if sw != nil {
+		gen := sw.GeneratedAt
+		out.Sources.SweepGeneratedAt = &gen
+	}
 	out.Skipped += sweepSkipped
 
 	out.Rows = attention.Build(attention.Input{
@@ -447,6 +465,14 @@ func readTail(r io.Reader, keep, limit int) (string, error) {
 	}
 }
 
+// shortKey is the start of a row key, enough to tell rows apart by eye.
+func shortKey(k string) string {
+	if len(k) < attentionShortKey {
+		return k
+	}
+	return k[:attentionShortKey]
+}
+
 // printAttentionList is the text view: one line per row, through safeText.
 func printAttentionList(out, errOut io.Writer, l attentionList) error {
 	w := &stickyWriter{w: out}
@@ -472,7 +498,7 @@ func printAttentionList(out, errOut io.Writer, l attentionList) error {
 		if r.NotOnDesk {
 			extra = append(extra, "not on desk")
 		}
-		line := fmt.Sprintf("%-6s %-10s %s", r.Kind, label, r.Text)
+		line := fmt.Sprintf("%s %-6s %-10s %s", shortKey(r.Key), r.Kind, label, r.Text)
 		if len(extra) > 0 {
 			line += "  (" + strings.Join(extra, ", ") + ")"
 		}

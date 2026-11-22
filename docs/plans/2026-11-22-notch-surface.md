@@ -1,6 +1,6 @@
 ---
-status: planned
-next: "PingPlace set up and probed (see Deviations). T0's 3-day count waits on cameronsjo/forgectl#1476 (clickable notifications, draft, build-test and macos-test red on 2026-11-22). After it merges: T0 banner trial → verdict. Build: T1 queue fields → T2 drain row → T3 jump → S1 security review → T4 NotchCore → T5 app → S2 security review → T6 cask/release → T7 docs → T8 decision issue. Not yet: write docs/research/2026-11-22-notch-surface.md and stop."
+status: in-progress
+next: "T0 waived by Cameron; T1 done (key, tier, herdrDetail, sweepGeneratedAt). Next: T2 drain row (own PR) → T3 jump, which must target herdr-app terminals (see Deviations) → S1 → T4 → T5 → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
 updated: 2026-11-22
@@ -168,14 +168,14 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 
 ## Tasks
 
-- [ ] **T0 Banner trial (gate).** Runs after the clickable-notifications PR merges.
+- [x] **T0 Banner trial (gate).** Waived by Cameron on 2026-11-22 (see Deviations). Runs after the clickable-notifications PR merges.
   - Install PingPlace and set it to Top Middle. Set terminal-notifier's banner style to Alerts so banners persist.
   - Run 3 working days on the external monitor.
   - Each time a desk item or needs-you appears, Cameron notes one of three outcomes: seen within a minute / seen late / missed.
   - **Not yet** (no missed, at most one late): write `docs/research/2026-11-22-notch-surface.md` from this plan's research summary plus the trial result, on a `research/` branch with a PR, and stop.
   - **Build**: tick T0 with the counts and go on.
   - If PingPlace does not run on 27.3, record that and go to build.
-- [ ] **T1 Queue fields.**
+- [x] **T1 Queue fields.**
   - **`key`**: 16 hex characters of sha256 over a length-prefixed tuple of the row's source plus fields fixed at creation. Per kind:
     - desk: item name (`Tag`);
     - item (`q`/`a`): session, turn, N;
@@ -241,5 +241,9 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 
 - 2026-11-22, T0 setup: the PingPlace cask (author's tap, v1.4.2) is self-signed and not notarized; Gatekeeper moved it to the Trash on every launch. PingPlace was instead built from source at tag v1.4.2 (`d244d121`, one Swift file, read first: no network or shell calls, banner titles logged only under debug logging), signed with the local Apple Development identity, and installed to `/Applications/PingPlace.app`. A rebuild under another identity needs a fresh Accessibility grant. The trial's Loop row covers removing it.
 - 2026-11-22, Live-state claim 2: confirmed on macOS 27.3. An osascript probe banner landed top-center on the external monitor, which Cameron called much better. The Mac was in clamshell mode, so only one screen was active; which display PingPlace uses with both screens on is still untested. Cosmetic: banners still slide off to the right when they leave. T0's 3-day count starts once #1476's clickable banners merge.
+- 2026-11-22, T0: waived. Cameron read the status (T0 still blocked on cameronsjo/forgectl#1476) and said "Send it. Let's get 'er done." The build starts without the trial count, so the "not yet" branch and its research doc are dropped. PingPlace stays installed; T8's decision issue is where banner-vs-notch evidence is weighed.
+- 2026-11-22, T1 / Live-state claim 4, measured half: `forgectl attention list --json` under `env -i HOME=… PATH=/usr/bin:/bin:/usr/sbin:/sbin` exits 0 and reads the spool and desk. The herdr half could not be measured: no herdr server runs on sjomba (`herdr agent list` → `server_not_running`), because Cameron works in herdr-app, so `sources.herdr` is `unavailable` from a full shell too and no row gets a pane. The Workarounds row stays `fix first`, re-aimed at T3.
+- 2026-11-22, T3 premise moved: cameronsjo/forgectl#1476 now clicks through to a **herdr-app terminal** (`forgectl herdr _focus-terminal --terminal <HC_TERMINAL_ID> --herdr-app <abs path>`, shared function `focusTerminal` in `internal/cli/herdr_focus_terminal.go`), not a herdr 0.9 tab. T3 therefore resolves a row to a herdr-app terminal and calls `focusTerminal`; it needs a terminal source the queue does not read yet (desk items queued from a herdr-app terminal, and a session-to-terminal map). The herdr `pane focus` Loop row may become moot under herdr-app; T3 decides.
+- 2026-11-22, T1: `--no-prune` follow-up filed as cameronsjo/forgectl#1492.
 
 ## Learnings
