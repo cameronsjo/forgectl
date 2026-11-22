@@ -61,7 +61,7 @@ for n in osascript terminal-notifier herdr; do
   printf '#!/bin/sh\necho "%s $*" >> "%s/marker.log"\n' "$n" "$S" > "$S/stubs/$n"
   chmod +x "$S/stubs/$n"
 done
-f() { env -u HERDR_ENV -u HERDR_PANE_ID HOME="$S/home" XDG_STATE_HOME="$S/state" \
+f() { env -u HERDR_ENV -u HERDR_PANE_ID -u XDG_CONFIG_HOME HOME="$S/home" XDG_STATE_HOME="$S/state" \
         PATH="$S/stubs:$PATH" forgectl "$@"; }
 
 printf '#!/bin/sh\necho "merging the release branch"\nsleep 1\necho "done"\n' > "$S/merge-1201.sh"
@@ -70,12 +70,14 @@ f desk add "$S/merge-1201.sh" --dir "$S/desk" \
   --why "CI is green and the review is posted at head"
 
 tmux -L deskux -f /dev/null new-session -d -s shot -x 66 -y 40 \
-  "env -u HERDR_ENV -u HERDR_PANE_ID HOME='$S/home' XDG_STATE_HOME='$S/state' PATH='$S/stubs:$PATH' forgectl desk --dir '$S/desk'"
+  "env -u HERDR_ENV -u HERDR_PANE_ID -u XDG_CONFIG_HOME HOME='$S/home' XDG_STATE_HOME='$S/state' PATH='$S/stubs:$PATH' forgectl desk --dir '$S/desk'"
 sleep 2                                   # wait for the first draw; a capture before it is blank
 tmux -L deskux send-keys -t shot a        # the keys a finding names; never Enter
 sleep 1
 tmux -L deskux capture-pane -t shot -p
-tmux -L deskux kill-server; test ! -s "$S/marker.log" && echo "no notifier was called"
+tmux -L deskux kill-server
+if test -s "$S/marker.log"; then echo "a notifier was called:"; cat "$S/marker.log"
+else echo "no notifier was called"; fi
 ```
 
 The other states come from more fixture items queued the same way:
@@ -93,7 +95,7 @@ The other states come from more fixture items queued the same way:
 | mixed days | a copy of the desk with the dates in `done/*.meta.json` rewritten |
 | asks | `desk ask --title … --bucket <name>` for each of `now`, `soon`, `optional` and `coming`; one with `--steps-file` and `--link`, one with `--allow reply,snooze` |
 
-`y` was pressed only on these fixture scripts. Every confirm was rendered and then cancelled.
+`y` on a waiting item runs it at once with no prompt; it was pressed only on these fixture scripts, with notifications off and stubbed. The run-all, clear-lost and mark-done prompts were rendered and then cancelled. One skip prompt was accepted, on a fixture item, and undone with `u`.
 
 Two capture traps, so nobody files them as bugs: the renderer moves the cursor with hard tabs and tmux keeps them (a tab near the right edge stops at the last column, so a plain `expand` pushes the border out), and a capture taken before the first draw is blank.
 
