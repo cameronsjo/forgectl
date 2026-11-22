@@ -1,6 +1,6 @@
 ---
 status: planned
-next: "T0 waits on cameronsjo/forgectl#1476 (clickable notifications, draft, build-test and macos-test red on 2026-11-22). After it merges: T0 banner trial → verdict. Build: T1 queue fields → T2 drain row → T3 jump → S1 security review → T4 NotchCore → T5 app → S2 security review → T6 cask/release → T7 docs → T8 decision issue. Not yet: write docs/research/2026-11-22-notch-surface.md and stop."
+next: "PingPlace set up and probed (see Deviations). T0's 3-day count waits on cameronsjo/forgectl#1476 (clickable notifications, draft, build-test and macos-test red on 2026-11-22). After it merges: T0 banner trial → verdict. Build: T1 queue fields → T2 drain row → T3 jump → S1 security review → T4 NotchCore → T5 app → S2 security review → T6 cask/release → T7 docs → T8 decision issue. Not yet: write docs/research/2026-11-22-notch-surface.md and stop."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
 updated: 2026-11-22
@@ -238,5 +238,8 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 - `bash scripts/build-notch-app.sh - ""` (ad hoc), then the `codesign --verify --strict` requirement check. It must fail on the ad-hoc build and pass on the CI artifact. That is the staged break for the Team-ID gate.
 
 ## Deviations
+
+- 2026-11-22, T0 setup: the PingPlace cask (author's tap, v1.4.2) is self-signed and not notarized; Gatekeeper moved it to the Trash on every launch. PingPlace was instead built from source at tag v1.4.2 (`d244d121`, one Swift file, read first: no network or shell calls, banner titles logged only under debug logging), signed with the local Apple Development identity, and installed to `/Applications/PingPlace.app`. A rebuild under another identity needs a fresh Accessibility grant. The trial's Loop row covers removing it.
+- 2026-11-22, Live-state claim 2: confirmed on macOS 27.3. An osascript probe banner landed top-center, which Cameron called much better. Cosmetic: banners still slide off to the right when they leave. T0's 3-day count starts once #1476's clickable banners merge.
 
 ## Learnings
