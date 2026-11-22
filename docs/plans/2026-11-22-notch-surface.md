@@ -1,6 +1,6 @@
 ---
 status: in-progress
-next: "T0 waived; T1 done (#1478); T2 drain row (#1493); T3a desk rows point at herdr-app terminals (feat/attention-hc-terminal). Next: T4 NotchCore while cameronsjo/forgectl#1476 is open; T3b jump after it merges → S1 (T1–T3) → T5 → S2 → T6 → T7 → T8."
+next: "T0 waived; T1 (#1478), T2 (#1493), T3a (#1494), T4 NotchCore (feat/notch-core) built. Next: T5 app shell; T3b jump after cameronsjo/forgectl#1476 merges → S1 (T1–T3) → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
 updated: 2026-11-22
@@ -198,7 +198,7 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
   - Each call appends a `source=notch` line to the app's `events.jsonl` through a flag the app passes.
   - It files the herdr `pane focus <id>` issue.
 - [ ] **S1 Security review (before T4).** Run `cadence-forge:security-reviewer` at Opus over `internal/attention/*`, `internal/cli/attention_unix.go`, and the T1-T3 diffs. It rules on the provenance basis for raising and the key/jump resolution.
-- [ ] **T4 NotchCore** (`helper/forgectl-notch/Sources/NotchCore`). Pure logic, unit-tested like `BlessHelperCore`:
+- [x] **T4 NotchCore** (`helper/forgectl-notch/Sources/NotchCore`). Pure logic, unit-tested like `BlessHelperCore`:
   - decode;
   - the raise diff (first-read rule, grouping, good-read-only updates);
   - the badge string;
@@ -246,6 +246,7 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 - 2026-11-22, T3 premise moved: cameronsjo/forgectl#1476 now clicks through to a **herdr-app terminal** (`forgectl herdr _focus-terminal --terminal <HC_TERMINAL_ID> --herdr-app <abs path>`, shared function `focusTerminal` in `internal/cli/herdr_focus_terminal.go`), not a herdr 0.9 tab. T3 therefore resolves a row to a herdr-app terminal and calls `focusTerminal`; it needs a terminal source the queue does not read yet (desk items queued from a herdr-app terminal, and a session-to-terminal map). The herdr `pane focus` Loop row may become moot under herdr-app; T3 decides.
 - 2026-11-22, T1: `--no-prune` follow-up filed as cameronsjo/forgectl#1492.
 - 2026-11-22, T3 re-scoped to herdr-core, on Cameron's go: he works in herdr-app on herdr-core (`hc`), and the herdr 0.9 server is not used. Nothing on his machine writes the attention spool (he does not use the steward mod) and no `sweep.json` exists, so the rows that matter are desk items and the drain. **T3a:** `desk add` stamps `$HC_TERMINAL_ID` into the item meta as `terminal` (only a local hc address shape, and never under tmux, screen or zellij, the reading `progstatus` makes); `attention list` asks `hc ls --json` and gives a desk row that `terminal` only while hc lists it live; `sources` gains `core`/`coreDetail`. The record/`--terminal` half and the steward change were dropped: no caller. **T3b** (`attention jump --key`) resolves a desk row's terminal and calls #1476's `focusTerminal`; it waits on that PR. The herdr-server path stays (forgectl is public). T5 must hand forgectl a PATH that finds `hc`, or `sources.core` reads `unavailable` from a login item.
+- 2026-11-22, T4 order and shape: built before T3b and S1 on Cameron's go (S1 splits: T1–T2 + T3a now, T3b after #1476). NotchCore uses `swift-tools-version:6.2` and Swift Testing, per the house Swift rule, not bless-helper's 5.9/XCTest. `RaiseTracker.ingest` takes the read's `Result`, so "a failed read changes nothing" is enforced by the API and pinned by a test that a staged break turns red; keys a first read excludes (older than launch) are marked seen, so they never raise later. The forgectl locator refuses a present-but-unsigned first candidate rather than falling through to the second. CI gains a `notch-core` job (`swift test`, macos-latest).
 - 2026-11-22, T2 / Live-state claim 3: confirmed (`slots_hold` in drain.json, `drain.Effective` reports `stale`, `drain.lock` is held `LOCK_EX` for the drain's life). Improvement: the liveness check is pid plus process start time (`checkDrainSignalable`, the check `surface drain stop` makes), not a `LOCK_SH|LOCK_NB` probe. A shared-lock probe held at the moment a drain starts makes that start's `LOCK_EX|LOCK_NB` fail with `ErrDrainLocked`; a 30 s poller would hit that window eventually. Same intent (a crashed drain shows no row), no lock taken.
 
 ## Learnings

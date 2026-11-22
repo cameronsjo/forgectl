@@ -407,3 +407,23 @@ jobs:
 
       - name: Test
         run: swift test
+
+  notch-core:
+    # The notch app's pure logic (helper/forgectl-notch, NotchCore). Same
+    # runner and Swift as the helper job; swift-tools-version 6.2 needs the
+    # runner's Xcode 26 toolchain.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: helper/forgectl-notch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Test
+        run: swift test
