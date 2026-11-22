@@ -185,7 +185,7 @@ func (d *Desk) AddWith(src string, h Headers, unique bool) (Added, bool, error) 
 		// mean a file a person dropped in by hand. createMeta fails rather
 		// than overwrite a meta that appeared after the name check.
 		now := d.now().UTC()
-		created, err := d.createMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane, Terminal: d.terminal})
+		created, err := d.createMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane, Terminal: d.terminal, TerminalCore: d.terminalCore})
 		if err != nil {
 			return Added{}, false, err
 		}

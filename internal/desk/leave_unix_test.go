@@ -27,10 +27,10 @@ func TestAddStampsTheSignalPaneIntoTheItemMeta(t *testing.T) {
 
 func TestAddStampsTheTerminalIntoTheItemMeta(t *testing.T) {
 	d := openDesk(t)
-	d.SetTerminal("t148")
+	d.SetTerminal("t148", "0123456789abcdef0123456789abcdef")
 	a := addScript(t, d, "x.sh", "echo hi\n")
 	m, ok, err := d.readMeta(DirPending, a.Name)
-	if err != nil || !ok || m.Terminal != "t148" {
+	if err != nil || !ok || m.Terminal != "t148" || m.TerminalCore != "0123456789abcdef0123456789abcdef" {
 		t.Fatalf("meta = %+v ok=%v err=%v, want terminal t148", m, ok, err)
 	}
 }

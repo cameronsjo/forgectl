@@ -80,12 +80,15 @@ func TestRowKeyForItems(t *testing.T) {
 // A desk row takes its queuing terminal only while hc lists it live, and
 // the terminal never enters the key.
 func TestBuildDeskTerminalComesFromCore(t *testing.T) {
-	desk := []DeskItem{{Name: "05-x", What: "x", Terminal: "t148", AddedAt: t0}}
+	const core, other = "0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff"
+	desk := []DeskItem{{Name: "05-x", What: "x", Terminal: "t148", TerminalCore: core, AddedAt: t0}}
 	none := Build(Input{Now: t0, Desk: desk})
-	gone := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Live: map[string]bool{"t9": true}}})
-	live := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Live: map[string]bool{"t148": true}}})
-	if none[0].Terminal != "" || gone[0].Terminal != "" {
-		t.Errorf("terminal without hc vouching: none=%q gone=%q", none[0].Terminal, gone[0].Terminal)
+	gone := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: core, Live: map[string]bool{"t9": true}}})
+	// Another core with its own live t148 is not the terminal that queued it.
+	elsewhere := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: other, Live: map[string]bool{"t148": true}}})
+	live := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: core, Live: map[string]bool{"t148": true}}})
+	if none[0].Terminal != "" || gone[0].Terminal != "" || elsewhere[0].Terminal != "" {
+		t.Errorf("terminal without hc vouching: none=%q gone=%q elsewhere=%q", none[0].Terminal, gone[0].Terminal, elsewhere[0].Terminal)
 	}
 	if live[0].Terminal != "t148" {
 		t.Errorf("live terminal = %q, want t148", live[0].Terminal)
