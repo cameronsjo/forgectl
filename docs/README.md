@@ -29,6 +29,7 @@ operated.
   rewritten after the fact.
 - **[`discovery/`](discovery/)** — dated research and audits (e.g. an
   audience/README review). A point-in-time snapshot, not a living document.
+- **[`research/`](research/)** — dated findings from measuring or reviewing forgectl itself (e.g. the [desk UI/UX deep dive](research/2026-11-22-desk-ux-deep-dive.md)). Like `discovery/`, each is a point-in-time snapshot; the issues a review filed carry the work forward.
 - **[`operations/`](operations/)** — live runbooks for operating forgectl
   itself day to day. Unlike `adr/` and `discovery/`, these are meant to be
   kept current.
