@@ -107,6 +107,16 @@ func TestRowKeyDistinguishesSameContentDeskItems(t *testing.T) {
 
 // The length prefix keeps field boundaries: ("ab", "c") and ("a", "bc") are
 // different workers' tuples and must not collide.
+// A desk name can come back once done/ is emptied (nextNumber counts what is
+// on disk); a new item under an old name is a new wait with a new key.
+func TestRowKeyDistinguishesAReusedDeskName(t *testing.T) {
+	a := Build(Input{Now: t0, Desk: []DeskItem{{Name: "01-x", What: "x", SHA256: sha64, AddedAt: t0}}})
+	b := Build(Input{Now: t0, Desk: []DeskItem{{Name: "01-x", What: "x", SHA256: sha64, AddedAt: t0.Add(time.Hour)}}})
+	if a[0].Key == b[0].Key {
+		t.Fatalf("a reused desk name kept its key %s", a[0].Key)
+	}
+}
+
 func TestRowKeyIsLengthPrefixed(t *testing.T) {
 	a := RowKey(Row{Kind: RowWorker, Worker: "ab", Tag: "c"})
 	b := RowKey(Row{Kind: RowWorker, Worker: "a", Tag: "bc"})
