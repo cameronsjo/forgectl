@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: in-flight
 next: "T0 waived; T1 done; T2 drain row on feat/attention-drain-row (stacked on plan/notch-surface). Next: T3 jump, which must target herdr-app terminals (see Deviations) → S1 → T4 → T5 → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
