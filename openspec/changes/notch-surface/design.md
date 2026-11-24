@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: in-flight
 next: "T0 waived; T1 done (#1478); T2 drain row (#1493); T3a desk rows point at herdr-app terminals (feat/attention-hc-terminal). Next: T4 NotchCore while cameronsjo/forgectl#1476 is open; T3b jump after it merges → S1 (T1–T3) → T5 → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
