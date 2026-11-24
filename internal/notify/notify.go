@@ -201,26 +201,45 @@ func (c *Client) Notify(ctx context.Context, m Message) (Sent, error) {
 	title := termsafe.SafeLineMax(m.Title, maxTitleRunes)
 	body := termsafe.SafeLineMax(m.Body, maxBodyRunes)
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-
 	var fallback error
 	if tn, ok := c.terminalNotifier(); ok {
-		err := c.runSender(ctx, tn, c.terminalNotifierArgs(title, body, m))
+		err := c.runBounded(ctx, c.firstSenderBudget(ctx), tn, c.terminalNotifierArgs(title, body, m))
 		if err == nil {
 			return Sent{Sender: SenderTerminalNotifier}, nil
 		}
 		fallback = fmt.Errorf("terminal-notifier notification: %w", termsafe.Error(err))
 		if ctx.Err() != nil {
-			// The budget is spent: osascript would start already cancelled.
+			// The caller's own deadline is spent: osascript would start
+			// already cancelled.
 			return Sent{}, fallback
 		}
 	}
-	if err := c.runSender(ctx, SenderOsascript, []string{"-e", notifyScript, "--", title, body}); err != nil {
+	if err := c.runBounded(ctx, c.timeout, SenderOsascript, []string{"-e", notifyScript, "--", title, body}); err != nil {
 		err = fmt.Errorf("osascript notification: %w", termsafe.Error(err))
 		return Sent{}, errors.Join(fallback, err)
 	}
 	return Sent{Sender: SenderOsascript, Fallback: fallback}, nil
+}
+
+// firstSenderBudget bounds terminal-notifier when osascript may still have
+// to follow it: at most half of what the caller's deadline leaves, so a slow
+// or hung terminal-notifier (a cold start, a value it mis-parses) cannot use
+// the whole budget and leave the fallback none.
+func (c *Client) firstSenderBudget(ctx context.Context) time.Duration {
+	d := c.timeout
+	if dl, ok := ctx.Deadline(); ok {
+		if half := time.Until(dl) / 2; half < d {
+			d = half
+		}
+	}
+	return d
+}
+
+// runBounded runs one sender under its own timeout, inside the caller's ctx.
+func (c *Client) runBounded(ctx context.Context, d time.Duration, name string, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return c.runSender(ctx, name, args)
 }
 
 func (c *Client) runSender(ctx context.Context, name string, args []string) error {

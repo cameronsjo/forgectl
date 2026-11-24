@@ -18,6 +18,8 @@ package notify
 //   [x] No herdr-app: neither -execute nor -activate
 //   [x] terminal-notifier failing falls back to osascript, reporting why
 //   [x] Both senders failing returns both errors
+//   [x] A terminal-notifier that hangs to its deadline leaves osascript time
+//       inside the caller's deadline
 //   [x] A value starting with a plist delimiter is escaped
 // Client.Remove
 //   [x] Runs -remove with the group; nothing without terminal-notifier or
@@ -306,6 +308,38 @@ func TestNotify_TerminalNotifierFailureFallsBackToOsascript(t *testing.T) {
 	}
 	if len(fake.Calls) != 2 || fake.Calls[1].Name != "osascript" {
 		t.Errorf("calls = %+v, want terminal-notifier then osascript", fake.Calls)
+	}
+}
+
+// hangFirstRunner blocks terminal-notifier until its context ends, and
+// records whether osascript started with time left on its own context.
+type hangFirstRunner struct {
+	*exec.FakeRunner
+	osaRan, osaLive bool
+}
+
+func (h *hangFirstRunner) Run(ctx context.Context, name string, _ ...string) (string, error) {
+	if name == tnPath {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	h.osaRan, h.osaLive = true, ctx.Err() == nil
+	return "", nil
+}
+
+func TestNotify_HungTerminalNotifierLeavesOsascriptTime(t *testing.T) {
+	run := &hangFirstRunner{FakeRunner: &exec.FakeRunner{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	sent, err := withTN(run, both()).Notify(ctx, Message{Title: "t", Body: "b"})
+	if err != nil {
+		t.Fatalf("Notify: %v, want osascript to post after terminal-notifier hung", err)
+	}
+	if !run.osaRan || !run.osaLive {
+		t.Errorf("osascript ran=%v live=%v, want it run with time left", run.osaRan, run.osaLive)
+	}
+	if sent.Sender != SenderOsascript || !errors.Is(sent.Fallback, context.DeadlineExceeded) {
+		t.Errorf("sent = %+v, want osascript with terminal-notifier's deadline as Fallback", sent)
 	}
 }
 

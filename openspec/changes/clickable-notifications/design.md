@@ -30,6 +30,10 @@ The banner names the terminal (`HC_TERMINAL_ID`), not its tab. The click looks t
 
 A desk item's group is keyed by the hash it was queued at. `desk add` knows the hash, and every meta that leaves pending carries it, so the leave hook removes the banner without needing the item's name. A drain worker's group is keyed by its name. Clearing ignores `notify_macos` and drops failures, as the pane-state release does.
 
+### Each sender gets its own budget
+
+terminal-notifier gets at most half of the time left before the caller's deadline. osascript gets the remainder, capped by its own timeout. A terminal-notifier that hangs (a cold start, or a value it misreads) therefore cannot use up the whole budget and leave the fallback with none. `signalTimeout` goes from 1 s to 2 s, so osascript keeps the second it had before terminal-notifier was added. Found in review of cameronsjo/forgectl#1476.
+
 ## Deviations from the approved plan
 
 The plan was approved in session `d97a8686-dc8c-47ce-af84-c537175b00b4` and first copied to `docs/plans/`, which this repo has frozen since 2026-10-20. This change replaces that copy.

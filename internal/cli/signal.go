@@ -15,8 +15,10 @@ import (
 
 // signalTimeout bounds each macOS notification. A signal is a courtesy: a
 // hung sender must not hold up the queue operation or the drain tick that
-// raised it.
-const signalTimeout = time.Second
+// raised it. notify gives terminal-notifier at most half, so the osascript
+// fallback keeps about a second, the whole budget it had before
+// terminal-notifier existed.
+const signalTimeout = 2 * time.Second
 
 // titledNotifier adapts notify.Client to the title-and-body notifier the pr
 // package takes, so pr need not import notify. Its banner has no group and no
