@@ -50,10 +50,10 @@ const prQuery = `query($owner: String!, $name: String!, $head: String!, $author:
 }`
 
 var (
-	sha40Re     = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	headSHARe   = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
-	branchRe    = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
-	loginRe     = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
+	sha40Re   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	headSHARe = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+	branchRe  = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+	loginRe   = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
 )
 
 // GitHub finds a branch's PR through gh. Run should be pinned to the
