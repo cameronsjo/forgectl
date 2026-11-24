@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: in-flight
 next: "T0 waived by Cameron; T1 done (key, tier, herdrDetail, sweepGeneratedAt). Next: T2 drain row (own PR) → T3 jump, which must target herdr-app terminals (see Deviations) → S1 → T4 → T5 → S2 → T6 → T7 → T8."
 branch: plan/notch-surface
 pr: cameronsjo/forgectl#1478
