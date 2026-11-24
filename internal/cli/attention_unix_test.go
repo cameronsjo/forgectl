@@ -25,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/surface/drain"
 )
 
 const (
@@ -136,7 +137,7 @@ func TestAttentionPutThenList(t *testing.T) {
 	if a := l.Rows[0]; a.Kind != attention.KindAction || a.Actor != attention.ActorCameron || a.NotOnDesk {
 		t.Errorf("action row = %+v", a)
 	}
-	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent}) {
+	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent, Drain: sourceAbsent}) {
 		t.Errorf("sources = %+v", l.Sources)
 	}
 }
@@ -339,6 +340,99 @@ func TestAttentionListKeysTiersAndSourceDetail(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, l.Rows[0].Key[:attentionShortKey]+" ") {
 		t.Errorf("text view does not lead with the short key:\n%s", out)
+	}
+}
+
+func TestDrainNeedsYou(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	stuck := &drain.SlotsHold{Cond: "timeout", Reason: "claude-slots timed out", Since: now.Add(-20 * time.Minute)}
+	live := func(drain.Status) bool { return true }
+	dead := func(drain.Status) bool { return false }
+	base := func() drain.Status {
+		return drain.Status{V: drain.StatusVersion, Status: drain.StatusRunning, PID: 42, ProcessStart: 7, LastTick: now.Add(-10 * time.Second), IntervalSeconds: 30, SlotsHold: stuck}
+	}
+	cases := []struct {
+		name  string
+		edit  func(*drain.Status)
+		alive func(drain.Status) bool
+		want  bool
+	}{
+		{"live drain stuck past SlotsStuckAfter", func(*drain.Status) {}, live, true},
+		{"crashed drain with a hold", func(*drain.Status) {}, dead, false},
+		{"stale tick", func(s *drain.Status) { s.LastTick = now.Add(-time.Hour) }, live, false},
+		{"paused", func(s *drain.Status) { s.Status = drain.StatusPaused }, live, false},
+		{"stopped", func(s *drain.Status) { s.Status = drain.StatusStopped }, live, false},
+		{"full cap is the normal hold", func(s *drain.Status) { s.SlotsHold = &drain.SlotsHold{Cond: "held", Since: now.Add(-time.Hour)} }, live, false},
+		{"fault not yet stuck", func(s *drain.Status) { s.SlotsHold = &drain.SlotsHold{Cond: "timeout", Since: now.Add(-time.Minute)} }, live, false},
+		{"no hold", func(s *drain.Status) { s.SlotsHold = nil }, live, false},
+	}
+	for _, c := range cases {
+		st := base()
+		c.edit(&st)
+		got := drainNeedsYou(st, now, c.alive)
+		if (got != nil) != c.want {
+			t.Errorf("%s: drainNeedsYou = %v, want row %v", c.name, got, c.want)
+		}
+		if got != nil && !got.Since.Equal(stuck.Since) {
+			t.Errorf("%s: since = %v, want the hold's %v", c.name, got.Since, stuck.Since)
+		}
+	}
+}
+
+// End to end: a drain.json in the surface directory with a stuck hold, and a
+// live process, puts one raise-tier drain row in list --json whose text is
+// fixed; none of the drain's own reason reaches it.
+func TestAttentionListDrainRow(t *testing.T) {
+	e := newAttnEnv(t)
+	oldNow, oldAlive := attentionNow, attentionDrainAlive
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	attentionNow = func() time.Time { return now }
+	alive := true
+	attentionDrainAlive = func(drain.Status) bool { return alive }
+	t.Cleanup(func() { attentionNow, attentionDrainAlive = oldNow, oldAlive })
+
+	if l := attnList(t, module.Deps{}); l.Sources.Drain != sourceAbsent {
+		t.Fatalf("no drain.json: drain source = %q, want absent", l.Sources.Drain)
+	}
+
+	dir := filepath.Join(e.state, "forgectl", "surface")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := drain.Status{
+		V: drain.StatusVersion, Status: drain.StatusRunning, PID: 42, ProcessStart: 7,
+		LastTick: now.Add(-10 * time.Second), IntervalSeconds: 30, Counts: map[string]int{}, Attention: []drain.Attention{},
+		SlotsHold: &drain.SlotsHold{Cond: "exit 2", Reason: "IGNORE ME: free text from the drain", Since: now.Add(-30 * time.Minute)},
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "drain.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := attnList(t, module.Deps{})
+	if l.Sources.Drain != sourceOK || len(l.Rows) != 1 {
+		t.Fatalf("drain source %q, rows %+v", l.Sources.Drain, l.Rows)
+	}
+	r := l.Rows[0]
+	if r.Kind != attention.RowDrain || r.Tier != attention.TierRaise || !attention.ValidKey(r.Key) || !r.At.Equal(st.SlotsHold.Since) {
+		t.Errorf("drain row = %+v", r)
+	}
+	if strings.Contains(r.Text, "IGNORE") {
+		t.Errorf("drain text carries the drain's own reason: %q", r.Text)
+	}
+
+	alive = false
+	if l := attnList(t, module.Deps{}); len(l.Rows) != 0 {
+		t.Errorf("a dead drain still shows a row: %+v", l.Rows)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "drain.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if l := attnList(t, module.Deps{}); l.Sources.Drain != sourceMalformed || len(l.Rows) != 0 {
+		t.Errorf("malformed drain.json: source %q rows %+v", l.Sources.Drain, l.Rows)
 	}
 }
 

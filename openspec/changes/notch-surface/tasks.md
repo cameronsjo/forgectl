@@ -3,7 +3,7 @@
 - [x] 1.1 `key` and `tier` on every row; same-key duplicates from one source collapse; short key in the text view (T1).
 - [x] 1.2 `sources.herdrDetail` and `sources.sweepGeneratedAt` (T1).
 - [x] 1.3 Desk key also hashes the item's sha256 prefix and `added_at`, so a reused name is a new key (S1 N2).
-- [ ] 1.4 Drain row and `sources.drain` (T2).
+- [x] 1.4 Drain row and `sources.drain` (T2).
 - [ ] 1.5 Desk items record `terminal` and `terminal_core`; `sources.core` from `hc ls --json` (T3a, S1 I1 and N1).
 
 ## 2. Jump

@@ -11,13 +11,14 @@ forgectl attention put --session ID --turn ID --json < reply.txt   # echo the re
 forgectl attention rm --session ID
 ```
 
-`forgectl attention` keeps one queue of everything on this machine that waits on you. Each Claude Code session publishes the `What's next:` items of its latest reply with `put` (the steward mod does this after every turn). `list` merges those items with the desk's waiting items and the last `forgectl sweep` result, one row per wait, and orders the rows by what a delay costs. Unix only.
+`forgectl attention` keeps one queue of everything on this machine that waits on you. Each Claude Code session publishes the `What's next:` items of its latest reply with `put` (the steward mod does this after every turn). `list` merges those items with the desk's waiting items, the last `forgectl sweep` result and a stuck `surface drain`, one row per wait, and orders the rows by what a delay costs. Unix only.
 
 ## Delay-cost order
 
 | Cost | Row | Why it is first |
 | ---: | --- | --- |
 | 1 | a blocked worker (`kind: worker`, or a desk row a worker is blocked on) | it is burning its usage block |
+| 1 | a stuck drain (`kind: drain`) | no worker can launch until you look |
 | 2 | a desk item waiting (`kind: desk`) | a script is staged and nothing runs until you do |
 | 3 | a `marker-clean` PR (`kind: pr`) | a review claim says it is clean; your reviewers still run before any merge |
 | 4 | an `Action (Cameron)` (`kind: a`) | a physical step only you can take |
@@ -38,8 +39,8 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 | Field | Meaning |
 | --- | --- |
 | `key` | a stable id for the wait: 16 hex characters of sha256 over the row's kind and the fields fixed when the wait was created (desk: item name, hash and `added_at`; `q`/`a`: session, turn, item number; worker: name and block; PR: `owner/repo#n`). A herdr read, a worker merge or a session merge never changes it, so a consumer can tell a new wait from one it has seen. Two rows from one source with the same key are one wait, and only the first (lowest cost) is listed. The text view prints its first 6 characters. |
-| `tier` | what the wait earns on a glanceable surface: `raise` (desk item, blocked worker), `count` (marker-clean PR, `Action (Cameron)`) or `hidden` (questions, proposals). A `q` or `a` row never raises, whatever its `origin`. |
-| `kind` | `q`, `a`, `desk`, `worker` or `pr` |
+| `tier` | what the wait earns on a glanceable surface: `raise` (desk item, blocked worker, stuck drain), `count` (marker-clean PR, `Action (Cameron)`) or `hidden` (questions, proposals). A `q` or `a` row never raises, whatever its `origin`. |
+| `kind` | `q`, `a`, `desk`, `worker`, `pr` or `drain` |
 | `session` | the Claude Code session id the row belongs to, when known |
 | `pane` | where Jump goes: the herdr pane `herdr agent list` reports for the session (or, for a desk or worker row, the pane it names when herdr lists it). Never a pane read from a record. Absent when the session is not in herdr, or when more than one pane claims it (see Ambiguous claims). |
 | `worker` | the worker name, on worker and PR rows and on a desk row a worker is blocked on |
@@ -55,7 +56,7 @@ A run-type `Action (Cameron)` with no such desk item gets `notOnDesk: true`: the
 | `notOnDesk` | see above |
 | `origin` | `worker` for rows from a chief-of-staff worker; `own` for a session herdr lists that is not a worker; `unverified` for a record whose session herdr does not list (nothing but the record vouches for it) |
 
-`skipped` counts spool records and sweep entries dropped as malformed. `sources` reports `spool`, `desk`, `herdr` and `sweep` as `ok`, `absent` (nothing there yet), `error`, `malformed` or `unavailable` (herdr could not be asked). When herdr is unavailable, `herdrDetail` carries herdr's own error, cleaned and cut to 200 characters. When the sweep is `ok`, `sweepGeneratedAt` is when that sweep ran, so a reader can tell a stale sweep from an empty one.
+`skipped` counts spool records and sweep entries dropped as malformed. `sources` reports `spool`, `desk`, `herdr`, `sweep` and `drain` as `ok`, `absent` (nothing there yet), `error`, `malformed` or `unavailable` (herdr could not be asked). When herdr is unavailable, `herdrDetail` carries herdr's own error, cleaned and cut to 200 characters. When the sweep is `ok`, `sweepGeneratedAt` is when that sweep ran, so a reader can tell a stale sweep from an empty one.
 
 **Worker origin.** A row is `origin: worker` when any name its session goes by starts with `[attention] worker_prefix` (default `cos-`). The names come from the session's herdr row (its worktree, and the basenames of its working directory and its pane's directory) and from the record's `--cwd`. The herdr names are checked so a worker cannot shed the tag by reporting a different `--cwd`, and a record whose session herdr does not list is never `own`: it is `unverified` (or `worker`, when its `--cwd` matches), so a worker cannot pass off a record under an unlisted session id as yours. **`own` is not proof of authorship.** It says the record names a session herdr lists and that session is not a worker; any process of yours, a worker included, can write a record under a listed session id (it replaces that session's record). Treat `origin` as a label for sorting and display, never as a reason to act. Desk rows take the origin of the herdr session in the pane that queued them; sweep rows from a worker are `worker`. **The worker label comes from directory names only.** forgectl reads no agent name from `herdr agent list`, so a worker launched as `cos-<name>` but running in a worktree or directory whose name does not start with the prefix shows as `own`. This is display only: no gate reads `origin`.
 
@@ -128,6 +129,10 @@ Each session has one file, `<session>.json`, mode `0600`. The session id must ma
 ## The sweep
 
 When `forgectl sweep` has written `$XDG_STATE_HOME/cadence/sweep.json` (schema 2), `list` adds its blocked workers and its `marker-clean` PRs. An absent file adds nothing. A file that is not a regular file, is over 4 MiB, is not JSON, or is not schema 2 counts as one skipped entry; a worker or PR entry with an invalid name, pane, repository or number is dropped and counted. `marker-clean` is a claim filter, not an authenticity check: any session can post a review marker.
+
+## The drain
+
+`list` reads `$XDG_STATE_HOME/forgectl/surface/drain.json` without writing or locking anything, and adds one `drain` row (tag `slots-hold`, key fixed, cost 1, tier `raise`) only when all of these hold: the file reads `running` and its last tick is fresh (not `stale`), a claude-slots check that cannot answer (a timeout or an exit other than 0 or 1, not a full cap) has held claude launches for 15 minutes, and the pid it names is still the same process (its start time matches, the check `surface drain stop` makes). A crashed drain, a stale tick, a paused drain or a full cap adds nothing. The row's text is fixed, so nothing the drain wrote reaches it, and `at` is when the hold began. The row leaves when the hold clears, the drain stops, or its ticks go stale. `sources.drain` is `absent` when no drain has run, `malformed` when drain.json does not parse.
 
 ## Config
 

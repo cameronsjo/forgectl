@@ -27,6 +27,21 @@ const (
 	TierHidden = "hidden"
 )
 
+// DrainHold is the one drain fact the queue shows: since when a live drain's
+// claude launches have been held by a check that cannot answer. The caller
+// decides whether the drain is live and stuck; the row's text is fixed, so
+// nothing the drain wrote reaches it.
+type DrainHold struct {
+	Since time.Time
+}
+
+// drainText is the drain row's only text.
+const drainText = "drain: claude launches held, the claude-slots check cannot answer"
+
+func drainRow(h DrainHold) Row {
+	return Row{Kind: RowDrain, Tag: "slots-hold", Text: drainText, At: h.Since.UTC(), Cost: CostBlockedWorker, Origin: OriginOwn}
+}
+
 // KeyLen is the length of a row key in hex characters.
 const KeyLen = 16
 

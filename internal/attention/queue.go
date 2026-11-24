@@ -204,11 +204,14 @@ type Sweep struct {
 
 // Input is everything Build merges.
 type Input struct {
-	Now          time.Time
-	Records      []Record
-	Herdr        Herdr
-	Desk         []DeskItem
-	Sweep        *Sweep
+	Now     time.Time
+	Records []Record
+	Herdr   Herdr
+	Desk    []DeskItem
+	Sweep   *Sweep
+	// Drain, when set, is a live drain whose claude launches have been held
+	// by a claude-slots check that cannot answer for long enough to need you.
+	Drain        *DrainHold
 	WorkerPrefix string
 	// Session, when set, keeps only that session's rows.
 	Session string
@@ -317,6 +320,9 @@ func Build(in Input) []Row {
 	}
 	for _, d := range desk {
 		rows = append(rows, d.row)
+	}
+	if in.Drain != nil {
+		rows = append(rows, drainRow(*in.Drain))
 	}
 	if in.Session != "" {
 		rows = slices.DeleteFunc(rows, func(r Row) bool { return r.Session != in.Session })
