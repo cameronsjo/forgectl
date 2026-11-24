@@ -69,6 +69,12 @@ func shortAges(_ s: Double, _ want: String) {
     #expect(!canJump(qrow(k1, at: now), health: ok))
 }
 
+@Test func coreAbsentIsNotClicksOff() {
+    let h = health(last: Snapshot(rows: [], sources: Sources(core: "absent")), lastGoodAt: now, failure: nil, now: now)
+    #expect(h.clicksOff == nil)
+    #expect(h.reasons.isEmpty)
+}
+
 @Test func jumpOutcomes() {
     #expect(jumpResult(outcome: "ok", reason: nil) == .actedOn)
     #expect(jumpResult(outcome: "gone", reason: nil) == .failed("already gone from the queue"))

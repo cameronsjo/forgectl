@@ -68,7 +68,9 @@ public func health(last: Snapshot?, lastGoodAt: Date?, failure: ReadFailure?, no
         degraded[.sweep] = "sweep is \(shortAge(now.timeIntervalSince(gen))) old"
     }
     var clicksOff: String?
-    if snap.sources.core != "ok" {
+    // "absent" means forgectl did not ask hc (no desk row names a terminal):
+    // there is nothing to click through to, so it is not a fault.
+    if snap.sources.core != "ok" && snap.sources.core != "absent" {
         let why = snap.sources.coreDetail.map { ": \($0)" } ?? ""
         clicksOff = "clicks off, herdr-app not reachable\(why)"
     }
