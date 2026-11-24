@@ -36,15 +36,15 @@ terminal-notifier gets at most half of the time left before the caller's deadlin
 
 ## Deviations from the approved plan
 
-- The live click on a real desk banner (tasks.md 6.4) is deferred to cameronsjo/forgectl#1502. The 2026-11-24 attempt didn't complete: the operator was away from the machine and ran the item from a dashboard on the released 0.69.0, which predates this change, so that banner also stayed after the run. Step 0 had already shown that clicks reach the click command on Darwin 27. The banner and skip-removes-it were confirmed live, and unit tests pin the group and the click command.
 The plan was approved in session `d97a8686-dc8c-47ce-af84-c537175b00b4` and first copied to `docs/plans/`, which this repo has frozen since 2026-10-20. This change replaces that copy.
 
 - Step 0 (prove a click works on Darwin 27) passed on 2026-11-22. The operator granted terminal-notifier permission, then clicked two probes. One went to another space's tab and one came back. Both are logged in `/tmp/forgectl-probe-click.log`.
 - The plan assumed terminal-notifier used the deprecated NSUserNotification. It uses UNUserNotificationCenter and needs permission, which is why it falls back to osascript and why doctor reports the sender.
 - The verb is `forgectl herdr _focus-terminal`, not `forgectl notify open`. A top-level `notify` group is a new module, which needs registry pins and a README section, for a verb nobody types.
 - The click target is a herdr-app terminal resolved at click time, not a tab id resolved at post time.
-- Only `desk add` from a herdr-app terminal gets a tab target. The drain's worker refs are herdr 0.9 panes, and the update watcher and `pr drain` run in no terminal, so their banners bring herdr-app forward only. A target for herdr 0.9 panes is a follow-up.
+- Only `desk add` from a herdr-app terminal gets a tab target. The drain's worker refs are herdr 0.9 panes, and the update watcher and `pr drain` run in no terminal, so their banners bring herdr-app forward only. A target for herdr 0.9 panes is cameronsjo/forgectl#1500.
 - Desk banner groups are keyed by the queued hash, not the item name.
+- The live click on a real desk banner (tasks.md 6.4) is deferred to cameronsjo/forgectl#1502. The 2026-11-24 attempt didn't complete: the operator was away from the machine and ran the item from a dashboard on the released 0.69.0, which predates this change, so that banner also stayed after the run. Step 0 had already shown that clicks reach the click command on Darwin 27. The banner and skip-removes-it were confirmed live, and unit tests pin the group and the click command.
 
 ## Loop
 
