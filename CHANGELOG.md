@@ -1,22 +1,5 @@
 # Changelog
 
-## [0.71.0](https://github.com/cameronsjo/forgectl/compare/v0.70.0...v0.71.0) (2026-11-24)
-
-
-### Features
-
-* **attention:** derive a drain row when a live drain is stuck on claude-slots ([6115be7](https://github.com/cameronsjo/forgectl/commit/6115be72dffb648d6f4d0c871d159b3a3d957b13))
-* **attention:** point desk rows at the herdr-app terminal that queued them ([7c8a28c](https://github.com/cameronsjo/forgectl/commit/7c8a28cffe20276298518cb5d7b827904ea9e890))
-* **notch:** NotchCore, the notch app's tested decision logic ([5bf0b05](https://github.com/cameronsjo/forgectl/commit/5bf0b056c28a4e13fd89503ed6c65ab97d9b4f07))
-* **notify:** clickable notifications through terminal-notifier ([312617a](https://github.com/cameronsjo/forgectl/commit/312617a0e488d7a2f957d98243a0d148185f1163))
-
-
-### Bug Fixes
-
-* **attention:** ask hc through the shared adapter, and only when needed ([22f76bf](https://github.com/cameronsjo/forgectl/commit/22f76bf25be9641c516ac96bfe1788c66f3a704a))
-* **notch:** an absent hc core is not "clicks off" ([b656ec4](https://github.com/cameronsjo/forgectl/commit/b656ec47896fc68ea1e46d36722a7dd279e171ae))
-* **notify:** give the osascript fallback its own share of the deadline ([2276b28](https://github.com/cameronsjo/forgectl/commit/2276b28131efa6ca1e75819fc662bb2ac7639d02))
-
 ## [0.70.0](https://github.com/cameronsjo/forgectl/compare/v0.69.0...v0.70.0) (2026-11-22)
 
 
