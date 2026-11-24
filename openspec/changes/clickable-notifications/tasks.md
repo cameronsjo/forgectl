@@ -28,7 +28,8 @@
 
 - [x] 6.1 Staged break: splice the body into `-execute`; the injection test goes red
 - [x] 6.2 Tests pass with terminal-notifier off PATH
-- [ ] 6.3 Live: `desk add` from a herdr-app terminal, banner click shows that tab, repeat replaces, skip removes
+- [x] 6.3 Live: `desk add` from a herdr-app terminal posts a grouped terminal-notifier banner, and skip removes it (2026-11-24)
+- [ ] 6.4 Live: the banner click shows the queuing tab, and a repeat replaces the banner. Deferred to cameronsjo/forgectl#1502 (see design.md § Deviations)
 
 ## 7. Docs
 

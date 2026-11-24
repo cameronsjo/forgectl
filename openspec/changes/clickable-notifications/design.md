@@ -36,6 +36,7 @@ terminal-notifier gets at most half of the time left before the caller's deadlin
 
 ## Deviations from the approved plan
 
+- The live click on a real desk banner (tasks.md 6.4) is deferred to cameronsjo/forgectl#1502. The 2026-11-24 attempt didn't complete: the operator was away from the machine and ran the item from a dashboard on the released 0.69.0, which predates this change, so that banner also stayed after the run. Step 0 had already shown that clicks reach the click command on Darwin 27. The banner and skip-removes-it were confirmed live, and unit tests pin the group and the click command.
 The plan was approved in session `d97a8686-dc8c-47ce-af84-c537175b00b4` and first copied to `docs/plans/`, which this repo has frozen since 2026-10-20. This change replaces that copy.
 
 - Step 0 (prove a click works on Darwin 27) passed on 2026-11-22. The operator granted terminal-notifier permission, then clicked two probes. One went to another space's tab and one came back. Both are logged in `/tmp/forgectl-probe-click.log`.
