@@ -87,8 +87,6 @@ func TestRowKeyDistinguishesSameContentDeskItems(t *testing.T) {
 	}
 }
 
-// The length prefix keeps field boundaries: ("ab", "c") and ("a", "bc") are
-// different workers' tuples and must not collide.
 // A desk name can come back once done/ is emptied (nextNumber counts what is
 // on disk); a new item under an old name is a new wait with a new key.
 func TestRowKeyDistinguishesAReusedDeskName(t *testing.T) {
@@ -99,6 +97,8 @@ func TestRowKeyDistinguishesAReusedDeskName(t *testing.T) {
 	}
 }
 
+// The length prefix keeps field boundaries: ("ab", "c") and ("a", "bc") are
+// different workers' tuples and must not collide.
 func TestRowKeyIsLengthPrefixed(t *testing.T) {
 	a := RowKey(Row{Kind: RowWorker, Worker: "ab", Tag: "c"})
 	b := RowKey(Row{Kind: RowWorker, Worker: "a", Tag: "bc"})
