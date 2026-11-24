@@ -265,6 +265,25 @@ func TestCheckMdroll(t *testing.T) {
 	}
 }
 
+func TestCheckNotifications(t *testing.T) {
+	// No terminal-notifier: a warn whose hint installs it, since a click on
+	// an osascript banner opens Script Editor.
+	check := checkNotifications(Deps{GOOS: "darwin", LookPath: fakeLookPath()})
+	if check.State != StateWarn || !strings.Contains(check.Detail, "Script Editor") || !strings.Contains(check.Hint, "brew install terminal-notifier") {
+		t.Errorf("osascript only: %+v, want warn naming Script Editor and the install", check)
+	}
+
+	check = checkNotifications(Deps{GOOS: "darwin", LookPath: fakeLookPath("terminal-notifier")})
+	if check.State != StateOK || !strings.Contains(check.Detail, "/usr/bin/terminal-notifier") {
+		t.Errorf("terminal-notifier present: %+v, want ok with its path", check)
+	}
+
+	check = checkNotifications(Deps{GOOS: "linux", LookPath: fakeLookPath("terminal-notifier")})
+	if check.State != StateSkip {
+		t.Errorf("off macOS: state = %q, want skip", check.State)
+	}
+}
+
 func TestCheckSops(t *testing.T) {
 	// Absent is StateSkip, not StateFail: sops is needed only for
 	// `env set --sops`, and a machine that never writes an encrypted secret

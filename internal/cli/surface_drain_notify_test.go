@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -96,8 +97,11 @@ func newNotifyRig(t *testing.T) *notifyRig {
 	r := &notifyRig{run: &exec.FakeRunner{}, panes: &fakePaneState{session: drainTestSession}}
 	r.n = needsYouNotifier{
 		session: drainTestSession,
-		mac:     notify.New(r.run, notify.WithGOOS("darwin")),
-		panes:   func() (workerPaneState, error) { return r.panes, nil },
+		// No sender binary resolves, so the rig posts through osascript
+		// whatever this host has on PATH; a test of terminal-notifier swaps
+		// mac for macWithTerminalNotifier.
+		mac:   notify.New(r.run, notify.WithGOOS("darwin"), notify.WithLookPath(lookNothing)),
+		panes: func() (workerPaneState, error) { return r.panes, nil },
 	}
 	r.row = worker.QueueRow{Name: "fix-flake", Repo: "/repo/a", State: worker.QueueNeedsYou, Session: drainTestSession}
 	r.led = worker.Row{Name: "fix-flake", Ref: raw}
@@ -232,5 +236,74 @@ func TestNeedsYouOffDarwinSendsNoOsascript(t *testing.T) {
 	}
 	if len(r.run.Calls) != 0 || len(r.panes.reported) != 1 {
 		t.Fatalf("osascript %d, reported %q", len(r.run.Calls), r.panes.reported)
+	}
+}
+
+// lookNothing is a LookPath that finds no binary.
+func lookNothing(name string) (string, error) { return "", errors.New(name + ": not found") }
+
+const rigTerminalNotifier = "/opt/homebrew/bin/terminal-notifier"
+
+// macWithTerminalNotifier is a darwin client that finds terminal-notifier
+// and herdr-app.
+func macWithTerminalNotifier(run *exec.FakeRunner) *notify.Client {
+	return notify.New(run, notify.WithGOOS("darwin"), notify.WithLookPath(func(name string) (string, error) {
+		switch name {
+		case "terminal-notifier":
+			return rigTerminalNotifier, nil
+		case "herdr-app":
+			return "/usr/local/bin/herdr-app", nil
+		}
+		return "", errors.New(name + ": not found")
+	}))
+}
+
+// TestNeedsYouBannerIsGroupedAndCleared: through terminal-notifier the
+// worker's banner carries its group, and Cleared removes that group.
+func TestNeedsYouBannerIsGroupedAndCleared(t *testing.T) {
+	r := newNotifyRig(t)
+	r.n.mac = macWithTerminalNotifier(r.run)
+	if err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt")); err != nil {
+		t.Fatalf("NeedsYou: %v", err)
+	}
+	if len(r.run.Calls) != 1 || r.run.Calls[0].Name != rigTerminalNotifier {
+		t.Fatalf("runner calls %+v, want one terminal-notifier call", r.run.Calls)
+	}
+	group := drainBannerGroup("fix-flake")
+	if !strings.Contains(strings.Join(r.run.Calls[0].Args, " "), "-group "+group) {
+		t.Errorf("argv %q, want -group %s", r.run.Calls[0].Args, group)
+	}
+	if err := r.n.Cleared(t.Context(), r.row, r.led); err != nil {
+		t.Fatalf("Cleared: %v", err)
+	}
+	last := r.run.Calls[len(r.run.Calls)-1]
+	if last.Name != rigTerminalNotifier || strings.Join(last.Args, " ") != "-remove "+group {
+		t.Errorf("last call %+v, want terminal-notifier -remove %s", last, group)
+	}
+}
+
+// TestDrainNotifyTestReportsTheFallback: a terminal-notifier that fails
+// leaves osascript posting, and notify-test says so instead of reading as a
+// clean pass.
+func TestDrainNotifyTestReportsTheFallback(t *testing.T) {
+	r := newNotifyRig(t)
+	r.run.RunFunc = func(name string, _ []string) (string, error) {
+		if name == rigTerminalNotifier {
+			return "", errors.New("exit status 3")
+		}
+		return "", nil
+	}
+	r.n.mac = macWithTerminalNotifier(r.run)
+	var out strings.Builder
+	if err := runDrainNotifyTest(t.Context(), &out, r.n, true); err != nil {
+		t.Fatalf("notify-test: %v", err)
+	}
+	var res notifyTestResult
+	if err := json.Unmarshal([]byte(out.String()), &res); err != nil {
+		t.Fatalf("json: %v: %s", err, out.String())
+	}
+	mac := res.Attempts[0]
+	if mac.Channel != channelMacOS || !mac.OK || mac.Sender != notify.SenderOsascript || !strings.Contains(mac.Note, "terminal-notifier failed") {
+		t.Errorf("macOS attempt %+v, want ok through osascript with the fallback noted", mac)
 	}
 }

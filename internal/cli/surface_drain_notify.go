@@ -30,8 +30,14 @@ import (
 //
 // Only herdr says whether a notification was seen. osascript exits 0 whether
 // or not macOS displays it (Focus, or a notification permission turned off),
-// so a macOS attempt that succeeded says only that osascript ran; herdr's
-// reply says whether it showed its own (forgectl#1189).
+// and terminal-notifier exits 0 once macOS accepts it, so a macOS attempt
+// that succeeded says only that the sender ran; herdr's reply says whether it
+// showed its own (forgectl#1189).
+//
+// The macOS banner carries the worker's group, so a repeat replaces it and
+// Cleared removes it. Its click brings herdr-app forward; it does not show
+// the worker's tab, because the drain's refs are herdr 0.9 panes, not the
+// herdr-app terminals a click can show.
 
 // drainPaneTimeout bounds the herdr half: the ownership checks and the
 // pane-state change, together.
@@ -93,10 +99,12 @@ const (
 )
 
 // notifyAttempt is one channel's try at a notification: err is nil when it
-// went out (for macOS: when osascript exited 0).
+// went out (for macOS: when the sender exited 0).
 type notifyAttempt struct {
 	channel string
 	err     error
+	// sender is the macOS sender that posted it (notify.Sender*).
+	sender string
 	// note is a remark on an attempt that did not fail (herdr rate-limited
 	// it), recorded on its notify event.
 	note string
@@ -107,7 +115,7 @@ type notifyAttempt struct {
 // notifications go out either way. It returns one attempt per channel tried.
 func (n needsYouNotifier) NeedsYou(ctx context.Context, row worker.QueueRow, led worker.Row, reason string) []notifyAttempt {
 	title, body, message := needsYouText(row.Name, reason)
-	attempts := n.Alert(ctx, title, body)
+	attempts := n.alert(ctx, notify.Message{Title: title, Body: body, Group: drainBannerGroup(row.Name)})
 	err := n.onPane(ctx, row, led, func(c context.Context, p workerPaneState, ref backend.Ref) error {
 		return p.ReportBlocked(c, ref, message)
 	})
@@ -117,13 +125,25 @@ func (n needsYouNotifier) NeedsYou(ctx context.Context, row worker.QueueRow, led
 // Alert sends one notification, not tied to a worker's pane: macOS when this
 // platform posts it, and herdr on the drain's pinned session.
 func (n needsYouNotifier) Alert(ctx context.Context, title, body string) []notifyAttempt {
+	return n.alert(ctx, notify.Message{Title: title, Body: body})
+}
+
+func (n needsYouNotifier) alert(ctx context.Context, m notify.Message) []notifyAttempt {
 	var attempts []notifyAttempt
 	if n.mac != nil && n.mac.Supported() {
-		attempts = append(attempts, notifyAttempt{channel: channelMacOS, err: sendMacSignal(ctx, n.mac.Notify, title, body)})
+		sent, err := sendMacSignal(ctx, n.mac.Notify, m)
+		a := notifyAttempt{channel: channelMacOS, err: err, sender: sent.Sender}
+		if sent.Fallback != nil {
+			a.note = "terminal-notifier failed (" + sent.Fallback.Error() + "), so osascript posted it and a click opens Script Editor"
+		}
+		attempts = append(attempts, a)
 	}
-	note, err := n.toast(ctx, title, body)
+	note, err := n.toast(ctx, m.Title, m.Body)
 	return append(attempts, notifyAttempt{channel: channelHerdr, err: err, note: note})
 }
+
+// drainBannerGroup is the macOS banner group of one worker.
+func drainBannerGroup(name string) string { return notify.GroupID("drain", name) }
 
 // toast shows a herdr notification through an adapter pinned to the drain's
 // session. herdr's reply is read through NotificationResult.Err, as the
@@ -150,6 +170,11 @@ func (n needsYouNotifier) toast(ctx context.Context, title, body string) (string
 // needs-you. A worker whose workspace is gone, or a ledger row with no ref,
 // has nothing to clear.
 func (n needsYouNotifier) Cleared(ctx context.Context, row worker.QueueRow, led worker.Row) error {
+	// The banner goes whatever the pane's fate; a failure to remove it is
+	// dropped, as the desk drops its own: it is a courtesy.
+	if n.mac != nil && n.mac.Supported() {
+		_ = n.mac.Remove(ctx, drainBannerGroup(row.Name))
+	}
 	if len(led.Ref) == 0 {
 		return nil
 	}
@@ -193,6 +218,9 @@ type notifyTestAttempt struct {
 	OK      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
 	Note    string `json:"note,omitempty"`
+	// Sender is the macOS sender that posted it: terminal-notifier or
+	// osascript. Empty for herdr and for a failed macOS attempt.
+	Sender string `json:"sender,omitempty"`
 }
 
 // notifyTestResult is what `drain notify-test --json` prints. Additive
@@ -210,10 +238,11 @@ func newSurfaceDrainNotifyTestCmd(deps module.Deps) *cobra.Command {
 		Long: `notify-test sends one notification through each channel the drain's needs-you
 signal uses, the way the drain sends it, and prints each channel's result:
 
-  macos  osascript, on macOS only. osascript exits 0 whether or not macOS
-         displays the notification (Focus, or the notification permission of
-         Script Editor or your terminal app), so "ok" here means only that
-         osascript ran: check that you saw it.
+  macos  on macOS only: terminal-notifier when it is on PATH, else osascript
+         (or osascript when terminal-notifier fails, which the note says).
+         Neither reports whether macOS displayed the notification (Focus, or
+         a notification permission turned off), so "ok" here means only that
+         the sender ran: check that you saw it.
   herdr  herdr notification show, on the herdr session the drain would pin
          (resolved as drain start resolves it). herdr's reply says whether
          it showed the notification and, when not, why: disabled,
@@ -224,7 +253,7 @@ It runs whatever [surface.drain] notify says, and needs no running drain.
 The worker pane's needs-you state has no worker to mark here and is not
 tested.
 
---json prints {"herdr_session","attempts":[{"channel","ok","error","note"}]}.
+--json prints {"herdr_session","attempts":[{"channel","ok","error","note","sender"}]}.
 
 Exit 0: every channel went out. Exit 1: a channel failed or herdr did not
 show the notification.
@@ -240,7 +269,7 @@ show the notification.
 			return runDrainNotifyTest(cmd.Context(), cmd.OutOrStdout(), n, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"herdr_session","attempts":[{"channel","ok","error","note"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"herdr_session","attempts":[{"channel","ok","error","note","sender"}]} as JSON`)
 	return cmd
 }
 
@@ -252,7 +281,7 @@ func runDrainNotifyTest(ctx context.Context, out io.Writer, n needsYouNotifier, 
 	res := notifyTestResult{HerdrSession: n.session, Attempts: []notifyTestAttempt{}}
 	failed := false
 	for _, a := range n.Alert(ctx, drainNotifyTestTitle, body) {
-		r := notifyTestAttempt{Channel: a.channel, OK: a.err == nil, Note: termsafe.SafeLineMax(a.note, maxDrainErrorLen)}
+		r := notifyTestAttempt{Channel: a.channel, OK: a.err == nil, Note: termsafe.SafeLineMax(a.note, maxDrainErrorLen), Sender: a.sender}
 		if a.err != nil {
 			failed = true
 			r.Error = termsafe.SafeLineMax(a.err.Error(), maxDrainErrorLen)
@@ -277,7 +306,7 @@ func runDrainNotifyTest(ctx context.Context, out io.Writer, n needsYouNotifier, 
 			case a.Note != "":
 				line += "ok, but " + a.Note
 			case a.Channel == channelMacOS:
-				line += "osascript exited 0; macOS does not report whether it displayed the notification, so check that you saw it"
+				line += a.Sender + " exited 0; macOS does not report whether it displayed the notification, so check that you saw it"
 			default:
 				line += "shown"
 			}

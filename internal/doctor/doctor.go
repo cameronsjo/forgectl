@@ -31,6 +31,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/githubapp"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/resume"
@@ -120,6 +121,9 @@ type Deps struct {
 	// IdentityProbe reads the worker App key and asks GitHub for the
 	// installation, minting no token. Nil uses the keychain and GitHub.
 	IdentityProbe func(context.Context, config.IdentitySettings) error
+	// GOOS is the platform the notifications check reports on; empty means
+	// runtime.GOOS. Tests set it so both platforms run on any host.
+	GOOS string
 }
 
 // NewDeps wires Deps with production seams: os/exec.LookPath, the real
@@ -151,6 +155,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkBinary(d, "ghostty", "ghostty not found on PATH — install from https://ghostty.org"))
 	checks = append(checks, checkBinary(d, "cmux", "cmux not found on PATH — see https://github.com/cameronsjo/cmux"))
 	checks = append(checks, checkMdroll(d))
+	checks = append(checks, checkNotifications(d))
 	checks = append(checks, checkSops(ctx, d))
 	checks = append(checks, checkGitleaks(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
@@ -228,6 +233,35 @@ func checkBinary(d Deps, name, hint string) Check {
 		return Check{Name: name, State: StateOK, Detail: p}
 	}
 	return Check{Name: name, State: StateWarn, Detail: name + " not found on PATH", Hint: hint}
+}
+
+// checkNotifications reports which sender posts forgectl's macOS
+// notifications (internal/notify). terminal-notifier is the one whose
+// banners a click can act on; with only osascript, a click opens Script
+// Editor. It runs no sender: macOS reports a notification permission only to
+// the app asking, so whether terminal-notifier is allowed is left to
+// `forgectl surface drain notify-test`, which sends one and says which
+// sender posted it.
+func checkNotifications(d Deps) Check {
+	const name = "notifications"
+	opts := []notify.Option{notify.WithLookPath(d.LookPath)}
+	if d.GOOS != "" {
+		opts = append(opts, notify.WithGOOS(d.GOOS))
+	}
+	c := notify.New(d.Runner, opts...)
+	switch c.Sender() {
+	case "":
+		return Check{Name: name, State: StateSkip, Detail: "macOS only"}
+	case notify.SenderTerminalNotifier:
+		p, _ := c.SenderPath()
+		return Check{Name: name, State: StateOK, Detail: "terminal-notifier (" + p + "); a click shows the herdr-app tab that raised it. If none arrive, allow terminal-notifier in System Settings > Notifications; `forgectl surface drain notify-test` sends one"}
+	}
+	return Check{
+		Name:   name,
+		State:  StateWarn,
+		Detail: "osascript only: notifications post, but a click opens Script Editor's file panel",
+		Hint:   "brew install terminal-notifier, then allow it in System Settings > Notifications",
+	}
 }
 
 // checkMdroll reports whether the optional mdroll terminal reader resolves on

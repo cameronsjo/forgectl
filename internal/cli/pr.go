@@ -51,7 +51,7 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 		pr.WithWindowEnv(func() ([]string, error) { return injectedWindowEnv(cfg) }),
 		// The drainer's review-started notification (#192). A no-op off
 		// macOS; `pr drain --no-notify` suppresses it per pass.
-		pr.WithNotifier(notify.New(deps.Runner)),
+		pr.WithNotifier(titledNotifier{notify.New(deps.Runner)}),
 		// Every PR-scoped gh call names its host explicitly and runs pinned
 		// to it (#413): the @me searches on the configured [github] host, and
 		// view/clone/post on the PR's own host (the configured one unless a

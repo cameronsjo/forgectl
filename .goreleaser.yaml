@@ -155,6 +155,12 @@ homebrew_casks:
     binaries:
       - forgectl
       - forgectl-bless-helper
+    # internal/notify posts macOS notifications through terminal-notifier, whose
+    # banners a click can act on (it shows the herdr-app tab that raised one);
+    # osascript's open Script Editor. forgectl falls back to osascript without
+    # it, so this is a dependency for the click, not for the notification.
+    dependencies:
+      - formula: terminal-notifier
     # Strip the quarantine bit on both binaries or the first run prompts. When a
     # signing cert is configured the release Developer-ID signs both (the helper
     # in the workflow, forgectl via the darwin build post-hook); until then, or on

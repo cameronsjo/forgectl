@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -29,6 +30,10 @@ type signalRig struct {
 	herdr  *exec.FakeSensitiveRunner
 	deps   module.Deps
 	mac    int // macOS notifications requested
+	// msgs are the requested notifications, removed the banner groups
+	// cleared, in order.
+	msgs    []notify.Message
+	removed []string
 }
 
 // newSignalRig stubs the macOS notification seam: the real client is a no-op
@@ -36,12 +41,20 @@ type signalRig struct {
 func newSignalRig(t *testing.T, cfg config.DeskConfig) *signalRig {
 	t.Helper()
 	r := &signalRig{runner: &exec.FakeRunner{}, herdr: &exec.FakeSensitiveRunner{}}
-	prev, prevSupported := deskMacNotify, deskMacSupported
-	deskMacNotify = func(context.Context, module.Deps, string, string) error { r.mac++; return nil }
+	prev, prevSupported, prevRemove := deskMacNotify, deskMacSupported, deskMacRemove
+	deskMacNotify = func(_ context.Context, _ module.Deps, m notify.Message) (notify.Sent, error) {
+		r.mac++
+		r.msgs = append(r.msgs, m)
+		return notify.Sent{Sender: notify.SenderTerminalNotifier}, nil
+	}
+	deskMacRemove = func(_ context.Context, _ module.Deps, group string) error {
+		r.removed = append(r.removed, group)
+		return nil
+	}
 	// The stub stands in for darwin, where the notification posts; a test of
 	// the non-darwin case sets deskMacSupported itself.
 	deskMacSupported = func(module.Deps) bool { return true }
-	t.Cleanup(func() { deskMacNotify, deskMacSupported = prev, prevSupported })
+	t.Cleanup(func() { deskMacNotify, deskMacSupported, deskMacRemove = prev, prevSupported, prevRemove })
 	r.deps = module.Deps{Theme: theme.Default(), Cfg: config.Config{Desk: cfg}, Runner: r.runner, SensitiveRunner: r.herdr}
 	return r
 }
@@ -519,5 +532,77 @@ func TestDeskAdd_HerdrFailureNamesHerdrsReason(t *testing.T) {
 				t.Errorf("stderr = %q still sends the operator to run herdr by hand", errOut)
 			}
 		})
+	}
+}
+
+// The banner names a group keyed by the item's hash, and, in a herdr-app
+// terminal, the terminal a click shows.
+func TestDeskAdd_BannerCarriesGroupAndClickTerminal(t *testing.T) {
+	newDeskDir(t)
+	stubLayout(t, map[string]string{"HC_TERMINAL_ID": "t146"})
+	rig := newSignalRig(t, config.DeskConfig{})
+	if _, err := addItem(t, rig, "merge"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rig.msgs) != 1 {
+		t.Fatalf("%d notifications, want 1", len(rig.msgs))
+	}
+	m := rig.msgs[0]
+	if m.Terminal != "t146" {
+		t.Errorf("click terminal = %q, want this process's t146", m.Terminal)
+	}
+	if !strings.HasPrefix(m.Group, "forgectl-desk-") || !notify.ValidID(m.Group) {
+		t.Errorf("group = %q, want a valid forgectl-desk- group", m.Group)
+	}
+}
+
+// In a herdr 0.9 pane there is no herdr-app terminal to show.
+func TestDeskAdd_HerdrPaneBannerHasNoClickTerminal(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	if _, err := addItem(t, rig, "merge"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rig.msgs) != 1 || rig.msgs[0].Terminal != "" {
+		t.Errorf("notifications %+v, want one with no click terminal", rig.msgs)
+	}
+}
+
+// Skipping an item removes its banner, whatever the herdr state.
+func TestDeskSkip_RemovesTheBanner(t *testing.T) {
+	newDeskDir(t)
+	stubLayout(t, map[string]string{})
+	rig := newSignalRig(t, config.DeskConfig{})
+	for _, n := range []string{"one", "two"} {
+		if _, err := addItem(t, rig, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := deskRun(t, rig.deps, "skip", "01-one", "--reason", "not now"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rig.removed) != 1 || rig.removed[0] != rig.msgs[0].Group {
+		t.Errorf("removed %q, want only the first item's group %q", rig.removed, rig.msgs[0].Group)
+	}
+	if rig.msgs[0].Group == rig.msgs[1].Group {
+		t.Errorf("two items share group %q", rig.msgs[0].Group)
+	}
+}
+
+// A banner osascript posted in terminal-notifier's place is a warning that
+// says why and what a click will do; the add still succeeds.
+func TestDeskAdd_SenderFallbackIsAWarning(t *testing.T) {
+	newDeskDir(t)
+	stubLayout(t, map[string]string{})
+	rig := newSignalRig(t, config.DeskConfig{})
+	deskMacNotify = func(context.Context, module.Deps, notify.Message) (notify.Sent, error) {
+		rig.mac++
+		return notify.Sent{Sender: notify.SenderOsascript, Fallback: errors.New("exit status 3")}, nil
+	}
+	errOut, err := addItem(t, rig, "merge")
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "osascript posted it instead, so a click opens Script Editor") || !strings.Contains(errOut, "exit status 3") {
+		t.Errorf("stderr = %q, want the fallback and its cause named", errOut)
 	}
 }

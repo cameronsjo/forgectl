@@ -36,9 +36,38 @@ const deskSignalBodyMax = 200
 const deskSignalErrMax = 400
 
 // deskMacNotify posts the macOS notification; a seam so tests record the call
-// instead of running osascript.
-var deskMacNotify = func(ctx context.Context, deps module.Deps, title, body string) error {
-	return notify.New(deps.Runner).Notify(ctx, title, body)
+// instead of running a sender.
+var deskMacNotify = func(ctx context.Context, deps module.Deps, m notify.Message) (notify.Sent, error) {
+	return notify.New(deps.Runner).Notify(ctx, m)
+}
+
+// deskMacRemove clears an item's banner once it has run or been skipped; a
+// seam like deskMacNotify.
+var deskMacRemove = func(ctx context.Context, deps module.Deps, group string) error {
+	return notify.New(deps.Runner).Remove(ctx, group)
+}
+
+// deskBannerGroup is the banner group of an item, keyed by the hash it was
+// queued at: desk add knows it, and every meta that leaves pending/ carries
+// it, so the banner is cleared without the hooks needing the item's name. An
+// item re-queued with other bytes is a new banner. A hash that does not
+// validate (meta is untrusted on read) has no group.
+func deskBannerGroup(sha string) string {
+	if !desk.ValidSHA256(sha) {
+		return ""
+	}
+	return notify.GroupID("desk", sha[:16])
+}
+
+// deskClickTerminal is the herdr-app terminal a click on the banner shows:
+// this process's own, when it runs in one. In a herdr 0.9 pane, or no host
+// at all, the click only brings herdr-app forward.
+func deskClickTerminal() string {
+	if herdr.DetectHost(deskLookupEnv) != herdr.HostApp {
+		return ""
+	}
+	v, _ := deskLookupEnv("HC_TERMINAL_ID")
+	return v
 }
 
 // deskMacSupported reports whether the macOS notification can post here: the
@@ -123,9 +152,14 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 	body = termsafe.SafeLineMax(body, deskSignalBodyMax)
 
 	if s.cfg.MacOSSignal() && deskMacSupported(s.deps) {
-		post := func(c context.Context, title, body string) error { return deskMacNotify(c, s.deps, title, body) }
-		if err := sendMacSignal(ctx, post, title, body); err != nil {
+		post := func(c context.Context, m notify.Message) (notify.Sent, error) { return deskMacNotify(c, s.deps, m) }
+		m := notify.Message{Title: title, Body: body, Group: deskBannerGroup(a.SHA256), Terminal: deskClickTerminal()}
+		sent, err := sendMacSignal(ctx, post, m)
+		switch {
+		case err != nil:
 			failed = append(failed, signalFailure("macOS notification", "notify_macos", err))
+		case sent.Fallback != nil:
+			failed = append(failed, fallbackNotice(sent.Fallback))
 		}
 	}
 	if path, ok := s.herdrPath(); ok && herdr.CheckSession(deskLookupEnv) == nil {
@@ -158,12 +192,20 @@ func signalFailure(what, setting string, err error) string {
 	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, failureHint(setting, err), setting)
 }
 
+// fallbackNotice words a banner osascript posted because terminal-notifier
+// failed: the operator was told, but a click opens Script Editor. Its usual
+// cause is terminal-notifier's notification permission being off (exit 3).
+func fallbackNotice(cause error) string {
+	return "terminal-notifier did not post the macOS notification (" + termsafe.SafeLineMax(cause.Error(), deskSignalErrMax) +
+		"); osascript posted it instead, so a click opens Script Editor. Allow terminal-notifier in System Settings > Notifications"
+}
+
 // failureHint says what to try. For macOS the runner's error is only an exit
 // status, so it names the likely fix. For herdr it is the error itself, which
 // carries herdr's refusal or its own stderr (forgectl#1181).
 func failureHint(setting string, err error) string {
 	if setting == "notify_macos" {
-		return "osascript did not post it; check System Settings > Notifications"
+		return "no sender posted it; check System Settings > Notifications for terminal-notifier and Script Editor"
 	}
 	return termsafe.SafeLineMax(err.Error(), deskSignalErrMax)
 }
@@ -217,13 +259,30 @@ func (s deskSignal) attach(d *desk.Desk) {
 			gaveUp.Store(true)
 		}
 	}
-	d.OnLeavePending(func(m desk.Meta) { refresh(m, true) })
+	d.OnLeavePending(func(m desk.Meta) {
+		refresh(m, true)
+		s.clearBanner(m)
+	})
 	// Re-raising is a new signal, so the setting gates it; clearing is not.
 	d.OnReturnPending(func(m desk.Meta) {
 		if s.cfg.HerdrSignal() {
 			refresh(m, false)
 		}
 	})
+}
+
+// clearBanner removes the macOS banner raised for an item that has left
+// pending/. Like the pane release it ignores the settings (turning
+// notify_macos off must not strand a banner from before) and drops its
+// failure: the banner is a courtesy, and the sender may be gone.
+func (s deskSignal) clearBanner(m desk.Meta) {
+	group := deskBannerGroup(m.SHA256)
+	if group == "" || !deskMacSupported(s.deps) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deskSignalTimeout)
+	defer cancel()
+	_ = deskMacRemove(ctx, s.deps, group)
 }
 
 // waitingRow reports the waiting count over OSC 7501 for a host that has no

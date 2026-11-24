@@ -266,3 +266,33 @@ func TestCheckApp(t *testing.T) {
 		t.Error("a non-JSON list must fail")
 	}
 }
+
+func TestAppLocateTerminalReadsLsOnlyAndRunsTheNamedBinary(t *testing.T) {
+	const bin = "/opt/herdr/bin/herdr-app"
+	r := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == bin {
+			return fixture(t, "herdr_app_ls.json"), nil
+		}
+		return "", errors.New("unexpected " + name)
+	}}
+	app := NewAppAt(r, bin)
+	space, tab, err := app.LocateTerminal(context.Background(), "t57")
+	if err != nil {
+		t.Fatalf("LocateTerminal: %v", err)
+	}
+	if space != "sp8a41fc22e40d665646f4384830f2ff26" || tab != "tba657915f02a55fb24163fc81d37f579b" {
+		t.Errorf("located %s / %s, want tab-2 of Space 1", space, tab)
+	}
+	if len(r.Calls) != 1 || r.Calls[0].Name != bin {
+		t.Errorf("calls %+v, want one ls through %s and no hc", r.Calls, bin)
+	}
+	if err := app.FocusTab(context.Background(), tab); err != nil {
+		t.Fatalf("FocusTab: %v", err)
+	}
+	if last := r.Calls[len(r.Calls)-1]; last.Name != bin {
+		t.Errorf("FocusTab ran %q, want %s", last.Name, bin)
+	}
+	if _, _, err := app.LocateTerminal(context.Background(), "t-none"); err == nil || !strings.Contains(err.Error(), "t-none") {
+		t.Errorf("unknown terminal: err = %v, want one naming it", err)
+	}
+}
