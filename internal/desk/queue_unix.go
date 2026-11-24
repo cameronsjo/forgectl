@@ -94,21 +94,8 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		return nil, err
 	}
 
-	skipped, err := d.list(DirSkipped)
-	if err != nil {
+	if snap.Skipped, err = d.skippedItems(); err != nil {
 		return nil, err
-	}
-	for _, e := range skipped {
-		name, kind, ok := kindOfFile(e.Name())
-		if !ok {
-			continue
-		}
-		it := newItem(name, kind, StateSkipped)
-		it.Meta, _, _ = d.readMeta(DirSkipped, name)
-		if data, err := d.readRegular(path.Join(DirSkipped, e.Name()), maxItemBytes); err == nil {
-			it.Headers = HeadersFor(kind, data)
-		}
-		snap.Skipped = append(snap.Skipped, it)
 	}
 
 	byNumber := func(a, b Item) int {
@@ -387,6 +374,122 @@ func (d *Desk) ownerless(name string, meta Meta) bool {
 	return !at.IsZero() && d.now().Sub(at) > ClaimGrace
 }
 
+// scanCacheKey identifies a cached done/ or skipped/ item.
+type scanCacheKey struct {
+	dir  string
+	name string
+}
+
+// fileSig captures the presence, size, and mtime of one contributing file so a
+// cached done/ or skipped/ item is invalidated whenever any of its files is
+// added, removed, resized, or rewritten.
+type fileSig struct {
+	present bool
+	size    int64
+	modTime time.Time
+}
+
+func (a fileSig) equal(b fileSig) bool {
+	return a.present == b.present && a.size == b.size && a.modTime.Equal(b.modTime)
+}
+
+type scanCacheEntry struct {
+	kind    Kind
+	legacy  bool
+	logSig  fileSig
+	metaSig fileSig
+	bodySig fileSig
+	item    Item
+}
+
+func (e scanCacheEntry) matches(kind Kind, legacy bool, logSig, metaSig, bodySig fileSig) bool {
+	return e.kind == kind &&
+		e.legacy == legacy &&
+		e.logSig.equal(logSig) &&
+		e.metaSig.equal(metaSig) &&
+		e.bodySig.equal(bodySig)
+}
+
+// onScanCacheRead runs whenever doneItems or skippedItems parses an item from
+// disk instead of serving it from scanCache. Tests replace it to assert that
+// unchanged items are not re-read.
+var onScanCacheRead = func(dir, name string) {}
+
+// entrySig stats e via its DirEntry.Info. ok is false if stat failed (e.g. the
+// file vanished mid-scan), which tells the caller to skip caching this item.
+func entrySig(e fs.DirEntry, present bool) (fileSig, bool) {
+	if !present {
+		return fileSig{}, true
+	}
+	fi, err := e.Info()
+	if err != nil {
+		return fileSig{}, false
+	}
+	return fileSig{present: true, size: fi.Size(), modTime: fi.ModTime()}, true
+}
+
+func cloneTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	return &cp
+}
+
+func cloneIntPtr(n *int) *int {
+	if n == nil {
+		return nil
+	}
+	cp := *n
+	return &cp
+}
+
+// cloneItem returns an independent copy of it so callers mutating a Snapshot
+// cannot corrupt entries held in scanCache.
+func cloneItem(it Item) Item {
+	out := it
+	out.After = slices.Clone(it.After)
+	out.Content = slices.Clone(it.Content)
+	out.ExitCode = cloneIntPtr(it.ExitCode)
+	out.Meta.AddedAt = cloneTimePtr(it.Meta.AddedAt)
+	out.Meta.SkippedAt = cloneTimePtr(it.Meta.SkippedAt)
+	out.Meta.StartedAt = cloneTimePtr(it.Meta.StartedAt)
+	out.Meta.EndedAt = cloneTimePtr(it.Meta.EndedAt)
+	out.Meta.ClaimedAt = cloneTimePtr(it.Meta.ClaimedAt)
+	out.Meta.SignalledAt = cloneTimePtr(it.Meta.SignalledAt)
+	out.Meta.ExitCode = cloneIntPtr(it.Meta.ExitCode)
+	return out
+}
+
+func (d *Desk) lookupScanCache(key scanCacheKey) (scanCacheEntry, bool) {
+	d.scanMu.Lock()
+	defer d.scanMu.Unlock()
+	if d.scanCache == nil {
+		return scanCacheEntry{}, false
+	}
+	e, ok := d.scanCache[key]
+	return e, ok
+}
+
+func (d *Desk) syncScanCache(dir string, seen map[string]bool, updates map[scanCacheKey]scanCacheEntry) {
+	d.scanMu.Lock()
+	defer d.scanMu.Unlock()
+	if d.scanCache == nil {
+		if len(updates) == 0 {
+			return
+		}
+		d.scanCache = make(map[scanCacheKey]scanCacheEntry, len(updates))
+	}
+	for k := range d.scanCache {
+		if k.dir == dir && !seen[k.name] {
+			delete(d.scanCache, k)
+		}
+	}
+	for k, v := range updates {
+		d.scanCache[k] = v
+	}
+}
+
 // doneItems lists history: one item per done/<name>.log, except names still
 // in running/ (a running item's log is already in done/).
 func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
@@ -394,17 +497,40 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	byName := make(map[string]fs.DirEntry, len(entries))
+	for _, e := range entries {
+		byName[e.Name()] = e
+	}
 	var out []Item
+	seen := make(map[string]bool)
+	var updates map[scanCacheKey]scanCacheEntry
 	for _, e := range entries {
 		name, found := strings.CutSuffix(e.Name(), extLog)
 		legacy := found && legacyName(name)
 		if !found || (!ValidName(name) && !legacy) || inRunning[name] || !e.Type().IsRegular() {
 			continue
 		}
+		seen[name] = true
 		kind := KindScript
-		if d.exists(path.Join(DirDone, name+extManifest)) {
+		if _, hasManifest := byName[name+extManifest]; hasManifest {
 			kind = KindBatch
 		}
+		logSig, logOK := entrySig(e, true)
+		metaEntry, hasMeta := byName[name+extMeta]
+		metaSig, metaOK := entrySig(metaEntry, hasMeta)
+		bodyEntry, hasBody := byName[name+kind.Ext()]
+		bodySig, bodyOK := entrySig(bodyEntry, hasBody)
+		cacheable := logOK && metaOK && bodyOK
+
+		key := scanCacheKey{dir: DirDone, name: name}
+		if cacheable {
+			if cached, ok := d.lookupScanCache(key); ok && cached.matches(kind, legacy, logSig, metaSig, bodySig) {
+				out = append(out, cloneItem(cached.item))
+				continue
+			}
+		}
+
+		onScanCacheRead(DirDone, name)
 		it := newItem(name, kind, StateDone)
 		it.Legacy = legacy
 		it.Meta, _, _ = d.readMeta(DirDone, name)
@@ -421,8 +547,78 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 			}
 		}
 		d.fillTimes(&it, logPath)
+		if cacheable {
+			if updates == nil {
+				updates = make(map[scanCacheKey]scanCacheEntry)
+			}
+			updates[key] = scanCacheEntry{
+				kind:    kind,
+				legacy:  legacy,
+				logSig:  logSig,
+				metaSig: metaSig,
+				bodySig: bodySig,
+				item:    cloneItem(it),
+			}
+		}
 		out = append(out, it)
 	}
+	d.syncScanCache(DirDone, seen, updates)
+	return out, nil
+}
+
+// skippedItems lists items in skipped/, reusing cached entries whose item file
+// and sidecar meta have not changed since the previous Scan.
+func (d *Desk) skippedItems() ([]Item, error) {
+	entries, err := d.list(DirSkipped)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]fs.DirEntry, len(entries))
+	for _, e := range entries {
+		byName[e.Name()] = e
+	}
+	var out []Item
+	seen := make(map[string]bool)
+	var updates map[scanCacheKey]scanCacheEntry
+	for _, e := range entries {
+		name, kind, ok := kindOfFile(e.Name())
+		if !ok {
+			continue
+		}
+		seen[name] = true
+		bodySig, bodyOK := entrySig(e, true)
+		metaEntry, hasMeta := byName[name+extMeta]
+		metaSig, metaOK := entrySig(metaEntry, hasMeta)
+		cacheable := bodyOK && metaOK
+
+		key := scanCacheKey{dir: DirSkipped, name: name}
+		if cacheable {
+			if cached, ok := d.lookupScanCache(key); ok && cached.matches(kind, false, fileSig{}, metaSig, bodySig) {
+				out = append(out, cloneItem(cached.item))
+				continue
+			}
+		}
+
+		onScanCacheRead(DirSkipped, name)
+		it := newItem(name, kind, StateSkipped)
+		it.Meta, _, _ = d.readMeta(DirSkipped, name)
+		if data, err := d.readRegular(path.Join(DirSkipped, e.Name()), maxItemBytes); err == nil {
+			it.Headers = HeadersFor(kind, data)
+		}
+		if cacheable {
+			if updates == nil {
+				updates = make(map[scanCacheKey]scanCacheEntry)
+			}
+			updates[key] = scanCacheEntry{
+				kind:    kind,
+				metaSig: metaSig,
+				bodySig: bodySig,
+				item:    cloneItem(it),
+			}
+		}
+		out = append(out, it)
+	}
+	d.syncScanCache(DirSkipped, seen, updates)
 	return out, nil
 }
 

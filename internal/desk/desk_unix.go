@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -53,6 +54,12 @@ type Desk struct {
 	// readOnly is set by OpenReadOnly: nothing below the desk is created,
 	// moved, chmodded or written, and Scan reports what it would have fixed.
 	readOnly bool
+
+	// scanMu guards scanCache, which caches parsed done/ and skipped/ items
+	// across Scan calls keyed by (dir, name) and validated against each
+	// contributing file's (presence, size, mtime).
+	scanMu    sync.Mutex
+	scanCache map[scanCacheKey]scanCacheEntry
 }
 
 // SetSignalPane records pane, the herdr pane of the queuing session, in the
