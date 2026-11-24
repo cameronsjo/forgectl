@@ -15,6 +15,8 @@
 
 - [ ] 3.1 NotchCore: decode, raise rules, badge, health, jump messages, forgectl locator (T4).
 - [ ] 3.2 App shell: DynamicNotchKit island per screen, FSEvents and a 30 s poll, menu (T5).
+- [ ] 3.2a Trust gate leads from the #1495 review: re-verify forgectl before each spawn, cap the child's stdout before decode, present-from-lstat, signing requirement pins `identifier "forgectl"` and the Developer ID OIDs (T5).
+- [ ] 3.2b NotchCore `clean` parity with `attention.Clean`: default-ignorables, variation selectors, U+2800, cap by scalars (T5).
 - [ ] 3.3 Security review of the release path (S2).
 - [ ] 3.4 Bundle, sign, notarize, `forgectl-notch` cask, `doctor` row (T6).
 
