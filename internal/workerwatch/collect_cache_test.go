@@ -110,15 +110,17 @@ func TestCollectorRunsSlowGetsAtOnceAndBacksOff(t *testing.T) {
 	}
 }
 
-// switchGit reports a branch the test can change.
+// switchGit reports a branch the test can change and counts Branch calls.
 type switchGit struct {
 	mu     sync.Mutex
 	branch string
+	reads  int
 }
 
 func (g *switchGit) Branch(context.Context, string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.reads++
 	return g.branch, nil
 }
 
@@ -238,5 +240,50 @@ func TestCollectorThrottlesAFailingBranchCheck(t *testing.T) {
 	c.Collect(context.Background(), false)
 	if git.reads != before {
 		t.Fatalf("a failed branch check ran again inside branchCheckGap: reads %d -> %d", before, git.reads)
+	}
+}
+
+// TestCollectorForwardsResolvedBranchToReadPR verifies that a branch already
+// resolved in branchesMoved is forwarded into readPR instead of invoking
+// Git.Branch a second time in the same Collect, including for detached HEAD.
+func TestCollectorForwardsResolvedBranchToReadPR(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	git := &switchGit{branch: "branch-old"}
+	gh := &fakeGH{}
+	c := &Collector{
+		HC:      &fakeHC{terms: map[string]Terminal{"cos-a": {Address: "t1", Name: "cos-a", State: "live"}}},
+		Git:     git,
+		GH:      gh,
+		Now:     func() time.Time { return now },
+		Entries: []Entry{{Name: "cos-a", Worktree: "/wt/a"}},
+	}
+	c.Collect(context.Background(), false) // cold: 1 Git.Branch inside readPR
+	if git.reads != 1 {
+		t.Fatalf("cold collect reads = %d, want 1", git.reads)
+	}
+
+	git.mu.Lock()
+	git.branch = "branch-new"
+	git.mu.Unlock()
+	now = now.Add(branchCheckGap)
+	s := c.Collect(context.Background(), false)
+	if s.Workers[0].Branch != "branch-new" || len(gh.calls) != 2 || gh.calls[1] != "branch-new" {
+		t.Fatalf("after branch switch: row=%+v gh.calls=%v", s.Workers[0], gh.calls)
+	}
+	if git.reads != 2 {
+		t.Fatalf("branch-switch collect called Git.Branch twice: total reads = %d, want 2", git.reads)
+	}
+
+	// Detached HEAD ("") is also forwarded cleanly without a second Git.Branch call.
+	git.mu.Lock()
+	git.branch = ""
+	git.mu.Unlock()
+	now = now.Add(branchCheckGap)
+	s = c.Collect(context.Background(), false)
+	if s.Workers[0].PRIssue != PRIssueNoBranch || s.Workers[0].Branch != "" {
+		t.Fatalf("after detach: row=%+v, want PRIssueNoBranch", s.Workers[0])
+	}
+	if git.reads != 3 {
+		t.Fatalf("detach collect called Git.Branch twice: total reads = %d, want 3", git.reads)
 	}
 }
