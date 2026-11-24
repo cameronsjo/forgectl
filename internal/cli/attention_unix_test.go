@@ -6,6 +6,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -47,9 +48,14 @@ func newAttnEnv(t *testing.T) attnEnv {
 	t.Setenv("XDG_STATE_HOME", e.state)
 	t.Setenv("DESK_DIR", e.desk)
 	t.Setenv("HERDR_SOCKET_PATH", attnSocket)
-	oldTTY := attentionStdinIsTerminal
+	oldTTY, oldHc := attentionStdinIsTerminal, attentionHcList
 	attentionStdinIsTerminal = func() bool { return false }
-	t.Cleanup(func() { attentionStdinIsTerminal = oldTTY })
+	// No test reaches a real hc: a dev machine's own hc would make results
+	// depend on its live terminals.
+	attentionHcList = func(context.Context) ([]byte, string, error) {
+		return nil, "", errors.New("hc: test has no hc")
+	}
+	t.Cleanup(func() { attentionStdinIsTerminal, attentionHcList = oldTTY, oldHc })
 	return e
 }
 
@@ -137,7 +143,7 @@ func TestAttentionPutThenList(t *testing.T) {
 	if a := l.Rows[0]; a.Kind != attention.KindAction || a.Actor != attention.ActorCameron || a.NotOnDesk {
 		t.Errorf("action row = %+v", a)
 	}
-	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent, Drain: sourceAbsent}) {
+	if l.Sources != (attentionSources{Spool: sourceOK, Desk: sourceAbsent, Herdr: sourceOK, Sweep: sourceAbsent, Drain: sourceAbsent, Core: sourceAbsent}) {
 		t.Errorf("sources = %+v", l.Sources)
 	}
 }
@@ -340,6 +346,93 @@ func TestAttentionListKeysTiersAndSourceDetail(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, l.Rows[0].Key[:attentionShortKey]+" ") {
 		t.Errorf("text view does not lead with the short key:\n%s", out)
+	}
+}
+
+// fakeHcLs makes attentionHcList answer with these live terminals (and one
+// finished one) on core selection sel, and counts its calls.
+func fakeHcLs(t *testing.T, sel string, addrs ...string) *int {
+	t.Helper()
+	var ts []map[string]any
+	for _, a := range addrs {
+		ts = append(ts, map[string]any{"address": a, "agent": "claude-code", "state": "live", "status": "idle", "cwd": "/x", "where": "s / t"})
+	}
+	ts = append(ts, map[string]any{"address": "t99", "state": "finished"})
+	body, _ := json.Marshal(map[string]any{"terminals": ts})
+	calls := 0
+	attentionHcList = func(context.Context) ([]byte, string, error) {
+		calls++
+		return body, sel, nil
+	}
+	return &calls
+}
+
+// A desk item queued from a herdr-app terminal points at that terminal while
+// hc lists it live; a finished or unlisted one gives no terminal, and hc
+// being down says why in sources.
+func TestAttentionListDeskTerminalFromCore(t *testing.T) {
+	e := newAttnEnv(t)
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(e.desk, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const here = "0123456789abcdef0123456789abcdef"
+	add := func(name, term, core string) {
+		body := "# WHAT: " + name + "\necho hi\n"
+		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".sh"), body)
+		writeDeskFile(t, filepath.Join(e.desk, "pending", name+".meta.json"),
+			`{"added_at":"2026-10-01T00:00:00Z","sha256":"`+sha(body)+`","kind":"script","terminal":"`+term+`","terminal_core":"`+core+`"}`)
+	}
+	add("01-live", "t148", here)
+	add("02-finished", "t99", here)
+	add("03-forged", "../../sh", here)
+	add("04-othercore", "t148", "ffffffffffffffffffffffffffffffff")
+
+	calls := fakeHcLs(t, here, "t148")
+	l := attnList(t, module.Deps{Runner: herdrDown()})
+	if *calls != 1 {
+		t.Errorf("hc ls ran %d times, want 1", *calls)
+	}
+	if l.Sources.Core != sourceOK || len(l.Rows) != 4 {
+		t.Fatalf("core %q, rows %+v", l.Sources.Core, l.Rows)
+	}
+	got := map[string]string{}
+	for _, r := range l.Rows {
+		got[r.Tag] = r.Terminal
+	}
+	if got["01-live"] != "t148" || got["02-finished"] != "" || got["03-forged"] != "" || got["04-othercore"] != "" {
+		t.Errorf("terminals = %v, want only 01-live at t148", got)
+	}
+
+	attentionHcList = func(context.Context) ([]byte, string, error) { return nil, "", errors.New("hc: not running") }
+	l = attnList(t, module.Deps{Runner: herdrDown()})
+	if l.Sources.Core != sourceUnavailable || l.Sources.CoreDetail == "" {
+		t.Errorf("hc down: core %q detail %q", l.Sources.Core, l.Sources.CoreDetail)
+	}
+	for _, r := range l.Rows {
+		if r.Terminal != "" {
+			t.Errorf("terminal %q with hc down", r.Terminal)
+		}
+	}
+}
+
+// With no desk item naming a terminal, hc is never asked and sources.core
+// is absent: nothing in the queue would use the answer.
+func TestAttentionListSkipsHcWithoutADeskTerminal(t *testing.T) {
+	e := newAttnEnv(t)
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(e.desk, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := "# WHAT: plain\necho hi\n"
+	writeDeskFile(t, filepath.Join(e.desk, "pending", "01-plain.sh"), body)
+	writeDeskFile(t, filepath.Join(e.desk, "pending", "01-plain.meta.json"), `{"added_at":"2026-10-01T00:00:00Z","sha256":"`+sha(body)+`","kind":"script"}`)
+	calls := fakeHcLs(t, "0123456789abcdef0123456789abcdef", "t148")
+	l := attnList(t, module.Deps{Runner: herdrDown()})
+	if *calls != 0 || l.Sources.Core != sourceAbsent || len(l.Rows) != 1 {
+		t.Errorf("hc calls %d, core %q, rows %d; want 0, absent, 1", *calls, l.Sources.Core, len(l.Rows))
 	}
 }
 

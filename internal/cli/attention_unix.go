@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -42,6 +44,8 @@ const (
 	attentionDetailMax = 200
 	// attentionShortKey is how much of a row key the text view prints.
 	attentionShortKey = 6
+	// attentionHcTimeout bounds the hc ls call.
+	attentionHcTimeout = 3 * time.Second
 )
 
 // Source states reported by `list --json`.
@@ -300,6 +304,10 @@ type attentionSources struct {
 	// cut. Empty when herdr answered.
 	HerdrDetail string `json:"herdrDetail,omitempty"`
 	Sweep       string `json:"sweep"`
+	// Core is herdr-core (hc): ok; unavailable with CoreDetail saying why;
+	// or absent when no desk item names a terminal, so hc was not asked.
+	Core       string `json:"core"`
+	CoreDetail string `json:"coreDetail,omitempty"`
 	// Drain is drain.json: ok, absent (no drain has run), error or
 	// malformed.
 	Drain string `json:"drain"`
@@ -357,11 +365,23 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	}
 	out.Skipped += sweepSkipped
 
+	// hc is asked only when a desk item names a terminal: nothing else in the
+	// queue uses it, and the call can cost up to attentionHcTimeout.
+	var core attention.Core
+	out.Sources.Core = sourceAbsent
+	if deskNamesATerminal(items) {
+		core = attentionCore(cmd.Context())
+		out.Sources.Core = sourceOK
+		if !core.Known {
+			out.Sources.Core, out.Sources.CoreDetail = sourceUnavailable, core.Detail
+		}
+	}
+
 	hold, drainState := attentionDrain(now)
 	out.Sources.Drain = drainState
 
 	out.Rows = attention.Build(attention.Input{
-		Now: now, Records: recs, Herdr: h, Desk: items, Sweep: sw, Drain: hold,
+		Now: now, Records: recs, Herdr: h, Core: core, Desk: items, Sweep: sw, Drain: hold,
 		WorkerPrefix: deps.Cfg.Attention.Prefix(), Session: o.session,
 	})
 	if out.Rows == nil {
@@ -407,6 +427,9 @@ func attentionDesk() ([]attention.DeskItem, string) {
 			continue
 		}
 		di := attention.DeskItem{Name: it.Name, What: it.What, SHA256: it.Meta.SHA256, SignalPane: it.Meta.SignalPane}
+		if hcadapter.ValidAddress(it.Meta.Terminal) && hcadapter.ValidSelection(it.Meta.TerminalCore) {
+			di.Terminal, di.TerminalCore = it.Meta.Terminal, it.Meta.TerminalCore
+		}
 		if it.Meta.AddedAt != nil {
 			di.AddedAt = *it.Meta.AddedAt
 		}
@@ -454,6 +477,65 @@ func drainNeedsYou(st drain.Status, now time.Time, alive func(drain.Status) bool
 		return nil
 	}
 	return &attention.DrainHold{Since: st.SlotsHold.Since}
+}
+
+// attentionCoreResult is the part of `hc ls --json` the queue reads.
+type attentionCoreResult struct {
+	Terminals *[]struct {
+		Address string `json:"address"`
+		State   string `json:"state"`
+	} `json:"terminals"`
+}
+
+// attentionHcList runs `hc ls --json` through the shared hc adapter
+// (newHcClient): the absolute hc path, the launching session's handles
+// scrubbed from the environment, sealed argv and capped output, the path
+// every other forgectl hc call takes. It also returns the adapter's
+// selection, the core it asked. A seam so tests never reach a real hc.
+var attentionHcList = func(ctx context.Context) (out []byte, selection string, err error) {
+	a, err := newHcClient()
+	if err != nil {
+		return nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, attentionHcTimeout)
+	defer cancel()
+	out, err = a.ListJSON(ctx)
+	return out, a.SelectionDigest(), err
+}
+
+// attentionCore asks herdr-core for its live terminals. Known is false when
+// hc could not be asked or its reply does not parse; Detail then says why,
+// cleaned and cut.
+func attentionCore(ctx context.Context) attention.Core {
+	c := attention.Core{}
+	out, sel, err := attentionHcList(ctx)
+	if err != nil {
+		c.Detail = attention.Clean(err.Error(), attentionDetailMax)
+		return c
+	}
+	var r attentionCoreResult
+	if err := json.Unmarshal(out, &r); err != nil || r.Terminals == nil {
+		c.Detail = "hc ls --json: reply has no terminals list"
+		return c
+	}
+	c.Known, c.Selection, c.Live = true, sel, map[string]bool{}
+	for _, t := range *r.Terminals {
+		if t.State == "live" && hcadapter.ValidAddress(t.Address) {
+			c.Live[t.Address] = true
+		}
+	}
+	return c
+}
+
+// deskNamesATerminal reports whether any desk item recorded a terminal, the
+// only thing the queue asks hc about.
+func deskNamesATerminal(items []attention.DeskItem) bool {
+	for _, it := range items {
+		if it.Terminal != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // attentionSweep reads `forgectl sweep`'s last result. Absent is no rows; a

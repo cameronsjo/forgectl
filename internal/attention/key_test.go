@@ -77,6 +77,27 @@ func TestRowKeyForItems(t *testing.T) {
 	}
 }
 
+// A desk row takes its queuing terminal only while hc lists it live, and
+// the terminal never enters the key.
+func TestBuildDeskTerminalComesFromCore(t *testing.T) {
+	const core, other = "0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff"
+	desk := []DeskItem{{Name: "05-x", What: "x", Terminal: "t148", TerminalCore: core, AddedAt: t0}}
+	none := Build(Input{Now: t0, Desk: desk})
+	gone := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: core, Live: map[string]bool{"t9": true}}})
+	// Another core with its own live t148 is not the terminal that queued it.
+	elsewhere := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: other, Live: map[string]bool{"t148": true}}})
+	live := Build(Input{Now: t0, Desk: desk, Core: Core{Known: true, Selection: core, Live: map[string]bool{"t148": true}}})
+	if none[0].Terminal != "" || gone[0].Terminal != "" || elsewhere[0].Terminal != "" {
+		t.Errorf("terminal without hc vouching: none=%q gone=%q elsewhere=%q", none[0].Terminal, gone[0].Terminal, elsewhere[0].Terminal)
+	}
+	if live[0].Terminal != "t148" {
+		t.Errorf("live terminal = %q, want t148", live[0].Terminal)
+	}
+	if none[0].Key != live[0].Key {
+		t.Errorf("terminal changed the key: %s -> %s", none[0].Key, live[0].Key)
+	}
+}
+
 func TestRowKeyDistinguishesSameContentDeskItems(t *testing.T) {
 	rows := Build(Input{Now: t0, Desk: []DeskItem{
 		{Name: "01-restart", What: "restart the box", SHA256: sha64, AddedAt: t0},

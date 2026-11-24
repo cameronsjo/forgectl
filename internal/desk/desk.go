@@ -395,6 +395,13 @@ type Meta struct {
 	// or is skipped. Untrusted text on read: validate before it reaches an
 	// argv.
 	SignalPane string `json:"signal_pane,omitempty"`
+	// Terminal is the herdr-app (herdr-core) terminal of the session that
+	// queued the item ($HC_TERMINAL_ID), so a viewer can take you back to it.
+	// Untrusted text on read, like SignalPane: validate before use.
+	Terminal string `json:"terminal,omitempty"`
+	// TerminalCore is the selection digest of the hc core Terminal belongs to
+	// (hcadapter.Selection): a terminal address is unique only within one core.
+	TerminalCore string `json:"terminal_core,omitempty"`
 	// SignalledAt is when `desk add` finished telling the operator the item
 	// is waiting, with every enabled signal sent. Absent when the add died
 	// before signalling or a signal failed, so a retry that finds the item
