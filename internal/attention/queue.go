@@ -67,6 +67,10 @@ var (
 
 // Row is one wait in the queue.
 type Row struct {
+	// Key is a stable id for the wait (RowKey); Tier is its surface tier
+	// (RowTier). Both are set by Build.
+	Key     string `json:"key"`
+	Tier    string `json:"tier"`
 	Kind    string `json:"kind"`
 	Session string `json:"session,omitempty"`
 	// Pane is where Jump goes: the herdr pane that `herdr agent list`
@@ -104,6 +108,8 @@ type Agent struct {
 // Herdr is what the caller's herdr server reported. Known is false when it
 // could not be asked.
 type Herdr struct {
+	// Detail is why herdr could not be asked, when Known is false.
+	Detail string
 	Known  bool
 	Socket string
 	Agents []Agent
@@ -330,7 +336,7 @@ func Build(in Input) []Row {
 		}
 		return a.N - b.N
 	})
-	return rows
+	return stamp(rows)
 }
 
 // sweepRows turns the sweep's blocked workers and marker-clean PRs into
