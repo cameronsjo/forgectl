@@ -33,7 +33,7 @@ Every row SHALL carry `tier`: `raise` for a waiting desk item, a blocked worker 
 - **THEN** its row's `tier` is `hidden`
 
 ### Requirement: Source detail
-`sources` SHALL report `drain` and `core` (herdr-core) beside the existing sources. When herdr or herdr-core is unavailable, `herdrDetail` or `coreDetail` SHALL say why, cleaned and cut to 200 characters. When the sweep is `ok`, `sweepGeneratedAt` SHALL be when that sweep ran.
+`sources` SHALL report `drain` and `core` (herdr-core) beside the existing sources. `core` SHALL be `absent` when no desk item names a terminal, because hc is asked only then. When herdr or herdr-core is unavailable, `herdrDetail` or `coreDetail` SHALL say why, cleaned and cut to 200 characters. When the sweep is `ok`, `sweepGeneratedAt` SHALL be when that sweep ran.
 
 #### Scenario: hc is not running
 - **WHEN** `hc ls --json` fails

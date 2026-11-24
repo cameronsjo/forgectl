@@ -177,7 +177,7 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
   - If PingPlace does not run on 27.3, record that and go to build.
 - [x] **T1 Queue fields.**
   - **`key`**: 16 hex characters of sha256 over a length-prefixed tuple of the row's source plus fields fixed at creation. Per kind:
-    - desk: item name (`Tag`);
+    - desk: item name (`Tag`), the item's sha256 prefix and `added_at` (a name can be reused once `done/` is emptied; S1 N2);
     - item (`q`/`a`): session, turn, N;
     - worker: worker name and block;
     - PR: owner/repo#n;
@@ -190,7 +190,8 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
   - **Tests**: the key is stable across a herdr flap, a sweep merge and a new turn; two desk items with the same content get distinct keys; duplicate sweep entries collapse. Stage the break: make two rows share a key and confirm red.
   - **Live-state claim 4** is measured here first.
   - **File** the `--no-prune` follow-up issue.
-- [ ] **T2 Drain row (own PR).** Derive a `drain` row at read time. It exists only when all four hold: `drain.json` reads `running`, `slots_hold` is set, `drain.SlotsStuck` is true, and a `LOCK_SH|LOCK_NB` probe on `drain.lock` fails (the drain is alive). There is no new writer and no TTL. Text is fixed, with no free text from the drain. Tests: a crashed drain with a hold shows no row, a stale tick shows no row, and a live stuck drain shows one. Update `docs/commands/attention.md` (cost table, `drain` source).
+- [ ] **T2 Drain row (own PR).** Derive a `drain` row at read time. It exists only when all four hold: `drain.json` reads `running`, `slots_hold` is set, `drain.SlotsStuck` is true, and the pid drain.json names is still that drain (pid plus process start time, the check `surface drain stop` makes; no lock is taken, see Deviations). There is no new writer and no TTL. Text is fixed, with no free text from the drain. Tests: a crashed drain with a hold shows no row, a stale tick shows no row, and a live stuck drain shows one. Update `docs/commands/attention.md` (cost table, `drain` source).
+- [ ] **T3a Desk terminals.** `desk add` records `terminal` ($HC_TERMINAL_ID, only from a herdr-app terminal, never under a multiplexer) and `terminal_core` (the hc core selection) in the item meta. `attention list` asks `hc ls --json` through the shared hc adapter, only when a desk item names a terminal, and gives a desk row its `terminal` only while hc lists it live on the same core; `sources` gains `core`/`coreDetail` (`absent` when hc was not asked). Tests: a finished, forged or other-core terminal gives no `terminal`; no hc call without a desk terminal.
 - [ ] **T3 Jump.** `forgectl attention jump --key=K [--json]`:
   - It validates K, re-lists, and requires exactly one matching row.
   - It takes the pane from herdr only, resolves its tab, and calls the shared focus-tab function, which focuses the workspace too where `FocusNeedsSpace()`, then brings herdr-app forward.
@@ -213,6 +214,8 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
   - FSEvents on the spool and desk directories, using the paths T1 confirms from `attention list`; a 30 s poll; a 10 s child timeout.
   - Collapse and menu as in the policy. Pane-less rows show no jump affordance and give the reason. Jump failures show inline for 5 s.
   - `os_log` plus `events.jsonl` at `$XDG_STATE_HOME/forgectl/notch/`, mode 0700/0600.
+  - From the #1495 security review (crit=0 imp=0), carry into the shell: re-verify the forgectl binary (path, resolved target, Team-ID requirement) right before each spawn, not once at launch; cap the child's stdout before `decodeQueue`; mark a candidate present from `lstat`, so a dangling first link is refused rather than falling through to the second path; pin `identifier "forgectl"` and the Developer ID OIDs in the code-signing requirement, not the team OU alone.
+  - Bring NotchCore's `clean` to parity with `attention.Clean`/`termsafe`: default-ignorable code points, variation selectors, U+2800 (braille blank), and cap by scalars as Go does.
   - Hand-check checklist in `docs/notch.md`: MacBook alone, external alone, both, over a full-screen app, Reduce Motion, VoiceOver. Always launch with `open -a` or the login item, never from a pane shell.
 - [ ] **S2 Security review (before the first tagged release).** Review `release.yml`, `.goreleaser.yaml`, `Package.swift`/`Package.resolved`, the bundle script, and the new cask's stanzas.
 - [ ] **T6 Bundle, sign, notarize, cask.**
@@ -245,5 +248,7 @@ Panel: plan-reviewer (conflicts and loops), plan-reviewer (underspecified tasks)
 - 2026-11-22, T1 / Live-state claim 4, measured half: `forgectl attention list --json` under `env -i HOME=… PATH=/usr/bin:/bin:/usr/sbin:/sbin` exits 0 and reads the spool and desk. The herdr half could not be measured: no herdr server runs on sjomba (`herdr agent list` → `server_not_running`), because Cameron works in herdr-app, so `sources.herdr` is `unavailable` from a full shell too and no row gets a pane. The Workarounds row stays `fix first`, re-aimed at T3.
 - 2026-11-22, T3 premise moved: cameronsjo/forgectl#1476 now clicks through to a **herdr-app terminal** (`forgectl herdr _focus-terminal --terminal <HC_TERMINAL_ID> --herdr-app <abs path>`, shared function `focusTerminal` in `internal/cli/herdr_focus_terminal.go`), not a herdr 0.9 tab. T3 therefore resolves a row to a herdr-app terminal and calls `focusTerminal`; it needs a terminal source the queue does not read yet (desk items queued from a herdr-app terminal, and a session-to-terminal map). The herdr `pane focus` Loop row may become moot under herdr-app; T3 decides.
 - 2026-11-22, T1: `--no-prune` follow-up filed as cameronsjo/forgectl#1492.
+
+- 2026-11-23, design synced to shipped behaviour (cameronsjo/forgectl#1478 review, crit=0 imp=2): T1's desk key bullet now names the hash and `added_at`; T2's contract names the pid plus start-time liveness check, which the spec requires (no lock); a T3a entry records the desk-terminal work tasks.md 1.5 and the spec already describe. The #1495 security review's leads are written into T5.
 
 ## Learnings
