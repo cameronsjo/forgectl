@@ -16,6 +16,7 @@ coverage.*
 
 # Swift (bless ceremony helper)
 helper/forgectl-bless-helper/.build/
+helper/forgectl-notch/.build/
 
 # Editor / OS
 .DS_Store
