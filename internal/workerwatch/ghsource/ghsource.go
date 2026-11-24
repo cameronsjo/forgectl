@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -48,9 +50,10 @@ const prQuery = `query($owner: String!, $name: String!, $head: String!, $author:
 }`
 
 var (
-	sha40Re  = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	branchRe = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
-	loginRe  = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
+	sha40Re   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	headSHARe = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+	branchRe  = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+	loginRe   = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
 )
 
 // GitHub finds a branch's PR through gh. Run should be pinned to the
@@ -210,8 +213,21 @@ type GitCLI struct {
 	Run gitenv.Runner
 }
 
-// Branch implements workerwatch.Git.
+// maxGitHeadFileBytes bounds direct reads of .git and HEAD files so a
+// non-git regular file at that path is never slurped into memory.
+const maxGitHeadFileBytes = 4096
+
+// Branch implements workerwatch.Git. It resolves the current branch directly
+// from <worktree>/.git/HEAD (or the gitdir target for a linked worktree) to
+// avoid spawning git on every poll, falling back to `git branch --show-current`
+// on any error or unexpected format.
 func (g GitCLI) Branch(ctx context.Context, worktree string) (string, error) {
+	if branch, ok := readBranchDirect(worktree); ok {
+		if branch != "" && !branchRe.MatchString(branch) {
+			return "", errors.New("the branch name holds characters the watch does not show")
+		}
+		return branch, nil
+	}
 	out, err := gitenv.Run(ctx, g.Run, gitenv.Local, "-C", worktree, "branch", "--show-current")
 	if err != nil {
 		return "", errors.New("git branch --show-current failed")
@@ -221,6 +237,69 @@ func (g GitCLI) Branch(ctx context.Context, worktree string) (string, error) {
 		return "", errors.New("the branch name holds characters the watch does not show")
 	}
 	return branch, nil
+}
+
+// readBranchDirect resolves worktree's checked-out branch by reading its .git
+// entry and HEAD file directly. It returns (branch, true) on a clean hit
+// (with branch == "" for a detached commit SHA, matching `git branch
+// --show-current`) and ("", false) whenever the caller should fall back to git.
+func readBranchDirect(worktree string) (string, bool) {
+	if worktree == "" {
+		return "", false
+	}
+	gitPath := filepath.Join(worktree, ".git")
+	fi, err := os.Stat(gitPath)
+	if err != nil {
+		return "", false
+	}
+	var gitDir string
+	switch {
+	case fi.IsDir():
+		gitDir = gitPath
+	case fi.Mode().IsRegular() && fi.Size() <= maxGitHeadFileBytes:
+		data, err := os.ReadFile(gitPath) //nolint:gosec // G304: reading caller-specified worktree's .git pointer file (capped to 4 KiB)
+		if err != nil {
+			return "", false
+		}
+		line, _, _ := strings.Cut(string(data), "\n")
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "gitdir:")
+		if !ok {
+			return "", false
+		}
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			return "", false
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(worktree, target)
+		}
+		gitDir = filepath.Clean(target)
+	default:
+		return "", false
+	}
+
+	headPath := filepath.Join(gitDir, "HEAD")
+	hfi, err := os.Stat(headPath) //nolint:gosec // G703: reading local git HEAD resolved from worktree's .git gitdir pointer
+	if err != nil || !hfi.Mode().IsRegular() || hfi.Size() > maxGitHeadFileBytes {
+		return "", false
+	}
+	headBytes, err := os.ReadFile(headPath) //nolint:gosec // G304,G703: reading local git HEAD (capped to 4 KiB)
+	if err != nil {
+		return "", false
+	}
+	head := strings.TrimSpace(string(headBytes))
+	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
+		ref = strings.TrimSpace(ref)
+		if branch, ok := strings.CutPrefix(ref, "refs/heads/"); ok && branch != "" {
+			return branch, true
+		}
+		return "", false
+	}
+	if headSHARe.MatchString(head) {
+		return "", true
+	}
+	return "", false
 }
 
 // Repo implements workerwatch.Git.

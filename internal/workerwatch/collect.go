@@ -458,7 +458,7 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 		i   int
 		age time.Duration
 	}
-	moved := c.branchesMoved(ctx, workers, now)
+	moved, knownBranches := c.branchesMoved(ctx, workers, now)
 	var due []stale
 	for i, w := range workers {
 		if w.Worktree == "" || c.GH == nil || c.Git == nil {
@@ -476,7 +476,8 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 	slices.SortStableFunc(due, func(a, b stale) int { return cmp.Compare(b.age, a.age) })
 	for _, d := range due[:min(len(due), ghPerCollect)] {
 		w := workers[d.i]
-		c.cache[w.Worktree] = c.readPR(ctx, w.Worktree, c.cache[w.Worktree], now)
+		branch, hasBranch := knownBranches[w.Worktree]
+		c.cache[w.Worktree] = c.readPR(ctx, w.Worktree, c.cache[w.Worktree], branch, hasBranch, now)
 	}
 	for i := range workers {
 		e, ok := c.cache[workers[i].Worktree]
@@ -491,11 +492,13 @@ func (c *Collector) readPRs(ctx context.Context, workers []Worker, now time.Time
 // branchesMoved checks the branch of each worktree with a cached PR read,
 // at most once per branchCheckGap, and reports the worktrees now on another
 // branch than the read was for: a worker that switched branch is re-read
-// within branchCheckGap, not after the TTL. A branch git cannot read (or a
-// check the deadline skipped) keeps the cached read.
-func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now time.Time) map[string]bool {
+// within branchCheckGap, not after the TTL. It also returns every branch
+// successfully resolved in this pass so readPR can reuse it without reading
+// git a second time. A branch git cannot read (or a check the deadline
+// skipped) keeps the cached read.
+func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now time.Time) (map[string]bool, map[string]string) {
 	if c.Git == nil || c.GH == nil {
-		return nil
+		return nil, nil
 	}
 	var trees []string
 	for _, w := range workers {
@@ -516,6 +519,7 @@ func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now tim
 	}
 	ran := runAll(ctx, gitTimeout, jobs)
 	moved := map[string]bool{}
+	resolved := map[string]string{}
 	for i, wt := range trees {
 		if !ran[i] {
 			continue // skipped by the deadline: check again next collect
@@ -523,11 +527,14 @@ func (c *Collector) branchesMoved(ctx context.Context, workers []Worker, now tim
 		e := c.cache[wt]
 		e.checked = now // a failed check waits too, so a broken worktree costs one git run per gap
 		c.cache[wt] = e
-		if errs[i] == nil && branches[i] != e.branch {
-			moved[wt] = true
+		if errs[i] == nil {
+			resolved[wt] = branches[i]
+			if branches[i] != e.branch {
+				moved[wt] = true
+			}
 		}
 	}
-	return moved
+	return moved, resolved
 }
 
 // runAll runs jobs at once, at most hcParallel at a time, under one shared
@@ -563,18 +570,23 @@ func runAll(ctx context.Context, timeout time.Duration, jobs []func(context.Cont
 	return ran
 }
 
-// readPR resolves the worktree's repo and branch, then its PR. A failed gh
-// read keeps the previous PR and its read time beside the issue, so the row
-// shows stale data as stale; the attempt still restarts the TTL, so an
-// outage is not retried on every collect.
-func (c *Collector) readPR(ctx context.Context, worktree string, prev prEntry, now time.Time) prEntry {
+// readPR resolves the worktree's repo and branch, then its PR. When hasBranch
+// is true, branch was already resolved in branchesMoved for this collect and is
+// reused without calling c.Git.Branch again. A failed gh read keeps the
+// previous PR and its read time beside the issue, so the row shows stale data
+// as stale; the attempt still restarts the TTL, so an outage is not retried on
+// every collect.
+func (c *Collector) readPR(ctx context.Context, worktree string, prev prEntry, branch string, hasBranch bool, now time.Time) prEntry {
 	ctx, cancel := context.WithTimeout(ctx, ghTimeout)
 	defer cancel()
 	e := prEntry{at: now}
-	branch, err := c.Git.Branch(ctx, worktree)
-	if err != nil {
-		e.issue, e.note = PRIssueNoBranch, "git could not read the worktree's branch"
-		return e
+	if !hasBranch {
+		var err error
+		branch, err = c.Git.Branch(ctx, worktree)
+		if err != nil {
+			e.issue, e.note = PRIssueNoBranch, "git could not read the worktree's branch"
+			return e
+		}
 	}
 	if branch == "" {
 		e.issue, e.note = PRIssueNoBranch, "the worktree has no branch checked out"

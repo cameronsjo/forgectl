@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -155,7 +156,23 @@ type Index struct {
 	// that survives the default log_level "off": `docs check` reads it to
 	// refuse a verdict on a partial tree, and the other verbs print a note.
 	skipped []SkippedPath
+	// docCache holds every cleanly-scanned Doc from this build along with its
+	// size and root kind so Rebuild can reuse unchanged docs without
+	// re-opening or re-parsing them.
+	docCache map[docKey]cachedDoc
 }
+
+// cachedDoc pairs a scanned Doc with the file size and root kind it was
+// scanned under, for incremental Rebuild reuse.
+type cachedDoc struct {
+	doc      Doc
+	size     int64
+	rootKind RootKind
+}
+
+// scanDocFn is the doc scanner called by walkRoot and indexFileRoot. Tests
+// replace it to verify incremental Rebuild skips scanning unchanged files.
+var scanDocFn = scanDocFrom
 
 // SkippedPath is one path the index walk skipped instead of failing the build.
 type SkippedPath struct {
@@ -476,9 +493,14 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 // *WalkDeadlineError naming that root and wrapping ctx.Err(), discarding any
 // roots already walked along with it — there is no partial Index to return.
 func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*Index, error) {
+	return newIndexContext(ctx, paths, opts, nil)
+}
+
+func newIndexContext(ctx context.Context, paths []string, opts IndexOptions, prev map[docKey]cachedDoc) (*Index, error) {
 	idx := &Index{paths: append([]string(nil), paths...), opts: opts}
 	labels := map[string]bool{}
 	attachmentsByRoot := map[string][]string{}
+	docCache := make(map[docKey]cachedDoc, len(prev))
 
 	for _, p := range paths {
 		abs, err := filepath.Abs(p)
@@ -496,7 +518,7 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 		}
 
 		if info.IsDir() {
-			root, docs, attachments, skipped, err := indexDirRoot(ctx, labels, p, override, hasOverride)
+			root, docs, attachments, skipped, err := indexDirRoot(ctx, labels, p, override, hasOverride, prev, docCache)
 			if err != nil {
 				return nil, err
 			}
@@ -507,7 +529,7 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 			continue
 		}
 
-		root, doc, err := indexFileRoot(labels, p, override, hasOverride)
+		root, doc, err := indexFileRoot(labels, p, override, hasOverride, prev, docCache)
 		if err != nil {
 			return nil, err
 		}
@@ -524,6 +546,7 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 
 	idx.byRoot = buildRootIndexes(idx.roots, idx.docs, attachmentsByRoot)
 	idx.backlinks = idx.buildBacklinks()
+	idx.docCache = docCache
 	return idx, nil
 }
 
@@ -586,7 +609,7 @@ func resolveRootKind(canonical string, override RootKind, hasOverride bool) (Roo
 // error whenever the two race, discarding its "docs root %q" wrap for no
 // reason. Every other walkRoot error (a real filesystem fault) keeps the
 // existing wrap.
-func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, []string, []SkippedPath, error) {
+func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool, prev, docCache map[docKey]cachedDoc) (Root, []Doc, []string, []SkippedPath, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
 		return Root{}, nil, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
@@ -599,7 +622,7 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 	}
 	defer func() { _ = rt.Close() }()
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
-	docs, attachments, skipped, err := walkRoot(ctx, root, rt)
+	docs, attachments, skipped, err := walkRoot(ctx, root, rt, prev, docCache)
 	if err != nil {
 		var deadline *WalkDeadlineError
 		if errors.As(err, &deadline) {
@@ -614,7 +637,7 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 // The returned Root's Path is the file's canonical PARENT directory (needed
 // so ResolveInRoot has a directory to Join/EvalSymlinks against), but
 // Root.OnlyFile pins the one path Resolve will ever hand back for it.
-func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOverride bool) (Root, Doc, error) {
+func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOverride bool, prev, docCache map[docKey]cachedDoc) (Root, Doc, error) {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
@@ -654,6 +677,16 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	if !fi.Mode().IsRegular() {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: not a regular file", file)
 	}
+	key := docKey{rootLabel: label, absPath: real}
+	if cached, ok := prev[key]; ok &&
+		cached.rootKind == kind &&
+		cached.size == fi.Size() &&
+		cached.doc.ModTime.Equal(fi.ModTime()) &&
+		cached.doc.RelPath == base {
+		reused := cached.doc.clone()
+		docCache[key] = cachedDoc{doc: reused, size: fi.Size(), rootKind: kind}
+		return root, reused, nil
+	}
 	f, err := openRegularIn(rt, base, fi)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
@@ -662,11 +695,13 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	// Unlike walkRoot's per-file skip below, a scan failure on a single-file
 	// root IS a hard error: there is no "rest of the index" to fall back to
 	// serving without it.
-	meta, err := scanDocFrom(kind, f, base)
+	meta, err := scanDocFn(kind, f, base)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
-	return root, newDoc(label, base, real, fi.ModTime(), meta), nil
+	doc := newDoc(label, base, real, fi.ModTime(), meta)
+	docCache[key] = cachedDoc{doc: doc, size: fi.Size(), rootKind: kind}
+	return root, doc, nil
 }
 
 // errRootMoved reports that a root's canonical path no longer named the
@@ -798,7 +833,7 @@ func (e *WalkDeadlineError) Unwrap() error { return e.Err }
 // and nothing else, so an attachment is never a symlink, never under a
 // symlinked or excluded directory, and never outside the root. Nothing is
 // opened or read for them (forgectl#709).
-func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []string, []SkippedPath, error) {
+func walkRoot(ctx context.Context, root Root, rt *os.Root, prev, docCache map[docKey]cachedDoc) ([]Doc, []string, []SkippedPath, error) {
 	var docs []Doc
 	var attachments []string
 	var skipped []SkippedPath
@@ -869,6 +904,23 @@ func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []string, []S
 			return nil // replaced by a non-regular file since the readdir
 		}
 
+		// path is canonical as it stands: the root is, and every directory
+		// below it was entered by a real, verified name, never a symlink.
+		// So Doc.AbsPath is byte-identical to what resolveIn computes for
+		// the same file at request time, which Resolve's pathIndex
+		// membership check depends on.
+		key := docKey{rootLabel: root.Label, absPath: path}
+		if cached, ok := prev[key]; ok &&
+			cached.rootKind == root.Kind &&
+			cached.size == info.Size() &&
+			cached.doc.ModTime.Equal(info.ModTime()) &&
+			cached.doc.RelPath == relSlash {
+			reused := cached.doc.clone()
+			docs = append(docs, reused)
+			docCache[key] = cachedDoc{doc: reused, size: info.Size(), rootKind: root.Kind}
+			return nil
+		}
+
 		// An open or scan failure here (the file became unreadable, or was
 		// swapped, between the Lstat and this read) keeps the doc in the
 		// index with its filename as the title and no link metadata — the
@@ -876,19 +928,20 @@ func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []string, []S
 		// transient read error unlist a file that Index.Open's
 		// request-time read may well succeed on a moment later.
 		meta := docMeta{Title: titleFromFilename(relSlash)}
+		scannedOK := false
 		if f, err := openRegularIn(dir, d.Name(), info); err == nil {
-			if scanned, err := scanDocFrom(root.Kind, f, relSlash); err == nil {
+			if scanned, err := scanDocFn(root.Kind, f, relSlash); err == nil {
 				meta = scanned
+				scannedOK = true
 			}
 			_ = f.Close()
 		}
 
-		// path is canonical as it stands: the root is, and every directory
-		// below it was entered by a real, verified name, never a symlink.
-		// So Doc.AbsPath is byte-identical to what resolveIn computes for
-		// the same file at request time, which Resolve's pathIndex
-		// membership check depends on.
-		docs = append(docs, newDoc(root.Label, relSlash, path, info.ModTime(), meta))
+		doc := newDoc(root.Label, relSlash, path, info.ModTime(), meta)
+		docs = append(docs, doc)
+		if scannedOK {
+			docCache[key] = cachedDoc{doc: doc, size: info.Size(), rootKind: root.Kind}
+		}
 		return nil
 	})
 	if err != nil {
@@ -901,19 +954,19 @@ func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []string, []S
 // Index, leaving the receiver untouched. It is how live reload picks up files
 // that were created, deleted, renamed, or retitled since the last build.
 //
-// Rebuilding through NewIndex — rather than patching the existing index in
-// place — is deliberate: NewIndex is the only code path that populates
-// pathIndex, and pathIndex membership is what Resolve uses to decide whether a
-// path is servable at all. An incremental "just add the changed file" update
-// would be a second, parallel implementation of the exclusion rules, which is
-// exactly the drift that produced the excluded-directory leak this reader
-// already had to fix once. One builder, one gate.
+// Rebuilding through the same builder — rather than patching the existing
+// index in place — is deliberate: newIndexContext is the only code path that
+// populates pathIndex, and pathIndex membership is what Resolve uses to decide
+// whether a path is servable at all. Unchanged files (same RootLabel, AbsPath,
+// ModTime, Size, and Root.Kind) reuse their previously scanned Doc via clone
+// without re-opening or re-parsing the markdown, while the walk, exclusions,
+// pathIndex, rootIndexes, and backlinks are all rebuilt cleanly.
 //
 // A rebuild can legitimately fail (a root was renamed or unmounted while the
 // server was running). Callers SHOULD keep serving the previous index in that
 // case rather than tearing the server down.
 func (idx *Index) Rebuild() (*Index, error) {
-	return NewIndexWithOptions(idx.paths, idx.opts)
+	return newIndexContext(context.Background(), idx.paths, idx.opts, idx.docCache)
 }
 
 // buildBacklinks maps every doc's docKey to the indices of every OTHER doc
@@ -1013,10 +1066,10 @@ func (idx *Index) List() []Doc {
 // unsynchronized on the promise that an Index never changes.
 func (d Doc) clone() Doc {
 	out := d
-	out.Aliases = append([]string(nil), d.Aliases...)
-	out.Headings = append([]Heading(nil), d.Headings...)
-	out.BlockIDs = append([]string(nil), d.BlockIDs...)
-	out.Links = append([]LinkRef(nil), d.Links...)
+	out.Aliases = slices.Clone(d.Aliases)
+	out.Headings = slices.Clone(d.Headings)
+	out.BlockIDs = slices.Clone(d.BlockIDs)
+	out.Links = slices.Clone(d.Links)
 	return out
 }
 

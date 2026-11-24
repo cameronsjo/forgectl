@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -169,4 +171,108 @@ func TestGitCLIRepo(t *testing.T) {
 	if b, err := g.Branch(context.Background(), "/wt/a"); err != nil || b != "feat/x" {
 		t.Errorf("Branch = %q, %v", b, err)
 	}
+}
+
+func TestGitCLIBranchDirect(t *testing.T) {
+	noRun := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		t.Errorf("unexpected git subprocess call: %s %v", name, args)
+		return "", errors.New("should not run")
+	}}
+	g := GitCLI{Run: noRun}
+
+	t.Run("normal .git dir", func(t *testing.T) {
+		wt := t.TempDir()
+		if err := os.Mkdir(filepath.Join(wt, ".git"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git", "HEAD"), []byte("ref: refs/heads/feat/direct-head\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := g.Branch(context.Background(), wt)
+		if err != nil || got != "feat/direct-head" {
+			t.Fatalf("Branch = %q, %v; want %q, nil", got, err, "feat/direct-head")
+		}
+	})
+
+	t.Run("linked worktree relative gitdir", func(t *testing.T) {
+		base := t.TempDir()
+		gitDir := filepath.Join(base, "repo", ".git", "worktrees", "wt1")
+		wt := filepath.Join(base, "wt1")
+		if err := os.MkdirAll(gitDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(wt, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/perf/rel-wt\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: ../repo/.git/worktrees/wt1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := g.Branch(context.Background(), wt)
+		if err != nil || got != "perf/rel-wt" {
+			t.Fatalf("Branch = %q, %v; want %q, nil", got, err, "perf/rel-wt")
+		}
+	})
+
+	t.Run("linked worktree absolute gitdir", func(t *testing.T) {
+		base := t.TempDir()
+		gitDir := filepath.Join(base, "common", "worktrees", "wt2")
+		wt := filepath.Join(base, "wt2")
+		if err := os.MkdirAll(gitDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(wt, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := g.Branch(context.Background(), wt)
+		if err != nil || got != "main" {
+			t.Fatalf("Branch = %q, %v; want %q, nil", got, err, "main")
+		}
+	})
+
+	t.Run("detached HEAD SHA-1 and SHA-256", func(t *testing.T) {
+		for _, commit := range []string{
+			sha,
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		} {
+			wt := t.TempDir()
+			if err := os.Mkdir(filepath.Join(wt, ".git"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(wt, ".git", "HEAD"), []byte(commit+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := g.Branch(context.Background(), wt)
+			if err != nil || got != "" {
+				t.Fatalf("detached(%d) Branch = %q, %v; want \"\", nil", len(commit), got, err)
+			}
+		}
+	})
+
+	t.Run("fallback on unexpected HEAD format", func(t *testing.T) {
+		wt := t.TempDir()
+		if err := os.Mkdir(filepath.Join(wt, ".git"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git", "HEAD"), []byte("ref: refs/tags/v1.0.0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		called := 0
+		fallback := GitCLI{Run: &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+			called++
+			return "fallback-branch\n", nil
+		}}}
+		got, err := fallback.Branch(context.Background(), wt)
+		if err != nil || got != "fallback-branch" || called != 1 {
+			t.Fatalf("fallback Branch = %q, %v (calls=%d); want fallback-branch, nil (calls=1)", got, err, called)
+		}
+	})
 }
