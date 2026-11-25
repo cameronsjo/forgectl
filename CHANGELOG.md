@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.71.1](https://github.com/cameronsjo/forgectl/compare/v0.71.0...v0.71.1) (2026-11-24)
+
+
+### Performance Improvements
+
+* **desk,docs,workerwatch:** cache immutable scan items, incremental index rebuild, and direct git HEAD read ([#1507](https://github.com/cameronsjo/forgectl/issues/1507)) ([a6e42bb](https://github.com/cameronsjo/forgectl/commit/a6e42bbf4dff9f0d65ef43c89f56645240ef330a))
+
 ## [0.71.0](https://github.com/cameronsjo/forgectl/compare/v0.70.0...v0.71.0) (2026-11-24)
 
 
