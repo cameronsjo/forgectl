@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ type watchOptions struct {
 	Workers  string
 	Cos      bool
 	JSON     bool
+	Stream   bool
 	Interval time.Duration
 	GHTTL    time.Duration
 }
@@ -132,7 +134,8 @@ every --interval. GitHub is read once per worker per --gh-ttl, at most two
 reads per refresh.
 
 Off a terminal it prints one plain snapshot; --json prints one snapshot
-as JSON.
+as JSON; --stream prints one typed NDJSON event per worker transition
+(suitable for Claude Code's Monitor tool, with no raw pane text).
 
 Keys: up/down (or j/k) select, r refresh now, q quit.
 
@@ -144,15 +147,17 @@ STATUS and REVIEW are claims: the agent reports its own status, and any
 session on your gh login can post a marker. Press ? in the view for the
 full key and column list. The view needs a terminal of at least 30x7.
 
-Exit 0: the view closed, or the snapshot printed. Exit 1: the snapshot
-printed, but hc could not be read at all (not on PATH, or every read
-failed; hc_unavailable says which). Exit 2: a usage error, the workers
-file could not be read, or HC_SESSION is not a session forgectl accepts
-(1-64 letters, digits, '-', '_' or '.'); nothing is printed then.
+Exit 0: the view closed, the stream ended on cancel, or the snapshot
+printed. Exit 1: the snapshot printed, but hc could not be read at all
+(not on PATH, or every read failed; hc_unavailable says which). Exit 2:
+a usage error, the workers file could not be read, or HC_SESSION is not
+a session forgectl accepts (1-64 letters, digits, '-', '_' or '.');
+nothing is printed then.
 
   forgectl surface watch --workers workers.txt
   forgectl surface watch --cos
-  forgectl surface watch --cos --json`,
+  forgectl surface watch --cos --json
+  forgectl surface watch --cos --stream`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSurfaceWatch(cmd, th, rt, opts)
@@ -161,6 +166,7 @@ file could not be read, or HC_SESSION is not a session forgectl accepts
 	cmd.Flags().StringVar(&opts.Workers, "workers", "", "chief-of-staff workers file (name|worktree|brief dir per line)")
 	cmd.Flags().BoolVar(&opts.Cos, "cos", false, "also watch every live hc terminal named cos-*")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print one snapshot as JSON: {"taken","workers":[...],"notes"}`)
+	cmd.Flags().BoolVar(&opts.Stream, "stream", false, "stream typed NDJSON transition events (driven by hc events, falling back to --interval)")
 	cmd.Flags().DurationVar(&opts.Interval, "interval", defaultWatchInterval, fmt.Sprintf("poll interval when hc events are unavailable (at least %s)", minWatchInterval))
 	cmd.Flags().DurationVar(&opts.GHTTL, "gh-ttl", workerwatch.DefaultGHTTL, fmt.Sprintf("how long a worker's GitHub read is reused (at least %s)", workerwatch.MinGHTTL))
 	return cmd
@@ -169,6 +175,9 @@ file could not be read, or HC_SESSION is not a session forgectl accepts
 func runSurfaceWatch(cmd *cobra.Command, th theme.Theme, rt watchRuntime, opts watchOptions) error {
 	if opts.Workers == "" && !opts.Cos {
 		return WithExitCode(errWatchNoSource, exitUsage)
+	}
+	if opts.JSON && opts.Stream {
+		return WithExitCode(errors.New("--json and --stream cannot be used together"), exitUsage)
 	}
 	if opts.Interval < minWatchInterval {
 		return WithExitCode(fmt.Errorf("--interval must be at least %s", minWatchInterval), exitUsage)
@@ -190,6 +199,10 @@ func runSurfaceWatch(cmd *cobra.Command, th theme.Theme, rt watchRuntime, opts w
 		return WithExitCode(err, exitUsage)
 	}
 	c := rt.newCollector(opts, entries, notes, hc)
+
+	if opts.Stream {
+		return streamWatchEvents(cmd.Context(), cmd.OutOrStdout(), c, hc, opts.Interval)
+	}
 
 	interactive := !opts.JSON && rt.stdoutIsTerminal(cmd.OutOrStdout()) && rt.stdinIsTerminal(cmd.InOrStdin()) && !termIsDumb()
 	if !interactive {
@@ -297,4 +310,59 @@ func orDash(s string) string {
 		return "-"
 	}
 	return termsafe.SafeLineMax(s, 64)
+}
+
+// streamWatchEvents runs the reactive NDJSON event loop for `--stream`.
+// It collects one baseline snapshot (emitting watch.hc_unavailable right away
+// if hc is unreachable), then waits on hc.Events plus a fallback poll ticker,
+// writing one compact JSON line per transition until ctx is cancelled.
+func streamWatchEvents(ctx context.Context, out io.Writer, c *workerwatch.Collector, hc workerwatch.CLI, interval time.Duration) error {
+	streamCtx, cancel := context.WithCancel(ctx)
+	ev := hc.Events(streamCtx)
+	defer func() {
+		cancel()
+		<-ev.Done
+	}()
+
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+
+	prev := c.Collect(streamCtx, false)
+	if prev.HCUnavailable != "" {
+		if err := enc.Encode(workerwatch.StreamEvent{
+			Time:   prev.Taken,
+			Type:   workerwatch.EventHCUnavailable,
+			Reason: prev.HCUnavailable,
+		}); err != nil {
+			return err
+		}
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	wake := ev.Wake
+	for {
+		select {
+		case <-streamCtx.Done():
+			return nil
+		case _, ok := <-wake:
+			if !ok {
+				// Event stream closed; keep running on the fallback poll ticker.
+				wake = nil
+				continue
+			}
+		case <-ticker.C:
+		}
+		if streamCtx.Err() != nil {
+			return nil
+		}
+		cur := c.Collect(streamCtx, false)
+		for _, event := range workerwatch.Diff(prev, cur) {
+			if err := enc.Encode(event); err != nil {
+				return err
+			}
+		}
+		prev = cur
+	}
 }
