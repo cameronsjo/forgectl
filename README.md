@@ -343,6 +343,8 @@ forgectl desk show 17-fix --events       # one run as a flow, with its event tim
 forgectl desk status --json              # the queue as JSON
 forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
 forgectl desk layout --below             # herdr: the desk in a full-width row under every pane in the tab
+# FORGECTL_DESK_ASKS_HOST=<ssh host> sends ask, asks, respond and watch --responses to that host over ssh
+#   (FORGECTL_DESK_ASKS_REMOTE_BIN names the binary there; --dir, DESK_DIR or CLAUDE_DESK_DIR keep asks local)
 
 # attention — one queue of what waits on you: session asks, desk items, the sweep (Unix only)
 forgectl attention list --json           # rows by delay cost; skipped counts malformed records
