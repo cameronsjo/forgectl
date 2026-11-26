@@ -248,28 +248,19 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
 //
-// The one deny rule keeps a worker from closing a board task with
-// `forgectl tasks done`: a board write cannot be undone, the operator or the
-// coordinator closes the task once the work lands, and a deny holds in every
-// permission mode, even over the operator's own allow rules (ADR-0010,
-// 2026-10-20 amendment). It backs up the FORGECTL_DRAIN_WORKER refusal, which
-// a worker can unset.
-//
 // editorMode is pinned to "normal" so a worker's prompt is never in vim mode,
 // where one Escape would switch it to NORMAL and the next typed text would be
 // read as vim commands. `surface brief --surface hc` sends one Escape before
 // it pastes, to close any dialog that is open; that is safe only at a
 // non-vim prompt.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
-	`"deny":["Bash(forgectl tasks done:*)"]}}`
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal"}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
 // every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
 // allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"editorMode":"normal","permissions":{` +
-	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
-	`"deny":["Bash(forgectl tasks done:*)"]}}`
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
 
 // withWorkerSettings inserts the worker settings right after the posture's
 // leading --permission-mode pair:

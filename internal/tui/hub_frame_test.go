@@ -29,10 +29,10 @@ func frameHub() []HubEntry {
 		{Name: "sessions", Short: "Sync local session ledgers into the operational concordance and query it", Key: 5, Leaves: []HubLeaf{{Name: "sync", Short: "Sync ledgers", Use: "sync"}}},
 		{Name: "recent", Heading: true},
 		{Name: "desk", Short: "Operator queue: scripts Claude stages for you to approve and run", Argv: []string{"desk"}},
-		{Name: "tasks ready", Short: "List tasks that are ready to start", Argv: []string{"tasks", "ready"}},
+		{Name: "attention", Short: "The per-machine attention queue", Argv: []string{"attention"}},
 		{Name: "resume", Short: "Pick a recent Claude Code session in any repo and resume it there", Argv: []string{"resume"}},
 		{Name: "areas · 8 commands", Heading: true},
-		{Name: "agents", Short: "launch · resume · desk · tasks · surface · workflow · recipe · preflight · quarantine", Key: 6, Members: []HubEntry{
+		{Name: "agents", Short: "launch · resume · desk · surface · workflow · recipe · preflight · quarantine", Key: 6, Members: []HubEntry{
 			{Name: "launch", Short: "Per-project launcher for Claude Code, Codex CLI, or Pi"},
 			{Name: "quarantine", Short: "Reversibly hide AI-instruction files from a workspace"},
 		}},
@@ -292,7 +292,7 @@ func TestHubShortTerminalKeepsTheAreas(t *testing.T) {
 	for _, h := range []int{16, 18, 20} {
 		m := frameModel(80, h)
 		got := frameText(m)
-		if strings.Contains(got, "recent") || strings.Contains(got, "tasks ready") {
+		if strings.Contains(got, "recent") || strings.Contains(got, "attention") {
 			t.Errorf("at 80x%d the recent rows still take room:\n%s", h, got)
 		}
 		for _, want := range []string{"5 sessions", "6 agents ›", "9 setup ›"} {
@@ -301,7 +301,7 @@ func TestHubShortTerminalKeepsTheAreas(t *testing.T) {
 			}
 		}
 	}
-	if got := frameText(frameModel(80, 24)); !strings.Contains(got, "tasks ready") {
+	if got := frameText(frameModel(80, 24)); !strings.Contains(got, "attention") {
 		t.Errorf("at 80x24 the recent rows should fit:\n%s", got)
 	}
 }
@@ -497,7 +497,7 @@ func TestHubFilterFramesFit(t *testing.T) {
 func TestHubPickerCancelKeepsTheRecentRow(t *testing.T) {
 	hub := frameHub()
 	for i := range hub {
-		if hub[i].Name == "tasks ready" {
+		if hub[i].Name == "attention" {
 			hub[i] = HubEntry{Name: "pr reviewed", Short: "mark a PR reviewed", Use: "reviewed <ref>", Argv: []string{"pr", "reviewed"}, NeedsArgs: true}
 		}
 	}

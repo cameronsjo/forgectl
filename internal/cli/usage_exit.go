@@ -56,7 +56,6 @@ func asUsageError(cmd *cobra.Command, err error) error {
 // except where 2 already means something else in that verb, or where the verb
 // must never exit 2.
 //
-//   - tasks: 2 is "instance unreachable", an external probe depends on it.
 //   - env check: 2 is "file absent", part of its documented contract.
 //   - resume snapshot: wired as a Claude Code Stop hook, and a Stop hook that
 //     exits 2 is a blocking error.
@@ -78,7 +77,7 @@ func usageKeepsOne(cmd *cobra.Command) bool {
 	switch {
 	case len(path) == 0:
 		return false
-	case path[0] == "tasks", path[0] == "k8s":
+	case path[0] == "k8s":
 		return true
 	case len(path) >= 2 && path[0] == "env" && path[1] == "check":
 		return true
@@ -112,11 +111,11 @@ func withJSONUsageCode(err error) error {
 // preFangUsageExit is the exit code for a setup failure raised before any
 // command tree exists (an unresolvable $HOME, a relative $XDG_CONFIG_HOME). It
 // reads the exceptions from argv by literal verb name, as invokesHookVerb
-// does, so `tasks` and `env check` keep 1 where their 2 means something else.
+// does, so `k8s` and `env check` keep 1 where their 2 means something else.
 func preFangUsageExit(args []string) int {
 	first, idx := firstNonFlag(args)
 	switch first {
-	case "tasks", "k8s":
+	case "k8s":
 		return classExit(classFailed)
 	case "env":
 		if idx >= 0 {

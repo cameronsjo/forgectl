@@ -23,7 +23,7 @@ import (
 // an interactive child (editor, docker run -it) through exec.CommandContext
 // instead of letting it take the terminal's Ctrl-C itself. And a verb that
 // never reads ctx would swallow a second Ctrl-C. The verbs that need a
-// graceful stop install their own scoped handler: docs serve, tasks mcp,
+// graceful stop install their own scoped handler: docs serve,
 // sops's guard, and the surface trampoline. workflow run and the bless and
 // trust ceremonies install one too (internal/cli/progstatus_unix.go): it
 // writes an OSC 7501 error report, then restores the default disposition and
