@@ -55,7 +55,7 @@ func TestBuiltinRefusalsCoverTheBinary(t *testing.T) {
 	// Self-guard: the closure must hold the binary's main package and the
 	// gates, or the derivation is broken.
 	for _, want := range []string{"", "/internal/cli", "/internal/surface/merge", "/internal/githubauth", "/internal/bless", "/internal/workflow",
-		"/internal/digest", "/internal/skill", "/internal/selfupdate", "/internal/tasks"} {
+		"/internal/digest", "/internal/skill", "/internal/selfupdate"} {
 		if !seen[modulePath+want] {
 			t.Fatalf("the closure lacks %s%s; the derivation is broken", modulePath, want)
 		}

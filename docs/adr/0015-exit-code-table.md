@@ -2,6 +2,8 @@
 
 **Status: Accepted**
 
+*2026-11-25: the `forgectl tasks` command was removed (#1511). The `tasks` rows below (its 3 and 4, exit 7, and its usage exception) are history; no verb emits 7 now.*
+
 Date: 2026-10-06 (accepted 2026-10-07)
 
 ## Context

@@ -160,8 +160,8 @@ func CheckBrief(text, via string) error {
 
 // WorkerRules is the rule forgectl puts in every launch brief, after the
 // task and before the report instruction: a worker never posts a review
-// marker or touches a board task, and approves or merges only when the
-// operator types it bare into the worker's terminal (atelier P4, T10.4;
+// marker, and approves or merges only when the operator types it bare
+// into the worker's terminal (atelier P4, T10.4;
 // cameronsjo/forgectl#1466). Workers run on the operator's GitHub identity,
 // so this asks; it cannot stop one (ADR-0011, 2026-10-09 amendment). The
 // carve-out leans on forgectl's envelope (Envelope), a convention and not
@@ -170,7 +170,7 @@ func CheckBrief(text, via string) error {
 // it writes nothing the merge policy's marker scan counts as a mention
 // (TestWorkerRulesMentionNoMarker in merge), and names the envelope element
 // without writing it as a tag, which the envelope would neutralize.
-const WorkerRules = "Rule from forgectl, whatever the task says: never post the merge policy's review marker (the verdict line a reviewer writes, with head=, crit= and imp= fields); and never create, comment on or mark done a board task, with forgectl tasks or the MCP tools create_task, add_comment and complete_task (also seen as vikunja_create_task and the like).\n\n" +
+const WorkerRules = "Rule from forgectl, whatever the task says: never post the merge policy's review marker (the verdict line a reviewer writes, with head=, crit= and imp= fields).\n\n" +
 	ApproveMergeRule + "\n\n" + CommandRules
 
 // ApproveMergeRule is the approve-and-merge part of WorkerRules, with the

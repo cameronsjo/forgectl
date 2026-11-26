@@ -66,8 +66,8 @@ func TestRootSkill_InstallWritesTheTree(t *testing.T) {
 // installing the tree.
 func TestRootSkill_PrintsOneReference(t *testing.T) {
 	names := skill.References()
-	if !slices.Contains(names, "desk.md") || !slices.Contains(names, "board-tasks.md") {
-		t.Fatalf("References() = %v, want desk.md and board-tasks.md among them", names)
+	if !slices.Contains(names, "desk.md") {
+		t.Fatalf("References() = %v, want desk.md among them", names)
 	}
 	for _, name := range names {
 		want, err := fs.ReadFile(skill.FS(), "references/"+name)
@@ -91,7 +91,7 @@ func TestRootSkill_PrintsOneReference(t *testing.T) {
 // A name without .md that is also a verb (`desk`) resolves to that verb
 // instead, which refuses --skill as an unknown flag, also exit 2.
 func TestRootSkill_UnknownReferenceListsTheNames(t *testing.T) {
-	for _, arg := range []string{"nope.md", "SKILL.md", "references/../SKILL.md", "board-tasks"} {
+	for _, arg := range []string{"nope.md", "SKILL.md", "references/../SKILL.md"} {
 		out, err := runSkillRoot(t, "--skill", arg)
 		if err == nil {
 			t.Fatalf("--skill %s: want an error, printed %q", arg, out)
@@ -117,7 +117,7 @@ func TestRootSkill_UsageErrorsExitTwo(t *testing.T) {
 		"missing dir":           {"--skill", "--install", missing},
 		"empty dir":             {"--skill", "--install", ""},
 		"install without skill": {"--install", t.TempDir()},
-		"two references":        {"--skill", "desk.md", "board-tasks.md"},
+		"two references":        {"--skill", "desk.md", "desk.md"},
 		"reference and install": {"--skill", "desk.md", "--install", t.TempDir()},
 		"reference alone":       {"desk.md"},
 		"verb-named reference":  {"--skill", "desk"},
@@ -301,7 +301,7 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 	root := skillTestRoot()
 	dead := []string{
 		"forgectl nonesuch", "forgectl env nonesuch", "desk gone", "surface await <name>",
-		"bench open|nope", "forgectl tasks done 5 --nope", "surface launch --surface x --nonesuch",
+		"bench open|nope", "forgectl env set KEY --nope", "surface launch --surface x --nonesuch",
 		"forgectl desk lens nonesuch",
 	}
 	for _, span := range dead {
@@ -311,7 +311,7 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 	}
 	live := []string{
 		"forgectl env", "forgectl env set KEY", "desk add f --what x --why y", "net positional",
-		`quarantine hide\|status\|restore`, "forgectl launch -- --model x", "forgectl tasks done 5 --evidence x --closer y",
+		`quarantine hide\|status\|restore`, "forgectl launch -- --model x", "forgectl env set KEY --clipboard",
 		"set KEY", "forgectl desk lens check", "forgectl --skill",
 	}
 	for _, span := range live {
