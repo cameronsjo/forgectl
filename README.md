@@ -54,7 +54,7 @@ deep-dive get a link here.
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
-| `attention` | Per-machine attention queue: what each Claude session, the desk and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
+| `attention` | Per-machine attention queue: what the desk, its asks and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | [workflow](docs/commands/workflow.md) |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -346,10 +346,8 @@ forgectl desk layout --below             # herdr: the desk in a full-width row u
 # FORGECTL_DESK_ASKS_HOST=<ssh host> sends ask, asks, respond and watch --responses to that host over ssh
 #   (FORGECTL_DESK_ASKS_REMOTE_BIN names the binary there; --dir, DESK_DIR or CLAUDE_DESK_DIR keep asks local)
 
-# attention — one queue of what waits on you: session asks, desk items, the sweep (Unix only)
-forgectl attention list --json           # rows by delay cost; skipped counts malformed records
-forgectl attention put --session ID --turn ID < reply.txt   # record a reply's What's next items
-forgectl attention rm --session ID       # drop a session's record when it ends
+# attention — one queue of what waits on you: desk items, desk asks, the sweep (Unix only)
+forgectl attention list --json           # rows by delay cost; skipped counts malformed entries
 
 # sweep — the chief-of-staff ledger: workers, PRs, what waits on you; feeds `attention list` (Unix only)
 forgectl sweep --json                    # needs [sweep] owner, since, briefs, reviewers (or flags); exit 2 names a missing key

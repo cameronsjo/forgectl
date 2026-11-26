@@ -109,7 +109,6 @@ const logKeepDays = 7
 //	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
 //	workspace = "forge"
 //	[attention]          # forgectl attention — the per-machine attention queue
-//	ttl_hours = 24                   # keep a record no visible herdr pane vouches for this long (1-720)
 //	worker_prefix = "cos-"           # sessions whose name starts with this are workers
 //	[sweep]              # forgectl sweep — the chief-of-staff ledger; nothing is defaulted
 //	owner = "your-login"             # GitHub account whose repos the sweep covers
