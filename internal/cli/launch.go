@@ -294,10 +294,15 @@ func consumeLaunchFlags(args []string) ([]string, launchOwnFlags, error) {
 			f.allowGuardedPluginDisable = true
 			i++
 		case tok == roleFlag:
-			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+			next := i + 1
+			if next >= len(args) {
 				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
 			}
-			f.role = args[i+1]
+			val := args[next]
+			if strings.TrimSpace(val) == "" {
+				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
+			}
+			f.role = val
 			i += 2
 		case strings.HasPrefix(tok, roleFlag+"="):
 			val := strings.TrimPrefix(tok, roleFlag+"=")

@@ -63,10 +63,10 @@ func TestLaunchRole_DryRunResumeAndWhich(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeClaude := filepath.Join(tmp, "claude")
-	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test fixture executable
 		t.Fatal(err)
 	}
-	if err := os.Chmod(fakeClaude, 0o700); err != nil {
+	if err := os.Chmod(fakeClaude, 0o700); err != nil { //nolint:gosec // test fixture executable
 		t.Fatal(err)
 	}
 	configTOML := "[launch.defaults]\nbinary_path = " + jsonString(t, fakeClaude) + "\n\n" +

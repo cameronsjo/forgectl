@@ -42,9 +42,8 @@ func setupClaudePluginEnv(t *testing.T, fixtures []pluginFixture) string {
 
 	for _, fx := range fixtures {
 		key := fx.name + "@" + fx.marketplace
-		mpLoc, ok := mpLocs[fx.marketplace]
-		if !ok {
-			mpLoc = filepath.Join(cfgDir, "marketplaces", fx.marketplace)
+		if _, ok := mpLocs[fx.marketplace]; !ok {
+			mpLoc := filepath.Join(cfgDir, "marketplaces", fx.marketplace)
 			mpLocs[fx.marketplace] = mpLoc
 			if err := os.MkdirAll(filepath.Join(mpLoc, ".claude-plugin"), 0o700); err != nil {
 				t.Fatalf("mkdir mp: %v", err)
