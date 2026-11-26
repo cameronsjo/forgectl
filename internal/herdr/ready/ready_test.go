@@ -81,9 +81,9 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		// mods drawing above the box: ready, nothing typed.
 		{"claude-after-first-auto-turn", "claude", StateReady, "", ""},
 		// A named session draws its name into the box's top rule
-		// ("──── cos-pr-misc ─", forgectl#1524). The screen is
-		// claude-after-first-auto-turn with the label spliced into that rule,
-		// in the shape read from a live worker pane on 2026-11-26.
+		// ("──── cos-pr-misc ─", forgectl#1524). Captured from a named
+		// worker at its empty prompt (Claude Code, 2026-11-26), transcript
+		// trimmed and host name replaced; the tip above the box is transcript.
 		{"claude-ready-named-session", "claude", StateReady, "", ""},
 		{"codex-typed-unsent", "codex", StateReady, "", "Run exactly this shell command once and nothing else: mkdir -p /tmp/fxcap/codex-made"},
 		// The turn failed on a model error and Codex is back at its composer.
@@ -193,16 +193,23 @@ func TestEvaluate_OverlayWithTheBoxVisibleIsBlocked(t *testing.T) {
 	}
 }
 
-// TestEvaluate_LabeledRuleOverDialogIsBlocked: a session-name label on a rule
-// line does not make a dialog drawn in place of the box read as the prompt.
+// TestEvaluate_LabeledRuleOverDialogIsBlocked: the label must be closed by a
+// rule run. A dialog row drawn as a rule with a trailing title (no closing
+// rule) directly above a `❯` line is not the input box, so the dialog text
+// above it still blocks. A label group that accepted any trailing text would
+// read this screen as the prompt and the dialog as transcript: ready.
 func TestEvaluate_LabeledRuleOverDialogIsBlocked(t *testing.T) {
 	tab := defaultTable(t)
-	s := fixture(t, "claude-permission-prompt")
-	i := strings.Index(s.Text, "\n─")
-	if i < 0 {
-		t.Fatal("fixture has no rule line")
+	s := fixture(t, "claude-ready-named-session")
+	box := claudeBoxStart(t, s.Text)
+	rule := strings.Index(s.Text[box+1:], " cos-pr-misc ─")
+	if rule < 0 {
+		t.Fatal("fixture has no labeled rule above the input box")
 	}
-	s.Text = s.Text[:i] + "\n──────────────────────── cos-pr-misc ─" + s.Text[i:]
+	s.Text = s.Text[:box] + "\n Do you want to make this edit to ready.go?\n" + s.Text[box+1:box+1+rule] + " ready.go" + s.Text[box+1+rule+len(" cos-pr-misc ─"):]
+	if strings.Contains(s.Text, "cos-pr-misc ─\n❯") || !strings.Contains(s.Text, "─ ready.go\n❯") {
+		t.Fatal("splice did not replace the label with an unclosed title")
+	}
 	v := tab.Evaluate("claude", s)
 	if v.State != StateBlocked || v.Blocking != "permission prompt" {
 		t.Fatalf("verdict %+v, want blocked by the permission prompt", v)
