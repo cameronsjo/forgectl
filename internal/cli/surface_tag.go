@@ -34,7 +34,8 @@ func checkTokenKey(k string) error {
 	}
 	for i := 0; i < len(k); i++ {
 		c := k[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+		if !ok {
 			return fmt.Errorf("%w: token key %q has invalid character", errBadToken, termsafe.SafeLineMax(k, 64))
 		}
 	}
@@ -54,8 +55,8 @@ func checkTokenValue(k, v string) error {
 	return nil
 }
 
-func checkTagTokens(set map[string]string, clear []string) error {
-	seen := make(map[string]bool, len(set)+len(clear))
+func checkTagTokens(set map[string]string, clearKeys []string) error {
+	seen := make(map[string]bool, len(set)+len(clearKeys))
 	for k, v := range set {
 		if err := checkTokenKey(k); err != nil {
 			return err
@@ -65,7 +66,7 @@ func checkTagTokens(set map[string]string, clear []string) error {
 		}
 		seen[k] = true
 	}
-	for _, k := range clear {
+	for _, k := range clearKeys {
 		if err := checkTokenKey(k); err != nil {
 			return err
 		}
