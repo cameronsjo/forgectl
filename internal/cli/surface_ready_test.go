@@ -10,7 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 )
 
 // scriptedLoop builds a readyLoop over a fixed sequence of reads and a fake
@@ -91,7 +91,7 @@ func TestWaitReady(t *testing.T) {
 	})
 
 	t.Run("a gone workspace ends the wait", func(t *testing.T) {
-		l, calls := scriptedLoop([]func() (ready.Screen, error){failRead(herdradapter.ErrWorkerGone)}, byText, time.Minute)
+		l, calls := scriptedLoop([]func() (ready.Screen, error){failRead(hcadapter.ErrWorkerGone)}, byText, time.Minute)
 		r := waitReady(ctx, l)
 		if r.State != readyStateGone || *calls != 1 {
 			t.Fatalf("result %+v after %d reads", r, *calls)
@@ -99,7 +99,7 @@ func TestWaitReady(t *testing.T) {
 	})
 
 	t.Run("an unreadable pane is retried, never read as gone", func(t *testing.T) {
-		unreadable := failRead(errors.Join(herdradapter.ErrScreenUnreadable, errors.New("protocol mismatch")))
+		unreadable := failRead(errors.Join(errors.New("screen unreadable"), errors.New("protocol mismatch")))
 		l, calls := scriptedLoop([]func() (ready.Screen, error){unreadable, unreadable, screen("ready")}, byText, time.Minute)
 		if r := waitReady(ctx, l); r.State != ready.StateReady || *calls != 3 {
 			t.Fatalf("result %+v after %d reads, want ready after 3", r, *calls)
@@ -107,7 +107,7 @@ func TestWaitReady(t *testing.T) {
 	})
 
 	t.Run("still unreadable at the timeout reports unreadable", func(t *testing.T) {
-		unreadable := failRead(errors.Join(herdradapter.ErrScreenUnreadable, errors.New("protocol mismatch")))
+		unreadable := failRead(errors.Join(errors.New("screen unreadable"), errors.New("protocol mismatch")))
 		l, _ := scriptedLoop([]func() (ready.Screen, error){unreadable}, byText, 3*time.Second)
 		if r := waitReady(ctx, l); r.State != readyStateUnreadable {
 			t.Fatalf("result %+v, want unreadable", r)

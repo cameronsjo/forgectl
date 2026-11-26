@@ -140,16 +140,75 @@ func TestExternalCommand_BareDashStaysMenuShorthand(t *testing.T) {
 
 func TestExternalCommand_KnownParentUnknownSubverbNeverProbes(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
-	args := []string{"tmux", "frobnicate"}
+	args := []string{"projects", "frobnicate"}
 	assertExternalCommandDoesNotProbe(t, root, args)
-	// tmux's Args: cobra.NoArgs (forgectl#479) is what makes this
+	// projects's Args: cobra.NoArgs (forgectl#479) is what makes this
 	// routeDispatch safe: the stray subverb hits cobra's own unknown-command
-	// error instead of falling through to tmux's RunE.
+	// error instead of falling through to projects's RunE.
 	if got := decideRoute(root, args, true); got != routeDispatch {
 		t.Errorf("interactive route = %v, want routeDispatch", got)
 	}
 	if got := decideRoute(root, args, false); got != routeDispatch {
 		t.Errorf("headless route = %v, want routeDispatch", got)
+	}
+}
+
+func TestExternalCommand_TmuxAndHerdrDispatchViaRungB(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
+	cases := []struct {
+		name     string
+		args     []string
+		wantBin  string
+		wantArgv []string
+	}{
+		{
+			name:     "tmux plugin dispatch",
+			args:     []string{"tmux", "ls", "--json"},
+			wantBin:  "forgectl-tmux",
+			wantArgv: []string{"/usr/local/bin/forgectl-tmux", "ls", "--json"},
+		},
+		{
+			name:     "herdr plugin dispatch",
+			args:     []string{"herdr", "organize", "--json"},
+			wantBin:  "forgectl-herdr",
+			wantArgv: []string{"/usr/local/bin/forgectl-herdr", "organize", "--json"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lookedUp string
+			var execPath string
+			var execArgv []string
+			rt := externalCommandRuntime{
+				lookPath: func(bin string) (string, error) {
+					lookedUp = bin
+					return "/usr/local/bin/" + bin, nil
+				},
+				exec: func(path string, argv, _ []string) error {
+					execPath = path
+					execArgv = argv
+					return nil
+				},
+				environ: func() []string { return []string{"PATH=/usr/local/bin"} },
+				stderr:  &bytes.Buffer{},
+			}
+			handled, err := tryExtensionRungs(root, tc.args, rt)
+			if err != nil {
+				t.Fatalf("tryExtensionRungs(%v) err = %v", tc.args, err)
+			}
+			if !handled {
+				t.Fatalf("tryExtensionRungs(%v) handled = false, want true", tc.args)
+			}
+			if lookedUp != tc.wantBin {
+				t.Errorf("looked up %q, want %q", lookedUp, tc.wantBin)
+			}
+			if execPath != "/usr/local/bin/"+tc.wantBin {
+				t.Errorf("exec path = %q, want %q", execPath, "/usr/local/bin/"+tc.wantBin)
+			}
+			if !reflect.DeepEqual(execArgv, tc.wantArgv) {
+				t.Errorf("exec argv = %v, want %v", execArgv, tc.wantArgv)
+			}
+		})
 	}
 }
 

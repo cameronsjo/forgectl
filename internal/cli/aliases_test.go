@@ -34,24 +34,3 @@ func TestApplyAliases_SkipsDashAndSelfName(t *testing.T) {
 		}
 	}
 }
-
-// TestApplyAliases_TmuxLastSurface pins the live tmux map through the shared
-// helper: the real newTmuxCmd tree keeps last alias-free while kill/rename/…
-// keep their registered aliases (TestCobraAliasResolution covers resolution).
-func TestApplyAliases_TmuxLastSurface(t *testing.T) {
-	parent := &cobra.Command{Use: "tmux"}
-	for _, name := range []string{"ls", "pick", "kill", "rename", "windows", "tree", "last", "cheat"} {
-		parent.AddCommand(&cobra.Command{Use: name})
-	}
-	applyAliases(parent, tmuxAliases)
-
-	for _, sub := range parent.Commands() {
-		if sub.Name() == "last" {
-			if len(sub.Aliases) != 0 {
-				t.Errorf("tmux last grew Cobra aliases %v; \"-\" must stay argv-only", sub.Aliases)
-			}
-			return
-		}
-	}
-	t.Fatal("last subcommand not found")
-}

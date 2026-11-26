@@ -123,3 +123,10 @@ func isPlaceholder(tok string) bool {
 	}
 	return true
 }
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}

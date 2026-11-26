@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -40,8 +39,8 @@ func TestParseTagTokens(t *testing.T) {
 			t.Errorf("parseTagTokens(%q) accepted", bad)
 		}
 	}
-	if _, err := parseTagTokens([]string{"k=" + strings.Repeat("v", herdradapter.MaxTokenValueLen+1)}); !errors.Is(err, herdradapter.ErrBadToken) {
-		t.Errorf("a long value: err = %v, want ErrBadToken", err)
+	if _, err := parseTagTokens([]string{"k=" + strings.Repeat("v", maxTokenValueLen+1)}); !errors.Is(err, errBadToken) {
+		t.Errorf("a long value: err = %v, want errBadToken", err)
 	}
 }
 
@@ -49,7 +48,7 @@ func TestParseTagTokens(t *testing.T) {
 // before it opens a ledger or reaches herdr.
 func TestSurfaceTagRefusesBeforeHerdr(t *testing.T) {
 	many := []string{"w1"}
-	for i := range herdradapter.MaxTokensPerReport + 1 {
+	for i := range maxTokensPerReport + 1 {
 		many = append(many, "--clear-token", "k"+strings.Repeat("x", i))
 	}
 	for name, tc := range map[string]struct {

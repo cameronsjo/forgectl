@@ -26,7 +26,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/workstate"
@@ -911,8 +911,8 @@ func TestProbeWorker(t *testing.T) {
 		reads  int
 	}{
 		"read":            {&fakeScreen{session: drainTestSession, screen: ready.Screen{Text: "> ", Status: "idle", Agent: "claude"}}, q, drain.ProbeRead, 1},
-		"gone":            {&fakeScreen{session: drainTestSession, err: herdradapter.ErrWorkerGone}, q, drain.ProbeGone, 1},
-		"herdr error":     {&fakeScreen{session: drainTestSession, err: herdradapter.ErrScreenUnreadable}, q, drain.ProbeUnreadable, 1},
+		"gone":            {&fakeScreen{session: drainTestSession, err: hcadapter.ErrWorkerGone}, q, drain.ProbeGone, 1},
+		"herdr error":     {&fakeScreen{session: drainTestSession, err: errors.New("screen unreadable")}, q, drain.ProbeUnreadable, 1},
 		"another session": {&fakeScreen{session: "other"}, q, drain.ProbeUnreadable, 0},
 	}
 	for name, c := range cases {

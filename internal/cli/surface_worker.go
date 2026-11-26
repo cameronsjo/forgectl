@@ -244,10 +244,10 @@ type workerSpec struct {
 	parent string
 }
 
-// surfaceName is the spec's worker surface, herdr when unset.
+// surfaceName is the spec's worker surface, hc when unset.
 func (spec workerSpec) surfaceName() string {
 	if spec.surface == "" {
-		return workerSurfaceHerdr
+		return workerSurfaceHc
 	}
 	return spec.surface
 }
@@ -318,7 +318,7 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 		if spec.parent != "" {
 			return workerSetup{}, WithExitCode(errParentNeedsHc, exitUsage)
 		}
-		adapter, err = newHerdrAdapter(warn)
+		return workerSetup{}, WithExitCode(fmt.Errorf("--surface herdr: %w", errLegacyBackend), exitUsage)
 	default:
 		return workerSetup{}, WithExitCode(errUnknownWorkerSurface, exitUsage)
 	}
@@ -491,11 +491,21 @@ func launchWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec wo
 	return attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
 }
 
-// runWorkerLaunch wires the real steps: herdr or hc only, a validated name, the repo
+// runWorkerLaunch wires the real steps: hc only, a validated name, the repo
 // top as the ledger key, and the worker posture floor on the invocation.
 func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
-	if opts.Backend != workerSurfaceHerdr && opts.Backend != workerSurfaceHc {
-		return WithExitCode(errors.New("--worktree needs --surface herdr or --surface hc; workers run in herdr or hc only"), exitUsage)
+	if opts.Backend != workerSurfaceHc {
+		switch opts.Backend {
+		case workerSurfaceHerdr, "cmux", "tmux":
+			if opts.HerdrSpace != "" {
+				return WithExitCode(errHerdrSpaceNeedsHc, exitUsage)
+			}
+			if opts.Parent != "" {
+				return WithExitCode(errParentNeedsHc, exitUsage)
+			}
+			return WithExitCode(fmt.Errorf("--worktree --surface %s: %w", opts.Backend, errLegacyBackend), exitUsage)
+		}
+		return WithExitCode(errors.New("--worktree needs --surface hc; workers run in hc only"), exitUsage)
 	}
 	if opts.Model != "" {
 		if err := config.CheckModelName(opts.Model); err != nil {

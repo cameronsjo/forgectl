@@ -16,7 +16,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -134,61 +133,38 @@ type workerSurface interface {
 }
 
 // workerLedgerContext is a repo's ledger and the adapter for its session.
-// Exactly one of herdr and hc is set; surface is that one.
 type workerLedgerContext struct {
 	surface workerSurface
-	herdr   *herdradapter.Adapter
 	hc      *hcadapter.Adapter
 	led     *worker.Ledger
 	top     string
 }
 
-// openWorkerLedger resolves repo and opens its ledger for the current herdr
-// session. Every failure is a usage or setup error (exit 2). warn takes the
-// herdr adapter's setup warnings.
+// openWorkerLedger resolves repo and opens its ledger for the current hc
+// session. Every failure is a usage or setup error (exit 2).
 func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo string) (*workerLedgerContext, error) {
-	return openSurfaceLedger(ctx, warn, deps, repo, workerSurfaceHerdr)
+	return openSurfaceLedger(ctx, warn, deps, repo, workerSurfaceHc)
 }
 
-// openSurfaceLedger is openWorkerLedger for the named worker surface, herdr
-// or hc. The hc ledger is keyed "hc:<session>", so it never shares rows with
-// a herdr session's.
+// openSurfaceLedger is openWorkerLedger for the named worker surface (hc only).
+// The hc ledger is keyed "hc:<session>".
 func openSurfaceLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo, surfaceName string) (*workerLedgerContext, error) {
 	if err := checkWorkerSurface(surfaceName); err != nil {
 		return nil, err
 	}
-	if surfaceName == workerSurfaceHc {
-		adapter, err := newHcAdapter()
-		if err != nil {
-			return nil, WithExitCode(err, exitUsage)
-		}
-		hc, ok := adapter.(*hcadapter.Adapter)
-		if !ok {
-			return nil, errors.New("forgectl: the hc adapter has an unexpected type")
-		}
-		led, top, err := openRepoLedger(ctx, warn, deps, repo, hc.Session())
-		if err != nil {
-			return nil, err
-		}
-		return &workerLedgerContext{surface: hc, hc: hc, led: led, top: top}, nil
-	}
-	adapter, err := newHerdrAdapter(warn)
+	adapter, err := newHcAdapter()
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
 	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
+	hc, ok := adapter.(*hcadapter.Adapter)
 	if !ok {
-		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
+		return nil, errors.New("forgectl: the hc adapter has an unexpected type")
 	}
-	led, top, err := openRepoLedger(ctx, warn, deps, repo, herdr.Session())
+	led, top, err := openRepoLedger(ctx, warn, deps, repo, hc.Session())
 	if err != nil {
 		return nil, err
 	}
-	// Every reference this context reads comes from the session's own
-	// ledger, so a changed server incarnation is that session restarting:
-	// close and list settle it by the ownership marker (forgectl#1077).
-	bound := herdr.ForSessionLedger()
-	return &workerLedgerContext{surface: bound, herdr: bound, led: led, top: top}, nil
+	return &workerLedgerContext{surface: hc, hc: hc, led: led, top: top}, nil
 }
 
 // openRepoLedger resolves repo to its top and opens that top's ledger for

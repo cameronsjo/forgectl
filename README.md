@@ -42,7 +42,7 @@ deep-dive get a link here.
 
 | Group | One-liner | Docs |
 | --- | --- | --- |
-| `tmux` | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` | Usage below |
+| `tmux` *(plugin: `forgectl-tmux`)* | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` (dispatched via Rung B) | Usage below |
 | `config` | Show every config section, per-key set/default (alias: `cfg`) | Usage below |
 | `init` | Create `config.toml`, or add the sections it lacks (safe to rerun; `--dry-run` previews) | Usage below |
 | `status` | Read-only overview: local git state, PRs, reclaimable space, bench health | [status](docs/commands/status.md) |
@@ -50,8 +50,8 @@ deep-dive get a link here.
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
-| `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr/hc) without exposing its invocation | Usage below |
-| `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
+| `surface` | Start a harness inside a native terminal manager (`hc` or `rex`) without exposing its invocation | Usage below |
+| `herdr` *(plugin: `forgectl-herdr`)* | Helpers for the legacy herdr (v1) terminal multiplexer: group tabs into workspaces by rule (dispatched via Rung B) | [herdr](docs/commands/herdr.md) |
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
 | `attention` | Per-machine attention queue: what the desk, its asks and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |

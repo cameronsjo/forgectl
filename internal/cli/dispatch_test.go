@@ -1,58 +1,25 @@
 package cli
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/theme"
-	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
-func TestNormalizeArgs(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []string
-		want []string
-	}{
-		{"autocorrect verb punctuation+case", []string{"tmux", "LS."}, []string{"tmux", "ls"}},
-		{"autocorrect kill", []string{"tmux", "Kill,"}, []string{"tmux", "kill"}},
-		{"alias rm -> kill", []string{"tmux", "rm"}, []string{"tmux", "kill"}},
-		{"alias x -> kill with punct", []string{"tmux", "X."}, []string{"tmux", "kill"}},
-		{"module spelling normalized + verb alias", []string{"Tmux.", "p"}, []string{"tmux", "pick"}},
-		{"module alias tm + verb alias", []string{"tm", "mv"}, []string{"tmux", "rename"}},
-		{"dash maps to last", []string{"tmux", "-"}, []string{"tmux", "last"}},
-		{"flag passes through untouched", []string{"tmux", "--bogus"}, []string{"tmux", "--bogus"}},
-		{"unknown verb left as-is (TUI fallthrough signal)", []string{"tmux", "frobnicate"}, []string{"tmux", "frobnicate"}},
-		{"only the verb is normalized, not its args", []string{"tmux", "RM", "old name"}, []string{"tmux", "kill", "old name"}},
-		{"global flag before module", []string{"-v"}, []string{"-v"}},
-		{"non-tmux first token untouched", []string{"completion", "zsh"}, []string{"completion", "zsh"}},
-		{"empty", []string{}, []string{}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeArgs(tc.in)
-			if strings.Join(got, "\x1f") != strings.Join(tc.want, "\x1f") {
-				t.Errorf("normalizeArgs(%v) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestNormalizeArgs_DoesNotMutateInput(t *testing.T) {
-	in := []string{"tmux", "RM"}
-	_ = normalizeArgs(in)
-	if in[1] != "RM" {
-		t.Errorf("normalizeArgs mutated its input: %v", in)
+	in := []string{"projects", "list"}
+	got := normalizeArgs(in)
+	if len(got) != 2 || got[0] != "projects" || got[1] != "list" {
+		t.Errorf("normalizeArgs(%v) = %v, want unchanged", in, got)
 	}
 }
 
 // TestShouldLaunchTUI pins the hub-era narrowing (forgectl#479): the TUI
 // opens on a bare invoke only. An unknown top-level verb and an unknown
 // subverb of a known group both fall through to Cobra/fang's own
-// unknown-command error now — the group parents' new Args: cobra.NoArgs
-// (tmux/projects/quarantine) is what makes that safe (TestGroupParentsRefuseStrayTokens).
+// unknown-command error now — the group parents' Args: cobra.NoArgs
+// (projects/quarantine) is what makes that safe (TestGroupParentsRefuseStrayTokens).
 func TestShouldLaunchTUI(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	cases := []struct {
@@ -62,10 +29,9 @@ func TestShouldLaunchTUI(t *testing.T) {
 	}{
 		{"bare invoke launches the hub", []string{}, true},
 		{"unknown top-level verb stays with cobra", []string{"frobnicate"}, false},
-		{"unknown tmux subverb stays with cobra", []string{"tmux", "frobnicate"}, false},
+		{"unknown projects subverb stays with cobra", []string{"projects", "frobnicate"}, false},
 		{"typo'd verb stays with cobra (did-you-mean)", []string{"lauch"}, false},
-		{"known verb does not launch", []string{"tmux", "ls"}, false},
-		{"known alias does not launch", []string{"tmux", "kill", "x"}, false},
+		{"known verb does not launch", []string{"projects", "list"}, false},
 		{"pr with ref positional stays with cobra", []string{"pr", "owner/repo#1"}, false},
 		{"pr known subverb does not launch", []string{"pr", "list"}, false},
 		{"review repo-flag value stays with cobra", []string{"review", "--json", "--repo", "owner/name"}, false},
@@ -74,11 +40,11 @@ func TestShouldLaunchTUI(t *testing.T) {
 		{"version flag stays with fang", []string{"--version"}, false},
 		{"help flag stays with fang", []string{"--help"}, false},
 		{"completion command does not launch", []string{"completion", "zsh"}, false},
-		{"bare tmux module does not launch here", []string{"tmux"}, false},
+		{"bare projects module does not launch here", []string{"projects"}, false},
 		// Flag-only invocations: flags alone (including --no-icons) route to fang, not TUI
 		{"no-icons flag alone stays with fang", []string{"--no-icons"}, false},
 		// Flag + known verb: --no-icons should not prevent Cobra dispatch
-		{"no-icons plus known verb stays with cobra", []string{"--no-icons", "tmux", "ls"}, false},
+		{"no-icons plus known verb stays with cobra", []string{"--no-icons", "projects", "list"}, false},
 		// Flag + unknown verb now stays with cobra too (the hub only opens bare)
 		{"no-icons plus unknown verb stays with cobra", []string{"--no-icons", "frobnicate"}, false},
 		{"bare version verb stays with cobra", []string{"version"}, false},
@@ -92,12 +58,7 @@ func TestShouldLaunchTUI(t *testing.T) {
 	}
 }
 
-// TestDecideRoute covers the headless TTY gate (forgectl#103): a menu-eligible
-// invocation (bare, unknown top-level verb, or unknown subverb) opens the TUI
-// only when tty is true; headless, it must route through Cobra/fang instead
-// so cobra's own "unknown command" + "did you mean" suggestion path runs
-// rather than silently opening the menu and exiting 0. tty is a plain bool
-// here (not a real isatty call) so this never needs a real terminal.
+// TestDecideRoute covers the headless TTY gate (forgectl#103).
 func TestDecideRoute(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	cases := []struct {
@@ -108,15 +69,12 @@ func TestDecideRoute(t *testing.T) {
 	}{
 		{"bare invoke, tty draws the hub", []string{}, true, routeTUI},
 		{"bare invoke, headless routes to cobra", []string{}, false, routeHeadlessMenu},
-		// The hub's routing arm no longer intercepts an unknown verb — cobra's
-		// own unknown-command error fires on TTY and headless alike now that
-		// the group parents refuse a stray subverb themselves (forgectl#479).
 		{"unknown top-level verb, tty routes to cobra", []string{"frobnicate"}, true, routeDispatch},
 		{"unknown top-level verb, headless routes to cobra", []string{"frobnicate"}, false, routeDispatch},
-		{"unknown tmux subverb, tty routes to cobra", []string{"tmux", "frobnicate"}, true, routeDispatch},
-		{"unknown tmux subverb, headless routes to cobra", []string{"tmux", "frobnicate"}, false, routeDispatch},
-		{"known verb dispatches regardless of tty (interactive)", []string{"tmux", "ls"}, true, routeDispatch},
-		{"known verb dispatches regardless of tty (headless)", []string{"tmux", "ls"}, false, routeDispatch},
+		{"unknown projects subverb, tty routes to cobra", []string{"projects", "frobnicate"}, true, routeDispatch},
+		{"unknown projects subverb, headless routes to cobra", []string{"projects", "frobnicate"}, false, routeDispatch},
+		{"known verb dispatches regardless of tty (interactive)", []string{"projects", "list"}, true, routeDispatch},
+		{"known verb dispatches regardless of tty (headless)", []string{"projects", "list"}, false, routeDispatch},
 		{"version flag dispatches even headless", []string{"--version"}, false, routeDispatch},
 		{"help flag dispatches even headless", []string{"--help"}, false, routeDispatch},
 	}
@@ -124,35 +82,6 @@ func TestDecideRoute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := decideRoute(root, tc.args, tc.tty); got != tc.want {
 				t.Errorf("decideRoute(%v, tty=%v) = %v, want %v", tc.args, tc.tty, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestCobraAliasResolution verifies the registry-driven Cobra aliases resolve
-// — root.Find(["tmux","rm"]) must land on the kill command.
-func TestCobraAliasResolution(t *testing.T) {
-	client := tmux.New(&exec.FakeRunner{})
-	root := newTmuxCmd(module.Deps{Theme: theme.Theme{}}, client)
-
-	cases := map[string]string{
-		"rm":  "kill",
-		"k":   "kill",
-		"x":   "kill",
-		"mv":  "rename",
-		"rn":  "rename",
-		"l":   "ls",
-		"p":   "pick",
-		"new": "pick",
-	}
-	for alias, wantName := range cases {
-		t.Run(alias, func(t *testing.T) {
-			found, _, err := root.Find([]string{alias})
-			if err != nil {
-				t.Fatalf("Find(%q): %v", alias, err)
-			}
-			if found.Name() != wantName {
-				t.Errorf("alias %q resolved to %q, want %q", alias, found.Name(), wantName)
 			}
 		})
 	}

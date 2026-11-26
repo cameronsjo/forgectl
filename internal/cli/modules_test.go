@@ -125,13 +125,13 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 36
+	const wantCount = 34
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
 
 	wantNames := map[string]bool{
-		"tmux": true, "projects": true, "config": true, "launch": true,
+		"projects": true, "config": true, "launch": true,
 		"workflow": true, "pr": true, "net": true, "proxy": true, "bench": true,
 		"quarantine": true, "pip": true, "docker": true, "branch": true,
 		"clean": true, "y": true, "sessions": true, "review": true,
@@ -148,7 +148,6 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"recipe":    true,
 		"k8s":       true,
 		"theme":     true,
-		"herdr":     true,
 		"audit":     true,
 		"status":    true,
 		"desk":      true,
@@ -169,7 +168,7 @@ func TestModules_CompletenessPins(t *testing.T) {
 	}
 
 	wantCore := map[string]bool{
-		"tmux": true, "projects": true, "launch": true,
+		"projects": true, "launch": true,
 		"workflow": true, "pr": true, "config": true,
 	}
 	for _, m := range mods {
@@ -252,7 +251,8 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 	// stamp clones and review keys with different hosts — forgectl#412), so
 	// under ADR-0005's ownership model it is a documented shared-section
 	// exception rather than an unclaimed drift.
-	sharedSections := map[string]bool{"github": true}
+	// [herdr] is owned by the standalone forgectl-herdr plugin binary (#1518).
+	sharedSections := map[string]bool{"github": true, "herdr": true}
 	for s := range sections {
 		if !claimed[s] && !sharedSections[s] {
 			t.Errorf("config section %q has no owning module — assign a ConfigKey", s)

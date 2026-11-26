@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -66,18 +64,9 @@ func newNeedsYouNotifier(run exec.Runner, session string) needsYouNotifier {
 	return needsYouNotifier{session: session, mac: notify.New(run), panes: drainPanes}
 }
 
-// drainPanes is the real herdr adapter, resolved as the drain's probe
-// resolves it.
+// drainPanes reports that the legacy herdr adapter moved to a plugin (#1518).
 func drainPanes() (workerPaneState, error) {
-	adapter, err := newHerdrAdapter(io.Discard)
-	if err != nil {
-		return nil, err
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-	return herdr, nil
+	return nil, errLegacyBackend
 }
 
 // needsYouText is the notification's title and body, and the message shown
@@ -181,7 +170,7 @@ func (n needsYouNotifier) Cleared(ctx context.Context, row worker.QueueRow, led 
 	err := n.onPane(ctx, row, led, func(c context.Context, p workerPaneState, ref backend.Ref) error {
 		return p.ReleaseBlocked(c, ref)
 	})
-	if err == nil || errors.Is(err, herdradapter.ErrWorkerGone) {
+	if err == nil || workerIsGone(err) {
 		return nil
 	}
 	return fmt.Errorf("herdr pane state: %w", err)

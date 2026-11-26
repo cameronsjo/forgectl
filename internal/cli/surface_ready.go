@@ -15,7 +15,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -134,15 +133,10 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 	return reportReady(cmd, res, opts.JSON)
 }
 
-// openedWorker is one launched worker, ready to be read and written: its
-// ledger row and reference, the adapter that reaches its pane, and the
+// openedWorker is one launched hc worker, ready to be read and written: its
+// ledger row and reference, the hc adapter that reaches its terminal, and the
 // readiness predicates for its harness.
-//
-// Exactly one of herdr and hc is set. An hc worker's readiness is hc's
-// reported status (evaluateHcStatus); its table is used only by brief, to
-// check the screen before it sends (sendBriefHC).
 type openedWorker struct {
-	herdr *herdradapter.Adapter
 	hc    *hcadapter.Adapter
 	led   *worker.Ledger
 	row   worker.Row
@@ -153,32 +147,21 @@ type openedWorker struct {
 // read reads the worker's screen for ready, wait and brief. An hc worker
 // whose program has exited reads as gone.
 func (w *openedWorker) read(ctx context.Context) (ready.Screen, error) {
-	if w.hc != nil {
-		return hcScreenReader(w.hc, w.ref, true)(ctx)
-	}
-	return w.herdr.WorkerScreen(ctx, w.ref)
+	return hcScreenReader(w.hc, w.ref, true)(ctx)
 }
 
 // readLast reads the worker's screen for surface read, which still shows a
 // finished hc worker's last screen.
 func (w *openedWorker) readLast(ctx context.Context) (ready.Screen, error) {
-	if w.hc != nil {
-		return hcScreenReader(w.hc, w.ref, false)(ctx)
-	}
-	return w.herdr.WorkerScreen(ctx, w.ref)
+	return hcScreenReader(w.hc, w.ref, false)(ctx)
 }
 
 func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
-	if w.hc != nil {
-		return evaluateHcWorker(w.table, w.row.Harness, s)
-	}
-	return w.table.Evaluate(w.row.Harness, s)
+	return evaluateHcWorker(w.table, w.row.Harness, s)
 }
 
 // openWorker finds the launched worker name in repo's ledger and loads its
-// harness's predicates (herdr only; an hc worker is judged by its status).
-// Every failure is a usage or setup error (exit 2). warn takes the herdr
-// adapter's setup warnings.
+// harness's predicates. Every failure is a usage or setup error (exit 2).
 func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, name, surfaceName string) (*openedWorker, error) {
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
@@ -187,7 +170,7 @@ func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	if err != nil {
 		return nil, err
 	}
-	herdr, led := wl.herdr, wl.led
+	led := wl.led
 	row, ref, err := launchedWorker(led, name)
 	if err != nil {
 		return nil, WithExitCode(err, exitUsage)
@@ -204,7 +187,7 @@ func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, nam
 	if !table.Has(row.Harness) {
 		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), exitUsage)
 	}
-	return &openedWorker{herdr: herdr, hc: wl.hc, led: led, row: row, ref: ref, table: table}, nil
+	return &openedWorker{hc: wl.hc, led: led, row: row, ref: ref, table: table}, nil
 }
 
 // launchedWorker finds the row named name and decodes its reference. Only a

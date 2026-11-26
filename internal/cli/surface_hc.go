@@ -19,7 +19,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workerwatch"
@@ -38,20 +37,24 @@ const (
 )
 
 // errUnknownWorkerSurface refuses a --surface the worker verbs do not drive.
-var errUnknownWorkerSurface = errors.New("--surface must be herdr or hc")
+var errUnknownWorkerSurface = errors.New("--surface must be hc (only hc and rex are native surfaces; legacy herdr, cmux, and tmux adapters moved to plugins)")
 
 // addWorkerSurfaceFlag adds the worker verbs' --surface flag.
 func addWorkerSurfaceFlag(cmd *cobra.Command, target *string) {
-	cmd.Flags().StringVar(target, "surface", workerSurfaceHerdr,
-		"terminal manager the worker was launched in: herdr or hc (herdr-core)")
+	cmd.Flags().StringVar(target, "surface", workerSurfaceHc,
+		"terminal manager the worker was launched in: hc (herdr-core)")
 }
 
-// checkWorkerSurface refuses a --surface value outside herdr and hc.
+// checkWorkerSurface refuses a --surface value outside hc.
 func checkWorkerSurface(name string) error {
-	if name != workerSurfaceHerdr && name != workerSurfaceHc {
+	switch name {
+	case workerSurfaceHc:
+		return nil
+	case workerSurfaceHerdr, "cmux", "tmux":
+		return WithExitCode(fmt.Errorf("--surface %s: %w", name, errLegacyBackend), exitUsage)
+	default:
 		return WithExitCode(errUnknownWorkerSurface, exitUsage)
 	}
-	return nil
 }
 
 // errHcNotOnPath reports that hc is not on PATH.
@@ -173,18 +176,14 @@ func checkHcName(name string) error {
 	return nil
 }
 
-// workerIsGone reports a worker whose workspace or terminal is provably gone,
-// under either backend.
+// workerIsGone reports a worker whose terminal is provably gone.
 func workerIsGone(err error) bool {
-	return errors.Is(err, herdradapter.ErrWorkerGone) || errors.Is(err, hcadapter.ErrWorkerGone)
+	return errors.Is(err, hcadapter.ErrWorkerGone)
 }
 
-// goneReason names what is gone, for the backend that said so.
-func goneReason(err error) string {
-	if errors.Is(err, hcadapter.ErrWorkerGone) {
-		return "the worker's hc terminal is gone"
-	}
-	return "the worker's herdr workspace is gone"
+// goneReason names what is gone.
+func goneReason(_ error) string {
+	return "the worker's hc terminal is gone"
 }
 
 // surfaceNoun names what a reference points at, for messages: an hc

@@ -24,7 +24,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/merge"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -1090,33 +1089,11 @@ func githubAuthFailure(err error) bool {
 	return false
 }
 
-// drainProbe builds the real reader for one tick: one herdr adapter pinned to
-// session and one predicate table. A setup failure reads every row as
-// unreadable.
-func drainProbe(session string) drainProber {
-	unreadable := func(why string) drainProber {
-		return func(context.Context, worker.QueueRow, worker.Row) drain.Probe {
-			return drain.Probe{State: drain.ProbeUnreadable, Err: why}
-		}
-	}
-	adapter, err := newHerdrAdapter(io.Discard)
-	if err != nil {
-		return unreadable(err.Error())
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return unreadable("the herdr adapter has an unexpected type")
-	}
-	path, err := config.SurfaceReadyPredicatesPath()
-	if err != nil {
-		return unreadable(err.Error())
-	}
-	table, err := ready.Load(path)
-	if err != nil {
-		return unreadable("readiness predicates: " + err.Error())
-	}
-	return func(ctx context.Context, q worker.QueueRow, led worker.Row) drain.Probe {
-		return probeWorker(ctx, herdr, table, session, q, led)
+// drainProbe builds the real reader for one tick. Legacy herdr adapter moved
+// to a plugin (#1518), so every row reads as unreadable.
+func drainProbe(string) drainProber {
+	return func(context.Context, worker.QueueRow, worker.Row) drain.Probe {
+		return drain.Probe{State: drain.ProbeUnreadable, Err: errLegacyBackend.Error()}
 	}
 }
 
@@ -1147,7 +1124,7 @@ func probeWorker(ctx context.Context, herdr screenReader, table *ready.Table, se
 	defer cancel()
 	s, err := herdr.WorkerScreen(ctx, ref)
 	switch {
-	case errors.Is(err, herdradapter.ErrWorkerGone):
+	case workerIsGone(err):
 		return drain.Probe{State: drain.ProbeGone}
 	case err != nil:
 		return drain.Probe{State: drain.ProbeUnreadable, Err: termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
@@ -1265,18 +1242,8 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 		},
 		prober: func() drainProber { return drainProbe(session) },
 		launch: drainLaunch(deps.Runner),
-		herdrReady: func(ctx context.Context) error {
-			adapter, err := newHerdrAdapter(io.Discard)
-			if err != nil {
-				return err
-			}
-			herdr, ok := adapter.(*herdradapter.Adapter)
-			if !ok {
-				return errors.New("forgectl: the herdr adapter has an unexpected type")
-			}
-			ctx, cancel := context.WithTimeout(ctx, drainHerdrTimeout)
-			defer cancel()
-			return herdr.CheckReady(ctx)
+		herdrReady: func(context.Context) error {
+			return errLegacyBackend
 		},
 		load:     drainLoadConfig,
 		notify:   newNeedsYouNotifier(deps.Runner, session),
@@ -1317,40 +1284,11 @@ func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Ev
 	}, nil
 }
 
-// drainCloseRow is the closers' close: the close `surface close` runs
-// (closeWorker through realCloseSteps), on the row's own ledger row, through
-// a herdr adapter that must resolve the drain's pinned session.
-func drainCloseRow(run exec.Runner, session string) func(context.Context, worker.QueueRow, worker.Row) closeResult {
-	return func(ctx context.Context, q worker.QueueRow, led worker.Row) closeResult {
-		refuse := func(why string) closeResult {
-			return closeResult{Name: led.Name, Branch: led.Branch, Workspace: closeWorkspaceRefused, Worktree: closeWorktreeUntouched, Reason: why}
-		}
-		adapter, err := newHerdrAdapter(io.Discard)
-		if err != nil {
-			return refuse("herdr: " + err.Error())
-		}
-		herdr, ok := adapter.(*herdradapter.Adapter)
-		if !ok {
-			return refuse("the herdr adapter has an unexpected type")
-		}
-		if herdr.Session() != session || (q.Session != "" && q.Session != session) {
-			return refuse(fmt.Sprintf("the worker is in herdr session %q, the drain's is %q", q.Session, session))
-		}
-		ledger, err := worker.Open(q.Repo, session)
-		if err != nil {
-			return refuse("the ledger: " + err.Error())
-		}
-		// Right before anything is closed: the ledger row must still be the
-		// one the closer read (same launch, same stage). A close by hand, a
-		// close that kept the worktree, or a relaunch under the same name in
-		// the meantime refuses here, so the new launch's worktree is never
-		// the one inspected or removed.
-		if why := ledgerRowChanged(ledger, led); why != "" {
-			return refuse(why)
-		}
-		ctx, cancel := context.WithTimeout(ctx, closeTimeout)
-		defer cancel()
-		return closeWorker(ctx, led, false, time.Now(), realCloseSteps(run, herdr.ForSessionLedger(), ledger, q.Repo, led))
+// drainCloseRow is the closers' close. Legacy herdr adapter moved to a plugin
+// (#1518), so herdr closes refuse cleanly.
+func drainCloseRow(_ exec.Runner, _ string) func(context.Context, worker.QueueRow, worker.Row) closeResult {
+	return func(_ context.Context, _ worker.QueueRow, led worker.Row) closeResult {
+		return closeResult{Name: led.Name, Branch: led.Branch, Workspace: closeWorkspaceRefused, Worktree: closeWorktreeUntouched, Reason: "herdr: " + errLegacyBackend.Error()}
 	}
 }
 
