@@ -49,7 +49,7 @@ func checkTokenValue(k, v string) error {
 	if strings.TrimSpace(v) != v {
 		return fmt.Errorf("%w: token %s value must not have leading or trailing space", errBadToken, k)
 	}
-	if termsafe.SafeLine(v) != v {
+	if termsafe.SafeLineMax(v, maxTokenValueLen) != v {
 		return fmt.Errorf("%w: token %s value contains control, bidi, or invisible characters", errBadToken, k)
 	}
 	return nil
