@@ -486,6 +486,7 @@ func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string
 	first := true
 	asks := map[string]ask.Ask{}
 	var recs []ask.Record
+	var items []ask.Item
 	for {
 		batch, next, _, err := s.ReadFrom(off)
 		if err != nil {
@@ -497,6 +498,7 @@ func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string
 				asks[rec.Ask.ID] = *rec.Ask
 			}
 		}
+		wasFirst := first
 		if first {
 			first = false
 			if since < 0 {
@@ -510,7 +512,9 @@ func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string
 				return fmt.Errorf("desk watch: no ask %s", id)
 			}
 		}
-		items := ask.Fold(recs, deskNow())
+		if wasFirst || len(batch) > 0 {
+			items = ask.Fold(recs, deskNow())
+		}
 		for _, rec := range batch {
 			r := rec.Response
 			if r == nil || (id != "" && r.Ask != id) || rec.Offset <= since {
