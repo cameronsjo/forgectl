@@ -1447,7 +1447,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [surface.identity], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [surface.identity], [resume], and [theme]. log_level is checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode

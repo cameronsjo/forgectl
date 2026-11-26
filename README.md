@@ -529,7 +529,7 @@ configuration even though VS Code settings are not quarantined wholesale.
 
 ## Configuration
 
-Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`, `[tasks]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
+Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
 
 ## License
 

@@ -135,6 +135,8 @@ This does not restore the 2026-10-05 isolation. A worker still loads the operato
 
 ## Amendment 2026-10-20: one deny rule for board closes
 
+*2026-11-25: withdrawn. The `forgectl tasks` command was removed (#1511), so the deny rule went with it; workers carry no built-in deny rule again, and `[launch.worker]` can still add one.*
+
 Every claude worker's `--settings` now carries one deny rule, `Bash(forgectl tasks done:*)`, in every permission mode. A board close cannot be undone, and the operator or the coordinator closes a task once its work lands. The `FORGECTL_DRAIN_WORKER` refusal (2026-10-09 amendment) already stops `tasks done` in a worker, but a worker can unset the variable. A deny rule holds over the operator's own allow rules, so it backs that refusal up. Before this, chief-of-staff's own `launch-workers.sh` added the rule, and drain workers went without it.
 
 This narrows the 2026-10-08 amendment's "nothing is denied" by one rule. A worker is otherwise still a full harness. The rule covers the shell command only: a board MCP tool (`complete_task` and the like) is still asked against in words, in the worker rule.
