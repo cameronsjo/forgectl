@@ -24,7 +24,6 @@ func allModules() []module.Manifest {
 		sessionsModule,
 		reviewModule,
 		envModule,
-		docsModule,
 		initModule,
 		doctorModule,
 		upgradeModule,

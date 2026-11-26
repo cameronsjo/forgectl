@@ -17,7 +17,7 @@ import (
 
 // hubPinned is the hub's first section (forgectl#730 item 2): the commands
 // the hub most often routes to, in this order, ahead of everything else.
-var hubPinned = []string{"docs", "pr", "projects", "tmux", "sessions"}
+var hubPinned = []string{"pr", "projects", "tmux", "sessions"}
 
 // hubRecentLimit is how many rows the "recent" section shows, and
 // hubRecentWindow how many of the newest forgectl lines in shell history rank

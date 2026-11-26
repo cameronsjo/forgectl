@@ -13,7 +13,8 @@ package config
 // lost by adding a fourth one that forgets.
 func stripLegacyUsageOptIn(lc LaunchConfig) LaunchConfig {
 	lc.UsageStats = false
-	// Worker posture is native-only too: a legacy file never sets it.
+	// Worker posture and roles are native-only too: a legacy file never sets them.
 	lc.Worker = LaunchWorker{}
+	lc.Roles = nil
 	return lc
 }

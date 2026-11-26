@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/review"
@@ -122,26 +121,4 @@ func TestTextVerbsCapUntrustedFields(t *testing.T) {
 		}
 		p.check(t, "resume outdated", out.String(), termsafe.TruncatedMarker)
 	})
-
-	t.Run("docs list", func(t *testing.T) {
-		p := path(capProbe{field: "the relative path", r: 'η'})
-		docs := []docspkg.Doc{{RootLabel: "docs", RelPath: p.long() + "/leaf.md", AbsPath: "/r/x.md", Title: "T"}}
-		out, _ := renderCmd(t, func(cmd *cobra.Command) error { return printDocsList(cmd, docs, false) })
-		p.check(t, "docs list", out, "…/leaf.md")
-	})
-}
-
-// TestPrintDocsList_OrdinaryRowKeepsItsColumn pins the #913 layout call: the
-// relative path is capped without quotes, so an ordinary row prints exactly
-// as it did before the cap, its title starting at the same column.
-//
-// Mutation that turns it red: render d.RelPath through safePath (quoted) in
-// printDocsList.
-func TestPrintDocsList_OrdinaryRowKeepsItsColumn(t *testing.T) {
-	docs := []docspkg.Doc{{RootLabel: "docs", RelPath: "guide/a.md", AbsPath: "/r/guide/a.md", Title: "A"}}
-	out, _ := renderCmd(t, func(cmd *cobra.Command) error { return printDocsList(cmd, docs, false) })
-	want := "docs             guide/a.md                                       A\n"
-	if out != want {
-		t.Errorf("docs list row = %q, want %q", out, want)
-	}
 }

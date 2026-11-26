@@ -125,7 +125,7 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 23
+	const wantCount = 22
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
@@ -135,7 +135,6 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"workflow": true, "pr": true, "branch": true,
 		"clean": true, "sessions": true, "review": true,
 		"env":       true,
-		"docs":      true,
 		"init":      true,
 		"doctor":    true,
 		"upgrade":   true,
@@ -240,14 +239,16 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 		}
 	}
 	// sharedSections are struct-kind config sections deliberately owned by no
-	// single CLI module:
+	// single in-process CLI module:
 	//   - [github] spans projects and review (forgectl#412).
+	//   - [docs] is owned by the standalone forgectl-docs plugin binary.
 	//   - [net] backs pr's offline fast-fail reachability check.
 	//   - [proxy] backs launch/resume/surface/pr launch_profile injection.
 	//   - [bench] backs launch telemetry, status, and doctor checks.
 	//   - [theme] backs TUI and fang colour resolution.
 	sharedSections := map[string]bool{
 		"github": true,
+		"docs":   true,
 		"net":    true,
 		"proxy":  true,
 		"bench":  true,

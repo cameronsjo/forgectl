@@ -1,7 +1,6 @@
 forgectl · forgectl @ main · 3 tmux · 1 review running, 2 queued
 
 pinned
-  forgectl docs  read project docs (3 subverbs)
   forgectl pr <ref>  review a pull request (3 subverbs)
 
 recent
@@ -9,5 +8,8 @@ recent
 
 setup
   forgectl doctor  check the install
+
+other
+  forgectl docs  read project docs (3 subverbs)
 
 forgectl menu <command> lists a command's subverbs.

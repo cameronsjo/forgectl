@@ -143,7 +143,6 @@ func TestUsagePlaceholders(t *testing.T) {
 // jsonShapeVerbs are the verbs whose --json flag text named no shape
 // (forgectl#1087). Each must list its top-level keys in its own --help.
 var jsonShapeVerbs = [][]string{
-	{"docs", "check"}, {"docs", "list"}, {"docs", "search"},
 	{"pr", "prs"},
 	{"projects", "list"},
 	{"review"},

@@ -64,17 +64,6 @@ func convergedHumanSinks() []humanSink {
 			},
 		},
 		{
-			name: "docs-token-file-path",
-			render: func(t *testing.T, value string) string {
-				t.Helper()
-				_, err := acquireDocsTokenFile("relative" + value + "/token")
-				if err == nil {
-					t.Fatal("a relative token path must be refused")
-				}
-				return err.Error()
-			},
-		},
-		{
 			name: "external-command-exec-failure",
 			render: func(t *testing.T, value string) string {
 				t.Helper()

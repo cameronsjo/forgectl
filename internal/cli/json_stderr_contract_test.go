@@ -198,14 +198,6 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 					t.Errorf("error = %q, want the unknown-flag message", msg)
 				}
 				switch {
-				case path[0] == "docs":
-					// The docs shape: integer code plus root (docs_errors.go).
-					if obj["code"] != float64(2) {
-						t.Errorf("docs code = %v, want 2", obj["code"])
-					}
-					if _, ok := obj["root"]; !ok {
-						t.Errorf("docs object %v has no root key", obj)
-					}
 				case name == "env check":
 					if obj["code"] != "check_failed" {
 						t.Errorf("env check code = %v, want check_failed", obj["code"])
@@ -422,11 +414,6 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 		}},
 		{name: "projects list: strict on a degraded host", build: func(t *testing.T) (*cobra.Command, []string) {
 			return newProjectsListCmd(listFixture(t, degradedGitHubRunFunc)), []string{"list", "--json", "--strict"}
-		}},
-		{name: "docs check: error findings", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
-			dir := t.TempDir()
-			docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[x](missing.md)\n")
-			return newDocsCheckCmd(module.Deps{}), []string{"check", "--json", dir}
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

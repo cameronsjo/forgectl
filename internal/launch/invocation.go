@@ -161,6 +161,14 @@ type InvocationRequest struct {
 	// Off a terminal the session, agents, and builder postures also withhold
 	// --allow-dangerously-skip-permissions (forgectl#812, #899).
 	StdoutTerminal bool
+	// Role selects a declarative [launch.roles.<name>] profile (#1515). When
+	// set, BuildInvocation validates the role, exports FORGECTL_ROLE (and
+	// FORGECTL_POSTURE when configured), and for Claude sessions applies the
+	// role's charter file, fail-closed plugin disables, and CLAUDE.md excludes.
+	Role string
+	// AllowUnsafePluginDisable explicitly bypasses the fail-closed guard-hook
+	// safety check for Role's disable_plugins. Default false.
+	AllowUnsafePluginDisable bool
 }
 
 var (
@@ -279,7 +287,7 @@ const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"editorMode":"n
 // mergeWorkerSettings, which never lets it change one forgectl sets.
 // mcpOff names the project MCP servers the worker starts with turned off
 // (workermcp.go); none adds no key.
-func withWorkerSettings(args []string, file *workerSettingsFile, mcpOff []string) ([]string, error) {
+func withWorkerSettings(args []string, file *workerSettingsFile, mcpOff []string, role *ResolvedRole) ([]string, error) {
 	if len(args) < 2 || args[0] != "--permission-mode" {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
@@ -296,6 +304,11 @@ func withWorkerSettings(args []string, file *workerSettingsFile, mcpOff []string
 	}
 	if settings, err = withMCPOff(settings, mcpOff); err != nil {
 		return nil, err
+	}
+	if role != nil {
+		if settings, err = mergeRoleSettingsInto(settings, *role); err != nil {
+			return nil, err
+		}
 	}
 	out = append(out, "--settings", settings)
 	return append(out, args[2:]...), nil
@@ -428,6 +441,9 @@ type BuiltInvocation struct {
 	// WorkerPosture is a worker's resolved posture, each field its harness
 	// takes with its source. Empty for a non-worker launch.
 	WorkerPosture []PostureValue
+	// Role is the resolved [launch.roles.<name>] profile, or nil when no role
+	// was requested.
+	Role *ResolvedRole
 }
 
 // ErrNoBinaryResolver reports a request with no resolver. Refusing beats
@@ -505,7 +521,24 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
+	dir := runDirectory(req, posture)
 	env := buildEnv(req, profile)
+
+	var resolvedRole *ResolvedRole
+	if req.Role != "" {
+		r, rerr := ResolveRole(req.Config, req.Role, profile.Harness, dir, env, req.AllowUnsafePluginDisable)
+		if rerr != nil {
+			return BuiltInvocation{}, rerr
+		}
+		resolvedRole = &r
+		notes = append(notes, r.Notes...)
+		roleEnv := map[string]string{RoleEnv: r.Name}
+		if r.Posture != "" {
+			roleEnv[PostureEnv] = r.Posture
+		}
+		env = MergeEnv(env, roleEnv)
+	}
+
 	if req.Worker && profile.Harness == "claude" {
 		var file *workerSettingsFile
 		if file, err = readWorkerSettingsFor(req.Config.Worker.Settings, os.UserHomeDir); err != nil {
@@ -517,8 +550,13 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if len(mcpOff) > 0 || mcpLeft > 0 {
 			notes = append(notes, workerMCPOffNote(mcpOff, mcpLeft))
 		}
-		if harnessArgs, err = withWorkerSettings(harnessArgs, file, mcpOff); err != nil {
+		if harnessArgs, err = withWorkerSettings(harnessArgs, file, mcpOff, resolvedRole); err != nil {
 			return BuiltInvocation{}, err
+		}
+		if resolvedRole != nil {
+			if harnessArgs, err = withRoleArgs(harnessArgs, posture, *resolvedRole, true); err != nil {
+				return BuiltInvocation{}, err
+			}
 		}
 		tools, err := workerToolsArg(req.Config.Worker.Tools)
 		if err != nil {
@@ -526,6 +564,10 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		}
 		if tools != "" {
 			harnessArgs = append(harnessArgs, "--tools", tools)
+		}
+	} else if resolvedRole != nil && profile.Harness == "claude" {
+		if harnessArgs, err = withRoleArgs(harnessArgs, posture, *resolvedRole, false); err != nil {
+			return BuiltInvocation{}, err
 		}
 	}
 	if req.SessionID != "" {
@@ -556,7 +598,6 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, err
 	}
 
-	dir := runDirectory(req, posture)
 	if dir != req.CWD {
 		// The harness inherits PWD; left alone it would still name the
 		// subfolder, and a shell the session starts trusts PWD when it names
@@ -578,6 +619,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		Worker:        req.Worker,
 		Notes:         notes,
 		WorkerPosture: workerPosture,
+		Role:          resolvedRole,
 	}, nil
 }
 
