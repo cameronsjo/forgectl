@@ -305,7 +305,7 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 	root := skillTestRoot()
 	dead := []string{
 		"forgectl nonesuch", "forgectl env nonesuch", "desk gone", "surface await <name>",
-		"bench open|nope", "forgectl env set KEY --nope", "surface launch --surface x --nonesuch",
+		"workflow list|nope", "forgectl env set KEY --nope", "surface launch --surface x --nonesuch",
 		"forgectl desk lens nonesuch",
 	}
 	for _, span := range dead {
@@ -314,8 +314,8 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 		}
 	}
 	live := []string{
-		"forgectl env", "forgectl env set KEY", "desk add f --what x --why y", "net positional",
-		`quarantine hide\|status\|restore`, "forgectl launch -- --model x", "forgectl env set KEY --clipboard",
+		"forgectl env", "forgectl env set KEY", "desk add f --what x --why y", "pr list",
+		`pr list\|queue\|attach`, "forgectl launch -- --model x", "forgectl env set KEY --clipboard",
 		"set KEY", "forgectl desk lens check", "forgectl --skill",
 	}
 	for _, span := range live {

@@ -143,8 +143,6 @@ func TestUsagePlaceholders(t *testing.T) {
 // jsonShapeVerbs are the verbs whose --json flag text named no shape
 // (forgectl#1087). Each must list its top-level keys in its own --help.
 var jsonShapeVerbs = [][]string{
-	{"bench", "status"},
-	{"net"},
 	{"pr", "prs"},
 	{"projects", "list"},
 	{"review"},
@@ -166,17 +164,6 @@ func TestJSONFlagText_NamesTheShape(t *testing.T) {
 		}
 		if !strings.ContainsAny(f.Usage, "{[") || strings.Count(f.Usage, `"`) < 4 {
 			t.Errorf("%v: --json help %q names no keys", path, f.Usage)
-		}
-	}
-}
-
-func TestBenchStatusJSONHelp_NamesStatesAndExit(t *testing.T) {
-	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
-	cmd, _, _ := root.Find([]string{"bench", "status"})
-	usage := cmd.Flags().Lookup("json").Usage
-	for _, want := range []string{"ok", "degraded", "unavailable", "not-configured", "exit code is 0"} {
-		if !strings.Contains(usage, want) {
-			t.Errorf("bench status --json help lacks %q: %s", want, usage)
 		}
 	}
 }

@@ -155,7 +155,7 @@ func TestFrames_NoTrailingPaddingOffTerminal(t *testing.T) {
 		{"desk", "--help"},
 		{"review", "--help"},
 		{"resume", "restart", "--help"},
-		{"k8s", "--help"},
+		{"env", "--help"},
 	} {
 		stdout, _ := runFramed(t, args...)
 		assertNoTrailingSpace(t, "help "+strings.Join(args, " "), stdout)

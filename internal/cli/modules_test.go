@@ -125,28 +125,21 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 35
+	const wantCount = 22
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
 
 	wantNames := map[string]bool{
 		"tmux": true, "projects": true, "config": true, "launch": true,
-		"workflow": true, "pr": true, "net": true, "proxy": true, "bench": true,
-		"quarantine": true, "pip": true, "docker": true, "branch": true,
-		"clean": true, "y": true, "sessions": true, "review": true,
+		"workflow": true, "pr": true, "branch": true,
+		"clean": true, "sessions": true, "review": true,
 		"env":       true,
 		"init":      true,
-		"preflight": true,
-		"ghostty":   true,
-		"update":    true,
 		"doctor":    true,
 		"upgrade":   true,
 		"resume":    true,
 		"surface":   true,
-		"recipe":    true,
-		"k8s":       true,
-		"theme":     true,
 		"herdr":     true,
 		"audit":     true,
 		"status":    true,
@@ -246,10 +239,21 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 		}
 	}
 	// sharedSections are struct-kind config sections deliberately owned by no
-	// single in-process module: [github] spans projects and review (forgectl#412),
-	// and [docs] is owned by the standalone forgectl-docs plugin binary
-	// (dispatched via Rung B PATH lookup).
-	sharedSections := map[string]bool{"github": true, "docs": true}
+	// single in-process CLI module:
+	//   - [github] spans projects and review (forgectl#412).
+	//   - [docs] is owned by the standalone forgectl-docs plugin binary.
+	//   - [net] backs pr's offline fast-fail reachability check.
+	//   - [proxy] backs launch/resume/surface/pr launch_profile injection.
+	//   - [bench] backs launch telemetry, status, and doctor checks.
+	//   - [theme] backs TUI and fang colour resolution.
+	sharedSections := map[string]bool{
+		"github": true,
+		"docs":   true,
+		"net":    true,
+		"proxy":  true,
+		"bench":  true,
+		"theme":  true,
+	}
 	for s := range sections {
 		if !claimed[s] && !sharedSections[s] {
 			t.Errorf("config section %q has no owning module — assign a ConfigKey", s)

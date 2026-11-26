@@ -139,7 +139,7 @@ func TestHubPickerArgv_DashTerminatorParsesUnchanged(t *testing.T) {
 	if dashed == 0 {
 		t.Fatal("no picker command took the terminator; the check proves nothing")
 	}
-	for _, prefix := range [][]string{{"launch"}, {"docker", "build"}} {
+	for _, prefix := range [][]string{{"launch"}} {
 		argv, err := build(prefix, "zz-value", true)
 		if err != nil || slices.Contains(argv, "--") {
 			t.Errorf("%q: argv %q (err %v), want no inserted terminator", prefix, argv, err)
