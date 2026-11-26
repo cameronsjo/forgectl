@@ -13,7 +13,7 @@ forgectl SHALL read `config.toml` from `forgectl/` under the OS user config dire
 - **THEN** the verb runs on built-in defaults without error
 
 ### Requirement: Broken config is refused, not defaulted
-A `config.toml` that exists but does not parse, cannot be read (permission denied, a directory, a FIFO), or holds a value the loader refuses (such as a `[tasks] allowed_hosts` entry that is not a plain hostname, or an unknown `log_level`) MUST stop every verb with exit 2 and an error naming the file and, for a syntax error, the line and column.
+A `config.toml` that exists but does not parse, cannot be read (permission denied, a directory, a FIFO), or holds a value the loader refuses (such as an unknown `log_level`) MUST stop every verb with exit 2 and an error naming the file and, for a syntax error, the line and column.
 
 #### Scenario: Syntax error
 - **WHEN** `config.toml` has a syntax error and `forgectl status` is run

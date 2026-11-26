@@ -5,12 +5,12 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,10 +19,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/attention"
 	"github.com/cameronsjo/forgectl/internal/desk"
+	"github.com/cameronsjo/forgectl/internal/desk/ask"
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
@@ -32,11 +32,6 @@ import (
 )
 
 const (
-	// attentionStdinCap is how much of a reply put keeps: the last 64 KiB,
-	// where the closing block is.
-	attentionStdinCap = 64 << 10
-	// attentionStdinMax is how much stdin put reads before refusing.
-	attentionStdinMax = 16 << 20
 	// attentionSweepMax caps the sweep.json read.
 	attentionSweepMax = 4 << 20
 	// attentionHerdrTimeout bounds the herdr agent list call.
@@ -56,13 +51,19 @@ const (
 	sourceError       = "error"
 	sourceUnavailable = "unavailable"
 	sourceMalformed   = "malformed"
+	// sourceRemote: the asks live on another host ($FORGECTL_DESK_ASKS_HOST)
+	// and were not read.
+	sourceRemote = "remote"
 )
+
+// attentionAsksHostEnv names the host that holds the desk's asks, when one
+// does; desk ask, asks, respond and watch --responses then run there.
+const attentionAsksHostEnv = "FORGECTL_DESK_ASKS_HOST"
 
 // Unix-only seams.
 var (
-	attentionStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 	// attentionHerdr asks the caller's herdr server for its agents. Known is
-	// false when herdr could not be asked; prune then falls back to the TTL.
+	// false when herdr could not be asked.
 	attentionHerdr = func(ctx context.Context, deps module.Deps) attention.Herdr {
 		h := attention.Herdr{Socket: attentionGetenv("HERDR_SOCKET_PATH")}
 		if deps.Runner == nil {
@@ -156,137 +157,6 @@ func attentionStateBase(deps module.Deps) (string, error) {
 	return base, nil
 }
 
-func runAttentionPut(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
-	if o.session == "" || o.turn == "" {
-		return attentionUsage("attention put: --session and --turn are required")
-	}
-	if attentionStdinIsTerminal() && cmd.InOrStdin() == os.Stdin {
-		return attentionUsage("attention put: stdin is a terminal; pipe the reply text in")
-	}
-	base, err := attentionStateBase(deps)
-	if err != nil {
-		return err
-	}
-	now := attentionNow().UTC()
-	r := attention.Record{Session: o.session, Pane: o.pane, Socket: o.socket, Cwd: o.cwd, Turn: o.turn, At: now}
-	// Check the flags before reading stdin, so a bad id costs nothing.
-	if err := attention.Validate(r); err != nil {
-		return attentionUsage("attention put: %v", err)
-	}
-	text, err := readTail(cmd.InOrStdin(), attentionStdinCap, attentionStdinMax)
-	if err != nil {
-		return attentionUsage("attention put: %v", err)
-	}
-	p := attention.Parse(text)
-	r.Items = p.Items
-	// written is the record as Put stores it, so --json echoes the stored
-	// items rather than the parser's view of them.
-	// A refusal here is the one Put would return, with the same exit code.
-	written, err := attention.Sanitize(r)
-	if err != nil {
-		return err
-	}
-
-	s, err := attention.OpenSpool(base, true)
-	if err != nil {
-		return err
-	}
-	defer s.Close() //nolint:errcheck // nothing buffered
-	if old, ok, err := s.Get(o.session); err == nil && ok {
-		since := old.At
-		r.Since = &since
-	}
-	if err := s.Put(r); err != nil {
-		return err
-	}
-	// The record is written. Housekeeping after it is best effort: a failure
-	// is reported on stderr and does not turn a published record into a
-	// failed put.
-	h := attentionHerdr(cmd.Context(), deps)
-	// Evict the pane's older records only when herdr itself says this
-	// session runs in that pane on this socket: --pane and --socket are the
-	// writer's claim, and any process of yours could name another pane.
-	if herdrRuns(h, o.session, o.pane, o.socket) {
-		if err := s.EvictPane(o.pane, o.socket, o.session); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "attention put: evict: %v\n", err) //nolint:errcheck // best-effort note on stderr
-		}
-	}
-	live := h.Liveness()
-	live.Keep = o.session
-	if _, _, err := s.List(now, deps.Cfg.Attention.TTL(), live); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "attention put: prune: %v\n", err) //nolint:errcheck // best-effort note on stderr
-	}
-	if o.asJSON {
-		return writeJSON(cmd.OutOrStdout(), attentionPutEcho(written, p))
-	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "items=%d seen=%d read=%d\n", len(p.Items), p.Seen, p.Read)
-	return err
-}
-
-// attentionPut is `put --json`: the session, the turn and the question and
-// action items of the record as written, in record order. Every field is
-// always present: actor and rec are "" when the item has none, and items is
-// [] when the reply had no block. A viewer holds this copy in memory and
-// compares spool rows against it, so its text is the stored, cleaned text.
-type attentionPut struct {
-	Session string             `json:"session"`
-	Turn    string             `json:"turn"`
-	Items   []attentionPutItem `json:"items"`
-	Seen    int                `json:"seen"`
-	Read    int                `json:"read"`
-}
-
-type attentionPutItem struct {
-	Kind  string `json:"kind"`
-	N     int    `json:"n"`
-	Actor string `json:"actor"`
-	Text  string `json:"text"`
-	Rec   string `json:"rec"`
-}
-
-// attentionPutEcho builds the --json echo from the written record. Notes and
-// options are stored but are not rows, so they are left out.
-func attentionPutEcho(r attention.Record, p attention.Parsed) attentionPut {
-	out := attentionPut{Session: r.Session, Turn: r.Turn, Items: []attentionPutItem{}, Seen: p.Seen, Read: p.Read}
-	for _, it := range r.Items {
-		if it.Kind != attention.KindQuestion && it.Kind != attention.KindAction {
-			continue
-		}
-		out.Items = append(out.Items, attentionPutItem{Kind: it.Kind, N: it.N, Actor: it.Actor, Text: it.Text, Rec: it.Rec})
-	}
-	return out
-}
-
-// herdrRuns reports whether the caller's herdr server lists session in pane
-// and in no other pane, and socket is that server. A session two panes claim
-// is ambiguous and vouches for nothing.
-func herdrRuns(h attention.Herdr, session, pane, socket string) bool {
-	if !h.Known || pane == "" || socket == "" || socket != h.Socket {
-		return false
-	}
-	got, ok := h.SessionPane(session)
-	return ok && got == pane
-}
-
-func runAttentionRm(cmd *cobra.Command, deps module.Deps, o attentionOpts) error {
-	if !attention.ValidSession(o.session) {
-		return attentionUsage("attention rm: --session must be 1 to 64 letters, digits, '_' or '-'")
-	}
-	base, err := attentionStateBase(deps)
-	if err != nil {
-		return err
-	}
-	s, err := attention.OpenSpool(base, false)
-	if errors.Is(err, attention.ErrNoSpool) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer s.Close() //nolint:errcheck // nothing buffered
-	return s.Remove(o.session)
-}
-
 // attentionList is `list --json`.
 type attentionList struct {
 	Rows    []attention.Row  `json:"rows"`
@@ -298,8 +168,10 @@ type attentionList struct {
 // yet), error or malformed (counted in skipped where it is a record or file),
 // unavailable (herdr could not be asked).
 type attentionSources struct {
-	Spool string `json:"spool"`
-	Desk  string `json:"desk"`
+	Desk string `json:"desk"`
+	// Asks is the desk's asks log: ok, absent (no ask yet), error, or remote
+	// (the asks live on $FORGECTL_DESK_ASKS_HOST and were not read).
+	Asks  string `json:"asks"`
 	Herdr string `json:"herdr"`
 	// HerdrDetail is why herdr is unavailable: herdr's own error, cleaned and
 	// cut. Empty when herdr answered.
@@ -329,19 +201,23 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	now := attentionNow().UTC()
 	ctx := cmd.Context()
 	var (
-		h           attention.Herdr
-		items       []attention.DeskItem
-		deskState   string
-		core        attention.Core
-		coreState   = sourceAbsent
-		sw          *attention.Sweep
+		h            attention.Herdr
+		items        []attention.DeskItem
+		deskState    string
+		asks         []attention.AskItem
+		asksSkipped  int
+		asksState    string
+		asksErr      error
+		core         attention.Core
+		coreState    = sourceAbsent
+		sw           *attention.Sweep
 		sweepSkipped int
-		sweepState  string
-		hold        *attention.DrainHold
-		drainState  string
+		sweepState   string
+		hold         *attention.DrainHold
+		drainState   string
 	)
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		h = attentionHerdr(ctx, deps)
@@ -361,6 +237,10 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	}()
 	go func() {
 		defer wg.Done()
+		asks, asksSkipped, asksState, asksErr = attentionAsks(now)
+	}()
+	go func() {
+		defer wg.Done()
 		sw, sweepSkipped, sweepState = attentionSweep(attention.SweepPath(base))
 	}()
 	go func() {
@@ -370,9 +250,9 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 	wg.Wait()
 
 	out := attentionList{Sources: attentionSources{
-		Spool: sourceOK,
-		Herdr: sourceOK,
 		Desk:  deskState,
+		Asks:  asksState,
+		Herdr: sourceOK,
 		Sweep: sweepState,
 		Core:  coreState,
 		Drain: drainState,
@@ -388,39 +268,18 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 		gen := sw.GeneratedAt
 		out.Sources.SweepGeneratedAt = &gen
 	}
-	out.Skipped += sweepSkipped
-
-	var recs []attention.Record
-	var spoolErr error
-	s, err := attention.OpenSpool(base, false)
-	switch {
-	case errors.Is(err, attention.ErrNoSpool):
-		out.Sources.Spool = sourceAbsent
-	case err != nil:
-		// An unsafe or unreadable spool hides only the session rows: the
-		// desk and sweep still report, and sources.spool says why rows are
-		// missing.
-		out.Sources.Spool = sourceError
-		spoolErr = err
-	default:
-		recs, out.Skipped, err = s.List(now, deps.Cfg.Attention.TTL(), h.Liveness())
-		_ = s.Close() // read-only use; nothing to flush
-		if err != nil {
-			out.Sources.Spool = sourceError
-			spoolErr = err
-		}
-	}
+	out.Skipped += asksSkipped + sweepSkipped
 
 	out.Rows = attention.Build(attention.Input{
-		Now: now, Records: recs, Herdr: h, Core: core, Desk: items, Sweep: sw, Drain: hold,
+		Now: now, Herdr: h, Core: core, Desk: items, Asks: asks, Sweep: sw, Drain: hold,
 		WorkerPrefix: deps.Cfg.Attention.Prefix(), Session: o.session,
 	})
 	if out.Rows == nil {
 		out.Rows = []attention.Row{}
 	}
-	if spoolErr != nil {
+	if asksErr != nil {
 		// Like a degraded `status` section: reported, not fatal.
-		fmt.Fprintf(cmd.ErrOrStderr(), "attention list: spool not read: %v\n", spoolErr) //nolint:errcheck // best-effort note on stderr
+		fmt.Fprintf(cmd.ErrOrStderr(), "attention list: asks not read: %s\n", attention.Clean(asksErr.Error(), attentionDetailMax)) //nolint:errcheck // best-effort note on stderr
 	}
 	if o.asJSON {
 		return writeJSON(cmd.OutOrStdout(), out)
@@ -467,6 +326,43 @@ func attentionDesk() ([]attention.DeskItem, string) {
 		items = append(items, di)
 	}
 	return items, sourceOK
+}
+
+// attentionAsks reads the desk's open asks through the asks store's
+// read-only open: it creates, chmods and locks nothing, so a writer is never
+// held up. Answered and still-snoozed asks are left out. Lines that are not
+// well-formed records are counted in skipped. When the asks live on another
+// host, nothing is read and the state is remote.
+func attentionAsks(now time.Time) (items []attention.AskItem, skipped int, state string, err error) {
+	if attentionGetenv(attentionAsksHostEnv) != "" && attentionGetenv("DESK_DIR") == "" && attentionGetenv("CLAUDE_DESK_DIR") == "" {
+		return nil, 0, sourceRemote, nil
+	}
+	// A missing home matters only when no env var names the desk, and then
+	// ResolveDir refuses on its own.
+	home, _ := attentionUserHome()
+	dir, err := desk.ResolveDir(attentionGetenv, home)
+	if err != nil {
+		return nil, 0, sourceError, err
+	}
+	s, err := ask.OpenReadOnly(dir)
+	if err != nil {
+		return nil, 0, sourceError, err
+	}
+	if _, err := os.Lstat(s.LogPath()); errors.Is(err, fs.ErrNotExist) {
+		return nil, 0, sourceAbsent, nil
+	}
+	recs, _, bad, err := s.ReadFrom(0)
+	if err != nil {
+		return nil, 0, sourceError, err
+	}
+	for _, it := range ask.Fold(recs, now) {
+		if it.State != ask.StateOpen {
+			continue
+		}
+		a := it.Ask
+		items = append(items, attention.AskItem{ID: a.ID, Title: a.Title, Bucket: string(a.Bucket), From: a.From, At: a.At})
+	}
+	return items, bad, sourceOK, nil
 }
 
 // attentionDrain reads drain.json read-only and returns the hold the queue
@@ -597,37 +493,6 @@ func attentionSweep(path string) (*attention.Sweep, int, string) {
 	return &sw, skipped, sourceOK
 }
 
-// readTail reads r to EOF and returns its last keep bytes, refusing input
-// over limit. When it had to cut, the partial first line is dropped, so the
-// tail starts on a whole line. A cut inside a fenced block can still leave
-// the fence state inverted; that is accepted for replies over keep bytes.
-func readTail(r io.Reader, keep, limit int) (string, error) {
-	buf := make([]byte, 0, keep)
-	chunk := make([]byte, 32<<10)
-	total, cut := 0, false
-	for {
-		n, err := r.Read(chunk)
-		total += n
-		if total > limit {
-			return "", fmt.Errorf("stdin is over %d MiB", limit>>20)
-		}
-		buf = append(buf, chunk[:n]...)
-		if len(buf) > keep {
-			buf = append(buf[:0], buf[len(buf)-keep:]...)
-			cut = true
-		}
-		if errors.Is(err, io.EOF) {
-			if i := bytes.IndexByte(buf, '\n'); cut && i >= 0 {
-				buf = buf[i+1:]
-			}
-			return string(buf), nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("read stdin: %w", err)
-		}
-	}
-}
-
 // shortKey is the start of a row key, enough to tell rows apart by eye.
 func shortKey(k string) string {
 	if len(k) < attentionShortKey {
@@ -644,10 +509,10 @@ func printAttentionList(out, errOut io.Writer, l attentionList) error {
 	}
 	for _, r := range l.Rows {
 		label := r.Tag
-		if r.N > 0 && (r.Kind == attention.KindQuestion || r.Kind == attention.KindAction) {
-			label = fmt.Sprintf("%s%d", r.Tag, r.N)
-		}
 		var extra []string
+		if r.Bucket != "" {
+			extra = append(extra, r.Bucket)
+		}
 		if r.Worker != "" {
 			extra = append(extra, "worker "+r.Worker)
 		} else if r.Origin == attention.OriginWorker {
@@ -657,9 +522,6 @@ func printAttentionList(out, errOut io.Writer, l attentionList) error {
 			extra = append(extra, "pane "+r.Pane)
 		} else if r.Session != "" {
 			extra = append(extra, "not in herdr")
-		}
-		if r.NotOnDesk {
-			extra = append(extra, "not on desk")
 		}
 		line := fmt.Sprintf("%s %-6s %-10s %s", shortKey(r.Key), r.Kind, label, r.Text)
 		if len(extra) > 0 {

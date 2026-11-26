@@ -52,13 +52,28 @@ func runDeskAsk(cmd *cobra.Command, _ module.Deps, dirFlag string, o deskAskOpts
 	if err != nil {
 		return deskUsage("desk ask: --steps-file: %w", err)
 	}
-	notify, err := resolveAskNotify(o.notify, deskGetenv)
-	if err != nil {
-		return err
-	}
 	from := o.from
 	if from == "" {
 		from = defaultAskFrom(deskGetenv)
+	}
+	remote, err := deskAsksRemoteTarget(dirFlag, deskGetenv)
+	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if o.notify != "" {
+			return deskUsage("desk ask: --notify is refused while asks go to %s ($%s): the hc terminal is on this machine; leave --notify off and use desk watch --responses", remote.Host, deskAsksHostEnv)
+		}
+		var stdin io.Reader
+		if o.stepsFile != "" {
+			stdin = strings.NewReader(steps)
+		}
+		return runDeskAsksRemote(cmd, remote, "desk ask", askRemoteWords(o, from, o.stepsFile != ""), stdin,
+			"the ask was NOT recorded, unless the connection dropped after it was sent: check forgectl desk asks before asking again")
+	}
+	notify, err := resolveAskNotify(o.notify, deskGetenv)
+	if err != nil {
+		return err
 	}
 	s, _, err := openAskStore(dirFlag)
 	if err != nil {
@@ -157,6 +172,16 @@ func readSteps(path string) (string, error) {
 }
 
 func runDeskAsks(cmd *cobra.Command, _ module.Deps, dirFlag, id string, all, asJSON bool) error {
+	remote, err := deskAsksRemoteTarget(dirFlag, deskGetenv)
+	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if id != "" && !ask.ValidID(id) {
+			return deskUsage("desk asks: %q is not an ask id (ask-xxxxxxxx)", termsafe.SafeLineMax(id, deskQuoteMax))
+		}
+		return runDeskAsksRemote(cmd, remote, "desk asks", asksRemoteWords(id, all, asJSON), nil, "no asks were read")
+	}
 	dir, err := resolveDeskDir(dirFlag)
 	if err != nil {
 		return err
@@ -330,6 +355,17 @@ func runDeskRespond(cmd *cobra.Command, _ module.Deps, dirFlag string, args []st
 	default:
 		return deskUsage("desk respond: %q is not done, reply, link or snooze", termsafe.SafeLineMax(args[1], deskQuoteMax))
 	}
+	remote, err := deskAsksRemoteTarget(dirFlag, deskGetenv)
+	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if !ask.ValidID(id) {
+			return deskUsage("desk respond: %q is not an ask id (ask-xxxxxxxx)", termsafe.SafeLineMax(id, deskQuoteMax))
+		}
+		return runDeskAsksRemote(cmd, remote, "desk respond", respondRemoteWords(args, asJSON), nil,
+			"the response was NOT recorded, unless the connection dropped after it was sent: check forgectl desk asks "+id)
+	}
 	s, _, err := openAskStore(dirFlag)
 	if err != nil {
 		return err
@@ -395,6 +431,20 @@ type askWatchLine struct {
 func runDeskWatchResponses(cmd *cobra.Command, _ module.Deps, dirFlag, id string, deadline int, since int64) error {
 	if id != "" && !ask.ValidID(id) {
 		return deskUsage("desk watch: %q is not an ask id (ask-xxxxxxxx)", termsafe.SafeLineMax(id, deskQuoteMax))
+	}
+	remote, err := deskAsksRemoteTarget(dirFlag, deskGetenv)
+	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if deadline == deskWatchDeadlineUnset {
+			deadline = 0
+			if !deskStdinIsTerminal() {
+				deadline = deskWatchDefaultDeadline
+			}
+		}
+		return runDeskAsksRemote(cmd, remote, "desk watch", watchResponsesRemoteWords(id, deadline, since), nil,
+			"the watch stopped; run it again, with --since from the last line's offset")
 	}
 	dir, err := resolveDeskDir(dirFlag)
 	if err != nil {

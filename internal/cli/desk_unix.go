@@ -1146,8 +1146,8 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):
-		// A retry finds the item already skipped: report it, exit 0, as
-		// `tasks done` does for a task already done. A name that never
+		// A retry finds the item already skipped: report it and exit 0,
+		// so the retry is idempotent. A name that never
 		// existed is the error below, so a caller can tell them apart.
 		if meta, ok := d.SkippedMeta(name); ok {
 			return reportDeskSkip(cmd, deskSkipJSON{Name: name, Reason: skipReasonOf(meta), Note: meta.SkipNote, Already: true}, asJSON)

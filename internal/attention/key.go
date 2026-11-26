@@ -58,7 +58,7 @@ func ValidKey(s string) bool { return keyRe.MatchString(s) }
 //
 //   - desk: the item name, its hash and when it was added (a name can be
 //     reused once done/ is emptied; the hash and time tell the two apart);
-//   - q / a: session, turn, item number (a new turn is a new ask);
+//   - ask: the ask id (the store never reuses one);
 //   - worker: worker name and block;
 //   - pr: owner/repo#n;
 //   - drain: the constant "slots-hold".
@@ -67,8 +67,8 @@ func RowKey(r Row) string {
 	switch r.Kind {
 	case RowDesk:
 		parts = []string{r.Tag, r.Hash, r.At.UTC().Format(time.RFC3339Nano)}
-	case KindQuestion, KindAction:
-		parts = []string{r.Session, r.Turn, strconv.Itoa(r.N)}
+	case RowAsk:
+		parts = []string{r.Tag}
 	case RowWorker:
 		parts = []string{r.Worker, r.Tag}
 	case RowPR:
@@ -76,7 +76,7 @@ func RowKey(r Row) string {
 	case RowDrain:
 		parts = []string{"slots-hold"}
 	default:
-		parts = []string{r.Tag, r.Session, r.Turn, strconv.Itoa(r.N), r.Text}
+		parts = []string{r.Tag, r.Session, strconv.Itoa(r.N), r.Text}
 	}
 	h := sha256.New()
 	field := func(s string) {
@@ -92,19 +92,14 @@ func RowKey(r Row) string {
 	return hex.EncodeToString(h.Sum(nil))[:KeyLen]
 }
 
-// RowTier is the surface tier for a row. Record-derived rows (q / a) never
-// raise, whatever their origin: any process of yours can write a record.
+// RowTier is the surface tier for a row. An ask row is counted, never
+// raised, whatever its origin: any process of yours can append an ask.
 func RowTier(r Row) string {
 	switch r.Kind {
 	case RowDesk, RowWorker, RowDrain:
 		return TierRaise
-	case RowPR:
+	case RowPR, RowAsk:
 		return TierCount
-	case KindAction:
-		if r.Actor == ActorCameron {
-			return TierCount
-		}
-		return TierHidden
 	default:
 		return TierHidden
 	}

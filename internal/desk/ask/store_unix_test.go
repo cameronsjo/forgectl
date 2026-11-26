@@ -246,6 +246,33 @@ func TestOpenReadOnlyCreatesNothing(t *testing.T) {
 	}
 }
 
+// A read-only open is how attention list reads the asks: it must change no
+// mode, even on a directory a writer would narrow.
+func TestOpenReadOnlyChangesNoMode(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, SubDir)
+	if err := os.Mkdir(sub, 0o755); err != nil { //nolint:gosec // G301: the test needs a broad directory to prove a reader leaves it
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o755); err != nil { //nolint:gosec // G302: the test needs a broad directory to prove a reader leaves it
+		t.Fatal(err)
+	}
+	s, err := OpenReadOnly(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Items(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o755 {
+		t.Fatalf("mode = %v, want 0755 untouched by a reader", fi.Mode().Perm())
+	}
+}
+
 func TestOpenNarrowsABroadDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, SubDir), 0o755); err != nil { //nolint:gosec // G301: the test needs a broad directory to prove Open narrows it
