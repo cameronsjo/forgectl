@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,5 +273,126 @@ func TestProductionWatchHC(t *testing.T) {
 	t.Setenv("HC_SESSION", "not a session!")
 	if _, err := productionWatchHC(); err == nil {
 		t.Fatal("an HC_SESSION the adapter refuses built a watch client")
+	}
+}
+
+type streamFakeSource struct {
+	mu       sync.Mutex
+	status   string
+	events   chan string
+	listed   chan struct{}
+	listOnce sync.Once
+}
+
+func (s *streamFakeSource) GetJSON(_ context.Context, target string) ([]byte, error) {
+	s.mu.Lock()
+	st := s.status
+	s.mu.Unlock()
+	return json.Marshal(map[string]any{
+		"address": "t1",
+		"name":    target,
+		"state":   "live",
+		"status":  st,
+	})
+}
+
+func (s *streamFakeSource) ListJSON(_ context.Context) ([]byte, error) {
+	s.mu.Lock()
+	st := s.status
+	s.mu.Unlock()
+	s.listOnce.Do(func() {
+		if s.listed != nil {
+			close(s.listed)
+		}
+	})
+	return json.Marshal(map[string]any{
+		"terminals": []map[string]any{{
+			"address": "t1",
+			"name":    "cos-a",
+			"state":   "live",
+			"status":  st,
+		}},
+	})
+}
+
+func (s *streamFakeSource) ReadText(_ context.Context, _ string) ([]byte, bool, error) {
+	return nil, true, nil
+}
+
+func (s *streamFakeSource) Events(ctx context.Context, w io.Writer) error {
+	if _, err := io.WriteString(w, "{\"seq\":1,\"terminals\":[]}\n"); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case line, ok := <-s.events:
+			if !ok {
+				return nil
+			}
+			if _, err := io.WriteString(w, line+"\n"); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func TestSurfaceWatchStreamRejectsJSONFlag(t *testing.T) {
+	cmd := newSurfaceWatchCmdWith(theme.Default(), watchRuntime{})
+	cmd.SetArgs([]string{"--cos", "--json", "--stream"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected usage error when --json and --stream are combined")
+	}
+	if got := ExitCode(err); got != exitUsage {
+		t.Fatalf("exit code = %d, want %d", got, exitUsage)
+	}
+}
+
+func TestSurfaceWatchStreamEmitsTypedTransitionsOnWake(t *testing.T) {
+	src := &streamFakeSource{
+		status: workerwatch.StatusWorking,
+		events: make(chan string, 4),
+		listed: make(chan struct{}),
+	}
+	hc := workerwatch.CLI{Source: src}
+	c := &workerwatch.Collector{
+		HC:  hc,
+		Cos: true,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		defer func() { _ = pw.Close() }()
+		errCh <- streamWatchEvents(ctx, pw, c, hc, time.Hour)
+	}()
+
+	// Wait for the baseline snapshot before flipping state.
+	<-src.listed
+
+	// Flip worker status and push an hc status event; stream must wake
+	// immediately without waiting for the 1h fallback ticker.
+	src.mu.Lock()
+	src.status = workerwatch.StatusBlocked
+	src.mu.Unlock()
+	src.events <- `{"method":"event","params":{"seq":2,"type":"status","terminal":"t1"}}`
+
+	dec := json.NewDecoder(pr)
+	var ev workerwatch.StreamEvent
+	if err := dec.Decode(&ev); err != nil {
+		t.Fatalf("decode stream event: %v", err)
+	}
+	if ev.Type != workerwatch.EventStatusChanged || ev.Worker != "cos-a" || ev.Status != workerwatch.StatusBlocked || !ev.NeedsYou {
+		t.Fatalf("unexpected stream event: %+v", ev)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamWatchEvents returned error on cancel: %v", err)
 	}
 }
