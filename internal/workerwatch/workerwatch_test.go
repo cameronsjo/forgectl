@@ -2,6 +2,7 @@ package workerwatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -180,6 +181,40 @@ func TestScanEventsWakesOnRowEventsOnly(t *testing.T) {
 	ScanEvents(strings.NewReader(`{"terminals":[]}`+"\n"+`{"params":{"type":"heartbeat"}}`), quiet)
 	if len(quiet) != 0 {
 		t.Error("a heartbeat woke the view")
+	}
+
+	titleWake := make(chan struct{}, 1)
+	ScanEvents(strings.NewReader(`{"terminals":[]}`+"\n"+`{"method":"event","params":{"seq":2,"type":"title","terminal":"t1"}}`), titleWake)
+	if len(titleWake) != 1 {
+		t.Error("a title event (OSC 2) must wake the view")
+	}
+}
+
+func TestStatusFromOSCTitle(t *testing.T) {
+	cases := []struct {
+		name   string
+		status json.RawMessage
+		title  string
+		want   string
+	}{
+		{"codex action required", nil, "Codex - Action Required", StatusBlocked},
+		{"codex braille spinner", nil, "⠋ Working on PR", StatusWorking},
+		{"claude half-circle spinner", nil, "◐ Reading files", StatusWorking},
+		{"claude idle prefix", nil, "✳ Claude Code", StatusIdle},
+		{"plain shell title ignored", nil, "zsh", ""},
+		{"explicit OSC 7501 wins over title", json.RawMessage(`"done"`), "Codex - Action Required", StatusDone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := hcGet{Address: "t1", State: "live", Status: tc.status, Title: tc.title}
+			term, ok := g.terminal()
+			if !ok {
+				t.Fatal("expected valid terminal")
+			}
+			if term.Status != tc.want {
+				t.Errorf("Status = %q, want %q", term.Status, tc.want)
+			}
+		})
 	}
 }
 

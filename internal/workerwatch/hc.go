@@ -88,13 +88,17 @@ type CLI struct {
 }
 
 var (
-	addressRe = regexp.MustCompile(`^(?:[A-Za-z0-9._-]{1,64}/)?t[0-9a-z]{1,12}$`)
-	modelRe   = regexp.MustCompile(`^[A-Za-z0-9._:\[\]-]{1,64}$`)
+	addressRe       = regexp.MustCompile(`^(?:[A-Za-z0-9._-]{1,64}/)?t[0-9a-z]{1,12}$`)
+	modelRe         = regexp.MustCompile(`^[A-Za-z0-9._:\[\]-]{1,64}$`)
+	oscClaudeWorkRe = regexp.MustCompile("^[\u2800-\u28FF\u25D0-\u25D3] ")
+	oscCodexWorkRe  = regexp.MustCompile(`(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)`)
+	oscClaudeIdleRe = regexp.MustCompile("^\u2733 ")
 )
 
 type hcGet struct {
 	Address    string          `json:"address"`
 	Name       *string         `json:"name"`
+	Title      string          `json:"title"`
 	State      string          `json:"state"`
 	Status     json.RawMessage `json:"status"`
 	CreatedMS  int64           `json:"created_ms"`
@@ -107,7 +111,9 @@ type hcGet struct {
 }
 
 // terminal converts one hc record. Status is an object ({app, state}) in
-// `hc get` and a bare word in `hc ls`; both are accepted.
+// `hc get` and a bare word in `hc ls`; both are accepted. When OSC 7501
+// status is absent, recognized harness OSC 2 title markers (Codex and
+// Claude Code) fill Status.
 func (g hcGet) terminal() (Terminal, bool) {
 	if !addressRe.MatchString(g.Address) {
 		return Terminal{}, false
@@ -122,6 +128,9 @@ func (g hcGet) terminal() (Terminal, bool) {
 		t.State = ""
 	}
 	t.Status = statusWord(g.Status)
+	if t.Status == "" && g.Title != "" {
+		t.Status = statusFromTitle(g.Title)
+	}
 	if g.Foreground != nil {
 		t.Model = ModelFromArgv(g.Foreground.Argv)
 	}
@@ -129,6 +138,22 @@ func (g hcGet) terminal() (Terminal, bool) {
 		t.Model = ModelFromArgv(g.Argv)
 	}
 	return t, true
+}
+
+// statusFromTitle maps recognized harness OSC 2 title markers (matching
+// herdr's codex.toml and claude.toml manifests) to a Status* constant.
+// Unrecognized titles (plain shells, editors) return "".
+func statusFromTitle(title string) string {
+	if strings.Contains(title, "Action Required") {
+		return StatusBlocked
+	}
+	if oscClaudeWorkRe.MatchString(title) || oscCodexWorkRe.MatchString(title) {
+		return StatusWorking
+	}
+	if oscClaudeIdleRe.MatchString(title) {
+		return StatusIdle
+	}
+	return ""
 }
 
 func statusWord(raw json.RawMessage) string {
@@ -260,8 +285,9 @@ func hcFailure(ctx context.Context, what string, err error) error {
 	return fmt.Errorf("%s failed (run it by hand to see why)", what)
 }
 
-// wakeEvents are the hc event types that can change a row.
-var wakeEvents = []string{"created", "lost", "restarted", "finished", "removed", "status", "turn"}
+// wakeEvents are the hc event types that can change a row, including OSC 2
+// title updates used by harnesses that do not emit OSC 7501 (e.g. Codex).
+var wakeEvents = []string{"created", "lost", "restarted", "finished", "removed", "status", "turn", "title"}
 
 // EventStream is a running `hc events` subscription.
 type EventStream struct {
