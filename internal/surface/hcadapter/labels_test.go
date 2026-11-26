@@ -172,7 +172,8 @@ func listenUnixTemp(t *testing.T, sockPath string) error {
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		return err
 	}
-	ln, err := net.Listen("unix", sockPath)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", sockPath)
 	if err != nil {
 		return err
 	}
