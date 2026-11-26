@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -46,19 +47,43 @@ func runSweep(cmd *cobra.Command, deps module.Deps, o sweepOpts) error {
 
 	// GitHub is the one source the ledger cannot do without: a ledger with
 	// no PRs would erase the queue's marker-clean rows, so a failed read
-	// stops here and the last good file stays.
+	// stops here and the last good file stays. Fan out the independent GitHub,
+	// herdr, and desk reads concurrently so slow network/IPC calls overlap.
 	gh := sweep.GitHub{Run: githubauth.Runner(deps.Runner, host)}
-	open, openCut, err := gh.OpenPRs(ctx, p.owner)
-	if err != nil {
-		return err
+	var (
+		open               []sweep.PRFacts
+		merged             []sweep.MergedPR
+		openCut, mergedCut bool
+		openErr, mergedErr error
+		h                  attention.Herdr
+		items              []attention.DeskItem
+		deskState          string
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		open, openCut, openErr = gh.OpenPRs(ctx, p.owner)
+	}()
+	go func() {
+		defer wg.Done()
+		merged, mergedCut, mergedErr = gh.MergedPRs(ctx, p.owner, p.since)
+	}()
+	go func() {
+		defer wg.Done()
+		h = attentionHerdr(ctx, deps)
+	}()
+	go func() {
+		defer wg.Done()
+		items, deskState = attentionDesk()
+	}()
+	wg.Wait()
+	if openErr != nil {
+		return openErr
 	}
-	merged, mergedCut, err := gh.MergedPRs(ctx, p.owner, p.since)
-	if err != nil {
-		return err
+	if mergedErr != nil {
+		return mergedErr
 	}
-
-	h := attentionHerdr(ctx, deps)
-	items, deskState := attentionDesk()
 	deskPanes := map[string]bool{}
 	for _, it := range items {
 		if attention.ValidPane(it.SignalPane) {

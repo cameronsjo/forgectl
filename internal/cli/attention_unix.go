@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -326,12 +327,68 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 		return err
 	}
 	now := attentionNow().UTC()
-	h := attentionHerdr(cmd.Context(), deps)
-	out := attentionList{Sources: attentionSources{Spool: sourceOK, Herdr: sourceOK}}
+	ctx := cmd.Context()
+	var (
+		h           attention.Herdr
+		items       []attention.DeskItem
+		deskState   string
+		core        attention.Core
+		coreState   = sourceAbsent
+		sw          *attention.Sweep
+		sweepSkipped int
+		sweepState  string
+		hold        *attention.DrainHold
+		drainState  string
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		h = attentionHerdr(ctx, deps)
+	}()
+	go func() {
+		defer wg.Done()
+		items, deskState = attentionDesk()
+		// hc is asked only when a desk item names a terminal: nothing else in
+		// the queue uses it, and the call can cost up to attentionHcTimeout.
+		if deskNamesATerminal(items) {
+			core = attentionCore(ctx)
+			coreState = sourceOK
+			if !core.Known {
+				coreState = sourceUnavailable
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		sw, sweepSkipped, sweepState = attentionSweep(attention.SweepPath(base))
+	}()
+	go func() {
+		defer wg.Done()
+		hold, drainState = attentionDrain(now)
+	}()
+	wg.Wait()
+
+	out := attentionList{Sources: attentionSources{
+		Spool: sourceOK,
+		Herdr: sourceOK,
+		Desk:  deskState,
+		Sweep: sweepState,
+		Core:  coreState,
+		Drain: drainState,
+	}}
 	if !h.Known {
 		out.Sources.Herdr = sourceUnavailable
 		out.Sources.HerdrDetail = h.Detail
 	}
+	if coreState == sourceUnavailable {
+		out.Sources.CoreDetail = core.Detail
+	}
+	if sw != nil {
+		gen := sw.GeneratedAt
+		out.Sources.SweepGeneratedAt = &gen
+	}
+	out.Skipped += sweepSkipped
 
 	var recs []attention.Record
 	var spoolErr error
@@ -353,32 +410,6 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 			spoolErr = err
 		}
 	}
-
-	items, deskState := attentionDesk()
-	out.Sources.Desk = deskState
-
-	sw, sweepSkipped, sweepState := attentionSweep(attention.SweepPath(base))
-	out.Sources.Sweep = sweepState
-	if sw != nil {
-		gen := sw.GeneratedAt
-		out.Sources.SweepGeneratedAt = &gen
-	}
-	out.Skipped += sweepSkipped
-
-	// hc is asked only when a desk item names a terminal: nothing else in the
-	// queue uses it, and the call can cost up to attentionHcTimeout.
-	var core attention.Core
-	out.Sources.Core = sourceAbsent
-	if deskNamesATerminal(items) {
-		core = attentionCore(cmd.Context())
-		out.Sources.Core = sourceOK
-		if !core.Known {
-			out.Sources.Core, out.Sources.CoreDetail = sourceUnavailable, core.Detail
-		}
-	}
-
-	hold, drainState := attentionDrain(now)
-	out.Sources.Drain = drainState
 
 	out.Rows = attention.Build(attention.Input{
 		Now: now, Records: recs, Herdr: h, Core: core, Desk: items, Sweep: sw, Drain: hold,
