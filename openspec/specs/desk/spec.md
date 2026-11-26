@@ -182,8 +182,8 @@ ssh SHALL be run without a local shell, and every word of the remote command MUS
 - **THEN** the host records the reply text byte for byte and the remote shell runs nothing from it
 
 ### Requirement: Remote outcome passes through
-The remote output SHALL stream unchanged and its exit code SHALL pass through. An ssh failure SHALL exit 255 with an error naming the host and saying nothing was recorded.
+The remote output SHALL stream unchanged and its exit code SHALL pass through. An ssh failure SHALL exit 255 with an error naming the host and saying nothing was recorded unless the connection dropped after the request was sent.
 
 #### Scenario: No connection
 - **WHEN** ssh exits 255
-- **THEN** `desk ask` exits 255 with an error naming the host and saying the ask was not recorded
+- **THEN** `desk ask` exits 255 with an error naming the host and saying the ask was not recorded unless the connection dropped after sending

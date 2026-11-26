@@ -110,7 +110,7 @@ func TestDeskAsksRemoteTarget(t *testing.T) {
 
 func TestDeskRemoteArgv(t *testing.T) {
 	got := deskRemoteArgv(deskAsksRemote{Host: "m5", Bin: "/opt/bin/forgectl"}, []string{"asks", "--", "it's"})
-	want := []string{"ssh", "-o", "BatchMode=yes", "-T", "--", "m5",
+	want := []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-T", "--", "m5",
 		"'env'", "'FORGECTL_DESK_ASKS_HOST='", "'/opt/bin/forgectl'", "'desk'", "'asks'", "'--'", `'it'\''s'`}
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv\n%q\nwant\n%q", got, want)
@@ -187,7 +187,7 @@ func stubDeskRemote(t *testing.T, code int, out string) *[]remoteCall {
 // remoteWords strips the fixed ssh prefix and quoting from a stub call.
 func remoteWords(t *testing.T, c remoteCall) []string {
 	t.Helper()
-	prefix := []string{"ssh", "-o", "BatchMode=yes", "-T", "--", "m5", "'env'", "'FORGECTL_DESK_ASKS_HOST='", "'forgectl'", "'desk'"}
+	prefix := []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-T", "--", "m5", "'env'", "'FORGECTL_DESK_ASKS_HOST='", "'forgectl'", "'desk'"}
 	if len(c.argv) < len(prefix) || !slices.Equal(c.argv[:len(prefix)], prefix) {
 		t.Fatalf("argv %q does not start with %q", c.argv, prefix)
 	}

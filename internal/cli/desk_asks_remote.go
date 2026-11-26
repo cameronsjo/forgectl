@@ -100,8 +100,11 @@ func shSingleQuote(s string) string {
 // uses its local desk instead of calling ssh again.
 func deskRemoteArgv(r deskAsksRemote, words []string) []string {
 	remote := append([]string{"env", deskAsksHostEnv + "=", r.Bin, "desk"}, words...)
-	argv := make([]string, 0, 6+len(remote))
-	argv = append(argv, "ssh", "-o", "BatchMode=yes", "-T", "--", r.Host)
+	argv := make([]string, 0, 12+len(remote))
+	// ConnectTimeout bounds an unreachable host; the keepalives end a session
+	// whose link died mid-watch instead of letting it hang past --deadline.
+	argv = append(argv, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-T", "--", r.Host)
 	for _, w := range remote {
 		argv = append(argv, shSingleQuote(w))
 	}
