@@ -181,6 +181,10 @@ func childNamed(cmd *cobra.Command, name string) *cobra.Command {
 // to start with a forgectl verb's name (`docker ps` is Docker's, not forgectl docker).
 var skillExternalSpans = map[string]bool{"docker ps": true}
 
+// skillPluginVerbs are top-level verbs dispatched to standalone forgectl-<verb>
+// plugin binaries via Rung B PATH lookup rather than registered in newRoot.
+var skillPluginVerbs = map[string]bool{"docs": true}
+
 var skillWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // checkSkillSpan returns what a span names that the tree lacks. A span counts
@@ -200,7 +204,7 @@ func checkSkillSpan(root *cobra.Command, span string) []string {
 		fields = fields[1:]
 	}
 	if len(fields) == 0 || !skillWord.MatchString(fields[0]) || childNamed(root, fields[0]) == nil {
-		if len(fields) > 0 && skillWord.MatchString(fields[0]) && strings.HasPrefix(span, "forgectl ") {
+		if len(fields) > 0 && skillWord.MatchString(fields[0]) && strings.HasPrefix(span, "forgectl ") && !skillPluginVerbs[fields[0]] {
 			return []string{fields[0]}
 		}
 		return nil

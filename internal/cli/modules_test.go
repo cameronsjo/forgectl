@@ -125,7 +125,7 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 36
+	const wantCount = 35
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
@@ -136,7 +136,6 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"quarantine": true, "pip": true, "docker": true, "branch": true,
 		"clean": true, "y": true, "sessions": true, "review": true,
 		"env":       true,
-		"docs":      true,
 		"init":      true,
 		"preflight": true,
 		"ghostty":   true,
@@ -247,12 +246,10 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 		}
 	}
 	// sharedSections are struct-kind config sections deliberately owned by no
-	// single module. [github] is the deployment-wide GitHub host: it spans the
-	// projects AND review modules by design (divergent per-module hosts would
-	// stamp clones and review keys with different hosts — forgectl#412), so
-	// under ADR-0005's ownership model it is a documented shared-section
-	// exception rather than an unclaimed drift.
-	sharedSections := map[string]bool{"github": true}
+	// single in-process module: [github] spans projects and review (forgectl#412),
+	// and [docs] is owned by the standalone forgectl-docs plugin binary
+	// (dispatched via Rung B PATH lookup).
+	sharedSections := map[string]bool{"github": true, "docs": true}
 	for s := range sections {
 		if !claimed[s] && !sharedSections[s] {
 			t.Errorf("config section %q has no owning module — assign a ConfigKey", s)

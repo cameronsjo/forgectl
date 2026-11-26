@@ -31,7 +31,6 @@ func allModules() []module.Manifest {
 		reviewModule,
 		quarantineModule,
 		envModule,
-		docsModule,
 		initModule,
 		preflightModule,
 		ghosttyModule,

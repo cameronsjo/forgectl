@@ -68,9 +68,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/artificerassets"
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/desk/ask"
-	"github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/httpsrv"
 )
 
@@ -185,7 +185,7 @@ func ReadScripts(dir string) ([]Script, error) {
 // Handler is the full handler with every request check applied.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	css, font := docs.ArtificerAssets()
+	css, font := artificerassets.Assets()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("POST /session", s.handleSession)
 	mux.HandleFunc("POST /respond", s.handleRespond)

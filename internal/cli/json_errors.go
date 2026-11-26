@@ -302,28 +302,15 @@ func mayTakeNextValue(a string) bool {
 }
 
 // jsonFamilyFailure writes err as the one --json failure object cmd's family
-// writes, and returns the silentCodedError carrying err's exit code. The docs
-// verbs keep docsErrorJSON's integer code, env check keeps check_failed, and
-// every other verb gets code "failed".
+// writes, and returns the silentCodedError carrying err's exit code. env check
+// keeps check_failed, and every other verb gets code "failed".
 func jsonFamilyFailure(cmd *cobra.Command, err error) error {
 	switch {
-	case isDocsVerb(cmd):
-		return docsFail(cmd, cmd.CommandPath(), "", err, ExitCode(err), true)
 	case cmd.Name() == "check" && cmd.HasParent() && cmd.Parent().Name() == "env":
 		return jsonFailure(cmd, err, true, "check_failed")
 	default:
 		return jsonFailure(cmd, err, true, jsonCodeFailed)
 	}
-}
-
-// isDocsVerb reports whether cmd sits under the top-level docs command.
-func isDocsVerb(cmd *cobra.Command) bool {
-	for c := cmd; c.HasParent(); c = c.Parent() {
-		if !c.Parent().HasParent() {
-			return c.Name() == "docs"
-		}
-	}
-	return false
 }
 
 // installJSONErrorContract walks root's tree and, on every command that

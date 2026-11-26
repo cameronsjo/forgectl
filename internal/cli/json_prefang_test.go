@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
-	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/pr"
@@ -86,14 +84,6 @@ func TestExecute_MalformedConfigUnderJSON(t *testing.T) {
 		{name: "generic verb", argv: []string{"projects", "list", "--json"}, wantJSON: true, check: func(t *testing.T, obj map[string]any) {
 			if obj["code"] != jsonCodeFailed || obj["path"] != "" {
 				t.Errorf("object = %v, want code %q and path \"\"", obj, jsonCodeFailed)
-			}
-		}},
-		{name: "docs verb keeps its integer code", argv: []string{"docs", "list", "--json"}, wantJSON: true, check: func(t *testing.T, obj map[string]any) {
-			if obj["code"] != float64(2) {
-				t.Errorf("code = %v, want 2", obj["code"])
-			}
-			if root, ok := obj["root"]; !ok || root != "" {
-				t.Errorf("object = %v, want root \"\"", obj)
 			}
 		}},
 		{name: "env check keeps check_failed", argv: []string{"env", "check", "--json"}, wantJSON: true, check: func(t *testing.T, obj map[string]any) {
@@ -165,7 +155,7 @@ func TestPreFangJSONTarget(t *testing.T) {
 		want  string
 		built bool
 	}{
-		{args: []string{"docs", "list", "--json"}, want: "forgectl docs list", built: true},
+		{args: []string{"projects", "list", "--json"}, want: "forgectl projects list", built: true},
 		{args: []string{"projects", "list", "--json=false"}, built: true},
 		{args: []string{"projects", "list", "--host", "--json"}, built: true},
 		// Everything after launch is the harness's: launch declares no --json.
@@ -176,7 +166,7 @@ func TestPreFangJSONTarget(t *testing.T) {
 		{args: []string{"projects", "list", "--host", "--", "--json"}, want: "forgectl projects list", built: true},
 		// A "--" after a flag that turns out to be a bool is the terminator:
 		// the tree is built to find out, and the --json after it is not counted.
-		{args: []string{"docs", "list", "--no-icons", "--", "--json"}, built: true},
+		{args: []string{"projects", "list", "--no-icons", "--", "--json"}, built: true},
 		// An inline value leaves nothing for the "--" to be, so it is the
 		// terminator and the tree is never built (#891).
 		{args: []string{"projects", "list", "--host=x", "--", "--json"}},
@@ -281,13 +271,6 @@ func TestJSONFailure_BareTypedNil(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &obj); err != nil || obj.Error != jsonErrTextUnavailable {
 		t.Errorf("stderr = %q (%v), want one object with the stand-in text", buf.String(), err)
 	}
-
-	buf.Reset()
-	_ = docsFail(c, "docs list", "", bare, 2, true)
-	var dobj docsErrorJSON
-	if err := json.Unmarshal(buf.Bytes(), &dobj); err != nil || dobj.Error != jsonErrTextUnavailable || dobj.Code != 2 {
-		t.Errorf("docs stderr = %q (%v), want one docs object with the stand-in text", buf.String(), err)
-	}
 }
 
 // TestChainAs_RecoveryLogsDebug is item 6: a panic chainAs recovers leaves a
@@ -307,83 +290,6 @@ func TestChainAs_RecoveryLogsDebug(t *testing.T) {
 	out := logs.String()
 	if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "panic_type=") || !strings.Contains(out, "error_type=*fmt.wrapError") {
 		t.Errorf("log = %q, want one Debug line naming the error and panic types", out)
-	}
-}
-
-// failWriter refuses every write.
-type failWriter struct{}
-
-func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
-
-// TestPrintDocsSearch_EncodeFailuresKeepDocsShape is item 4. When stdout
-// refuses the response, stderr gets the docs integer-code object, not
-// nothing; when stderr refuses the partial-result object after the response
-// is on stdout, the verb exits 1 silently rather than hand the generic
-// contract an error it would render in its string-code shape.
-//
-// Mutations that turn it red: return err unchanged from the stdout failure
-// (the first half); return the WithExitCode error without jsonVerdict from
-// the stderr failure (the second half).
-func TestPrintDocsSearch_EncodeFailuresKeepDocsShape(t *testing.T) {
-	var stderr bytes.Buffer
-	c := &cobra.Command{Use: "search"}
-	c.SetOut(failWriter{})
-	c.SetErr(&stderr)
-	err := printDocsSearch(c, docspkg.SearchResponse{}, true)
-	if ExitCode(err) != 1 {
-		t.Errorf("stdout failure exit = %d, want 1", ExitCode(err))
-	}
-	if _, ok := err.(*silentCodedError); !ok {
-		t.Errorf("stdout failure = %T, want *silentCodedError", err)
-	}
-	var obj docsErrorJSON
-	if jerr := json.Unmarshal(stderr.Bytes(), &obj); jerr != nil || obj.Code != 1 || !strings.Contains(obj.Error, "write refused") {
-		t.Errorf("stderr = %q (%v), want one docs object with code 1", stderr.String(), jerr)
-	}
-
-	var stdout bytes.Buffer
-	c = &cobra.Command{Use: "search"}
-	c.SetOut(&stdout)
-	c.SetErr(failWriter{})
-	err = printDocsSearch(c, docspkg.SearchResponse{Errors: []docspkg.SearchError{{Root: "r", Message: "m"}}}, true)
-	if ExitCode(err) != 1 {
-		t.Errorf("stderr failure exit = %d, want 1", ExitCode(err))
-	}
-	if _, ok := err.(*silentCodedError); !ok {
-		t.Errorf("stderr failure = %T, want *silentCodedError: the response is already on stdout", err)
-	}
-	if stdout.Len() == 0 {
-		t.Error("the response never reached stdout")
-	}
-}
-
-// TestDocsList_StdoutEncodeFailureKeepsDocsShape is #886 item 1: when stdout
-// refuses the list, stderr gets the docs integer-code object, the way docs
-// search's does, not the generic contract's string-code shape. The exit code
-// stays 1 with or without --json.
-//
-// Mutation that turns it red: return printDocsList's error unchanged from
-// newDocsListCmd's RunE.
-func TestDocsList_StdoutEncodeFailureKeepsDocsShape(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "page.md"), []byte("# Page"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stderr bytes.Buffer
-	cmd := newDocsListCmd(module.Deps{})
-	cmd.SetOut(failWriter{})
-	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--json", dir})
-	err := cmd.ExecuteContext(context.Background())
-	if ExitCode(err) != 1 {
-		t.Errorf("exit = %d (err %v), want 1", ExitCode(err), err)
-	}
-	if _, ok := err.(*silentCodedError); !ok {
-		t.Errorf("err = %T, want *silentCodedError", err)
-	}
-	var obj docsErrorJSON
-	if jerr := json.Unmarshal(stderr.Bytes(), &obj); jerr != nil || obj.Code != 1 || !strings.Contains(obj.Error, "write refused") {
-		t.Errorf("stderr = %q (%v), want one docs object with code 1", stderr.String(), jerr)
 	}
 }
 
