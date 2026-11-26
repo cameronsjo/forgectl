@@ -86,15 +86,17 @@ func Open(deskDir string, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
-// OpenReadOnly opens the store without creating anything. A desk with no
-// asks directory reads as an empty log.
+// OpenReadOnly opens the store without creating or changing anything: a
+// desk with no asks directory reads as an empty log, and a broad asks
+// directory is read as it is (the next writer narrows it). It takes no lock,
+// so a reader never holds up a writer.
 func OpenReadOnly(deskDir string, opts ...Option) (*Store, error) {
 	s, err := newStore(deskDir, opts)
 	if err != nil {
 		return nil, err
 	}
 	s.readOnly = true
-	if err := checkDir(s.dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if _, err := inspectDir(s.dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	return s, nil
@@ -111,15 +113,25 @@ func newStore(deskDir string, opts []Option) (*Store, error) {
 	return s, nil
 }
 
-// checkDir refuses an asks directory that is a symlink or not a directory,
-// and narrows a group- or world-accessible one to 0700.
-func checkDir(dir string) error {
+// inspectDir refuses an asks directory that is a symlink or not a
+// directory, and changes nothing.
+func inspectDir(dir string) (fs.FileInfo, error) {
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("ask: %s: %w", SubDir, err)
+		return nil, fmt.Errorf("ask: %s: %w", SubDir, err)
 	}
 	if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
-		return fmt.Errorf("ask: %s is not a plain directory", SubDir)
+		return nil, fmt.Errorf("ask: %s is not a plain directory", SubDir)
+	}
+	return fi, nil
+}
+
+// checkDir is inspectDir, then narrows a group- or world-accessible
+// directory to 0700. Only a writer calls it.
+func checkDir(dir string) error {
+	fi, err := inspectDir(dir)
+	if err != nil {
+		return err
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		if err := os.Chmod(dir, dirMode); err != nil {

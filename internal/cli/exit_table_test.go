@@ -36,9 +36,6 @@ func TestExitTable_UsageErrors(t *testing.T) {
 		{"config with a stray argument", []string{"config", "zzbogus"}, 2},
 		{"resume flag error", []string{"resume", "--zz-no-such-flag"}, 2},
 
-		{"tasks unknown subverb stays 1", []string{"tasks", "zzbogus"}, 1},
-		{"tasks missing argument stays 1", []string{"tasks", "show"}, 1},
-		{"tasks flag error stays 1", []string{"tasks", "ready", "--zz-no-such-flag"}, 1},
 		{"env check flag error stays 1", []string{"env", "check", "--zz-no-such-flag"}, 1},
 		{"resume snapshot flag error stays 1", []string{"resume", "snapshot", "--zz-no-such-flag"}, 1},
 		{"resume snapshot stray argument stays 1", []string{"resume", "snapshot", "x"}, 1},
@@ -93,7 +90,7 @@ func TestExitTable_LeafWalk(t *testing.T) {
 	for _, p := range leaves {
 		args := append(append([]string(nil), p...), "--zz-no-such-flag")
 		want := exitUsage
-		if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
+		if strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
 			want = exitFailed
 		}
 		err := execRoot(t, args...)
@@ -190,7 +187,7 @@ func TestClassExit(t *testing.T) {
 // TestJSONUsageCode: a usage error raised inside RunE reports usage_error
 // without moving its exit status.
 func TestJSONUsageCode(t *testing.T) {
-	for _, args := range [][]string{{"desk", "show", "a/b", "--json"}, {"tasks", "show", "abc", "--json"}} {
+	for _, args := range [][]string{{"desk", "show", "a/b", "--json"}} {
 		isolateJSONContractEnv(t)
 		_, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), args...)
 		if err == nil {
@@ -279,7 +276,7 @@ func TestExitTable_ArgCountWalk(t *testing.T) {
 			}
 			rejected++
 			want := exitUsage
-			if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
+			if strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" || strings.Join(p, " ") == "surface event" {
 				want = exitFailed
 			}
 			if got := ExitCode(err); got != want {
@@ -295,14 +292,14 @@ func TestExitTable_ArgCountWalk(t *testing.T) {
 
 // TestExitTable_EnvFailureKeepsExceptionVerbs: the environment failure is
 // raised before the command tree exists, so the exceptions are read from argv.
-// tasks and env check keep 1 (their 2 means "unreachable" and "file absent").
+// k8s and env check keep 1 (kubectl pass-through codes and "file absent").
 func TestExitTable_EnvFailureKeepsExceptionVerbs(t *testing.T) {
 	for _, tt := range []struct {
 		argv []string
 		want int
 	}{
-		{[]string{"tasks", "ls"}, exitFailed},
-		{[]string{"--no-icons", "tasks", "ls", "--json"}, exitFailed},
+		{[]string{"k8s", "ns"}, exitFailed},
+		{[]string{"--no-icons", "k8s", "ns", "--json"}, exitFailed},
 		{[]string{"env", "check", ".env"}, exitFailed},
 		{[]string{"env", "get", "X"}, exitUsage},
 		{[]string{"projects", "list"}, exitUsage},

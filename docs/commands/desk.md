@@ -472,6 +472,30 @@ The open and snoozed asks by bucket; `--all` adds answered ones; `--json` prints
 
 The operator's shell answer. `DURATION` is a Go duration (`90m`, `4h`) or `Nd`. Agents must not answer their own asks.
 
+### Asks on another machine
+
+The desk directory is local to each machine, and a laptop sleeps. To keep one asks log for every machine, set `FORGECTL_DESK_ASKS_HOST` to an always-on host that you reach over ssh. Then `desk ask`, `desk asks [ASK-ID]`, `desk respond` and `desk watch --responses` run on that host:
+
+```bash
+export FORGECTL_DESK_ASKS_HOST=desk-host            # an ssh config alias or hostname
+export FORGECTL_DESK_ASKS_REMOTE_BIN=/opt/homebrew/bin/forgectl   # optional; default: forgectl on the remote PATH
+forgectl desk ask --title "Approve the new deploy key" --steps-file steps.md
+```
+
+| Variable | Accepted shape |
+|---|---|
+| `FORGECTL_DESK_ASKS_HOST` | `[A-Za-z0-9][A-Za-z0-9._-]{0,252}`: an ssh config alias or hostname. No `user@`, no path, no leading `-`; put a user or port in `~/.ssh/config` |
+| `FORGECTL_DESK_ASKS_REMOTE_BIN` | an absolute path of `[A-Za-z0-9._/-]`, or a bare name of `[A-Za-z0-9._-]` starting with a letter or digit |
+
+A value of another shape is refused with exit 2; nothing falls back to the local desk.
+
+- **Which desk.** `--dir`, `DESK_DIR` or `CLAUDE_DESK_DIR` names a local desk and keeps asks local. The host must not have `DESK_DIR` pointed somewhere unexpected, since it resolves its own desk the usual way.
+- **Transport.** forgectl runs `ssh -o BatchMode=yes -T -- HOST env FORGECTL_DESK_ASKS_HOST= BIN desk VERB ARGS...` directly, with no local shell. ssh hands the words after the host to the remote login shell as one string, so forgectl wraps every word in single quotes. The remote login shell must be a POSIX shell (sh, bash, zsh, dash); fish reads backslashes inside single quotes and is not supported. The command clears `FORGECTL_DESK_ASKS_HOST` for the remote run, so a host whose own environment names itself still uses its local desk.
+- **Arguments.** Flags travel as `--flag=value` and positionals after `--`, so a reply that starts with `-` stays a reply. Ask ids are checked here before the call. `--steps-file FILE` and `--steps-file -` are read here and sent on ssh's stdin as `--steps-file -`. `--from` is resolved here (`$FORGECTL_WORKER`, else the session) and sent, so the host records the real asker. `watch --responses` resolves its default deadline here, because the remote stdin is never a terminal.
+- **`--notify` is refused.** The hc terminal it would name is on this machine, not the host. Use `desk watch --responses`.
+- **Output and exit codes.** stdout and stderr stream unchanged (a `--responses` watch prints its JSON lines as they arrive), and the remote exit code is passed through. An ssh failure exits 255 with an error naming the host and saying the ask (or response) was not recorded; if the connection dropped after the request was sent, check `desk asks` before asking again. Exit 127 means the host could not find the binary: set `FORGECTL_DESK_ASKS_REMOTE_BIN`.
+- **What stays local.** `desk add`, the dashboard, `desk watch NAME` for scripts and every other script verb. Scripts run where they are staged. `desk ui` and `desk serve` read the local desk, so to answer asks held on the host, run `desk serve` (or `desk ui`) on the host itself and open it there or through `tailscale serve` on that host.
+
 ### `forgectl desk ui`
 
 A live TUI over the asks log and the queue. Asks are grouped Now, When you have 10 minutes, Optional, Coming, then Snoozed and recently answered; queued scripts are listed read-only with their sha256 (run them from the dashboard). Keys: `j`/`k` move, `enter` details, `d` done, `r` reply, `l` link, `s` snooze, `?` help, `q` quit. Only the responses the ask allows are offered. `--frame` prints one frame sized by `$COLUMNS` and `$LINES`.

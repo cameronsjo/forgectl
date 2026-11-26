@@ -108,10 +108,7 @@ const logKeepDays = 7
 //	[[herdr.organize.rule]]
 //	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
 //	workspace = "forge"
-//	[tasks]              # forgectl tasks — where a keychain credential may be sent
-//	allowed_hosts = []               # hosts allowed besides the built-in default; plain hostnames only
 //	[attention]          # forgectl attention — the per-machine attention queue
-//	ttl_hours = 24                   # keep a record no visible herdr pane vouches for this long (1-720)
 //	worker_prefix = "cos-"           # sessions whose name starts with this are workers
 //	[sweep]              # forgectl sweep — the chief-of-staff ledger; nothing is defaulted
 //	owner = "your-login"             # GitHub account whose repos the sweep covers
@@ -142,7 +139,6 @@ type Config struct {
 	Theme     ThemeConfig     `toml:"theme"`
 	Herdr     HerdrConfig     `toml:"herdr"`
 	Resume    ResumeConfig    `toml:"resume"`
-	Tasks     TasksConfig     `toml:"tasks"`
 	Desk      DeskConfig      `toml:"desk"`
 	Attention AttentionConfig `toml:"attention"`
 	Sweep     SweepConfig     `toml:"sweep"`
@@ -1391,33 +1387,21 @@ func DecodeStrict(data []byte) (Config, error) {
 	if err != nil {
 		return cfg, tomlerr.Scrub(err)
 	}
-	// [tasks] is checked here, at decode, and not left to the command that
-	// uses it: the list decides where a keychain credential may be sent, and
-	// every reader of this file must see the same refusal. The list is
-	// dropped with the error, so a caller that goes on with this Config
-	// anyway holds one that allows the default host only.
+	// log_level is checked here, at decode: a value the logger does not know
+	// would otherwise turn logging off, which is what "off" does, and nothing
+	// would say so. It is dropped with the error, so a caller that goes on
+	// with this Config has logging off — what the value did before it was
+	// checked, and nothing louder.
 	//
-	// log_level is checked here for the same reason the list is: a value the
-	// logger does not know would otherwise turn logging off, which is what
-	// "off" does, and nothing would say so. It is dropped with the error, so a
-	// caller that goes on with this Config has logging off — what the value
-	// did before it was checked, and nothing louder.
-	//
-	// Both are checked, and both dropped, before either error is returned, so
+	// Every refused value is dropped before the first error is returned, so
 	// a file with two refused values carries neither into the Config.
 	var invalid error
-	if err := cfg.Tasks.Validate(); err != nil {
-		cfg.Tasks = TasksConfig{}
-		invalid = err
-	}
 	if err := validateLogLevel(cfg.LogLevel); err != nil {
 		cfg.LogLevel = ""
-		if invalid == nil {
-			invalid = err
-		}
+		invalid = err
 	}
 	// [surface.profiles] names the Claude config directory a worker runs
-	// under, so a bad entry is refused at load like the two above, and the
+	// under, so a bad entry is refused at load like log_level, and the
 	// whole table is dropped: a worker asking for any profile then fails as
 	// unknown rather than running under a guessed directory.
 	if err := cfg.Surface.ValidateProfiles(); err != nil {
@@ -1462,7 +1446,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [surface.identity], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [surface.intake], [surface.merge], [surface.identity], [resume], and [theme]. log_level is checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
@@ -1892,22 +1876,6 @@ func PrFindingsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "pr-findings"), nil
-}
-
-// TasksCachePath returns the on-disk path for the `forgectl tasks` local
-// cache: <os.UserConfigDir()>/forgectl/tasks-cache.json (macOS: ~/Library/
-// Application Support/forgectl/tasks-cache.json; Linux: ~/.config/forgectl/
-// tasks-cache.json). It derives from the same configDir() base as
-// ConfigPath/NetCachePath, so none of them drift. The cache holds only
-// task/project/label data (internal/tasks.Snapshot carries no credential
-// field) — the bearer token is read fresh from the keychain every run and
-// never touches disk.
-func TasksCachePath() (string, error) {
-	dir, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "tasks-cache.json"), nil
 }
 
 // ResumeStoreDir returns the forgectl-owned directory that holds `forgectl

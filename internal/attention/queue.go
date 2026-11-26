@@ -12,21 +12,20 @@ import (
 	"time"
 )
 
-// Row kinds beyond the item kinds q and a.
+// Row kinds.
 const (
 	RowDesk   = "desk"
 	RowWorker = "worker"
 	RowPR     = "pr"
+	// RowAsk is an open desk ask: something an agent needs the operator to
+	// do that is not a script.
+	RowAsk = "ask"
 )
 
 // Origins.
 const (
 	OriginOwn    = "own"
 	OriginWorker = "worker"
-	// OriginUnverified is a record whose session herdr does not list: nothing
-	// but the record itself vouches for it, and any process of yours can
-	// write one, so it is neither own nor worker.
-	OriginUnverified = "unverified"
 )
 
 // Delay costs, lowest first: what a wait costs while it sits.
@@ -35,12 +34,8 @@ const (
 	CostBlockedWorker = 1
 	CostDesk          = 2
 	CostMarkerClean   = 3
-	// CostAction is an `Action (Cameron)`.
-	CostAction   = 4
-	CostQuestion = 5
-	// CostProposal is an action Claude offers to take (an `Action (Claude)`
-	// or one with no actor): it waits on a go, after every question.
-	CostProposal = 6
+	// CostAsk is an open desk ask: an action only the operator can take.
+	CostAsk = 4
 )
 
 // DefaultWorkerPrefix marks a chief-of-staff worker's session.
@@ -61,8 +56,7 @@ var (
 	repoPartRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 	sha256Re   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	deskNameRe = regexp.MustCompile(`^[0-9]{2,}-[A-Za-z0-9._-]{1,64}$`)
-	// runVerbs lead an operator action that belongs on the desk.
-	runVerbs = map[string]bool{"run": true, "bash": true, "brew": true, "restart": true, "sudo": true}
+	askIDRe    = regexp.MustCompile(`^ask-[0-9a-f]{8}$`)
 )
 
 // Row is one wait in the queue.
@@ -81,21 +75,18 @@ type Row struct {
 	// was queued from, when hc lists it live now. Never part of the key.
 	Terminal string `json:"terminal,omitempty"`
 	Worker   string `json:"worker,omitempty"`
-	// Tag is "Q" or "A" on an item row, the item name on a desk row, the
+	// Tag is the item name on a desk row, the ask id on an ask row, the
 	// block on a worker row, and owner/repo#n on a PR row.
-	Tag   string `json:"tag,omitempty"`
-	N     int    `json:"n,omitempty"`
-	Actor string `json:"actor,omitempty"`
-	Text  string `json:"text"`
-	Rec   string `json:"rec,omitempty"`
-	// Turn is the turn an item row came from.
-	Turn string `json:"turn,omitempty"`
+	Tag  string `json:"tag,omitempty"`
+	N    int    `json:"n,omitempty"`
+	Text string `json:"text"`
+	// Bucket is an ask row's bucket: now, soon, optional or coming.
+	Bucket string `json:"bucket,omitempty"`
 	// Hash is a desk item's sha256, first 12 hex characters.
-	Hash      string    `json:"hash,omitempty"`
-	At        time.Time `json:"at"`
-	Cost      int       `json:"cost"`
-	NotOnDesk bool      `json:"notOnDesk,omitempty"`
-	Origin    string    `json:"origin"`
+	Hash   string    `json:"hash,omitempty"`
+	At     time.Time `json:"at"`
+	Cost   int       `json:"cost"`
+	Origin string    `json:"origin"`
 }
 
 // Agent is one `herdr agent list` row, reduced to what the queue uses.
@@ -154,25 +145,6 @@ func (h Herdr) index() (bySession, byPane map[string]Agent) {
 	return bySession, byPane
 }
 
-// SessionPane is the one pane herdr lists session in. ok is false when herdr
-// does not list the session, or lists it in more than one pane.
-func (h Herdr) SessionPane(session string) (pane string, ok bool) {
-	bySession, _ := h.index()
-	a, ok := bySession[session]
-	return a.Pane, ok
-}
-
-// Liveness is the prune view of h.
-func (h Herdr) Liveness() Liveness {
-	panes := map[string]bool{}
-	for _, a := range h.Agents {
-		if ValidPane(a.Pane) {
-			panes[a.Pane] = true
-		}
-	}
-	return Liveness{Known: h.Known, Socket: h.Socket, Panes: panes}
-}
-
 // DeskItem is one waiting desk item, from a read-only scan.
 type DeskItem struct {
 	Name       string
@@ -221,14 +193,26 @@ type Sweep struct {
 	PRs         []SweepPR
 }
 
+// AskItem is one open desk ask, from a read-only read of the asks log. Its
+// fields are untrusted: any process of yours can append to the log.
+type AskItem struct {
+	ID     string
+	Title  string
+	Bucket string
+	// From is who the ask says asked: a label, never proof.
+	From string
+	At   time.Time
+}
+
 // Input is everything Build merges.
 type Input struct {
-	Now     time.Time
-	Records []Record
-	Herdr   Herdr
-	Core    Core
-	Desk    []DeskItem
-	Sweep   *Sweep
+	Now   time.Time
+	Herdr Herdr
+	Core  Core
+	Desk  []DeskItem
+	// Asks are the open (not answered, not snoozed) desk asks.
+	Asks  []AskItem
+	Sweep *Sweep
 	// Drain, when set, is a live drain whose claude launches have been held
 	// by a claude-slots check that cannot answer for long enough to need you.
 	Drain        *DrainHold
@@ -245,10 +229,8 @@ type deskRow struct {
 }
 
 // Build merges the sources into one row per wait, ordered by cost, then
-// oldest first. A desk item absorbs the waits that are the same wait: a
-// worker blocked on that desk item (the merged row takes the worker's cost)
-// and a session's run-type `Action (Cameron)` when that session's pane
-// queued the item during or after the turn. Notes and options are not waits.
+// oldest first. A desk item absorbs a worker blocked on that desk item (the
+// merged row takes the worker's cost).
 func Build(in Input) []Row {
 	// An ambiguous session or pane has no entry here, so a session two panes
 	// claim has no pane, is not own and merges with no desk item, and a desk
@@ -309,35 +291,8 @@ func Build(in Input) []Row {
 		rows = append(rows, sweepRows(*sw, desk, byPane, paneSession)...)
 	}
 
-	for _, rec := range in.Records {
-		agent, inHerdr := bySession[rec.Session]
-		// Only a session herdr lists has a pane to merge on: a record's own
-		// pane is a claim, so it never joins a desk row.
-		matchPane, origin := "", OriginUnverified
-		if inHerdr {
-			matchPane, origin = agent.Pane, OriginOwn
-		}
-		if isWorker(rec.Cwd) || (inHerdr && isWorker(agent.Names...)) {
-			origin = OriginWorker
-		}
-		for _, it := range rec.Items {
-			r, ok := itemRow(rec, it)
-			if !ok {
-				continue
-			}
-			r.Origin = origin
-			if inHerdr {
-				r.Pane = agent.Pane
-			}
-			if it.Kind == KindAction && it.Actor == ActorCameron && runVerbs[leadingVerb(it.Text)] {
-				if d := onDesk(desk, matchPane, rec.Since); d != nil {
-					if d.row.Session == "" {
-						d.row.Session = rec.Session
-					}
-					continue
-				}
-				r.NotOnDesk = true
-			}
+	for _, a := range in.Asks {
+		if r, ok := askRow(a, isWorker); ok {
 			rows = append(rows, r)
 		}
 	}
@@ -415,47 +370,27 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession fu
 	return rows
 }
 
-// itemRow is the row for one question or action; ok is false for a note or
-// an option.
-func itemRow(rec Record, it Item) (Row, bool) {
-	r := Row{Kind: it.Kind, Session: rec.Session, N: it.N, Text: it.Text, Rec: it.Rec, Turn: rec.Turn, At: rec.At}
-	switch it.Kind {
-	case KindQuestion:
-		r.Tag, r.Cost = "Q", CostQuestion
-	case KindAction:
-		r.Tag, r.Actor, r.Cost = "A", it.Actor, CostProposal
-		if it.Actor == ActorCameron {
-			r.Cost = CostAction
-		}
-	default:
+// askRow is the row for one open ask; ok is false for an ask whose id is
+// not the shape the store writes. The title is cleaned and cut like every
+// other untrusted text. From names a worker only when it has a worker's
+// shape and prefix; it is a label the asker chose, so it changes the origin
+// and nothing else (an ask row's cost and tier are fixed).
+func askRow(a AskItem, isWorker func(...string) bool) (Row, bool) {
+	if !askIDRe.MatchString(a.ID) {
 		return Row{}, false
 	}
+	r := Row{Kind: RowAsk, Tag: a.ID, Text: Clean(a.Title, MaxText), At: a.At.UTC(), Cost: CostAsk, Origin: OriginOwn}
+	if r.Text == "" {
+		r.Text = a.ID
+	}
+	switch a.Bucket {
+	case "now", "soon", "optional", "coming":
+		r.Bucket = a.Bucket
+	}
+	if workerRe.MatchString(a.From) && isWorker(a.From) {
+		r.Worker, r.Origin = a.From, OriginWorker
+	}
 	return r, true
-}
-
-// onDesk returns the desk row a run action is waiting on: an item queued
-// from pane at or after since (the turn's start). nil since accepts any.
-func onDesk(desk []deskRow, pane string, since *time.Time) *deskRow {
-	if pane == "" {
-		return nil
-	}
-	for i := range desk {
-		d := &desk[i]
-		if d.pane == pane && (since == nil || !d.row.At.Before(*since)) {
-			return d
-		}
-	}
-	return nil
-}
-
-// leadingVerb is an action text's first word, lower-cased, without
-// surrounding markdown or punctuation.
-func leadingVerb(text string) string {
-	f := strings.Fields(text)
-	if len(f) == 0 {
-		return ""
-	}
-	return strings.ToLower(strings.Trim(f[0], "`*_\"'([{:.,;!?)]}"))
 }
 
 // sweepFile is sweep.json as `forgectl sweep` writes it (schema 2). Only the

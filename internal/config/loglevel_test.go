@@ -49,19 +49,6 @@ func TestDecodeStrict_RefusesAMistypedLogLevel(t *testing.T) {
 	}
 }
 
-// TestDecodeStrict_ABadLogLevelDoesNotHideABadAllowedHost: both values are
-// dropped, whichever error is reported, so neither survives into a Config a
-// caller goes on to use.
-func TestDecodeStrict_ABadLogLevelDoesNotKeepABadAllowedHost(t *testing.T) {
-	cfg, err := DecodeStrict([]byte("log_level = \"loud\"\n" + badTasksHostsTOML))
-	if err == nil {
-		t.Fatal("DecodeStrict(two refused values) = nil, want an error")
-	}
-	if cfg.LogLevel != "" || len(cfg.Tasks.AllowedHosts) != 0 {
-		t.Errorf("LogLevel = %q, AllowedHosts = %q, want both dropped", cfg.LogLevel, cfg.Tasks.AllowedHosts)
-	}
-}
-
 func TestLoadPath_AMistypedLogLevelIsALoadError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("log_level = \"degub\"\n"), 0o600); err != nil {
@@ -97,7 +84,7 @@ func TestDescribe_ReportsAMistypedLogLevel(t *testing.T) {
 	if rep.DecodeErr != nil {
 		t.Errorf("DecodeErr = %v for a file that parsed in full, want nil", rep.DecodeErr)
 	}
-	if !rep.IsRefused("log_level") || rep.IsRefused("tasks.allowed_hosts") {
+	if !rep.IsRefused("log_level") {
 		t.Errorf("Refused = %v, want log_level only", rep.Refused)
 	}
 	if cfg.LogLevel != "degub" {

@@ -35,7 +35,6 @@ func TestUsageArgs_NamesTheArgumentAndUsage(t *testing.T) {
 		{"desk skip names the positional, not the flag value", []string{"desk", "skip", "--reason", "x"}, []string{"missing <name>", "usage: forgectl desk skip <name> --reason <text>"}},
 		{"surface close", []string{"surface", "close"}, []string{"missing <name>", "usage: forgectl surface close <name>"}},
 		{"surface brief second argument", []string{"surface", "brief", "w"}, []string{"missing <text|@file>"}},
-		{"tasks done", []string{"tasks", "done"}, []string{"missing <id>"}},
 		{"too many", []string{"desk", "add", "a", "b"}, []string{`unexpected argument "b" after <file|->`, "usage: forgectl desk add <file|->"}},
 		{"optional positional, too many", []string{"desk", "status", "a", "b"}, []string{"takes at most 1 argument, got 2", "usage: forgectl desk status [name]"}},
 		{"no-argument leaf", []string{"launch", "which", "extra"}, []string{`takes no arguments, got "extra"`, "usage: forgectl launch which"}},
@@ -55,9 +54,6 @@ func TestUsageArgs_NamesTheArgumentAndUsage(t *testing.T) {
 				t.Errorf("error = %q still carries cobra's count text", err)
 			}
 			want := exitUsage
-			if tt.args[0] == "tasks" { // a documented ADR-0015 exception: tasks keeps 2 for "unreachable"
-				want = exitFailed
-			}
 			if got := ExitCode(err); got != want {
 				t.Errorf("exit = %d, want %d: a wrong argument count is a usage error (ADR-0015)", got, want)
 			}

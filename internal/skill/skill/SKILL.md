@@ -1,6 +1,6 @@
 ---
 name: forgectl
-description: Use when a session needs the workbench control plane — a .env edit without exposing values, a profiled Claude Code launch or one inside tmux/cmux/herdr/hc, a workflow or recipe, the local bench, finding projects, closing a board task when work lands, or handing the operator a script to approve and run (a merge, sudo, a homelab change, a command a guard blocks) instead of a copy-paste. NOT for PR review.
+description: Use when a session needs the workbench control plane — a .env edit without exposing values, a profiled Claude Code launch or one inside tmux/cmux/herdr/hc, a workflow or recipe, the local bench, finding projects, or handing the operator a script to approve and run (a merge, sudo, a homelab change, a command a guard blocks) instead of a copy-paste. NOT for PR review.
 license: Apache-2.0 WITH Commons-Clause
 ---
 
@@ -23,7 +23,6 @@ This skill teaches when to reach for forgectl, not what to type; the binary docu
 | A built-in routine such as the herdr AFK ritual (journal the agent, wait, type-submit `/compact`) | `forgectl recipe afk`, `--target <agent-or-pane>` to override the pane. Recipes are shipped code; workflows are user-authored TOML |
 | "Is the local bench healthy?" before instrumenting a service, debugging telemetry, or transcript retention | `forgectl bench status`: one aggregate health card (`--json` for scripts); `bench up` brings the configured services up; `bench open [hearth\|grafana]` opens a UI |
 | Finding or opening a project that may not be cloned locally: local checkouts, GitHub, and Gitea | `forgectl projects list [query]` (`--json` is clean on stdout, degradation notes go to stderr); `projects pick` opens it in tmux, cloning on demand; `projects clone` and `projects worktree` own the clone layouts |
-| Work that started from a board task has landed: its PR is `MERGED`, or the non-PR work is done | `forgectl tasks done <id>`, or the MCP tool ending in `complete_task`. Read [references/board-tasks.md](references/board-tasks.md) before every call: which task is yours, when to mark it done, the autonomous-turn and PR-author rules, and what each outcome means. No recorded id means mark nothing done |
 | A script you will not or should not run yourself (a merge, `sudo`, a production or homelab change, anything a guard blocks or the operator owns) | `forgectl desk add FILE --what … --why …` queues it for the operator instead of a copy-paste request (a guard-blocked item puts the verdict's first line in single-quoted `--why`); `desk watch NAME --deadline 540` under Monitor reports the run. Read [references/desk.md](references/desk.md) before the first call |
 | Searching or reading markdown docs, or checking links | `forgectl docs search <query>`, `docs list`, `docs read <file>`, `docs check` (broken links, orphans, stale pages), `docs serve` |
 | What a past session did in a repo | `forgectl sessions last <repo>`, `sessions why <path\|topic>`, `sessions search <query>` (all take `--json`) |

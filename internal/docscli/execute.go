@@ -38,7 +38,7 @@ func Execute(ctx context.Context) error {
 		cfg = config.LoadPath(legacyBoundary.ConfigPath)
 	}
 	closer := config.SetupLogger(cfg)
-	defer closer.Close()
+	defer closer.Close() //nolint:errcheck
 
 	deps := module.Deps{
 		Cfg:            cfg,

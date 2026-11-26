@@ -4,29 +4,28 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestAttentionConfigDefaults(t *testing.T) {
 	var c AttentionConfig
-	if c.TTL() != 24*time.Hour || c.Prefix() != "cos-" || c.Validate() != nil {
-		t.Errorf("defaults = %v %q %v", c.TTL(), c.Prefix(), c.Validate())
+	if c.Prefix() != "cos-" || c.Validate() != nil {
+		t.Errorf("defaults = %q %v", c.Prefix(), c.Validate())
 	}
 }
 
+// ttl_hours belonged to the retired session spool. A config that still sets
+// it loads, and the key does nothing.
 func TestAttentionConfigLoadsAndValidates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[attention]\nttl_hours = 6\nworker_prefix = \"w-\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c := LoadPath(path).Attention
-	if c.TTL() != 6*time.Hour || c.Prefix() != "w-" || c.Validate() != nil {
-		t.Errorf("loaded = %v %q %v", c.TTL(), c.Prefix(), c.Validate())
+	if c.Prefix() != "w-" || c.Validate() != nil {
+		t.Errorf("loaded = %q %v", c.Prefix(), c.Validate())
 	}
-	zero, big, bad := 0, 721, "-x"
-	for _, c := range []AttentionConfig{{TTLHours: &zero}, {TTLHours: &big}, {WorkerPrefix: &bad}} {
-		if c.Validate() == nil {
-			t.Errorf("%+v was accepted", c)
-		}
+	bad := "-x"
+	if c := (AttentionConfig{WorkerPrefix: &bad}); c.Validate() == nil {
+		t.Errorf("%+v was accepted", c)
 	}
 }
