@@ -17,7 +17,6 @@ var pipedVerbs = [][]string{
 	{"doctor"},
 	{"launch", "which"},
 	{"launch", "doctor"},
-	{"tmux", "cheat"},
 }
 
 // TestPlainVerbsEmitNoEscapesWhenPiped is the behavioural half of the colour

@@ -80,11 +80,11 @@ func TestSurfaceLaunchProfileRefusals(t *testing.T) {
 		opts surfaceLaunchOptions
 		want string
 	}{
-		"profile without worktree": {surfaceLaunchOptions{Backend: "tmux", Profile: "work"}, "need --worktree"},
-		"model without worktree":   {surfaceLaunchOptions{Backend: "tmux", Model: "sonnet"}, "need --worktree"},
-		"unknown profile":          {surfaceLaunchOptions{Backend: "herdr", Worktree: "feat/x", DisplayName: "w1", Profile: "personal"}, "--profile: no such [surface.profiles] entry"},
-		"model as a flag":          {surfaceLaunchOptions{Backend: "herdr", Worktree: "feat/x", DisplayName: "w1", Model: "-p"}, "--model: a model is"},
-		"profile on codex":         {surfaceLaunchOptions{Backend: "herdr", Worktree: "feat/x", DisplayName: "w1", Profile: "work", Harness: "codex"}, "claude workers only"},
+		"profile without worktree": {surfaceLaunchOptions{Backend: "hc", Profile: "work"}, "need --worktree"},
+		"model without worktree":   {surfaceLaunchOptions{Backend: "hc", Model: "sonnet"}, "need --worktree"},
+		"unknown profile":          {surfaceLaunchOptions{Backend: "hc", Worktree: "feat/x", DisplayName: "w1", Profile: "personal"}, "--profile: no such [surface.profiles] entry"},
+		"model as a flag":          {surfaceLaunchOptions{Backend: "hc", Worktree: "feat/x", DisplayName: "w1", Model: "-p"}, "--model: a model is"},
+		"profile on codex":         {surfaceLaunchOptions{Backend: "hc", Worktree: "feat/x", DisplayName: "w1", Profile: "work", Harness: "codex"}, "claude workers only"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := runSurfaceLaunch(cmd, module.Deps{Cfg: profileCfg("/cfg/work")}, c.opts)

@@ -17,7 +17,7 @@ import (
 // has not trusted, and passes once it is.
 func TestSurfaceLaunchDryRun_RefusesAnUntrustedFolder(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -35,7 +35,7 @@ func TestSurfaceLaunchDryRun_RefusesAnUntrustedFolder(t *testing.T) {
 		cmd := newSurfaceLaunchCmd(deps)
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs([]string{target, "--surface", "tmux", "--dry-run", "--here"})
+		cmd.SetArgs([]string{target, "--surface", "hc", "--dry-run", "--here"})
 		return cmd.ExecuteContext(t.Context())
 	}
 
@@ -54,7 +54,7 @@ func TestSurfaceLaunchDryRun_RefusesAnUntrustedFolder(t *testing.T) {
 // CODEX_HOME has no trust entry for, and passes once the root has one.
 func TestSurfaceLaunchDryRun_RefusesAnUntrustedCodexFolder(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -68,7 +68,7 @@ func TestSurfaceLaunchDryRun_RefusesAnUntrustedCodexFolder(t *testing.T) {
 		cmd := newSurfaceLaunchCmd(deps)
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs([]string{repo, "--surface", "tmux", "--dry-run", "--here"})
+		cmd.SetArgs([]string{repo, "--surface", "hc", "--dry-run", "--here"})
 		return cmd.ExecuteContext(t.Context())
 	}
 

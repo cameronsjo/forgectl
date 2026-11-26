@@ -422,7 +422,7 @@ func TestSurfaceLaunchDryRunNeverCallsTheBackend(t *testing.T) {
 	bin := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "tmux-ran")
 	script := "#!/bin/sh\necho \"$@\" >> '" + marker + "'\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -442,11 +442,11 @@ func TestSurfaceLaunchDryRunNeverCallsTheBackend(t *testing.T) {
 		return o.String(), err
 	}
 
-	out, err := run(project, "--surface", "tmux", "--name", "review", "--dry-run")
+	out, err := run(project, "--surface", "hc", "--name", "review", "--dry-run")
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	for _, want := range []string{"dry_run=true\n", "surface=tmux\n", "name=review\n", "target=" + project + "\n", "harness=codex\n"} {
+	for _, want := range []string{"dry_run=true\n", "surface=hc\n", "name=review\n", "target=" + project + "\n", "harness=codex\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview lacks %q:\n%s", want, out)
 		}
@@ -458,7 +458,7 @@ func TestSurfaceLaunchDryRunNeverCallsTheBackend(t *testing.T) {
 		t.Errorf("the dry run called tmux: %v", err)
 	}
 
-	out, err = run(project, "--surface", "tmux", "--dry-run", "--json")
+	out, err = run(project, "--surface", "hc", "--dry-run", "--json")
 	if err != nil {
 		t.Fatalf("dry run --json: %v", err)
 	}
@@ -661,13 +661,13 @@ func TestRenderClosePlan(t *testing.T) {
 func TestSurfaceCloseDryRunTouchesNothing(t *testing.T) {
 	top := dryRunRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HERDR_SESSION", "dryrun")
+	t.Setenv("HC_SESSION", "dryrun")
 
-	// A fake herdr that records every call: any call at all fails the test.
+	// A fake hc that records every call: any call at all fails the test.
 	bin := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "herdr-ran")
+	marker := filepath.Join(t.TempDir(), "hc-ran")
 	script := "#!/bin/sh\necho \"$@\" >> '" + marker + "'\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -681,7 +681,7 @@ func TestSurfaceCloseDryRunTouchesNothing(t *testing.T) {
 	gitIn(t, top, "worktree", "add", "-q", wtPath, "feat/w1")
 	head := strings.TrimSpace(gitIn(t, top, "rev-parse", "HEAD"))
 
-	led, err := worker.Open(top, "dryrun")
+	led, err := worker.Open(top, "hc:dryrun")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +749,7 @@ func TestSurfaceWorkerLaunchDryRunCreatesNothing(t *testing.T) {
 	bin := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "herdr-ran")
 	script := "#!/bin/sh\necho \"$@\" >> '" + marker + "'\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -759,7 +759,7 @@ func TestSurfaceWorkerLaunchDryRunCreatesNothing(t *testing.T) {
 	var o, e bytes.Buffer
 	cmd.SetOut(&o)
 	cmd.SetErr(&e)
-	cmd.SetArgs([]string{top, "--surface", "herdr", "--worktree", "feat/w1", "--name", "w1", "--dry-run", "--json"})
+	cmd.SetArgs([]string{top, "--surface", "hc", "--worktree", "feat/w1", "--name", "w1", "--dry-run", "--json"})
 	if err := cmd.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("dry run: %v\nstderr: %s", err, e.String())
 	}
@@ -787,7 +787,7 @@ func TestSurfaceWorkerLaunchDryRunCreatesNothing(t *testing.T) {
 // notice on stderr as the launch, and --here previews the target itself.
 func TestSurfaceLaunchDryRunFromASubfolder(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -810,7 +810,7 @@ func TestSurfaceLaunchDryRunFromASubfolder(t *testing.T) {
 		return o.String(), e.String(), err
 	}
 
-	out, stderr, err := run(sub, "--surface", "tmux", "--dry-run", "--json")
+	out, stderr, err := run(sub, "--surface", "hc", "--dry-run", "--json")
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
@@ -825,7 +825,7 @@ func TestSurfaceLaunchDryRunFromASubfolder(t *testing.T) {
 		t.Errorf("stderr = %q, want the move notice", stderr)
 	}
 
-	out, stderr, err = run(sub, "--surface", "tmux", "--dry-run", "--here")
+	out, stderr, err = run(sub, "--surface", "hc", "--dry-run", "--here")
 	if err != nil {
 		t.Fatalf("dry run --here: %v", err)
 	}

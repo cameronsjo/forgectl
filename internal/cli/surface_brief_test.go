@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -184,7 +184,7 @@ func TestSendBrief(t *testing.T) {
 			step: "readback",
 		},
 		"typing fails": {
-			pane: func() *fakePane { return &fakePane{status: "idle", typeErr: herdradapter.ErrSendFailed} },
+			pane: func() *fakePane { return &fakePane{status: "idle", typeErr: hcadapter.ErrSendFailed} },
 			step: "type",
 		},
 		"the screen changes between the read-back and Enter": {
@@ -234,7 +234,7 @@ func TestSendBrief(t *testing.T) {
 	})
 
 	t.Run("a failed Enter is unconfirmed, not refused", func(t *testing.T) {
-		p := &fakePane{status: "idle", enterErr: herdradapter.ErrSendFailed}
+		p := &fakePane{status: "idle", enterErr: hcadapter.ErrSendFailed}
 		r := sendBrief(ctx, p.steps(), "run the tests", testBriefMarker)
 		if r.Outcome != briefUnconfirmed || r.Step != "enter" || len(p.recorded) != 1 {
 			t.Fatalf("result %+v, recorded %d", r, len(p.recorded))

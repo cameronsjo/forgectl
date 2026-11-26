@@ -42,7 +42,7 @@ func TestExecCommand_UnknownCommandWithHelpFails(t *testing.T) {
 		{"top-level short flag", []string{"nosuchcmd", "-h"}, `"nosuchcmd" for "forgectl"`},
 		{"flag before the verb", []string{"--help", "nosuchcmd"}, `"nosuchcmd" for "forgectl"`},
 		{"subcommand", []string{"desk", "nosuchsub", "--help"}, `"nosuchsub" for "forgectl desk"`},
-		{"subcommand of another group", []string{"tmux", "frobnicate", "--help"}, `"frobnicate" for "forgectl tmux"`},
+		{"subcommand of another group", []string{"workflow", "frobnicate", "--help"}, `"frobnicate" for "forgectl workflow"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stderr, err := runUnknownHelpArgs(t, tt.args...)
@@ -142,8 +142,8 @@ func TestEveryGroupRejectsUnknownSubcommand(t *testing.T) {
 	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
 	root := newRoot(deps)
 	groups := groupPaths(root)
-	if len(groups) < 17 {
-		t.Fatalf("found %d groups, want at least 17", len(groups))
+	if len(groups) < 15 {
+		t.Fatalf("found %d groups, want at least 15", len(groups))
 	}
 	for _, path := range groups {
 		name := strings.Join(path, " ")

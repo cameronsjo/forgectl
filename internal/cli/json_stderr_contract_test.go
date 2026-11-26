@@ -288,7 +288,6 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 		{name: "launch stats: bad window", args: []string{"launch", "stats", "soon", "--json"}, wantCode: jsonCodeFailed, wantExit: 1},
 		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "takes no arguments"},
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
-		{name: "herdr organize: no config", args: []string{"herdr", "organize", "--json"}, wantCode: jsonCodeFailed, wantExit: 2},
 		{name: "status: non-positive timeout", args: []string{"status", "--json", "--timeout", "0s"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "--timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

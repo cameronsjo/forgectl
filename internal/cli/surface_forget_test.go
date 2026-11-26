@@ -147,8 +147,8 @@ func TestForgetIsHcOnly(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	err := runSurfaceForget(cmd, module.Deps{}, forgetOptions{Surface: workerSurfaceHerdr, Name: "w"})
-	if code := ExitCode(err); code != exitUsage || !errors.Is(err, errForgetHcOnly) {
-		t.Fatalf("exit %d (err %v), want 2 and errForgetHcOnly", code, err)
+	if code := ExitCode(err); code != exitUsage || (!errors.Is(err, errForgetHcOnly) && !errors.Is(err, errLegacyBackend)) {
+		t.Fatalf("exit %d (err %v), want 2 and errForgetHcOnly or errLegacyBackend", code, err)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -165,9 +165,10 @@ func TestNeedsYouMarksTheLedgerPane(t *testing.T) {
 func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	t.Run("adapter refuses the pane", func(t *testing.T) {
 		r := newNotifyRig(t)
-		r.panes.err = herdradapter.ErrScreenUnreadable
+		unreadable := errors.New("screen unreadable")
+		r.panes.err = unreadable
 		err := failures(r.n.NeedsYou(t.Context(), r.row, r.led, "blocked: prompt"))
-		if !errors.Is(err, herdradapter.ErrScreenUnreadable) {
+		if !errors.Is(err, unreadable) {
 			t.Fatalf("err = %v, want the adapter's refusal", err)
 		}
 		if len(r.run.Calls) != 1 {
@@ -219,7 +220,7 @@ func TestNeedsYouUnverifiedPaneStillNotifies(t *testing.T) {
 	})
 	t.Run("a gone workspace has nothing to clear", func(t *testing.T) {
 		r := newNotifyRig(t)
-		r.panes.err = herdradapter.ErrWorkerGone
+		r.panes.err = hcadapter.ErrWorkerGone
 		if err := r.n.Cleared(t.Context(), r.row, r.led); err != nil {
 			t.Fatalf("Cleared: %v", err)
 		}

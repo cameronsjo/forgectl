@@ -2,11 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
+	"github.com/cameronsjo/forgectl/internal/surface/hcadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 )
 
@@ -86,7 +87,7 @@ func TestWaitSettled(t *testing.T) {
 	})
 
 	t.Run("an unreadable read breaks the settle window", func(t *testing.T) {
-		l, calls := scriptedWait([]ready.Screen{working, idle}, map[int]error{3: herdradapter.ErrScreenUnreadable}, "")
+		l, calls := scriptedWait([]ready.Screen{working, idle}, map[int]error{3: errors.New("screen unreadable")}, "")
 		r := waitSettled(ctx, l)
 		if r.State != readyStateSettled || *calls != 8 {
 			t.Fatalf("result %+v after %d reads, want settled after 8", r, *calls)
@@ -119,7 +120,7 @@ func TestWaitSettled(t *testing.T) {
 	})
 
 	t.Run("a gone workspace ends the wait", func(t *testing.T) {
-		l, _ := scriptedWait([]ready.Screen{working}, map[int]error{1: herdradapter.ErrWorkerGone}, "")
+		l, _ := scriptedWait([]ready.Screen{working}, map[int]error{1: hcadapter.ErrWorkerGone}, "")
 		if r := waitSettled(ctx, l); r.State != readyStateGone {
 			t.Fatalf("result %+v", r)
 		}

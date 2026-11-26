@@ -1,26 +1,85 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// `surface tag <name>` stamps display tokens on a worker's pane, for a
-// scheduler that wants its task or issue id in herdr's sidebar
-// (forgectl#1239).
+// `surface tag <name>` stamps display tokens on a worker's pane.
+// Legacy herdr adapter moved to a plugin (#1518), and hc has no sidebar
+// metadata yet; token validation stays here so usage errors remain uniform.
 
-// tagTimeout bounds the ownership check and the report.
-const tagTimeout = 30 * time.Second
+const (
+	maxTokenKeyLen     = 32
+	maxTokenValueLen   = 80
+	maxTokensPerReport = 16
+)
+
+var errBadToken = errors.New("bad display token")
+
+func checkTokenKey(k string) error {
+	if k == "" || len(k) > maxTokenKeyLen {
+		return fmt.Errorf("%w: token key %q must be 1-%d characters", errBadToken, termsafe.SafeLineMax(k, 64), maxTokenKeyLen)
+	}
+	if k[0] == '-' {
+		return fmt.Errorf("%w: token key %q must not start with '-'", errBadToken, termsafe.SafeLineMax(k, 64))
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+		if !ok {
+			return fmt.Errorf("%w: token key %q has invalid character", errBadToken, termsafe.SafeLineMax(k, 64))
+		}
+	}
+	return nil
+}
+
+func checkTokenValue(k, v string) error {
+	if v == "" || utf8.RuneCountInString(v) > maxTokenValueLen || !utf8.ValidString(v) {
+		return fmt.Errorf("%w: token %s value must be 1-%d valid UTF-8 characters", errBadToken, k, maxTokenValueLen)
+	}
+	if strings.TrimSpace(v) != v {
+		return fmt.Errorf("%w: token %s value must not have leading or trailing space", errBadToken, k)
+	}
+	if termsafe.SafeLineMax(v, maxTokenValueLen) != v {
+		return fmt.Errorf("%w: token %s value contains control, bidi, or invisible characters", errBadToken, k)
+	}
+	return nil
+}
+
+func checkTagTokens(set map[string]string, clearKeys []string) error {
+	seen := make(map[string]bool, len(set)+len(clearKeys))
+	for k, v := range set {
+		if err := checkTokenKey(k); err != nil {
+			return err
+		}
+		if err := checkTokenValue(k, v); err != nil {
+			return err
+		}
+		seen[k] = true
+	}
+	for _, k := range clearKeys {
+		if err := checkTokenKey(k); err != nil {
+			return err
+		}
+		if seen[k] {
+			return fmt.Errorf("%w: token %s named twice", errBadToken, k)
+		}
+		seen[k] = true
+	}
+	if len(seen) > maxTokensPerReport {
+		return fmt.Errorf("%w: at most %d tokens per report", errBadToken, maxTokensPerReport)
+	}
+	return nil
+}
 
 // tagResult is what `surface tag --json` prints. Additive changes only
 // (ADR-0008 rule 2).
@@ -94,10 +153,10 @@ func parseTagTokens(tokens []string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("--token %q: want k=v", termsafe.SafeLineMax(t, 120))
 		}
-		if err := herdradapter.CheckTokenKey(k); err != nil {
+		if err := checkTokenKey(k); err != nil {
 			return nil, err
 		}
-		if err := herdradapter.CheckTokenValue(k, v); err != nil {
+		if err := checkTokenValue(k, v); err != nil {
 			return nil, err
 		}
 		if _, dup := set[k]; dup {
@@ -121,7 +180,7 @@ func runSurfaceTag(cmd *cobra.Command, deps module.Deps, opts tagOptions) error 
 	}
 	// The cleared keys, a key both set and cleared, and the per-report cap
 	// are checked here too, before the ledger or herdr is touched.
-	if _, _, err := herdradapter.CheckTag(set, opts.Clear); err != nil {
+	if err := checkTagTokens(set, opts.Clear); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	if err := checkWorkerSurface(opts.Surface); err != nil {
@@ -129,34 +188,5 @@ func runSurfaceTag(cmd *cobra.Command, deps module.Deps, opts tagOptions) error 
 	}
 	// Tags are herdr sidebar metadata tokens, which herdr-core has no
 	// equivalent of yet.
-	if opts.Surface == workerSurfaceHc {
-		return WithExitCode(errors.New("surface tag supports herdr workers only; hc has no sidebar metadata"), exitUsage)
-	}
-	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
-	if err != nil {
-		return err
-	}
-	_, ref, err := launchedWorker(w.led, opts.Name)
-	if err != nil {
-		return WithExitCode(err, exitUsage)
-	}
-	ctx, cancel := context.WithTimeout(cmd.Context(), tagTimeout)
-	defer cancel()
-	pane, err := w.herdr.TagPane(ctx, ref, set, opts.Clear)
-	switch {
-	case errors.Is(err, herdradapter.ErrBadToken):
-		return WithExitCode(termsafe.Error(err), exitUsage)
-	case err != nil:
-		return WithExitCode(termsafe.Error(fmt.Errorf("worker %s: %w", opts.Name, err)), exitFailed)
-	}
-	res := tagResult{Name: opts.Name, PaneID: pane, Set: set, Cleared: opts.Clear}
-	if res.Cleared == nil {
-		res.Cleared = []string{}
-	}
-	if opts.JSON {
-		return writeJSON(cmd.OutOrStdout(), res)
-	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s: tagged pane %s (%s set, %s cleared)\n",
-		opts.Name, termsafe.SafeLineMax(pane, 64), plural(len(set), "token", "tokens"), plural(len(res.Cleared), "token", "tokens"))
-	return err
+	return WithExitCode(errors.New("surface tag supports herdr workers only; hc has no sidebar metadata"), exitUsage)
 }

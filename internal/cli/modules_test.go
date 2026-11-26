@@ -125,13 +125,13 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 22
+	const wantCount = 20
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
 
 	wantNames := map[string]bool{
-		"tmux": true, "projects": true, "config": true, "launch": true,
+		"projects": true, "config": true, "launch": true,
 		"workflow": true, "pr": true, "branch": true,
 		"clean": true, "sessions": true, "review": true,
 		"env":       true,
@@ -140,7 +140,6 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"upgrade":   true,
 		"resume":    true,
 		"surface":   true,
-		"herdr":     true,
 		"audit":     true,
 		"status":    true,
 		"desk":      true,
@@ -161,7 +160,7 @@ func TestModules_CompletenessPins(t *testing.T) {
 	}
 
 	wantCore := map[string]bool{
-		"tmux": true, "projects": true, "launch": true,
+		"projects": true, "launch": true,
 		"workflow": true, "pr": true, "config": true,
 	}
 	for _, m := range mods {
@@ -242,6 +241,7 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 	// single in-process CLI module:
 	//   - [github] spans projects and review (forgectl#412).
 	//   - [docs] is owned by the standalone forgectl-docs plugin binary.
+	//   - [herdr] is owned by the standalone forgectl-herdr plugin binary (#1518).
 	//   - [net] backs pr's offline fast-fail reachability check.
 	//   - [proxy] backs launch/resume/surface/pr launch_profile injection.
 	//   - [bench] backs launch telemetry, status, and doctor checks.
@@ -249,6 +249,7 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 	sharedSections := map[string]bool{
 		"github": true,
 		"docs":   true,
+		"herdr":  true,
 		"net":    true,
 		"proxy":  true,
 		"bench":  true,

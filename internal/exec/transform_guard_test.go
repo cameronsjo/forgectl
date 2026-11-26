@@ -24,11 +24,9 @@ var transformSeam = map[string]bool{
 }
 
 // transformCallers is the allowlist of files outside internal/exec that may
-// name the transform seam, relative to the module root. It is one file: the
-// tmux adapter's create command, which escapes its sealed -c (forgectl#839).
-var transformCallers = map[string]bool{
-	"internal/surface/tmuxadapter/start.go": true,
-}
+// name the transform seam, relative to the module root. Currently empty after
+// tmuxadapter moved out of core (#1518).
+var transformCallers = map[string]bool{}
 
 // TestNoCallerCodeReceivesAnOpaquePayload keeps the sealed-payload promise
 // that sealed.Start, FakeSensitiveRunner and backend.BootstrapCommand state: no
@@ -99,7 +97,7 @@ func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
 	if parsed == 0 {
 		t.Fatal("parsed no Go files; the file set is broken, not the module clean")
 	}
-	if sanctioned == 0 {
+	if len(transformCallers) > 0 && sanctioned == 0 {
 		t.Fatal("found no use of the transform seam at its sanctioned site; the matcher is broken, not the module clean")
 	}
 }

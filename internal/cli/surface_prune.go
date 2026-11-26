@@ -15,9 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/pr"
-	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -199,42 +197,10 @@ func pathGone(path string) (bool, error) {
 	return false, err
 }
 
-// herdrWorkspaces probes ledger rows' workspaces through the herdr session
-// this process resolves, against one herdr listing (Adapter.Prober). A row
-// from another session cannot be seen from here, so herdr cannot say.
-func herdrWorkspaces(ctx context.Context) (func(worker.LedgerID, worker.Row) drain.Workspace, error) {
-	adapter, err := newHerdrAdapter(io.Discard)
-	if err != nil {
-		return nil, err
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return nil, errors.New("the herdr adapter has an unexpected type")
-	}
-	if err := herdr.CheckReady(ctx); err != nil {
-		return nil, err
-	}
-	// One readiness read and one workspace listing for the whole prune, not
-	// two herdr calls per row.
-	// Only rows from this session's ledgers are probed (below), so the
-	// prober may settle a restarted session by the ownership marker.
-	probe := herdr.ForSessionLedger().Prober()
-	return func(id worker.LedgerID, r worker.Row) drain.Workspace {
-		if id.Session != herdr.Session() {
-			return drain.WorkspaceUnknown
-		}
-		ref, err := backend.DecodeRef(r.Ref)
-		if err != nil {
-			return drain.WorkspaceUnknown
-		}
-		switch probe(ctx, ref).State() {
-		case backend.ProbePresent:
-			return drain.WorkspaceLive
-		case backend.ProbeGone:
-			return drain.WorkspaceGone
-		}
-		return drain.WorkspaceUnknown
-	}, nil
+// herdrWorkspaces previously probed legacy herdr workspaces; herdr moved to a
+// plugin (#1518), so prune reports it unavailable and keeps ledger rows safely.
+func herdrWorkspaces(context.Context) (func(worker.LedgerID, worker.Row) drain.Workspace, error) {
+	return nil, errLegacyBackend
 }
 
 // runPrune reads the queue and every ledger, decides with drain.PlanPrune,

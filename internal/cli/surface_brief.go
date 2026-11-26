@@ -169,43 +169,26 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), opts.Readback+opts.Start+5*time.Second)
 	defer cancel()
-	if w.hc != nil {
-		res := hcBriefLocked(ctx, w.led.LockBrief, w.row, hcBriefSteps{
-			status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
-			screen: func(ctx context.Context) (string, error) {
-				s, err := w.hc.WorkerScreen(ctx, w.ref)
-				return s.Text, err
-			},
-			promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
-			escape: func(ctx context.Context, checked hcadapter.Worker) error {
-				return w.hc.PressEscape(ctx, w.ref, checked)
-			},
-			send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
-				return w.hc.SendBrief(ctx, w.ref, s, checked)
-			},
-			record:  w.recordBrief,
-			now:     time.Now,
-			sleep:   resume.SleepContext,
-			start:   opts.Start,
-			compose: briefComposer(),
-			// --readback-timeout has no step under hc: hc's send pastes and
-			// submits in one call.
-			interval: briefPollInterval,
-		}, text, marker)
-		res.Name, res.Harness = w.row.Name, w.row.Harness
-		return reportBrief(cmd, res, opts.JSON)
-	}
-	res := sendBrief(ctx, briefSteps{
-		read:     w.read,
-		evaluate: w.evaluate,
-		typeText: func(ctx context.Context, s string) error { return w.herdr.TypeText(ctx, w.ref, s) },
-		enter:    func(ctx context.Context) error { return w.herdr.PressEnter(ctx, w.ref) },
-		record:   w.recordBrief,
-		now:      time.Now,
-		sleep:    resume.SleepContext,
-		compose:  briefComposer(),
-		readback: opts.Readback,
-		start:    opts.Start,
+	res := hcBriefLocked(ctx, w.led.LockBrief, w.row, hcBriefSteps{
+		status: func(ctx context.Context) (hcadapter.Worker, error) { return w.hc.WorkerStatus(ctx, w.ref) },
+		screen: func(ctx context.Context) (string, error) {
+			s, err := w.hc.WorkerScreen(ctx, w.ref)
+			return s.Text, err
+		},
+		promptShown: func(text string) ready.Verdict { return w.table.EvaluateText(w.row.Harness, text) },
+		escape: func(ctx context.Context, checked hcadapter.Worker) error {
+			return w.hc.PressEscape(ctx, w.ref, checked)
+		},
+		send: func(ctx context.Context, s string, checked hcadapter.Worker) (hcadapter.SendResult, error) {
+			return w.hc.SendBrief(ctx, w.ref, s, checked)
+		},
+		record:  w.recordBrief,
+		now:     time.Now,
+		sleep:   resume.SleepContext,
+		start:   opts.Start,
+		compose: briefComposer(),
+		// --readback-timeout has no step under hc: hc's send pastes and
+		// submits in one call.
 		interval: briefPollInterval,
 	}, text, marker)
 	res.Name, res.Harness = w.row.Name, w.row.Harness

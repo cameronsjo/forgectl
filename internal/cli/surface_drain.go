@@ -17,7 +17,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
-	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workstate"
@@ -198,32 +197,7 @@ func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) err
 	if err := drainRunDirCheck(); err != nil {
 		return WithExitCode(termsafe.Error(runDirRefusal(err)), exitUsage)
 	}
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
-	if err != nil {
-		return WithExitCode(err, exitUsage)
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-	herdrPath, err := lookHerdr()
-	if err != nil {
-		return WithExitCode(err, exitUsage)
-	}
-	pid, err := drainSpawn(drainChildArgv(herdr.Session(), herdrPath), pinnedDrainEnv(os.Environ(), herdr.Session()))
-	if err != nil {
-		return WithExitCode(fmt.Errorf("forgectl: start the drain: %w", err), exitUsage)
-	}
-	st, ok := waitDrainRunning(files, pid, drainStartWait)
-	if !ok {
-		return termsafe.Error(fmt.Errorf("the drain (pid %d) did not report running within %s; last event: %s", pid, drainStartWait, lastDrainEvent(files)))
-	}
-	res := drainStartResult{PID: st.PID, ProcessStart: st.ProcessStart, HerdrSession: st.HerdrSession, Status: st.Status}
-	if asJSON {
-		return writeJSON(cmd.OutOrStdout(), res)
-	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "drain %s: pid %d, herdr session %s\n", res.Status, res.PID, termsafe.SafeLineMax(res.HerdrSession, 64))
-	return err
+	return WithExitCode(fmt.Errorf("surface drain start: %w", errLegacyBackend), exitUsage)
 }
 
 // runDirRefusal names TMPDIR in a run-directory failure, since TMPDIR is what
@@ -680,25 +654,7 @@ func drainSessionPin(session, herdrPath string) error {
 	if session == "" || herdrPath == "" {
 		return errors.New("_drain needs --session and --herdr-path; run surface drain start")
 	}
-	adapter, err := newHerdrAdapter(io.Discard)
-	if err != nil {
-		return err
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-	if herdr.Session() != session {
-		return fmt.Errorf("the herdr session resolves to %q, expected the pinned %q", herdr.Session(), session)
-	}
-	path, err := lookHerdr()
-	if err != nil {
-		return err
-	}
-	if path != herdrPath {
-		return fmt.Errorf("herdr resolves to %s, expected the pinned %s", path, herdrPath)
-	}
-	return nil
+	return errLegacyBackend
 }
 
 // drainLoadConfig reloads the config file with the normal loader. A file
