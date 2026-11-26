@@ -80,6 +80,11 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		// Claude Code 2.1.289 after a first auto-mode turn, with interactive
 		// mods drawing above the box: ready, nothing typed.
 		{"claude-after-first-auto-turn", "claude", StateReady, "", ""},
+		// A named session draws its name into the box's top rule
+		// ("──── cos-pr-misc ─", forgectl#1524). The screen is
+		// claude-after-first-auto-turn with the label spliced into that rule,
+		// in the shape read from a live worker pane on 2026-11-26.
+		{"claude-ready-named-session", "claude", StateReady, "", ""},
 		{"codex-typed-unsent", "codex", StateReady, "", "Run exactly this shell command once and nothing else: mkdir -p /tmp/fxcap/codex-made"},
 		// The turn failed on a model error and Codex is back at its composer.
 		{"codex-model-error", "codex", StateReady, "", ""},
@@ -185,6 +190,22 @@ func TestEvaluate_OverlayWithTheBoxVisibleIsBlocked(t *testing.T) {
 	v := tab.Evaluate("claude", s)
 	if v.State != StateBlocked || v.Blocking != "session feedback survey" {
 		t.Fatalf("verdict %+v, want blocked by the survey", v)
+	}
+}
+
+// TestEvaluate_LabeledRuleOverDialogIsBlocked: a session-name label on a rule
+// line does not make a dialog drawn in place of the box read as the prompt.
+func TestEvaluate_LabeledRuleOverDialogIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-permission-prompt")
+	i := strings.Index(s.Text, "\n─")
+	if i < 0 {
+		t.Fatal("fixture has no rule line")
+	}
+	s.Text = s.Text[:i] + "\n──────────────────────── cos-pr-misc ─" + s.Text[i:]
+	v := tab.Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "permission prompt" {
+		t.Fatalf("verdict %+v, want blocked by the permission prompt", v)
 	}
 }
 
