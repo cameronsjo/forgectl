@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -324,8 +323,7 @@ func streamWatchEvents(ctx context.Context, out io.Writer, c *workerwatch.Collec
 		<-ev.Done
 	}()
 
-	enc := json.NewEncoder(out)
-	enc.SetEscapeHTML(false)
+	enc := termsafe.JSONEncoder(out)
 
 	prev := c.Collect(streamCtx, false)
 	if prev.HCUnavailable != "" {

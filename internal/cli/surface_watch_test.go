@@ -368,7 +368,7 @@ func TestSurfaceWatchStreamEmitsTypedTransitionsOnWake(t *testing.T) {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		defer pw.Close()
+		defer func() { _ = pw.Close() }()
 		errCh <- streamWatchEvents(ctx, pw, c, hc, time.Hour)
 	}()
 
