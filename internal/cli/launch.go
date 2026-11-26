@@ -280,42 +280,36 @@ type launchOwnFlags struct {
 // harness untouched.
 func consumeLaunchFlags(args []string) ([]string, launchOwnFlags, error) {
 	var f launchOwnFlags
-	i := 0
-	for i < len(args) {
-		tok := args[i]
+	for len(args) > 0 {
+		tok := args[0]
 		switch {
 		case tok == hereFlag:
 			f.here = true
-			i++
+			args = args[1:]
 		case tok == dryRunFlag:
 			f.dryRun = true
-			i++
+			args = args[1:]
 		case tok == allowGuardedPluginDisableFlag:
 			f.allowGuardedPluginDisable = true
-			i++
+			args = args[1:]
 		case tok == roleFlag:
-			next := i + 1
-			if next >= len(args) {
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
 				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
 			}
-			val := args[next]
-			if strings.TrimSpace(val) == "" {
-				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
-			}
-			f.role = val
-			i += 2
+			f.role = args[1]
+			args = args[2:]
 		case strings.HasPrefix(tok, roleFlag+"="):
 			val := strings.TrimPrefix(tok, roleFlag+"=")
 			if strings.TrimSpace(val) == "" {
 				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
 			}
 			f.role = val
-			i++
+			args = args[1:]
 		default:
-			return args[i:], f, nil
+			return args, f, nil
 		}
 	}
-	return args[i:], f, nil
+	return args, f, nil
 }
 
 // consumeHereFlag drops a leading --here from args and reports whether it was
