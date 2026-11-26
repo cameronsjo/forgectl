@@ -47,6 +47,9 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	if a.space != "" {
 		args = append(args, exec.MustFixed("--label"), exec.Opaque(spaceLabel+"="+a.space))
 	}
+	for _, kv := range a.agent.pairs() {
+		args = append(args, exec.MustFixed("--label"), exec.Opaque(kv))
+	}
 	if a.parent != "" {
 		// Measured on hc 0.1.21: with --outlive-parent the child is listed
 		// under its parent (herdr-app ls sub_agents) and die_with_parent

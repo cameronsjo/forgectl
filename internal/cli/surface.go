@@ -469,6 +469,15 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return renderLaunchPlan(cmd.OutOrStdout(), plan, opts.JSON)
 	}
 
+	if hc, ok := adapter.(*hcadapter.Adapter); ok {
+		if err := hc.StampAgent(hcadapter.AgentIdentity{
+			Kind:    built.Invocation.Harness,
+			Session: built.SessionID,
+		}); err != nil {
+			return err
+		}
+	}
+
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
 	built.Invocation.Env = markPane(built.Invocation.Env, opts.Backend)

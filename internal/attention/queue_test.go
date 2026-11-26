@@ -214,3 +214,90 @@ func TestBuildPaneTwoSessionsClaimIsAmbiguous(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCorroboratesHcAgentLabels(t *testing.T) {
+	const coreSel = "0123456789abcdef0123456789abcdef"
+	in := Input{
+		Now: t0,
+		Core: Core{
+			Known:     true,
+			Selection: coreSel,
+			Live:      map[string]bool{"t10": true, "t11": true},
+			Terminals: []CoreTerminal{
+				{Address: "t10", Name: "fix-login", Kind: "claude", Session: "sess-hc-10", Worker: "fix-login", Role: "builder"},
+				{Address: "t11", Name: "review-pr", Kind: "codex", Session: "sess-hc-11", Worker: "review-pr", Role: "reviewer"},
+			},
+		},
+		Desk: []DeskItem{
+			// Queued from t10: no Herdr 1 pane, no cos- prefix; hc labels corroborate worker, session, kind, role.
+			{Name: "01-merge", What: "merge PR", SHA256: sha64, Terminal: "t10", TerminalCore: coreSel, AddedAt: t0.Add(-2 * time.Minute)},
+		},
+		Sweep: &Sweep{
+			GeneratedAt: t0.Add(-5 * time.Minute),
+			Workers: []SweepWorker{
+				// Blocked on desk, no Herdr 1 pane: merges into 01-merge via hc terminal t10.
+				{Name: "fix-login", BlockedBy: BlockedByDesk},
+				// Blocked on prompt, no Herdr 1 pane: corroborated via hc agent.worker=review-pr.
+				{Name: "review-pr", BlockedBy: BlockedByPrompt},
+			},
+		},
+		Asks: []AskItem{
+			// From "fix-login" (no cos- prefix): corroborated as worker via hc agent.worker label.
+			{ID: "ask-00000001", Title: "Approve deploy", Bucket: "now", From: "fix-login", At: t0.Add(-1 * time.Minute)},
+		},
+		WorkerPrefix: "cos-",
+	}
+	rows := Build(in)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v, want 3 (1 prompt-blocked worker, 1 merged desk row, 1 ask)", rows)
+	}
+	// Cost 1, oldest first: review-pr (-5m) then 01-merge (-2m), then ask (-1m, cost 4).
+	w, d, a := rows[0], rows[1], rows[2]
+	if w.Kind != RowWorker || w.Worker != "review-pr" || w.Terminal != "t11" || w.Session != "sess-hc-11" || w.AgentKind != "codex" || w.AgentRole != "reviewer" {
+		t.Errorf("worker row = %+v", w)
+	}
+	if d.Kind != RowDesk || d.Tag != "01-merge" || d.Cost != CostBlockedWorker || d.Worker != "fix-login" || d.Origin != OriginWorker || d.Terminal != "t10" || d.Session != "sess-hc-10" || d.AgentKind != "claude" || d.AgentRole != "builder" {
+		t.Errorf("merged desk row = %+v", d)
+	}
+	if a.Kind != RowAsk || a.Worker != "fix-login" || a.Origin != OriginWorker || a.AgentKind != "claude" || a.AgentRole != "builder" || a.Terminal != "" {
+		t.Errorf("ask row = %+v", a)
+	}
+
+	// --session filters hc-corroborated rows the same way as Herdr 1 rows.
+	in.Session = "sess-hc-11"
+	filtered := Build(in)
+	if len(filtered) != 1 || filtered[0].Worker != "review-pr" {
+		t.Fatalf("session-filtered rows = %+v, want only review-pr", filtered)
+	}
+}
+
+func TestBuildHcAmbiguousClaimsDropped(t *testing.T) {
+	const coreSel = "0123456789abcdef0123456789abcdef"
+	in := Input{
+		Now: t0,
+		Core: Core{
+			Known:     true,
+			Selection: coreSel,
+			Live:      map[string]bool{"t1": true, "t2": true},
+			Terminals: []CoreTerminal{
+				{Address: "t1", Kind: "claude", Session: "dup-sess", Worker: "dup-worker"},
+				{Address: "t2", Kind: "claude", Session: "dup-sess", Worker: "dup-worker"},
+			},
+		},
+		Desk: []DeskItem{
+			{Name: "01-a", What: "a", SHA256: sha64, Terminal: "t1", TerminalCore: coreSel, AddedAt: t0},
+		},
+		Sweep: &Sweep{
+			GeneratedAt: t0,
+			Workers:     []SweepWorker{{Name: "dup-worker", BlockedBy: BlockedByPrompt}},
+		},
+	}
+	for _, row := range Build(in) {
+		if row.Kind == RowDesk && row.Session != "" {
+			t.Errorf("desk row took ambiguous hc session: %+v", row)
+		}
+		if row.Kind == RowWorker && (row.Terminal != "" || row.Session != "") {
+			t.Errorf("worker row took ambiguous hc worker/session: %+v", row)
+		}
+	}
+}
