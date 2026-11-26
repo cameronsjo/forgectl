@@ -20,6 +20,8 @@ type launchResult struct {
 	Name    string `json:"name"`
 	Target  string `json:"target"`
 	Harness string `json:"harness"`
+	// Role is the --role name when a [launch.roles.<name>] profile is selected.
+	Role string `json:"role,omitempty"`
 	// Ref is the line a launch without --json prints: the backend and the
 	// recovery tag.
 	Ref string `json:"ref"`

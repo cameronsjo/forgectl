@@ -15,7 +15,11 @@ import (
 )
 
 func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config, th theme.Theme) *cobra.Command {
-	var asJSON bool
+	var (
+		asJSON       bool
+		roleName     string
+		allowGuarded bool
+	)
 	cmd := &cobra.Command{
 		Use:   "which",
 		Short: "Print the resolved launch profile for the current directory",
@@ -53,6 +57,21 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			if profile.Harness == "claude" {
 				runDir = launch.SettingsRoot(cwd)
 			}
+			// Optional role resolution (--role <name>): validates the role
+			// against the resolved harness and run directory, matching
+			// `forgectl launch --role <name>`.
+			var resolvedRole *launch.ResolvedRole
+			if roleName != "" {
+				roleDir := runDir
+				if roleDir == "" {
+					roleDir = cwd
+				}
+				r, rerr := launch.ResolveRole(lc, roleName, profile.Harness, roleDir, os.Environ(), allowGuarded)
+				if rerr != nil {
+					return WithExitCode(termsafe.Error(rerr), exitUsage)
+				}
+				resolvedRole = &r
+			}
 			// What a worker started here would get (forgectl#1125): a worker
 			// does not read [launch.defaults], so the profile above is not
 			// its posture. Resolved through the launch's own worker path.
@@ -63,16 +82,24 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			if asJSON {
 				doc := buildLaunchWhichJSON(profile, cwd, runDir, source, injected)
 				doc.Worker = buildLaunchWhichWorkerJSON(worker)
+				if resolvedRole != nil {
+					doc.Role = buildLaunchWhichRoleJSON(*resolvedRole)
+				}
 				return encodeLaunchWhichJSON(cmd.OutOrStdout(), doc)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			printLaunchProfile(out, th, profile, cwd, runDir, src, injected)
+			if resolvedRole != nil {
+				printLaunchRole(out, th, *resolvedRole)
+			}
 			printWorkerPosture(out, th, worker)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		`emit {"directory":...,"run_directory":...,"config":...,"config_path":...,"config_note":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
+	cmd.Flags().StringVar(&roleName, "role", "", "preview a [launch.roles.<name>] role profile alongside the resolved directory profile")
+	cmd.Flags().BoolVar(&allowGuarded, "allow-guarded-plugin-disable", false, "bypass the fail-closed guard-hook safety check when previewing --role disable_plugins")
 	return cmd
 }
 
@@ -115,6 +142,78 @@ type launchWhichJSON struct {
 	// reads [launch.worker], not [launch.defaults], so the fields above are
 	// not its posture (forgectl#1125).
 	Worker *launchWhichWorkerJSON `json:"worker,omitempty"`
+	// Role is the resolved [launch.roles.<name>] profile when --role is given.
+	Role *launchWhichRoleJSON `json:"role,omitempty"`
+}
+
+// launchWhichRoleJSON is the --json wire shape for `launch which --role <name>`.
+type launchWhichRoleJSON struct {
+	Name                     string   `json:"name"`
+	Posture                  string   `json:"posture,omitempty"`
+	CharterFile              string   `json:"charter_file,omitempty"`
+	SessionName              string   `json:"session_name,omitempty"`
+	DisablePlugins           []string `json:"disable_plugins"`
+	DisabledPlugins          []string `json:"disabled_plugins"`
+	GuardedPlugins           []string `json:"guarded_plugins"`
+	ExcludeClaudeMD          bool     `json:"exclude_claude_md"`
+	ClaudeMDExcludes         []string `json:"claude_md_excludes"`
+	AllowUnsafePluginDisable bool     `json:"allow_unsafe_plugin_disable,omitempty"`
+	Notes                    []string `json:"notes"`
+}
+
+func buildLaunchWhichRoleJSON(r launch.ResolvedRole) *launchWhichRoleJSON {
+	nonNil := func(s []string) []string {
+		if s == nil {
+			return []string{}
+		}
+		return s
+	}
+	return &launchWhichRoleJSON{
+		Name:                     r.Name,
+		Posture:                  r.Posture,
+		CharterFile:              r.CharterFile,
+		SessionName:              r.SessionName,
+		DisablePlugins:           nonNil(r.DisablePlugins),
+		DisabledPlugins:          nonNil(r.DisabledPlugins),
+		GuardedPlugins:           nonNil(r.GuardedPlugins),
+		ExcludeClaudeMD:          r.ExcludeClaudeMD,
+		ClaudeMDExcludes:         nonNil(r.ClaudeMDExcludes),
+		AllowUnsafePluginDisable: r.AllowUnsafePluginDisable,
+		Notes:                    nonNil(r.Notes),
+	}
+}
+
+func printLaunchRole(w io.Writer, th theme.Theme, r launch.ResolvedRole) {
+	styles := th.Styles()
+	labelStyle := styles.Muted.Width(14)
+	valueStyle := styles.Fg
+	dimStyle := styles.Muted.Italic(true)
+	row := func(label, value string, style func(...string) string) {
+		_, _ = fmt.Fprintln(w, renderSafe(labelStyle.Render, label)+renderSafe(style, value))
+	}
+	summary := r.Name
+	if r.Posture != "" {
+		summary += "  (" + r.Posture + ")"
+	}
+	row("role", summary, valueStyle.Render)
+	if r.CharterFile != "" {
+		row("", "charter: "+r.CharterFile, valueStyle.Render)
+	}
+	if r.SessionName != "" {
+		row("", "session_name: "+r.SessionName, valueStyle.Render)
+	}
+	if len(r.DisabledPlugins) > 0 {
+		row("", "disabled plugins: "+strings.Join(r.DisabledPlugins, ", "), valueStyle.Render)
+	}
+	if len(r.GuardedPlugins) > 0 {
+		row("", "guarded plugins (kept on): "+strings.Join(r.GuardedPlugins, ", "), dimStyle.Render)
+	}
+	if len(r.ClaudeMDExcludes) > 0 {
+		row("", "claude.md excludes: "+strings.Join(r.ClaudeMDExcludes, ", "), valueStyle.Render)
+	}
+	for _, n := range r.Notes {
+		row("", "note: "+n, dimStyle.Render)
+	}
 }
 
 // launchWhichWorkerJSON is the effective worker posture. Posture names each

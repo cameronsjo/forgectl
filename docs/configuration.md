@@ -45,7 +45,7 @@ Several command groups own their own config section, documented alongside that c
 
 - [`env`](commands/env.md) — safe `.env` management
 - [`resume`](commands/resume.md) — session resume across repos; `[[resume.on_update]]`, the hooks fired when claude updates
-- [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles
+- [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles, `[launch.worker]`, and declarative `[launch.roles.<name>]` role profiles (`--role <name>`)
 - [`pr`](commands/pr.md) — `[pr]`, the clean-room reviewer's own posture
 - [`proxy`](commands/proxy.md) — `[proxy.profiles]`, named profiles; `launch_profile` applies one to every launch
 - [`projects` and `review`](commands/projects-and-review.md) — `[projects]`, `[[projects.wings]]`, `[review]`, `[github]`, whose repos get enumerated and where clones land
