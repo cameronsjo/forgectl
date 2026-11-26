@@ -141,20 +141,22 @@ reports, PRs, and the selected worker's screen:
 
 func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 	var (
-		backendName string
-		displayName string
-		allowPATH   bool
-		worktree    string
-		harness     string
-		brief       string
-		profile     string
-		model       string
-		inheritMode string
-		herdrSpace  string
-		parent      string
-		here        bool
-		dryRun      bool
-		asJSON      bool
+		backendName               string
+		displayName               string
+		allowPATH                 bool
+		worktree                  string
+		harness                   string
+		brief                     string
+		profile                   string
+		model                     string
+		inheritMode               string
+		herdrSpace                string
+		parent                    string
+		here                      bool
+		dryRun                    bool
+		asJSON                    bool
+		role                      string
+		allowGuardedPluginDisable bool
 	)
 
 	cmd := &cobra.Command{
@@ -275,22 +277,24 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
-				Target:      firstArg(args),
-				Backend:     backendName,
-				DisplayName: displayName,
-				AllowPATH:   allowPATH,
-				Worktree:    worktree,
-				Harness:     harness,
-				Brief:       brief,
-				Profile:     profile,
-				Model:       model,
-				InheritMode: inheritMode,
-				HerdrSpace:  herdrSpace,
-				Parent:      parent,
-				ParentGiven: cmd.Flags().Changed("parent"),
-				Here:        here,
-				DryRun:      dryRun,
-				JSON:        asJSON,
+				Target:                   firstArg(args),
+				Backend:                  backendName,
+				DisplayName:              displayName,
+				AllowPATH:                allowPATH,
+				Worktree:                 worktree,
+				Harness:                  harness,
+				Brief:                    brief,
+				Profile:                  profile,
+				Model:                    model,
+				InheritMode:              inheritMode,
+				HerdrSpace:               herdrSpace,
+				Parent:                   parent,
+				ParentGiven:              cmd.Flags().Changed("parent"),
+				Here:                     here,
+				DryRun:                   dryRun,
+				JSON:                     asJSON,
+				Role:                     role,
+				AllowUnsafePluginDisable: allowGuardedPluginDisable,
 			})
 		},
 	}
@@ -329,6 +333,10 @@ row whose terminal hc proves gone, such as one on a core whose state was wiped.
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		`print what the launch created as {"surface","name","target","harness","ref","workspace_id","tab_id","pane_id","terminal_id","worker"} JSON, or with --dry-run the preview as {"dry_run","surface","name","target","harness","run_directory","worker"}`)
+	cmd.Flags().StringVar(&role, "role", "",
+		"apply a declarative [launch.roles.<name>] role profile (charter, plugin disables, posture env)")
+	cmd.Flags().BoolVar(&allowGuardedPluginDisable, "allow-guarded-plugin-disable", false,
+		"bypass the fail-closed guard-hook safety check for --role disable_plugins")
 
 	return cmd
 }
@@ -353,10 +361,12 @@ type surfaceLaunchOptions struct {
 	// ParentGiven reports that --parent was on the command line, so an
 	// explicit empty value (an unset $HC_TERMINAL_ID) is refused rather than
 	// read as no parent.
-	ParentGiven bool
-	Here        bool
-	DryRun      bool
-	JSON        bool
+	ParentGiven              bool
+	Here                     bool
+	DryRun                   bool
+	JSON                     bool
+	Role                     string
+	AllowUnsafePluginDisable bool
 }
 
 func firstArg(args []string) string {
@@ -427,7 +437,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
-	built, err := buildSurfaceLaunchInvocation(deps.Cfg.Launch, target, injected, unset, opts.Harness, opts.Here, cmd.ErrOrStderr())
+	built, err := buildSurfaceLaunchInvocation(deps.Cfg.Launch, target, injected, unset, opts.Harness, opts.Here, opts.Role, opts.AllowUnsafePluginDisable, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -451,6 +461,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 			Name:    displayNameFor(opts.DisplayName, target),
 			Target:  target,
 			Harness: built.Invocation.Harness,
+			Role:    opts.Role,
 		}
 		if built.Invocation.Harness == "claude" {
 			plan.RunDirectory = built.Invocation.CWD
@@ -470,8 +481,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	}
 
 	if opts.JSON {
-		return writeJSON(cmd.OutOrStdout(), newLaunchResult(cmd.Context(), adapter, result.Ref(), opts.Backend,
-			displayNameFor(opts.DisplayName, target), target, built.Invocation.Harness))
+		res := newLaunchResult(cmd.Context(), adapter, result.Ref(), opts.Backend,
+			displayNameFor(opts.DisplayName, target), target, built.Invocation.Harness)
+		res.Role = opts.Role
+		return writeJSON(cmd.OutOrStdout(), res)
 	}
 	// One line, to stdout, naming only what the manager already knows. The ref
 	// renders as its backend and recovery tag; it has no accessor that would
@@ -676,15 +689,20 @@ func displayNameFor(explicit, target string) string {
 // (cadence-ecosystem#608); here keeps it in the target. The move is said on
 // stderr, like the backend warnings: the manager shows the root, not the
 // directory that was named.
-func buildSurfaceLaunchInvocation(cfg config.LaunchConfig, target string, injected map[string]string, unset []string, harness string, here bool, stderr io.Writer) (launch.BuiltInvocation, error) {
+func buildSurfaceLaunchInvocation(cfg config.LaunchConfig, target string, injected map[string]string, unset []string, harness string, here bool, role string, allowUnsafePluginDisable bool, stderr io.Writer) (launch.BuiltInvocation, error) {
 	req := surfaceInvocationRequest(cfg, target, injected, unset, harness)
 	req.StayInCWD = here
+	req.Role = role
+	req.AllowUnsafePluginDisable = allowUnsafePluginDisable
 	built, err := launch.BuildInvocation(req)
 	if err != nil {
 		return launch.BuiltInvocation{}, err
 	}
 	if dir := built.Invocation.CWD; dir != target {
 		_, _ = fmt.Fprintln(stderr, settingsRootNotice(target, dir))
+	}
+	for _, n := range built.Notes {
+		_, _ = fmt.Fprintln(stderr, "forgectl: note: "+termsafe.SafeLineMax(n, 300))
 	}
 	return built, nil
 }

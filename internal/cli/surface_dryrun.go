@@ -35,6 +35,8 @@ type launchPlan struct {
 	// (launch.SettingsRoot, cadence-ecosystem#608), otherwise Target. Present
 	// for a plain claude launch only, mirroring `launch which --json`.
 	RunDirectory string `json:"run_directory,omitempty"`
+	// Role is the --role name when a [launch.roles.<name>] profile is selected.
+	Role string `json:"role,omitempty"`
 	// Worker is set for a --worktree launch.
 	Worker *workerLaunchPlan `json:"worker,omitempty"`
 }
@@ -97,6 +99,9 @@ func renderLaunchPlan(out io.Writer, p launchPlan, asJSON bool) error {
 		safeColumnPath(p.Target), termsafe.SafeLineMax(p.Harness, 64))
 	if p.RunDirectory != "" {
 		w.printf("run_directory=%s\n", safeColumnPath(p.RunDirectory))
+	}
+	if p.Role != "" {
+		w.printf("role=%s\n", termsafe.SafeLineMax(p.Role, 64))
 	}
 	if wp := p.Worker; wp != nil {
 		w.printf("worktree=%s\nbranch=%s\nbranch_from=%s\nledger_row=%s\nbrief=%t\n",

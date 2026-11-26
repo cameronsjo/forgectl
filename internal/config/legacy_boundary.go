@@ -128,11 +128,14 @@ func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 	for _, k := range undecoded {
 		keys = append(keys, k.String())
 	}
-	// [worker] is a native [launch.worker] table, which no legacy file had.
-	// Reported as unsupported, so migration refuses it rather than dropping
-	// it, and never applied: a legacy file does not set worker posture.
+	// [worker] and [roles] are native [launch.*] tables, which no legacy file had.
+	// Reported as unsupported, so migration refuses them rather than dropping
+	// them, and never applied: a legacy file does not set worker posture or roles.
 	if md.IsDefined("worker") {
 		keys = append(keys, "worker")
+	}
+	if md.IsDefined("roles") {
+		keys = append(keys, "roles")
 	}
 	sort.Strings(keys)
 	return untrustedLegacy(stripLegacyUsageOptIn(lc)), keys, nil

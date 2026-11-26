@@ -3,8 +3,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -104,6 +106,8 @@ then execs the configured harness with that posture — no prompts.
   forgectl launch -p …             print mode: only the permission mode
   forgectl launch -- <args…>       skip launch's own verbs; "--" is dropped
   forgectl launch --here [args…]   stay in this directory (see below)
+  forgectl launch --role <name>    apply a [launch.roles.<name>] role profile
+  forgectl launch --dry-run […]    print the resolved invocation without starting it
 
 Started in a subfolder of a git repository whose root has
 .claude/settings.json or .claude/settings.local.json, and with no settings of
@@ -167,9 +171,13 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// a forgectl verb. The harness never sees it. Everything below, usage
 	// classification included, reads the consumed args.
 	//
-	// `--here` is launch's one flag of its own, and it is read only as the
-	// first token: anything after it, `--` included, is still the harness's.
-	args, here := consumeHereFlag(args)
+	// Leading forgectl-owned flags (--here, --role, --dry-run,
+	// --allow-guarded-plugin-disable) are consumed only before `--` or the
+	// first non-forgectl token; anything after them is still the harness's.
+	args, ownFlags, err := consumeLaunchFlags(args)
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
 	args = launch.ConsumeLeadingSeparator(args)
 
 	// Before the automatic legacy migration below, which renames claunch.conf
@@ -203,13 +211,23 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 		Resolve:     launch.ResolveBinary,
 		// The harness inherits this stdout through the exec, so whether it
 		// is a terminal is what claude itself will see (forgectl#795).
-		StdoutTerminal: launchStdoutIsTerminal(),
-		StayInCWD:      here,
+		StdoutTerminal:           launchStdoutIsTerminal(),
+		StayInCWD:                ownFlags.here,
+		Role:                     ownFlags.role,
+		AllowUnsafePluginDisable: ownFlags.allowGuardedPluginDisable,
 	})
 	if err != nil {
 		return err
 	}
 	profile := built.Profile
+
+	for _, n := range built.Notes {
+		fmt.Fprintln(os.Stderr, "forgectl: note: "+termsafe.SafeLineMax(n, 300))
+	}
+
+	if ownFlags.dryRun {
+		return printLaunchDryRun(os.Stdout, built)
+	}
 
 	// The profile was resolved for cwd; a claude session may still run at the
 	// repository root, where its .claude settings live (cadence-ecosystem#608).
@@ -242,7 +260,57 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 
 // hereFlag keeps a claude launch in the directory it was started from. See
 // launch.SettingsRoot for where it would otherwise run.
-const hereFlag = "--here"
+const (
+	hereFlag                      = "--here"
+	roleFlag                      = "--role"
+	dryRunFlag                    = "--dry-run"
+	allowGuardedPluginDisableFlag = "--allow-guarded-plugin-disable"
+)
+
+type launchOwnFlags struct {
+	here                      bool
+	role                      string
+	dryRun                    bool
+	allowGuardedPluginDisable bool
+}
+
+// consumeLaunchFlags consumes leading forgectl-owned flags (--here, --role,
+// --dry-run, --allow-guarded-plugin-disable) in any order before `--` or the
+// first non-forgectl token. Everything from that point onward belongs to the
+// harness untouched.
+func consumeLaunchFlags(args []string) ([]string, launchOwnFlags, error) {
+	var f launchOwnFlags
+	for len(args) > 0 {
+		tok := args[0]
+		switch {
+		case tok == hereFlag:
+			f.here = true
+			args = args[1:]
+		case tok == dryRunFlag:
+			f.dryRun = true
+			args = args[1:]
+		case tok == allowGuardedPluginDisableFlag:
+			f.allowGuardedPluginDisable = true
+			args = args[1:]
+		case tok == roleFlag:
+			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
+			}
+			f.role = args[1]
+			args = args[2:]
+		case strings.HasPrefix(tok, roleFlag+"="):
+			val := strings.TrimPrefix(tok, roleFlag+"=")
+			if strings.TrimSpace(val) == "" {
+				return nil, launchOwnFlags{}, errors.New("--role requires a role name")
+			}
+			f.role = val
+			args = args[1:]
+		default:
+			return args, f, nil
+		}
+	}
+	return args, f, nil
+}
 
 // consumeHereFlag drops a leading --here from args and reports whether it was
 // there. Only the first token counts: launch passes everything else through to
@@ -253,6 +321,37 @@ func consumeHereFlag(args []string) ([]string, bool) {
 		return args[1:], true
 	}
 	return args, false
+}
+
+// printLaunchDryRun prints the resolved invocation for `forgectl launch --dry-run`
+// without executing the harness.
+func printLaunchDryRun(w io.Writer, b launch.BuiltInvocation) error {
+	sw := &stickyWriter{w: w}
+	sw.printf("dry_run=true\nharness=%s\ncwd=%s\nbinary=%s\n",
+		safeText(b.Invocation.Harness),
+		safeColumnPath(b.Invocation.CWD),
+		safeColumnPath(b.Invocation.Binary.Path),
+	)
+	if b.Role != nil {
+		sw.printf("role=%s\n", safeText(b.Role.Name))
+		if b.Role.Posture != "" {
+			sw.printf("posture=%s\n", safeText(b.Role.Posture))
+		}
+		if b.Role.CharterFile != "" {
+			sw.printf("charter_file=%s\n", safeColumnPath(b.Role.CharterFile))
+		}
+	}
+	if roleVal := envValue(b.Invocation.Env, launch.RoleEnv); roleVal != "" {
+		sw.printf("env=%s=%s\n", launch.RoleEnv, safeText(roleVal))
+	}
+	if postureVal := envValue(b.Invocation.Env, launch.PostureEnv); postureVal != "" {
+		sw.printf("env=%s=%s\n", launch.PostureEnv, safeText(postureVal))
+	}
+	cmdParts := make([]string, 0, len(b.Invocation.Args)+1)
+	cmdParts = append(cmdParts, b.Invocation.Binary.Path)
+	cmdParts = append(cmdParts, b.Invocation.Args...)
+	sw.printf("argv=%s\n", termsafe.SafeLineMax(strings.Join(cmdParts, " "), 4096))
+	return sw.err
 }
 
 // settingsRootNotice is the one stderr line a launch prints when it starts a

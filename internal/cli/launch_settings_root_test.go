@@ -157,7 +157,7 @@ func TestBuildSurfaceLaunchInvocation_SettingsRoot(t *testing.T) {
 	cfg := usageConfig(t, "claude", false).Launch
 
 	var moved strings.Builder
-	built, err := buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", false, &moved)
+	built, err := buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", false, "", false, &moved)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestBuildSurfaceLaunchInvocation_SettingsRoot(t *testing.T) {
 	}
 
 	var stayed strings.Builder
-	built, err = buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", true, &stayed)
+	built, err = buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", true, "", false, &stayed)
 	if err != nil {
 		t.Fatalf("build --here: %v", err)
 	}
