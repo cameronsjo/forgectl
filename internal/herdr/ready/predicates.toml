@@ -57,9 +57,15 @@ prompt_first = true
 # line, then up to 12 footer rows that are indented or empty (a taller status
 # line reads as "prompt not visible": the safe direction). Claude Code
 # 2.1.289 puts a no-break space (U+00A0) between `❯` and typed text; past
-# messages in the transcript use a plain space. The bare `❯` of a starship
-# shell prompt has no rule lines around it.
-prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](?P<input>.*(?:\n  .*)*))?\n─{20,}(?P<footer>(?:\n(?:  .*)?){0,12})\z'
+# messages in the transcript use a plain space, and so do dialog option rows
+# (`❯ 1. Yes`), so a plain space after `❯` is not the box: a dialog drawn
+# between two rules then reads as blocked, not as typed input. Typed text with
+# a plain space reads as "prompt not visible": the safe direction. The bare `❯` of a starship
+# shell prompt has no rule lines around it. A session the user has named
+# (`claude --name`, `/rename`) draws that name into the top rule
+# (`──── <name> ─`, cameronsjo/forgectl#1524), so that rule may carry one
+# label of non-rule characters, closed by a rule run.
+prompt = '(?m)^─{20,}(?: [^─\n]+ ─+)?\n❯(?:\x{00A0}(?P<input>.*(?:\n  .*)*))?\n─{20,}(?P<footer>(?:\n(?:  .*)?){0,12})\z'
 # An empty box sometimes shows a dim example prompt (`Try "refactor <filepath>"`).
 # Screen text carries no dim attribute, so it is matched by shape and read as no
 # input. Typed text of exactly this shape also reads as empty; the brief's

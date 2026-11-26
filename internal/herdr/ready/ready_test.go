@@ -80,6 +80,11 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		// Claude Code 2.1.289 after a first auto-mode turn, with interactive
 		// mods drawing above the box: ready, nothing typed.
 		{"claude-after-first-auto-turn", "claude", StateReady, "", ""},
+		// A named session draws its name into the box's top rule
+		// ("──── cos-pr-misc ─", forgectl#1524). Captured from a named
+		// worker at its empty prompt (Claude Code, 2026-11-26), transcript
+		// trimmed and host name replaced; the tip above the box is transcript.
+		{"claude-ready-named-session", "claude", StateReady, "", ""},
 		{"codex-typed-unsent", "codex", StateReady, "", "Run exactly this shell command once and nothing else: mkdir -p /tmp/fxcap/codex-made"},
 		// The turn failed on a model error and Codex is back at its composer.
 		{"codex-model-error", "codex", StateReady, "", ""},
@@ -185,6 +190,54 @@ func TestEvaluate_OverlayWithTheBoxVisibleIsBlocked(t *testing.T) {
 	v := tab.Evaluate("claude", s)
 	if v.State != StateBlocked || v.Blocking != "session feedback survey" {
 		t.Fatalf("verdict %+v, want blocked by the survey", v)
+	}
+}
+
+// TestEvaluate_LabeledRuleOverDialogIsBlocked: the label must be closed by a
+// rule run. A dialog row drawn as a rule with a trailing title (no closing
+// rule) directly above a `❯` line is not the input box, so the dialog text
+// above it still blocks. A label group that accepted any trailing text would
+// read this screen as the prompt and the dialog as transcript: ready.
+func TestEvaluate_LabeledRuleOverDialogIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-named-session")
+	box := claudeBoxStart(t, s.Text)
+	rule := strings.Index(s.Text[box+1:], " cos-pr-misc ─")
+	if rule < 0 {
+		t.Fatal("fixture has no labeled rule above the input box")
+	}
+	s.Text = s.Text[:box] + "\n Do you want to make this edit to ready.go?\n" + s.Text[box+1:box+1+rule] + " ready.go" + s.Text[box+1+rule+len(" cos-pr-misc ─"):]
+	if strings.Contains(s.Text, "cos-pr-misc ─\n❯") || !strings.Contains(s.Text, "─ ready.go\n❯") {
+		t.Fatal("splice did not replace the label with an unclosed title")
+	}
+	v := tab.Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "permission prompt" {
+		t.Fatalf("verdict %+v, want blocked by the permission prompt", v)
+	}
+}
+
+// TestEvaluate_MenuRowInTheBoxIsBlocked: a dialog drawn as a closed titled
+// rule, a numbered option row on the `❯` line, then a bottom rule has the
+// input box's shape. Its option row has a plain space after `❯`, as dialogs
+// and transcript rows do; the input box has a no-break space. So it is not
+// the box, and the numbered menu blocks.
+func TestEvaluate_MenuRowInTheBoxIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-named-session")
+	box := claudeBoxStart(t, s.Text)
+	i := strings.Index(s.Text[box:], "\n❯\n")
+	if i < 0 {
+		t.Fatal("fixture has no empty input box")
+	}
+	at := box + i
+	s.Text = s.Text[:at] + "\n❯ 1. Yes\n  2. No" + s.Text[at+len("\n❯"):]
+	s.Text = strings.Replace(s.Text, " cos-pr-misc ─\n", " Run this command? ─\n", 1)
+	if !strings.Contains(s.Text, " Run this command? ─\n❯ 1. Yes\n  2. No\n─") {
+		t.Fatal("splice did not draw the menu in the box")
+	}
+	v := tab.Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "selection menu" {
+		t.Fatalf("verdict %+v, want blocked by the selection menu", v)
 	}
 }
 

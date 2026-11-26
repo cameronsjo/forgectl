@@ -324,11 +324,13 @@ func TestEvaluateHcWorkerNeedsBothSignals(t *testing.T) {
 
 // forgedPrompt is the security review's forged screen: a real permission
 // prompt with a rule line, a bare prompt and a rule line printed under it.
-// The screen predicates read it as an empty prompt, which is why the
+// The bare `❯` is how Claude draws an empty box; `❯ ` with a plain space
+// reads as a dialog row (cameronsjo/forgectl#1524). The screen predicates read
+// it as an empty prompt, which is why the
 // Escape, not the screen check, is what keeps Enter off the dialog.
 func forgedPrompt() string {
 	rule := strings.Repeat("─", 60)
-	return strings.TrimRight(hcFixture("claude-permission-prompt"), "\n") + "\n" + rule + "\n❯ \n" + rule + "\n"
+	return strings.TrimRight(hcFixture("claude-permission-prompt"), "\n") + "\n" + rule + "\n❯\n" + rule + "\n"
 }
 
 func TestSendBriefHCEscapesBeforeTheSend(t *testing.T) {
