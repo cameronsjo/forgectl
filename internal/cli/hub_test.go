@@ -67,7 +67,7 @@ func TestBuildHub_PinOrder(t *testing.T) {
 	entries := buildHub(root, true, nil)
 	names := hubNames(entries)
 
-	want := []string{"docs", "pr", "projects", "tmux", "sessions"}
+	want := []string{"pr", "projects", "tmux", "sessions"}
 	if len(names) < len(want)+1 {
 		t.Fatalf("got %d entries, want at least %d: %v", len(names), len(want)+1, names)
 	}
@@ -188,20 +188,20 @@ func TestBuildHub_RecentSectionSitsBetweenPinsAndAll(t *testing.T) {
 	entries := buildHub(root, true, []*cobra.Command{prs, last})
 	names := hubNames(entries)
 
-	if len(entries) < 9 {
+	if len(entries) < 8 {
 		t.Fatalf("too few entries: %v", names)
 	}
-	if !entries[5].Heading || entries[5].Name != "recent" {
-		t.Fatalf("entries[5] = %+v, want the \"recent\" divider (order: %v)", entries[5], names)
+	if !entries[4].Heading || entries[4].Name != "recent" {
+		t.Fatalf("entries[4] = %+v, want the \"recent\" divider (order: %v)", entries[4], names)
 	}
-	if got := strings.Join(entries[6].Argv, " "); got != "pr prs" || entries[6].NeedsArgs {
-		t.Errorf("recent row 1 = %+v, want argv [pr prs] with no argument", entries[6])
+	if got := strings.Join(entries[5].Argv, " "); got != "pr prs" || entries[5].NeedsArgs {
+		t.Errorf("recent row 1 = %+v, want argv [pr prs] with no argument", entries[5])
 	}
-	if got := strings.Join(entries[7].Argv, " "); got != "sessions last" || !entries[7].NeedsArgs || entries[7].Use != last.Use {
-		t.Errorf("recent row 2 = %+v, want argv [sessions last], NeedsArgs, Use %q", entries[7], last.Use)
+	if got := strings.Join(entries[6].Argv, " "); got != "sessions last" || !entries[6].NeedsArgs || entries[6].Use != last.Use {
+		t.Errorf("recent row 2 = %+v, want argv [sessions last], NeedsArgs, Use %q", entries[6], last.Use)
 	}
-	if !entries[8].Heading || !strings.HasPrefix(entries[8].Name, "areas · ") {
-		t.Errorf("entries[8] = %+v, want the areas divider", entries[8])
+	if !entries[7].Heading || !strings.HasPrefix(entries[7].Name, "areas · ") {
+		t.Errorf("entries[7] = %+v, want the areas divider", entries[7])
 	}
 }
 
@@ -209,8 +209,8 @@ func TestBuildHub_RecentSectionSitsBetweenPinsAndAll(t *testing.T) {
 func TestBuildHub_FirstRunRowPrecedesPins(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	names := hubNames(buildHub(root, false, nil))
-	if len(names) < 2 || names[0] != "init" || names[1] != "docs" {
-		t.Errorf("order = %v, want init then docs", names)
+	if len(names) < 2 || names[0] != "init" || names[1] != "pr" {
+		t.Errorf("order = %v, want init then pr", names)
 	}
 }
 

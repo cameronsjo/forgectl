@@ -148,7 +148,6 @@ func TestUsagePlaceholders(t *testing.T) {
 // (forgectl#1087). Each must list its top-level keys in its own --help.
 var jsonShapeVerbs = [][]string{
 	{"bench", "status"},
-	{"docs", "check"}, {"docs", "list"}, {"docs", "search"},
 	{"net"},
 	{"pr", "prs"},
 	{"projects", "list"},

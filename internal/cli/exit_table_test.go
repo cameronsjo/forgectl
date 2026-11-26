@@ -33,8 +33,6 @@ func TestExitTable_UsageErrors(t *testing.T) {
 		{"argument count error, env get", []string{"env", "get"}, 2},
 		{"unknown verb", []string{"zzbogus"}, 2},
 		{"unknown subverb", []string{"desk", "zzbogus"}, 2},
-		{"docs group flag error", []string{"docs", "--zzbogus"}, 2},
-		{"docs leaf flag error keeps 2", []string{"docs", "list", "--zzbogus"}, 2},
 		{"config with a stray argument", []string{"config", "zzbogus"}, 2},
 		{"resume flag error", []string{"resume", "--zz-no-such-flag"}, 2},
 

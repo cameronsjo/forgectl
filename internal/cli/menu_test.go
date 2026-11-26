@@ -304,17 +304,17 @@ func TestMenu_TextCollapsesUnlessScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("menu: %v (stderr %q)", err, stderr)
 	}
-	if strings.Contains(whole, "forgectl docs serve") {
-		t.Errorf("bare menu lists docs' subverbs; want one line per command:\n%s", whole)
+	if strings.Contains(whole, "forgectl pr prs") {
+		t.Errorf("bare menu lists pr's subverbs; want one line per command:\n%s", whole)
 	}
 	if !strings.Contains(whole, "subverbs)") || !strings.Contains(whole, "forgectl menu <command> lists a command's subverbs.") {
 		t.Errorf("bare menu lacks the subverb count or the closing hint:\n%s", whole)
 	}
-	scoped, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "menu", "docs")
+	scoped, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "menu", "pr")
 	if err != nil {
-		t.Fatalf("menu docs: %v (stderr %q)", err, stderr)
+		t.Fatalf("menu pr: %v (stderr %q)", err, stderr)
 	}
-	if !strings.Contains(scoped, "forgectl docs serve") {
-		t.Errorf("menu docs does not list docs' subverbs:\n%s", scoped)
+	if !strings.Contains(scoped, "forgectl pr prs") {
+		t.Errorf("menu pr does not list pr's subverbs:\n%s", scoped)
 	}
 }
