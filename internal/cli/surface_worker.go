@@ -363,6 +363,7 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 // warn takes base-lookup and build notes.
 func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, brief *worker.Brief, warn io.Writer) workerSteps {
 	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
+	var builtSessionID string
 	return workerSteps{
 		identify: func(ctx context.Context) (repoIdentity, error) {
 			return workerRepoIdentity(ctx, deps.Runner, warn, s.top, spec.branch, spec.drain)
@@ -373,9 +374,22 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
+			built, err := buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
+			if err == nil {
+				builtSessionID = built.SessionID
+			}
+			return built, err
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
+			if hc, ok := s.adapter.(*hcadapter.Adapter); ok {
+				if err := hc.StampAgent(hcadapter.AgentIdentity{
+					Kind:    inv.Harness,
+					Session: builtSessionID,
+					Worker:  spec.name,
+				}); err != nil {
+					return backend.Ref{}, err
+				}
+			}
 			inv.Env = markPane(inv.Env, spec.surfaceName())
 			req := surface.NewLaunchRequest(spec.name, inv)
 			req.Self = s.self

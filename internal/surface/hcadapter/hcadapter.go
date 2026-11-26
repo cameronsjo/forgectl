@@ -109,6 +109,8 @@ type Adapter struct {
 	// Empty starts it with no parent: the launcher's HC_TERMINAL_* never
 	// reach hc (see command), so hc cannot infer one.
 	parent string
+	// agent holds the canonical agent.* labels Start stamps on the terminal.
+	agent AgentIdentity
 	// selection is the digest of what picks the core (SelectionDigest).
 	selection string
 }
@@ -173,6 +175,17 @@ func (a *Adapter) NestUnder(addr string) error {
 
 // Parent is the terminal NestUnder set, or "".
 func (a *Adapter) Parent() string { return a.parent }
+
+// StampAgent makes Start label each terminal it creates with the non-empty
+// canonical agent.* fields of id (agent.kind, agent.session, agent.worker,
+// agent.role). It refuses invalid values before anything runs.
+func (a *Adapter) StampAgent(id AgentIdentity) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	a.agent = id
+	return nil
+}
 
 // ValidAddress reports whether s has the shape of a local hc terminal
 // address: "t", a digit, then lowercase letters or digits ("t7", "t11n"), the
