@@ -125,7 +125,7 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 24
+	const wantCount = 23
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
@@ -141,7 +141,6 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"upgrade":   true,
 		"resume":    true,
 		"surface":   true,
-		"tasks":     true,
 		"herdr":     true,
 		"audit":     true,
 		"status":    true,
@@ -220,7 +219,7 @@ func TestModules_DocumentedInREADME(t *testing.T) {
 
 		// The Usage roster alone is not enough: the "Command groups" table is
 		// the scannable index, so every module also needs a row there
-		// (forgectl#930: tasks and theme had usage lines but no row).
+		// (forgectl#930: theme had a usage line but no row).
 		row := regexp.MustCompile("(?m)^\\|\\s*`" + name + "`\\s*\\|")
 		if !row.MatchString(readme) {
 			t.Errorf("module %q has no row in the README \"Command groups\" table — add `| `%s` | <one-liner> | <docs> |` (forgectl#930)", m.Name, m.Name)

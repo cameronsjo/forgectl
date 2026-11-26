@@ -23,7 +23,6 @@ import (
 // own leaf, where this walk enforces --json.
 var jsonContractExempt = map[string]string{
 	"attention":              "a bare `attention` prints its help and reports no state; it runs only so that an unknown verb is refused (`attention list --json` reports the queue)",
-	"attention rm":           "drops one session's record; the exit code is the outcome (`attention list --json` reports the queue)",
 	"desk":                   "a bare `desk` runs the interactive dashboard (`--frame` prints one frame for the eye); `desk status --json` reports the queue",
 	"desk layout":            "splits herdr panes and starts the desk in one; the exit code is the outcome and the printed pane ids are informational",
 	"desk serve":             "a long-running local web server; it prints the URL to open and serves until interrupted, and `desk asks --json` reports the asks",
@@ -64,8 +63,6 @@ var jsonContractExempt = map[string]string{
 	"review mark":            "records a reviewed mark; the exit code is the outcome",
 	"review sync":            "prunes reviewed marks for closed work items; the exit code is the outcome",
 	"review unmark":          "clears a reviewed mark; the exit code is the outcome",
-	"tasks":                  "a bare `tasks` prints its help and reports no state; it runs only so that an unknown verb is refused with exit 1 (`tasks ls --json` reports tasks)",
-	"tasks mcp":              "a long-running MCP server (stdio or streamable HTTP); it serves rather than reports",
 	"tmux":                   "a bare `tmux` runs the interactive session picker; `tmux ls --json` reports sessions",
 	"tmux cheat":             "a static tmux terminology and key cheatsheet; it reports no state",
 	"tmux kill":              "kills a session; the exit code is the outcome (`tmux ls --json` reports sessions)",

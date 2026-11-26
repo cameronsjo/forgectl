@@ -28,7 +28,7 @@ func TestInstall_WritesSkillAndReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	for _, want := range []string{"SKILL.md", "references/desk.md", "references/board-tasks.md"} {
+	for _, want := range []string{"SKILL.md", "references/desk.md"} {
 		if !slices.Contains(written, want) {
 			t.Errorf("Install did not write %s; wrote %v", want, written)
 		}

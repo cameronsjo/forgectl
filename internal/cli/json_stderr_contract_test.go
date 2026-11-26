@@ -293,8 +293,6 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 		wantExit int
 		wantMsg  string
 	}{
-		{name: "tasks show: not an id", args: []string{"tasks", "show", "abc", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "not a task id"},
-		{name: "tasks show: no id", args: []string{"tasks", "show", "--json"}, wantCode: jsonCodeUsage, wantExit: 1, wantMsg: "missing <id>"},
 		{name: "launch stats: bad window", args: []string{"launch", "stats", "soon", "--json"}, wantCode: jsonCodeFailed, wantExit: 1},
 		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "takes no arguments"},
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},

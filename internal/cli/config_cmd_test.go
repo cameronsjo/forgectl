@@ -517,11 +517,11 @@ func TestConfig_DecodeErrorSurfaces(t *testing.T) {
 }
 
 // TestConfig_AnInvalidValueIsNotADecodeError: a file that parses and holds an
-// allowed_hosts entry the loader refuses is not a file that failed to decode.
-// The report must say which it is, and must not show the refused list as a
-// value in effect: the loader holds an empty list.
+// log_level the loader refuses is not a file that failed to decode.
+// The report must say which it is, and must not show the refused value as a
+// value in effect: the loader drops it.
 func TestConfig_AnInvalidValueIsNotADecodeError(t *testing.T) {
-	const body = "[net]\nprobe_host = \"example.com\"\n\n[tasks]\nallowed_hosts = [\"ok.example\", \"bad.example:443\"]\n"
+	const body = "log_level = \"loud\"\n\n[net]\nprobe_host = \"example.com\"\n"
 
 	out := runConfig(t, body)
 	for _, wrong := range []string{"decode error", "values below reflect only what parsed before the error"} {
@@ -529,26 +529,26 @@ func TestConfig_AnInvalidValueIsNotADecodeError(t *testing.T) {
 			t.Errorf("the output says %q about a file that parsed in full:\n%s", wrong, out)
 		}
 	}
-	if !strings.Contains(out, "! validation error: [tasks].allowed_hosts[1]") {
+	if !strings.Contains(out, "! validation error: log_level = \"loud\"") {
 		t.Errorf("the output does not report the refused value as a validation error:\n%s", out)
 	}
 	var row string
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "tasks.allowed_hosts") && strings.HasPrefix(line, "  tasks.") {
+		if strings.HasPrefix(line, "  log_level") && strings.Contains(line, "(") { // the provenance row, not the host-level line
 			row = line
 		}
 	}
 	if row == "" {
-		t.Fatalf("no tasks.allowed_hosts row:\n%s", out)
+		t.Fatalf("no log_level row:\n%s", out)
 	}
 	if strings.Contains(row, "(set)") || strings.Contains(row, "(default)") {
-		t.Errorf("the refused list is shown as a value in effect: %q", row)
+		t.Errorf("the refused value is shown as a value in effect: %q", row)
 	}
 	if !strings.HasSuffix(row, "(refused — not loaded)") {
-		t.Errorf("the row does not say the list was refused: %q", row)
+		t.Errorf("the row does not say the value was refused: %q", row)
 	}
-	if !strings.Contains(row, "bad.example:443") {
-		t.Errorf("the row does not show the entry to fix: %q", row)
+	if !strings.Contains(row, "loud") {
+		t.Errorf("the row does not show the value to fix: %q", row)
 	}
 	// A key the validation did not touch keeps its ordinary marker.
 	if !regexp.MustCompile(`(?m)^  net\.probe_host\s+example\.com\s+\(set\)$`).MatchString(out) {
@@ -570,28 +570,28 @@ func TestConfig_AnInvalidValueIsNotADecodeError(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &extra); err != nil {
 		t.Fatalf("decode --json output: %v", err)
 	}
-	if !strings.Contains(extra.ValidationError, "[tasks].allowed_hosts[1]") {
+	if !strings.Contains(extra.ValidationError, "log_level") {
 		t.Errorf("validation_error = %q, want the refusal naming the key", extra.ValidationError)
 	}
 	refused := 0
 	for _, entry := range extra.Entries {
 		if entry.Refused {
 			refused++
-			if entry.Key != "tasks.allowed_hosts" {
+			if entry.Key != "log_level" {
 				t.Errorf("%s is marked refused", entry.Key)
 			}
 		}
 	}
 	if refused != 1 {
-		t.Errorf("%d entries are marked refused, want the one allowed_hosts key", refused)
+		t.Errorf("%d entries are marked refused, want the one log_level key", refused)
 	}
 
 	// A clean file carries neither field.
-	_, clean := runConfigJSONRaw(t, "[tasks]\nallowed_hosts = [\"ok.example\"]\n")
+	_, clean := runConfigJSONRaw(t, "log_level = \"debug\"\n")
 	if strings.Contains(clean, "validation_error") || strings.Contains(clean, `"refused"`) {
 		t.Errorf("a valid file's report carries a validation field:\n%s", clean)
 	}
-	if text := runConfig(t, "[tasks]\nallowed_hosts = [\"ok.example\"]\n"); strings.Contains(text, "validation error") || strings.Contains(text, "(refused") {
+	if text := runConfig(t, "log_level = \"debug\"\n"); strings.Contains(text, "validation error") || strings.Contains(text, "(refused") {
 		t.Errorf("a valid file is reported as refused:\n%s", text)
 	}
 }
@@ -722,7 +722,7 @@ func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
 
 // TestConfig_AMistypedLogLevelIsAValidationError: a log_level the logger does
 // not know used to turn logging off without a word. `forgectl config` reports
-// it the way it reports a refused allowed_hosts entry: the file parsed, one
+// it the way it reports a refused log_level: the file parsed, one
 // value is wrong, and the row says it was not loaded.
 func TestConfig_AMistypedLogLevelIsAValidationError(t *testing.T) {
 	out := runConfig(t, "log_level = \"degub\"\n")

@@ -30,7 +30,6 @@ func allModules() []module.Manifest {
 		upgradeModule,
 		resumeModule,
 		surfaceModule,
-		tasksModule,
 		herdrModule,
 		auditModule,
 		statusModule,

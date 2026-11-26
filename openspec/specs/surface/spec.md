@@ -174,13 +174,6 @@ Before merging, `surface merge` MUST re-read the PR and required check runs and 
 - **WHEN** the events file holds two runs and `surface drain events --since 0 --json` runs
 - **THEN** both runs' events print
 
-### Requirement: Worker settings deny board closes
-A claude worker's `--settings` MUST deny `Bash(forgectl tasks done:*)` in every permission mode, so a worker cannot close a board task through that shell command even where the operator's own allow rules would let it. Board MCP tools are not denied.
-
-#### Scenario: Worker cannot run the board-close shell command
-- **WHEN** a claude worker launches in any permission mode
-- **THEN** its `--settings` deny list holds `Bash(forgectl tasks done:*)`
-
 ### Requirement: hc backend
 `--surface hc` SHALL start the trampoline with `hc run --bg --outlive-parent --no-notify`, naming the terminal after the display name and labeling it `forgectl.surface=<ownership marker>`. A display name outside hc's name rules MUST be refused before anything is created. forgectl MUST NOT stop or restart an hc core.
 

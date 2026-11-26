@@ -2,6 +2,8 @@
 
 **Status: Accepted**
 
+*2026-11-25: the `forgectl tasks` command was removed (#1511). Its credentialed client, MCP server and close path no longer exist, so this record is history; its posture rules still apply to any future credentialed client.*
+
 Date: 2026-09-07 (amended 2026-09-08 for the MCP server: §7, §8, §9; amended
 2026-10-02 for closing a task: §12 to §17)
 
