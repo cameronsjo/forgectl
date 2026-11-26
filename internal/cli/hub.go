@@ -17,7 +17,7 @@ import (
 
 // hubPinned is the hub's first section (forgectl#730 item 2): the commands
 // the hub most often routes to, in this order, ahead of everything else.
-var hubPinned = []string{"docs", "pr", "projects", "sessions"}
+var hubPinned = []string{"pr", "projects", "sessions"}
 
 // hubRecentLimit is how many rows the "recent" section shows, and
 // hubRecentWindow how many of the newest forgectl lines in shell history rank
@@ -37,10 +37,10 @@ var hubGroups = []struct {
 	title string
 	names []string
 }{
-	{"agents", []string{"launch", "resume", "desk", "attention", "sweep", "surface", "workflow", "recipe", "preflight", "quarantine"}},
-	{"repos", []string{"status", "review", "branch", "clean", "audit", "docker", "k8s"}},
-	{"shell", []string{"env", "y", "pip", "proxy", "net"}},
-	{"setup", []string{"doctor", "config", "init", "update", "upgrade", "bench", "theme", "ghostty"}},
+	{"agents", []string{"launch", "resume", "desk", "attention", "sweep", "surface", "workflow"}},
+	{"repos", []string{"status", "review", "branch", "clean", "audit"}},
+	{"shell", []string{"env"}},
+	{"setup", []string{"doctor", "config", "init", "upgrade"}},
 }
 
 // hubOtherGroup holds a module no hubGroups area names.

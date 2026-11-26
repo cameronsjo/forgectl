@@ -59,10 +59,6 @@ var uncappedAllowlist = map[string]struct {
 	"internal/cli/clean.go:cleanCommandFailure": {2, "escapes under its own head/tail cap (cleanDiagnosticMaxRunes); SafeLine is the escaping step, not the sink"},
 	"internal/cli/clean.go:cleanDiagnostic":     {1, "escapes under its own head/tail cap (cleanDiagnosticMaxRunes); SafeLine is the escaping step, not the sink"},
 	"internal/cli/clean.go:escapedPieces":       {1, "per-rune escape pieces for cleanDiagnostic's cap: one rune in, one escape out"},
-	"internal/cli/update.go:writeStepDetail":    {1, "writes the transcript FILE, never the terminal: it is the whole recoverable detail the capped terminal line points at"},
-	"internal/cli/update.go:writeOutputLines":   {1, "writes the transcript FILE, never the terminal: it is the whole recoverable detail the capped terminal line points at"},
-	"internal/cli/k8s.go:writeK8sSafeLines":     {1, "passes kubectl describe/get/events output through line by line; the operator asked to see it whole, and a cut would corrupt it"},
-	"internal/cli/y.go:newYLastCmd":             {1, "prints the operator's shell history for reuse; a cut would corrupt the command they copy"},
 
 	// Review before trust (#782): a display that decides whether something
 	// runs must show all of it, escaped. A cut would let a hostile value push
@@ -87,15 +83,12 @@ var uncappedAllowlist = map[string]struct {
 	"internal/cli/audit.go:auditShowPath": {1, "QuoteText only as a predicate (does quoting change the path?); what it prints is the raw path or the capped QuotePath"},
 
 	// Outside internal/cli (#934).
-	"internal/k8s/logs.go:logLineTransform":                 {1, "streams kubectl logs line by line; the operator asked to see them whole, and a cut would corrupt them (as internal/cli writeK8sSafeLines)"},
-	"internal/k8s/logs.go:safeLineTransform":                {1, "streams kubectl logs line by line; the operator asked to see them whole, and a cut would corrupt them (as internal/cli writeK8sSafeLines)"},
-	"internal/k8s/logs.go:safeFragmentWriter.WriteFragment": {1, "streams a partial kubectl log line as it arrives; a per-fragment cap would cut the middle of a line the operator asked to see whole"},
-	"internal/resume/hooks.go:outputTail":                   {1, "escapes under its own input cap (hookTailRunes, keeping the tail); SafeLine is the escaping step, not the sink"},
-	"internal/tui/hub.go:capSafe":                           {1, "per-rune escape pieces under capSafe's own maxRunes cap: one rune in, one escape out"},
-	"internal/tui/hub.go:tailSafe":                          {1, "per-rune escape pieces under tailSafe's own maxRunes cap: one rune in, one escape out"},
-	"internal/tui/desk_model_unix.go:pagerLines":            {1, "the v pager shows the bytes y runs and the l pager a run's log; a cut would hide part of either (the review behind M5). Input is bounded by Record (1 MiB, v) and LogTail (256 KiB, l), lines are soft-wrapped, never cut, and only the window's rows are drawn"},
-	"internal/tui/hub.go:displayToken":                      {3, "the \"$ forgectl …\" echo (DisplayArgv) shows exactly the argv that will run (#782's rule); a cut would hide part of what runs"},
-	"internal/pr/repair.go:cappedRecordBytes":               {1, "escapes under its own byte cap (maxAuditRecordBytes, applied before and after); SafeLine is the escaping step, not the sink"},
+	"internal/resume/hooks.go:outputTail":        {1, "escapes under its own input cap (hookTailRunes, keeping the tail); SafeLine is the escaping step, not the sink"},
+	"internal/tui/hub.go:capSafe":                {1, "per-rune escape pieces under capSafe's own maxRunes cap: one rune in, one escape out"},
+	"internal/tui/hub.go:tailSafe":               {1, "per-rune escape pieces under tailSafe's own maxRunes cap: one rune in, one escape out"},
+	"internal/tui/desk_model_unix.go:pagerLines": {1, "the v pager shows the bytes y runs and the l pager a run's log; a cut would hide part of either (the review behind M5). Input is bounded by Record (1 MiB, v) and LogTail (256 KiB, l), lines are soft-wrapped, never cut, and only the window's rows are drawn"},
+	"internal/tui/hub.go:displayToken":           {3, "the \"$ forgectl …\" echo (DisplayArgv) shows exactly the argv that will run (#782's rule); a cut would hide part of what runs"},
+	"internal/pr/repair.go:cappedRecordBytes":    {1, "escapes under its own byte cap (maxAuditRecordBytes, applied before and after); SafeLine is the escaping step, not the sink"},
 
 	// Review before trust (#782) in pr repair: the confirmation prompts, and
 	// the non-TTY refusals that name what --yes would approve or what the

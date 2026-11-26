@@ -23,7 +23,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/theme"
-	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
 
 // The --json stderr contract (forgectl#862, docs/json-contract.md), asserted
@@ -199,14 +198,6 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 					t.Errorf("error = %q, want the unknown-flag message", msg)
 				}
 				switch {
-				case path[0] == "docs":
-					// The docs shape: integer code plus root (docs_errors.go).
-					if obj["code"] != float64(2) {
-						t.Errorf("docs code = %v, want 2", obj["code"])
-					}
-					if _, ok := obj["root"]; !ok {
-						t.Errorf("docs object %v has no root key", obj)
-					}
 				case name == "env check":
 					if obj["code"] != "check_failed" {
 						t.Errorf("env check code = %v, want check_failed", obj["code"])
@@ -294,13 +285,9 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 		wantExit int
 		wantMsg  string
 	}{
-		{name: "k8s ns: kubectl fails", runner: failingRunner(3), args: []string{"k8s", "ns", "--json"}, wantCode: jsonCodeFailed, wantExit: 3, wantMsg: "kubectl"},
-		{name: "k8s ns: namespace argument", args: []string{"k8s", "ns", "staging", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
 		{name: "launch stats: bad window", args: []string{"launch", "stats", "soon", "--json"}, wantCode: jsonCodeFailed, wantExit: 1},
 		{name: "launch which: stray argument", args: []string{"launch", "which", "extra", "--json"}, wantCode: jsonCodeUsage, wantExit: 2, wantMsg: "takes no arguments"},
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
-		{name: "update check: unknown step", args: []string{"update", "check", "--only", "forgectl-bogus", "--json"}, wantCode: jsonCodeFailed, wantExit: 2, wantMsg: "forgectl-bogus"},
-		// (herdr organize moved to forgectl-herdr plugin in #1518)
 		{name: "status: non-positive timeout", args: []string{"status", "--json", "--timeout", "0s"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "--timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,11 +391,6 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 			}
 			return newLaunchStatsCmd(), []string{"stats", "--json"}
 		}},
-		{name: "preflight: misaligned", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
-			cfg := setupPreflightHome(t)
-			t.Chdir(t.TempDir())
-			return newPreflightCmdForConfig(cfg), []string{"preflight", "--json"}
-		}},
 		{name: "pr repair: unsettled", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
 			dir := t.TempDir()
 			seedRepairRecord(t, dir, "o/r#1", "preparing", "")
@@ -431,17 +413,6 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 		}},
 		{name: "projects list: strict on a degraded host", build: func(t *testing.T) (*cobra.Command, []string) {
 			return newProjectsListCmd(listFixture(t, degradedGitHubRunFunc)), []string{"list", "--json", "--strict"}
-		}},
-		{name: "docs check: error findings", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
-			dir := t.TempDir()
-			docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[x](missing.md)\n")
-			return newDocsCheckCmd(module.Deps{}), []string{"check", "--json", dir}
-		}},
-		{name: "update run: a step failed", build: func(t *testing.T) (*cobra.Command, []string) {
-			client := updatepkg.New(&exec.FakeRunner{}, updatepkg.WithSteps([]updatepkg.Step{
-				fakeUpdateStep("npm", true, errors.New("boom")),
-			}))
-			return newUpdateCmdForClient(client, config.UpdateConfig{LogDir: t.TempDir()}, theme.Theme{}), []string{"update", "run", "--yes", "--json"}
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

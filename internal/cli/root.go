@@ -226,6 +226,36 @@ func showRootHelp(*cobra.Command, []string) error { return pflag.ErrHelp }
 // (allModules) — every command group registers through its manifest
 // (ADR-0005).
 func newRoot(deps module.Deps) *cobra.Command {
+	return newRootWithModules(deps, allModules(), true)
+}
+
+// newRootForArgs builds only the single module matching argv's first verb,
+// avoiding constructing all 37 Cobra command trees on typed single-verb
+// invocations. Bare invocations, root --help, menu, completion, and unknown
+// verbs (which need full "did you mean" suggestions) fall back to newRoot.
+func newRootForArgs(deps module.Deps, args []string) *cobra.Command {
+	first, _ := firstNonFlag(args)
+	if first == "" {
+		// Fast-path bare --version / -v without building all 37 modules.
+		if slices.Contains(args, "--version") || slices.Contains(args, "-v") {
+			if !slices.Contains(args, "--help") && !slices.Contains(args, "-h") {
+				return newRootWithModules(deps, nil, false)
+			}
+		}
+		return newRoot(deps)
+	}
+	if first == "version" {
+		return newRootWithModules(deps, nil, false)
+	}
+	for _, m := range allModules() {
+		if m.Name == first || slices.Contains(m.GroupAliases, first) {
+			return newRootWithModules(deps, []module.Manifest{m}, false)
+		}
+	}
+	return newRoot(deps)
+}
+
+func newRootWithModules(deps module.Deps, mods []module.Manifest, includeMenu bool) *cobra.Command {
 	root := &cobra.Command{
 		Use:   meta.AppName,
 		Short: meta.Tagline,
@@ -253,7 +283,7 @@ verbs. Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused
 
 	root.AddGroup(rootHelpGroups()...)
 
-	for i, m := range allModules() {
+	for i, m := range mods {
 		cmd := m.New(deps)
 		// Append-if-absent: a constructor may already set its group alias in
 		// its own literal (the ForClient test seams pin that surface), so the
@@ -287,13 +317,17 @@ verbs. Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused
 	// `menu` prints the hub's contents without a TTY (forgectl#730 item 5).
 	// Outside the registry like version: it describes the hub, so it has no
 	// hub tier and no row of its own.
-	root.AddCommand(newMenuCmd(deps))
+	if includeMenu {
+		root.AddCommand(newMenuCmd(deps))
+	}
 
 	// The editor `env set --sops` points sops at — forgectl re-invoking
 	// itself. Registered outside the registry because it is not a verb anyone
 	// runs: it is half of an internal protocol, and its own guards (not its
 	// Hidden flag) are what make it safe to expose at all.
-	root.AddCommand(newSopsEditCmd())
+	if includeMenu {
+		root.AddCommand(newSopsEditCmd())
+	}
 
 	rejectUnknownSubcommands(root)
 

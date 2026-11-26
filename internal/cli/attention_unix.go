@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -198,42 +199,87 @@ func runAttentionList(cmd *cobra.Command, deps module.Deps, o attentionOpts) err
 		return err
 	}
 	now := attentionNow().UTC()
-	h := attentionHerdr(cmd.Context(), deps)
-	out := attentionList{Sources: attentionSources{Herdr: sourceOK}}
+	ctx := cmd.Context()
+	var (
+		h            attention.Herdr
+		items        []attention.DeskItem
+		deskState    string
+		asks         []attention.AskItem
+		asksSkipped  int
+		asksState    string
+		asksErr      error
+		core         attention.Core
+		coreState    = sourceAbsent
+		sw           *attention.Sweep
+		sweepSkipped int
+		sweepState   string
+		hold         *attention.DrainHold
+		drainState   string
+	)
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		h = attentionHerdr(ctx, deps)
+	}()
+	go func() {
+		defer wg.Done()
+		items, deskState = attentionDesk()
+		// hc is asked only when a desk item names a terminal: nothing else in
+		// the queue uses it, and the call can cost up to attentionHcTimeout.
+		if deskNamesATerminal(items) {
+			core = attentionCore(ctx)
+			coreState = sourceOK
+			if !core.Known {
+				coreState = sourceUnavailable
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		asks, asksSkipped, asksState, asksErr = attentionAsks(now)
+	}()
+	go func() {
+		defer wg.Done()
+		sw, sweepSkipped, sweepState = attentionSweep(attention.SweepPath(base))
+	}()
+	go func() {
+		defer wg.Done()
+		hold, drainState = attentionDrain(now)
+	}()
+	wg.Wait()
+
+	out := attentionList{Sources: attentionSources{
+		Desk:  deskState,
+		Asks:  asksState,
+		Herdr: sourceOK,
+		Sweep: sweepState,
+		Core:  coreState,
+		Drain: drainState,
+	}}
 	if !h.Known {
 		out.Sources.Herdr = sourceUnavailable
 		out.Sources.HerdrDetail = h.Detail
 	}
-
-	items, deskState := attentionDesk()
-	out.Sources.Desk = deskState
-
-	asks, asksSkipped, asksState, asksErr := attentionAsks(now)
-	out.Sources.Asks = asksState
-	out.Skipped += asksSkipped
-
-	sw, sweepSkipped, sweepState := attentionSweep(attention.SweepPath(base))
-	out.Sources.Sweep = sweepState
+	if coreState == sourceUnavailable {
+		out.Sources.CoreDetail = core.Detail
+	}
 	if sw != nil {
 		gen := sw.GeneratedAt
 		out.Sources.SweepGeneratedAt = &gen
 	}
-	out.Skipped += sweepSkipped
+	out.Skipped += asksSkipped + sweepSkipped
 
-	// hc is asked only when a desk item names a terminal: nothing else in the
-	// queue uses it, and the call can cost up to attentionHcTimeout.
-	var core attention.Core
-	out.Sources.Core = sourceAbsent
-	if deskNamesATerminal(items) {
-		core = attentionCore(cmd.Context())
+	// If desk did not already query hc, also query when sweep workers or asks
+	// with a sender can be corroborated against a live hc core without
+	// auto-starting one (attentionHcRunning checks for an existing core socket).
+	if coreState == sourceAbsent && (hasSweepWorkers(sw) || hasAskFrom(asks)) && attentionHcRunning() {
+		core = attentionCore(ctx)
 		out.Sources.Core = sourceOK
 		if !core.Known {
 			out.Sources.Core, out.Sources.CoreDetail = sourceUnavailable, core.Detail
 		}
 	}
-
-	hold, drainState := attentionDrain(now)
-	out.Sources.Drain = drainState
 
 	out.Rows = attention.Build(attention.Input{
 		Now: now, Herdr: h, Core: core, Desk: items, Asks: asks, Sweep: sw, Drain: hold,
@@ -374,9 +420,18 @@ func drainNeedsYou(st drain.Status, now time.Time, alive func(drain.Status) bool
 // attentionCoreResult is the part of `hc ls --json` the queue reads.
 type attentionCoreResult struct {
 	Terminals *[]struct {
-		Address string `json:"address"`
-		State   string `json:"state"`
+		Address string            `json:"address"`
+		Name    string            `json:"name"`
+		State   string            `json:"state"`
+		Labels  map[string]string `json:"labels"`
 	} `json:"terminals"`
+}
+
+// attentionHcRunning reports whether an hc core socket already exists for the
+// current environment, so `attention list` never auto-starts a stray hc server
+// when no core is running. A seam so tests never inspect the host's sockets.
+var attentionHcRunning = func() bool {
+	return hcadapter.CoreSocketExists(attentionGetenv)
 }
 
 // attentionHcList runs `hc ls --json` through the shared hc adapter
@@ -395,9 +450,9 @@ var attentionHcList = func(ctx context.Context) (out []byte, selection string, e
 	return out, a.SelectionDigest(), err
 }
 
-// attentionCore asks herdr-core for its live terminals. Known is false when
-// hc could not be asked or its reply does not parse; Detail then says why,
-// cleaned and cut.
+// attentionCore asks herdr-core for its live terminals and parses their
+// canonical agent.* labels. Known is false when hc could not be asked or its
+// reply does not parse; Detail then says why, cleaned and cut.
 func attentionCore(ctx context.Context) attention.Core {
 	c := attention.Core{}
 	out, sel, err := attentionHcList(ctx)
@@ -414,16 +469,41 @@ func attentionCore(ctx context.Context) attention.Core {
 	for _, t := range *r.Terminals {
 		if t.State == "live" && hcadapter.ValidAddress(t.Address) {
 			c.Live[t.Address] = true
+			id := hcadapter.ParseAgentLabels(t.Labels)
+			c.Terminals = append(c.Terminals, attention.CoreTerminal{
+				Address: t.Address,
+				Name:    t.Name,
+				Kind:    id.Kind,
+				Session: id.Session,
+				Worker:  id.Worker,
+				Role:    id.Role,
+			})
 		}
 	}
 	return c
 }
 
-// deskNamesATerminal reports whether any desk item recorded a terminal, the
-// only thing the queue asks hc about.
+// deskNamesATerminal reports whether any desk item recorded an hc terminal.
 func deskNamesATerminal(items []attention.DeskItem) bool {
 	for _, it := range items {
 		if it.Terminal != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSweepWorkers reports whether the sweep has any worker entries that hc
+// labels can corroborate.
+func hasSweepWorkers(sw *attention.Sweep) bool {
+	return sw != nil && len(sw.Workers) > 0
+}
+
+// hasAskFrom reports whether any open ask names a sender that hc's
+// agent.worker labels can corroborate.
+func hasAskFrom(asks []attention.AskItem) bool {
+	for _, a := range asks {
+		if a.From != "" {
 			return true
 		}
 	}
@@ -485,6 +565,8 @@ func printAttentionList(out, errOut io.Writer, l attentionList) error {
 		}
 		if r.Pane != "" {
 			extra = append(extra, "pane "+r.Pane)
+		} else if r.Terminal != "" {
+			extra = append(extra, "terminal "+r.Terminal)
 		} else if r.Session != "" {
 			extra = append(extra, "not in herdr")
 		}

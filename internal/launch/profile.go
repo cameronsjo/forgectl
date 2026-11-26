@@ -214,7 +214,7 @@ func defaultsProfileWithHome(lc config.LaunchConfig, userHome func() (string, er
 // defaults or project add_dir, or a project match) cannot be expanded. It is
 // for display surfaces that show a profile without resolving one.
 func CheckHome(lc config.LaunchConfig) error {
-	_, err := homeIfNeeded(os.UserHomeDir, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
+	_, err := homeIfNeeded(os.UserHomeDir, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects) || rolesUseHome(lc.Roles))
 	return err
 }
 

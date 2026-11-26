@@ -126,14 +126,11 @@ type Config struct {
 	Net       NetConfig       `toml:"net"`
 	Proxy     ProxyConfig     `toml:"proxy"`
 	Bench     BenchConfig     `toml:"bench"`
-	Docker    DockerConfig    `toml:"docker"`
 	Clean     CleanConfig     `toml:"clean"`
 	Sessions  SessionsConfig  `toml:"sessions"`
 	Projects  ProjectsConfig  `toml:"projects"`
 	Review    ReviewConfig    `toml:"review"`
 	Docs      DocsConfig      `toml:"docs"`
-	Preflight PreflightConfig `toml:"preflight"`
-	Update    UpdateConfig    `toml:"update"`
 	Pr        PrConfig        `toml:"pr"`
 	Github    GithubConfig    `toml:"github"`
 	Theme     ThemeConfig     `toml:"theme"`
@@ -222,6 +219,10 @@ type LaunchConfig struct {
 	// Worker is [launch.worker]: the posture a coordinator's worker starts
 	// with (`surface launch --worktree`). See LaunchWorker.
 	Worker LaunchWorker `toml:"worker"`
+	// Roles is [launch.roles.<name>]: declarative role profiles selected with
+	// `--role <name>` on `forgectl launch`, `forgectl launch which`, and
+	// `forgectl surface launch` (#1515).
+	Roles map[string]LaunchRole `toml:"roles,omitempty"`
 
 	// UsageStats is the informed opt-in for local launch statistics (#240).
 	// Absent and explicit false are both disabled, and nothing but an operator
@@ -254,6 +255,40 @@ type LaunchWorker struct {
 	// caller's own unverifiable claim. It cannot be set with PermissionMode:
 	// a worker takes one or the other.
 	InheritLauncherMode bool `toml:"inherit_launcher_mode,omitempty"`
+}
+
+// LaunchRole is one [launch.roles.<name>] declarative role profile (#1515).
+// Selecting a role exports FORGECTL_ROLE=<name> and (when Posture is set)
+// FORGECTL_POSTURE=<posture>, and for Claude sessions applies CharterFile
+// (--append-system-prompt-file), DisablePlugins (fail-closed guard-hook
+// checked enabledPlugins in --settings), ExcludeClaudeMD / ClaudeMDExcludes
+// (claudeMdExcludes in --settings), and SessionName (--name).
+type LaunchRole struct {
+	// CharterFile is a path to the role's system-prompt charter file, passed
+	// to Claude Code as --append-system-prompt-file. A leading ~/ is expanded.
+	CharterFile string `toml:"charter_file,omitempty"`
+	// DisablePlugins lists plugin names (matched before @marketplace in
+	// installed_plugins.json) to turn off in --settings. Every plugin stays on
+	// unless the fail-closed guard-hook check proves it declares only
+	// non-blocking hooks from a verifiable remote marketplace, or
+	// AllowUnsafePluginDisable is explicitly true.
+	DisablePlugins []string `toml:"disable_plugins,omitempty"`
+	// Posture is the session's operational posture: "autonomous" or
+	// "interactive" (or "" when unset), exported as FORGECTL_POSTURE.
+	Posture string `toml:"posture,omitempty"`
+	// ExcludeClaudeMD excludes the user's global CLAUDE.md, rules/**, and the
+	// launch directory's CLAUDE.md and AGENTS.md via claudeMdExcludes.
+	ExcludeClaudeMD bool `toml:"exclude_claude_md,omitempty"`
+	// ClaudeMDExcludes adds explicit claudeMdExcludes globs/paths (leading ~/
+	// expanded) to Claude's --settings.
+	ClaudeMDExcludes []string `toml:"claude_md_excludes,omitempty"`
+	// SessionName sets a default --name for interactive Claude sessions
+	// launched under this role (e.g. "chief-of-staff"). Workers keep their
+	// worker name.
+	SessionName string `toml:"session_name,omitempty"`
+	// AllowUnsafePluginDisable bypasses the guard-hook safety check for
+	// DisablePlugins when explicitly set to true. Default false (fail-closed).
+	AllowUnsafePluginDisable bool `toml:"allow_unsafe_plugin_disable,omitempty"`
 }
 
 // isZero reports whether the [launch.worker] table set nothing. An empty
@@ -396,7 +431,7 @@ type LaunchProject struct {
 // either route — the difference is which code path carries it, and that is
 // worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker.isZero() && !lc.UsageStats
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker.isZero() && len(lc.Roles) == 0 && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
@@ -652,19 +687,6 @@ var ErrProxyProfileNotEncodable = errors.New(
 // No caller TOML-encodes a Config today; this exists so the one added later
 // gets an error rather than a truncated config file.
 func (ProxyProfile) MarshalTOML() ([]byte, error) { return nil, ErrProxyProfileNotEncodable }
-
-// DockerConfig is the [docker] section: build-time defaults for `forgectl
-// docker build`. A zero value means "section absent" — internal/docker's
-// Client falls back to no --platform flag and no extra label.
-type DockerConfig struct {
-	DefaultPlatform string `toml:"default_platform"`
-	LabelTemplate   string `toml:"label_template"` // "key=value" appended to every build
-}
-
-// IsZero reports whether the [docker] section was absent or empty.
-func (dc DockerConfig) IsZero() bool {
-	return dc.DefaultPlatform == "" && dc.LabelTemplate == ""
-}
 
 // CleanConfig is the [clean] section: the default root and --type filter
 // `forgectl clean` uses when the corresponding flag is omitted. A zero value
@@ -1101,40 +1123,6 @@ func (dc DocsConfig) ExpandHome(home string) (DocsConfig, error) {
 		out.RootKinds[expanded] = value
 	}
 	return out, nil
-}
-
-// PreflightConfig is the [preflight] section: `forgectl preflight`'s
-// deterministic alignment inputs. A zero value means "section absent" —
-// internal/preflight's LocateCatalog falls back to installed_plugins.json
-// and then a cache-dir glob, and DefaultSet contributes nothing beyond the
-// catalog's own core tier.
-type PreflightConfig struct {
-	CatalogPath string   `toml:"catalog_path"` // override auto-locate; direct path to the generated catalog.md
-	DefaultSet  []string `toml:"default_set"`  // extra "plugin@marketplace" entries always folded into the core-tier target, independent of catalog tier
-}
-
-// IsZero reports whether the [preflight] section was absent or empty.
-func (pc PreflightConfig) IsZero() bool {
-	return pc.CatalogPath == "" && len(pc.DefaultSet) == 0
-}
-
-// UpdateConfig is the [update] section: `forgectl update`'s persisted
-// defaults. A zero value means "section absent" — internal/update's Client
-// runs its full built-in roster (DefaultSteps) and internal/cli falls back
-// to its own default log directory.
-type UpdateConfig struct {
-	// Roster names the steps to run when --only is omitted (matched against
-	// the roster's Step.Name values). Empty means every roster step — the
-	// same "unrestricted" meaning --only's absence has on the CLI.
-	Roster []string `toml:"roster"`
-	// LogDir overrides the default directory for the timestamped
-	// transcript log. Empty falls back to UpdateLogDir().
-	LogDir string `toml:"log_dir"`
-}
-
-// IsZero reports whether the [update] section was absent or empty.
-func (uc UpdateConfig) IsZero() bool {
-	return len(uc.Roster) == 0 && uc.LogDir == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a

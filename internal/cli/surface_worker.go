@@ -242,6 +242,10 @@ type workerSpec struct {
 	herdrSpace string
 	// parent is --parent: the hc terminal an hc worker nests under, or empty.
 	parent string
+	// role is --role: the [launch.roles.<name>] role profile to apply, or empty.
+	role string
+	// allowUnsafePluginDisable is --allow-guarded-plugin-disable for role.
+	allowUnsafePluginDisable bool
 }
 
 // surfaceName is the spec's worker surface, hc when unset.
@@ -259,6 +263,8 @@ func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map
 	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
 	req.ConfigDir, req.Model, req.LauncherMode = spec.configDir, spec.model, spec.launcherMode
 	req.SessionName = spec.name
+	req.Role = spec.role
+	req.AllowUnsafePluginDisable = spec.allowUnsafePluginDisable
 	return req
 }
 
@@ -363,6 +369,7 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 // warn takes base-lookup and build notes.
 func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, brief *worker.Brief, warn io.Writer) workerSteps {
 	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
+	var builtSessionID string
 	return workerSteps{
 		identify: func(ctx context.Context) (repoIdentity, error) {
 			return workerRepoIdentity(ctx, deps.Runner, warn, s.top, spec.branch, spec.drain)
@@ -373,9 +380,22 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
+			built, err := buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
+			if err == nil {
+				builtSessionID = built.SessionID
+			}
+			return built, err
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
+			if hc, ok := s.adapter.(*hcadapter.Adapter); ok {
+				if err := hc.StampAgent(hcadapter.AgentIdentity{
+					Kind:    inv.Harness,
+					Session: builtSessionID,
+					Worker:  spec.name,
+				}); err != nil {
+					return backend.Ref{}, err
+				}
+			}
 			inv.Env = markPane(inv.Env, spec.surfaceName())
 			req := surface.NewLaunchRequest(spec.name, inv)
 			req.Self = s.self
@@ -525,7 +545,8 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
-		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode, herdrSpace: opts.HerdrSpace, parent: opts.Parent}
+		configDir: configDir, model: opts.Model, surface: opts.Backend, launcherMode: opts.InheritMode, herdrSpace: opts.HerdrSpace, parent: opts.Parent,
+		role: opts.Role, allowUnsafePluginDisable: opts.AllowUnsafePluginDisable}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
@@ -555,6 +576,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	out := cmd.OutOrStdout()
 	if opts.JSON {
 		res, rerr := workerLaunchResult(ctx, setup.adapter, attempt, spec.name, setup.top)
+		res.Role = opts.Role
 		if werr := writeJSON(out, res); werr != nil {
 			return errors.Join(err, werr)
 		}
@@ -764,6 +786,7 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		Name:    opts.DisplayName,
 		Target:  top,
 		Harness: built.Invocation.Harness,
+		Role:    opts.Role,
 		Worker: &workerLaunchPlan{
 			Repo:         top,
 			Worktree:     plan.Path,

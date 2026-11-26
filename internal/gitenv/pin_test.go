@@ -39,7 +39,8 @@ var gitConstantAllowlist = map[string]struct {
 	uses   int
 	reason string
 }{
-	"internal/cli/status.go:var": {1, "statusSectionLabels: the status report's section label, printed by both human views, never run"},
+	"internal/cli/status.go:var":  {1, "statusSectionLabels: the status report's section label, printed by both human views, never run"},
+	"internal/launch/role.go:var": {1, "remoteMarketplaceSources: Claude known_marketplaces.json remote source type name, never run"},
 }
 
 // transportAllowlist is every function that may run git under

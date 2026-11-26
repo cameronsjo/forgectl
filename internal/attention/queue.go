@@ -72,9 +72,16 @@ type Row struct {
 	// names when herdr lists it. Never a pane taken from a record alone.
 	Pane string `json:"pane,omitempty"`
 	// Terminal is where Jump goes on herdr-app: the hc terminal a desk item
-	// was queued from, when hc lists it live now. Never part of the key.
+	// was queued from, or a worker's live hc terminal, when hc lists it live
+	// now. Never part of the key.
 	Terminal string `json:"terminal,omitempty"`
 	Worker   string `json:"worker,omitempty"`
+	// AgentKind is the agent harness kind ("claude", "codex", "pi") when
+	// corroborated from an hc terminal's agent.kind label. Never part of the key.
+	AgentKind string `json:"agentKind,omitempty"`
+	// AgentRole is the agent role when corroborated from an hc terminal's
+	// agent.role label. Never part of the key.
+	AgentRole string `json:"agentRole,omitempty"`
 	// Tag is the item name on a desk row, the ask id on an ask row, the
 	// block on a worker row, and owner/repo#n on a PR row.
 	Tag  string `json:"tag,omitempty"`
@@ -159,8 +166,22 @@ type DeskItem struct {
 	AddedAt      time.Time
 }
 
+// CoreTerminal is one live herdr-core (hc) terminal from `hc ls --json`,
+// reduced to what the queue uses: its address, optional display name, and
+// validated canonical agent.* labels (agent.kind, agent.session, agent.worker,
+// agent.role).
+type CoreTerminal struct {
+	Address string
+	Name    string
+	Kind    string
+	Session string
+	Worker  string
+	Role    string
+}
+
 // Core is what the caller's herdr-core (hc) reported. Known is false when it
-// could not be asked; Live holds the addresses of its live terminals.
+// could not be asked; Live holds the addresses of its live terminals, and
+// Terminals holds live terminals with their validated agent.* labels.
 type Core struct {
 	Known  bool
 	Detail string
@@ -168,6 +189,51 @@ type Core struct {
 	// item's terminal counts only when it was recorded under the same one.
 	Selection string
 	Live      map[string]bool
+	Terminals []CoreTerminal
+}
+
+// index maps live hc terminals by address, unambiguous agent.session, and
+// unambiguous agent.worker. Labels are unauthenticated (any hc client can
+// write one), so a session or worker claimed by two or more live terminals is
+// ambiguous and gets no entry, and an address listed twice with conflicting
+// fields gets no entry.
+func (c Core) index() (byAddr, bySession, byWorker map[string]CoreTerminal) {
+	byAddr, bySession, byWorker = map[string]CoreTerminal{}, map[string]CoreTerminal{}, map[string]CoreTerminal{}
+	badAddr, badSession, badWorker := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, t := range c.Terminals {
+		if t.Address == "" {
+			continue
+		}
+		if prev, dup := byAddr[t.Address]; dup && prev != t {
+			badAddr[t.Address] = true
+		} else if !dup {
+			byAddr[t.Address] = t
+		}
+		if ValidSession(t.Session) {
+			if prev, dup := bySession[t.Session]; dup && prev.Address != t.Address {
+				badSession[t.Session] = true
+			} else if !dup {
+				bySession[t.Session] = t
+			}
+		}
+		if t.Worker != "" {
+			if prev, dup := byWorker[t.Worker]; dup && prev.Address != t.Address {
+				badWorker[t.Worker] = true
+			} else if !dup {
+				byWorker[t.Worker] = t
+			}
+		}
+	}
+	for a := range badAddr {
+		delete(byAddr, a)
+	}
+	for s := range badSession {
+		delete(bySession, s)
+	}
+	for w := range badWorker {
+		delete(byWorker, w)
+	}
+	return byAddr, bySession, byWorker
 }
 
 // SweepWorker and SweepPR are the parts of sweep.json the queue uses.
@@ -236,6 +302,7 @@ func Build(in Input) []Row {
 	// claim has no pane, is not own and merges with no desk item, and a desk
 	// or worker row naming an ambiguous pane gets no pane (see index).
 	bySession, byPane := in.Herdr.index()
+	coreByAddr, coreBySession, coreByWorker := in.Core.index()
 	// paneSession is the session a herdr pane runs, or "" when that session
 	// is ambiguous: a desk or worker row is not given a session another pane
 	// also claims.
@@ -244,6 +311,19 @@ func Build(in Input) []Row {
 			return a.Session
 		}
 		return ""
+	}
+	coreSession := func(t CoreTerminal) string {
+		if b, ok := coreBySession[t.Session]; ok && b.Address == t.Address {
+			return t.Session
+		}
+		return ""
+	}
+	coreLive := func(addr string) bool {
+		if len(in.Core.Terminals) > 0 {
+			_, ok := coreByAddr[addr]
+			return ok
+		}
+		return in.Core.Live[addr]
 	}
 	isWorker := func(names ...string) bool {
 		if in.WorkerPrefix == "" {
@@ -273,9 +353,6 @@ func Build(in Input) []Row {
 		if ValidPane(d.SignalPane) {
 			pane = d.SignalPane
 		}
-		if d.Terminal != "" && d.TerminalCore != "" && d.TerminalCore == in.Core.Selection && in.Core.Live[d.Terminal] {
-			r.Terminal = d.Terminal
-		}
 		if a, ok := byPane[pane]; ok && pane != "" {
 			r.Pane = pane
 			r.Session = paneSession(a)
@@ -283,16 +360,36 @@ func Build(in Input) []Row {
 				r.Origin = OriginWorker
 			}
 		}
+		if d.Terminal != "" && d.TerminalCore != "" && d.TerminalCore == in.Core.Selection && coreLive(d.Terminal) {
+			r.Terminal = d.Terminal
+			if ct, ok := coreByAddr[d.Terminal]; ok {
+				if r.Session == "" {
+					r.Session = coreSession(ct)
+				}
+				if ct.Kind != "" {
+					r.AgentKind = ct.Kind
+				}
+				if ct.Role != "" {
+					r.AgentRole = ct.Role
+				}
+				if ct.Worker != "" {
+					r.Worker = ct.Worker
+					r.Origin = OriginWorker
+				} else if r.Origin == OriginOwn && isWorker(ct.Name) {
+					r.Origin = OriginWorker
+				}
+			}
+		}
 		desk = append(desk, deskRow{row: r, pane: pane})
 	}
 
 	var rows []Row
 	if sw := in.Sweep; sw != nil {
-		rows = append(rows, sweepRows(*sw, desk, byPane, paneSession)...)
+		rows = append(rows, sweepRows(*sw, desk, byPane, paneSession, coreByWorker, coreSession)...)
 	}
 
 	for _, a := range in.Asks {
-		if r, ok := askRow(a, isWorker); ok {
+		if r, ok := askRow(a, isWorker, coreByWorker); ok {
 			rows = append(rows, r)
 		}
 	}
@@ -324,23 +421,37 @@ func Build(in Input) []Row {
 }
 
 // sweepRows turns the sweep's blocked workers and marker-clean PRs into
-// rows. A worker blocked on the desk whose pane queued a desk item is merged
-// into that item's row instead.
-func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession func(Agent) string) []Row {
+// rows. A worker blocked on the desk whose pane or hc terminal queued a desk
+// item is merged into that item's row instead.
+func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession func(Agent) string, coreByWorker map[string]CoreTerminal, coreSession func(CoreTerminal) string) []Row {
 	var rows []Row
 	for _, w := range sw.Workers {
 		if w.BlockedBy == "" {
 			continue
 		}
+		ct, hasCore := coreByWorker[w.Name]
 		merged := false
-		if w.BlockedBy == BlockedByDesk && w.Pane != "" {
+		if w.BlockedBy == BlockedByDesk && (w.Pane != "" || hasCore) {
 			for i := range desk {
-				if desk[i].pane != w.Pane {
+				matchPane := w.Pane != "" && desk[i].pane == w.Pane
+				matchTerm := hasCore && desk[i].row.Terminal != "" && desk[i].row.Terminal == ct.Address
+				if !matchPane && !matchTerm {
 					continue
 				}
 				d := &desk[i].row
 				d.Cost = min(d.Cost, CostBlockedWorker)
 				d.Worker, d.Origin = w.Name, OriginWorker
+				if hasCore {
+					if d.Session == "" {
+						d.Session = coreSession(ct)
+					}
+					if d.AgentKind == "" {
+						d.AgentKind = ct.Kind
+					}
+					if d.AgentRole == "" {
+						d.AgentRole = ct.Role
+					}
+				}
 				merged = true
 			}
 		}
@@ -355,6 +466,18 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession fu
 			r.Pane = w.Pane
 			r.Session = paneSession(a)
 		}
+		if hasCore {
+			r.Terminal = ct.Address
+			if r.Session == "" {
+				r.Session = coreSession(ct)
+			}
+			if ct.Kind != "" {
+				r.AgentKind = ct.Kind
+			}
+			if ct.Role != "" {
+				r.AgentRole = ct.Role
+			}
+		}
 		rows = append(rows, r)
 	}
 	for _, p := range sw.PRs {
@@ -364,6 +487,9 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession fu
 		r := Row{Kind: RowPR, Tag: p.Repo + "#" + strconv.Itoa(p.Number), N: p.Number, Text: p.Title, Worker: p.Worker, At: sw.GeneratedAt, Cost: CostMarkerClean, Origin: OriginOwn}
 		if p.Worker != "" {
 			r.Origin = OriginWorker
+			if ct, ok := coreByWorker[p.Worker]; ok {
+				r.AgentKind, r.AgentRole = ct.Kind, ct.Role
+			}
 		}
 		rows = append(rows, r)
 	}
@@ -372,10 +498,11 @@ func sweepRows(sw Sweep, desk []deskRow, byPane map[string]Agent, paneSession fu
 
 // askRow is the row for one open ask; ok is false for an ask whose id is
 // not the shape the store writes. The title is cleaned and cut like every
-// other untrusted text. From names a worker only when it has a worker's
-// shape and prefix; it is a label the asker chose, so it changes the origin
-// and nothing else (an ask row's cost and tier are fixed).
-func askRow(a AskItem, isWorker func(...string) bool) (Row, bool) {
+// other untrusted text. From names a worker when it matches a live hc
+// terminal's agent.worker label or has a worker's shape and prefix; it is a
+// label the asker chose, so it changes the origin and nothing else (an ask
+// row's cost and tier are fixed).
+func askRow(a AskItem, isWorker func(...string) bool, coreByWorker map[string]CoreTerminal) (Row, bool) {
 	if !askIDRe.MatchString(a.ID) {
 		return Row{}, false
 	}
@@ -387,8 +514,13 @@ func askRow(a AskItem, isWorker func(...string) bool) (Row, bool) {
 	case "now", "soon", "optional", "coming":
 		r.Bucket = a.Bucket
 	}
-	if workerRe.MatchString(a.From) && isWorker(a.From) {
-		r.Worker, r.Origin = a.From, OriginWorker
+	if workerRe.MatchString(a.From) {
+		if ct, ok := coreByWorker[a.From]; ok {
+			r.Worker, r.Origin = a.From, OriginWorker
+			r.AgentKind, r.AgentRole = ct.Kind, ct.Role
+		} else if isWorker(a.From) {
+			r.Worker, r.Origin = a.From, OriginWorker
+		}
 	}
 	return r, true
 }

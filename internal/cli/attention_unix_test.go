@@ -50,12 +50,17 @@ func newAttnEnv(t *testing.T) attnEnv {
 	t.Setenv("DESK_DIR", e.desk)
 	t.Setenv("HERDR_SOCKET_PATH", attnSocket)
 	oldHc := attentionHcList
+	oldHcRunning := attentionHcRunning
 	// No test reaches a real hc: a dev machine's own hc would make results
-	// depend on its live terminals.
+	// depend on its live terminals or sockets.
 	attentionHcList = func(context.Context) ([]byte, string, error) {
 		return nil, "", errors.New("hc: test has no hc")
 	}
-	t.Cleanup(func() { attentionHcList = oldHc })
+	attentionHcRunning = func() bool { return false }
+	t.Cleanup(func() {
+		attentionHcList = oldHc
+		attentionHcRunning = oldHcRunning
+	})
 	return e
 }
 
@@ -758,5 +763,101 @@ func TestAttentionWorkerOriginFromAgentName(t *testing.T) {
 		if r.Origin != attention.OriginWorker {
 			t.Errorf("row from agent cos-fix-12 in a free-form worktree = %+v, want origin worker", r)
 		}
+	}
+}
+
+// TestAttentionListCorroboratesHcAgentLabels verifies that when Herdr 1 is
+// down and an hc core is running, `attention list` parses agent.* labels from
+// `hc ls --json` and corroborates desk items, sweep workers, and asks without
+// requiring the cos- prefix, and renders "terminal <addr>" in text view.
+func TestAttentionListCorroboratesHcAgentLabels(t *testing.T) {
+	e := newAttnEnv(t)
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(e.desk, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const here = "0123456789abcdef0123456789abcdef"
+	body := "# WHAT: ship fix\necho ship\n"
+	writeDeskFile(t, filepath.Join(e.desk, "pending", "01-ship.sh"), body)
+	writeDeskFile(t, filepath.Join(e.desk, "pending", "01-ship.meta.json"),
+		`{"added_at":"2026-10-16T11:55:00Z","sha256":"`+sha(body)+`","kind":"script","terminal":"t10","terminal_core":"`+here+`"}`)
+
+	sweep := filepath.Join(e.state, "cadence", "sweep.json")
+	if err := os.MkdirAll(filepath.Dir(sweep), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sweepJSON := `{"schemaVersion":2,"generatedAt":"2026-10-16T12:00:00Z","workers":[{"name":"review-pr","blockedBy":"prompt"}]}`
+	if err := os.WriteFile(sweep, []byte(sweepJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hcBody, _ := json.Marshal(map[string]any{
+		"terminals": []map[string]any{
+			{
+				"address": "t10", "name": "fix-login", "state": "live",
+				"labels": map[string]string{
+					"agent.kind":    "claude",
+					"agent.session": attnSession,
+					"agent.worker":  "fix-login",
+					"agent.role":    "builder",
+				},
+			},
+			{
+				"address": "t11", "name": "review-pr", "state": "live",
+				"labels": map[string]string{
+					"agent.kind":    "codex",
+					"agent.session": "70c3e550-aaaa-4bbb-8ccc-000000000002",
+					"agent.worker":  "review-pr",
+					"agent.role":    "reviewer",
+				},
+			},
+		},
+	})
+	attentionHcRunning = func() bool { return true }
+	attentionHcList = func(context.Context) ([]byte, string, error) { return hcBody, here, nil }
+
+	l := attnList(t, module.Deps{Runner: herdrDown()})
+	if l.Sources.Core != sourceOK || len(l.Rows) != 2 {
+		t.Fatalf("core %q, rows %+v", l.Sources.Core, l.Rows)
+	}
+	w, d := l.Rows[0], l.Rows[1]
+	if w.Kind != attention.RowWorker || w.Worker != "review-pr" || w.Terminal != "t11" || w.AgentKind != "codex" || w.AgentRole != "reviewer" {
+		t.Errorf("worker row = %+v", w)
+	}
+	if d.Kind != attention.RowDesk || d.Worker != "fix-login" || d.Origin != attention.OriginWorker || d.Terminal != "t10" || d.Session != attnSession || d.AgentKind != "claude" || d.AgentRole != "builder" {
+		t.Errorf("desk row = %+v", d)
+	}
+
+	out, _, err := attnRun(t, module.Deps{Runner: herdrDown()}, "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "terminal t10") || !strings.Contains(out, "terminal t11") {
+		t.Errorf("text view should print hc terminal addresses:\n%s", out)
+	}
+	if strings.Contains(out, "not in herdr") {
+		t.Errorf("text view should not say 'not in herdr' when corroborated by hc:\n%s", out)
+	}
+}
+
+// TestAttentionListDoesNotAutoStartHcForSweepWorkers verifies that when no desk
+// item names a terminal and no hc core socket exists, hc ls is never invoked
+// even when sweep workers exist.
+func TestAttentionListDoesNotAutoStartHcForSweepWorkers(t *testing.T) {
+	e := newAttnEnv(t)
+	sweep := filepath.Join(e.state, "cadence", "sweep.json")
+	if err := os.MkdirAll(filepath.Dir(sweep), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sweepJSON := `{"schemaVersion":2,"generatedAt":"2026-10-16T12:00:00Z","workers":[{"name":"cos-w","blockedBy":"prompt"}]}`
+	if err := os.WriteFile(sweep, []byte(sweepJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := fakeHcLs(t, "0123456789abcdef0123456789abcdef", "t10")
+	// attentionHcRunning is false from newAttnEnv.
+	l := attnList(t, module.Deps{Runner: herdrDown()})
+	if *calls != 0 || l.Sources.Core != sourceAbsent || len(l.Rows) != 1 {
+		t.Errorf("hc calls %d, core %q, rows %d; want 0, absent, 1", *calls, l.Sources.Core, len(l.Rows))
 	}
 }

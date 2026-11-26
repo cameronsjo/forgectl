@@ -181,6 +181,10 @@ func childNamed(cmd *cobra.Command, name string) *cobra.Command {
 // to start with a forgectl verb's name (`docker ps` is Docker's, not forgectl docker).
 var skillExternalSpans = map[string]bool{"docker ps": true}
 
+// skillPluginVerbs are top-level verbs dispatched to standalone forgectl-<verb>
+// plugin binaries via Rung B PATH lookup rather than registered in newRoot.
+var skillPluginVerbs = map[string]bool{"docs": true}
+
 var skillWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // checkSkillSpan returns what a span names that the tree lacks. A span counts
@@ -200,7 +204,7 @@ func checkSkillSpan(root *cobra.Command, span string) []string {
 		fields = fields[1:]
 	}
 	if len(fields) == 0 || !skillWord.MatchString(fields[0]) || childNamed(root, fields[0]) == nil {
-		if len(fields) > 0 && skillWord.MatchString(fields[0]) && strings.HasPrefix(span, "forgectl ") {
+		if len(fields) > 0 && skillWord.MatchString(fields[0]) && strings.HasPrefix(span, "forgectl ") && !skillPluginVerbs[fields[0]] {
 			return []string{fields[0]}
 		}
 		return nil
@@ -301,7 +305,7 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 	root := skillTestRoot()
 	dead := []string{
 		"forgectl nonesuch", "forgectl env nonesuch", "desk gone", "surface await <name>",
-		"bench open|nope", "forgectl env set KEY --nope", "surface launch --surface x --nonesuch",
+		"workflow list|nope", "forgectl env set KEY --nope", "surface launch --surface x --nonesuch",
 		"forgectl desk lens nonesuch",
 	}
 	for _, span := range dead {
@@ -310,8 +314,8 @@ func TestSkillDrift_CatchesDeadCommandsAndFlags(t *testing.T) {
 		}
 	}
 	live := []string{
-		"forgectl env", "forgectl env set KEY", "desk add f --what x --why y", "net positional",
-		`quarantine hide\|status\|restore`, "forgectl launch -- --model x", "forgectl env set KEY --clipboard",
+		"forgectl env", "forgectl env set KEY", "desk add f --what x --why y", "pr list",
+		`pr list\|queue\|attach`, "forgectl launch -- --model x", "forgectl env set KEY --clipboard",
 		"set KEY", "forgectl desk lens check", "forgectl --skill",
 	}
 	for _, span := range live {

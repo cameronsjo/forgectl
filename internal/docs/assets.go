@@ -3,21 +3,17 @@ package docs
 import (
 	"embed"
 	"html/template"
+
+	"github.com/cameronsjo/forgectl/internal/artificerassets"
 )
 
-// Vendored via the #219 adherence kit (`artificer vendor`, forgectl#93's
-// "Artificer vendoring" requirement) into assets/artificer/ — provenance.json
-// there records the exact source version and a sha256 per file; re-run
-// `scripts/vendor-artificer.sh` from the repo root to update (it pins the
-// version and verifies provenance; `--check` reports registry drift). Only
-// the three files the docs UI actually links are individually embedded
-// (rather than the whole vendored directory), so the vendored metadata —
-// tokens.json, primitives.json, provenance.json — and every unlinked asset
-// never become servable over HTTP; go:embed's byte slices carry each file's
-// version banner through unmodified.
-//
-//go:embed assets/artificer/artificer.css
-var artificerCSS []byte
+// artificerCSS and artificerFonts come from internal/artificerassets so both
+// internal/docs and internal/desk/deskweb share one embedded copy without
+// deskweb linking internal/docs.
+var (
+	artificerCSS   = artificerassets.CSS
+	artificerFonts = artificerassets.Fonts
+)
 
 //go:embed assets/artificer/artificer-theme.js
 var artificerThemeJS []byte
@@ -29,15 +25,6 @@ var artificerThemeJS []byte
 //
 //go:embed assets/artificer/artificer-tree.js
 var artificerTreeJS []byte
-
-// artificerFonts is the vendored web fonts (`artificer vendor --fonts`). Only
-// the woff2 files are embedded: artificer.css links all nine by relative
-// @font-face URL, so each is a linked asset like the files above, and nothing
-// else in that directory becomes servable. Without them the reader fell back
-// to whatever the font stack found next.
-//
-//go:embed assets/artificer/assets/fonts/*.woff2
-var artificerFonts embed.FS
 
 // reloadJS is this repo's own live-reload client (not vendored) — the browser
 // half of the SSE loop in server.go/watcher.go. Embedded per-file alongside the

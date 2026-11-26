@@ -12,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/step"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workflow"
@@ -46,6 +47,9 @@ func workflowModule() module.Manifest {
 		GroupAliases: []string{"flow"},
 		SubAliases:   workflowAliases,
 		New:          newWorkflowCmd,
+		Steps: func(deps module.Deps) step.Registry {
+			return quarantine.Steps(deps.Cfg.Workflow.StripGlobs)
+		},
 	}
 }
 

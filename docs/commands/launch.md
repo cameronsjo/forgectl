@@ -326,6 +326,24 @@ A pi worker takes none of these fields: pi has no permission or sandbox flag, so
 
 A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `auto`, `workspace-write` and `on-request`. Setting `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. `auto` is allowed (ADR-0010, 2026-10-07): set `permission_mode = "auto"` in `[launch.worker]` to send a worker's tool calls to Claude Code's classifier instead of prompting; a project block that sets `acceptEdits` or stricter still wins. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.
 
+### Declarative role profiles: `[launch.roles.<name>]`
+
+Role profiles replace ad-hoc launch wrapper scripts (such as `chief-of-staff.sh`) with a declarative `[launch.roles.<name>]` block selected by `forgectl launch --role <name>`, `forgectl launch which --role <name>`, or `forgectl surface launch --role <name>`:
+
+```toml
+[launch.roles.chief-of-staff]
+charter_file = "~/Projects/cadence-ecosystem/scripts/chief-of-staff/charter.md"
+disable_plugins = ["cadence-voice", "cadence-palette", "artificer-voice"]
+posture = "autonomous"         # "autonomous" | "interactive"
+exclude_claude_md = true       # excludes global CLAUDE.md, rules/**, and run-dir CLAUDE.md/AGENTS.md
+session_name = "chief-of-staff"
+```
+
+- **Structured env contract:** every launch with `--role <name>` exports `FORGECTL_ROLE=<name>` and, when `posture` is set, `FORGECTL_POSTURE=<posture>` (`autonomous` or `interactive`).
+- **Charter file:** `charter_file` (leading `~/` expanded, must be an absolute regular readable file) is passed to Claude Code via `--append-system-prompt-file`. Non-Claude harnesses refuse Claude-only role options cleanly.
+- **Fail-closed guard-hook safety check:** `disable_plugins` matches plugin names (before `@marketplace`) against `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` and turns them off via `--settings` (`enabledPlugins`). A plugin stays **on** (with a warning on stderr) unless its marketplace in `known_marketplaces.json` is remote (`github`, `git`, `url`) with no `source.path`, `marketplace.json` has a single entry for it with neither `hooks` nor `strict: false`, its `installPath` is absolute, and every hook in `hooks/hooks.json` and `.claude-plugin/plugin.json` is strictly on a non-blocking event (`SessionStart`, `SessionEnd`, `SubagentStart`, `Notification`, `PostModelSwitch`, `DirectoryAdded`, `WorktreeRemove`, `MessageDisplay`). Any unreadable, malformed, or non-regular file fails closed. To override explicitly, set `allow_unsafe_plugin_disable = true` in the role or pass `--allow-guarded-plugin-disable`.
+- **Resuming & dry-run:** `forgectl launch --role <name> -- --resume <id>` preserves the role's charter, settings/exclusions, and posture env vars; `forgectl launch --role <name> --dry-run` prints the resolved invocation without starting the harness.
+
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 
 ## Local launch statistics

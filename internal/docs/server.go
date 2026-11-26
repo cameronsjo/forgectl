@@ -206,7 +206,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 	// artificer.css names its fonts as url('assets/fonts/…') relative to
 	// itself, which resolves to this doubled path.
-	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveWoff2(artificerFonts, "assets/artificer/assets/fonts/"))
+	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveWoff2(artificerFonts, "assets/fonts/"))
 	mux.HandleFunc("GET /assets/katex/katex.min.js", serveStaticJS(katexJS))
 	mux.HandleFunc("GET /assets/katex/katex.min.css", serveStaticCSS(katexCSS))
 	// katex.min.css names its fonts as url(fonts/…), relative to itself.

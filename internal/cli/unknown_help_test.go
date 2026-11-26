@@ -142,8 +142,8 @@ func TestEveryGroupRejectsUnknownSubcommand(t *testing.T) {
 	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
 	root := newRoot(deps)
 	groups := groupPaths(root)
-	if len(groups) < 18 {
-		t.Fatalf("found %d groups, want at least 18 (forgectl#1090 measured 18 that exited 0 alone)", len(groups))
+	if len(groups) < 15 {
+		t.Fatalf("found %d groups, want at least 15", len(groups))
 	}
 	for _, path := range groups {
 		name := strings.Join(path, " ")
