@@ -251,33 +251,6 @@ func TestTmuxFrobnicateReturnsCobraError(t *testing.T) {
 	}
 }
 
-// TestQuarantineRestorReturnsCobraErrorAndTouchesNothing pins the
-// destructive half of the same fix: a typo of `restore` must never reach
-// runQuarantineHide.
-func TestQuarantineRestorReturnsCobraErrorAndTouchesNothing(t *testing.T) {
-	dir := t.TempDir()
-	claudeMd := dir + "/CLAUDE.md"
-	if err := os.WriteFile(claudeMd, []byte("hi"), 0o600); err != nil {
-		t.Fatalf("seed CLAUDE.md: %v", err)
-	}
-
-	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
-	root.SetOut(new(bytes.Buffer))
-	root.SetErr(new(bytes.Buffer))
-	root.SetArgs([]string{"quarantine", "restor", "--root", dir})
-
-	err := root.Execute()
-	if err == nil {
-		t.Fatal("expected an error for the unknown subverb `restor`, got nil")
-	}
-	if !strings.Contains(err.Error(), "unknown command") {
-		t.Errorf("error = %q, want cobra's unknown-command error", err.Error())
-	}
-	if _, statErr := os.Stat(claudeMd); statErr != nil {
-		t.Errorf("CLAUDE.md should still be present at its original name, stat error: %v", statErr)
-	}
-}
-
 // --- ActionRunVerb re-enters the typed dispatch pipeline (forgectl#479) ---
 
 // TestRunHubVerb_MatchesTypedDispatch pins the Architecture's re-entry

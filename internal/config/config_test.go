@@ -454,18 +454,6 @@ func TestUpdateLogDir(t *testing.T) {
 	}
 }
 
-func TestUpdateConfig_IsZero(t *testing.T) {
-	if !(UpdateConfig{}).IsZero() {
-		t.Error("zero-value UpdateConfig.IsZero() = false, want true")
-	}
-	if (UpdateConfig{Roster: []string{"brew"}}).IsZero() {
-		t.Error("UpdateConfig with a Roster must not report IsZero")
-	}
-	if (UpdateConfig{LogDir: "/tmp/x"}).IsZero() {
-		t.Error("UpdateConfig with a LogDir must not report IsZero")
-	}
-}
-
 func TestLoad(t *testing.T) {
 	t.Run("missing file returns defaults", func(t *testing.T) {
 		redirectConfigDir(t) // empty temp config dir → no config.toml
@@ -930,5 +918,33 @@ func TestBenchConfig_ResolvedDirsFailClosedWithoutHome(t *testing.T) {
 	}
 	if bc.ResolvedHearthDir() != "" || bc.ResolvedChronicleDir() != "" {
 		t.Error("Resolved*Dir must be empty when home is unresolvable")
+	}
+}
+
+// TestDecodeStrict_ToleratesLegacyRemovedSections pins that removing the
+// [docker], [preflight], and [update] config sections does not break existing
+// user config.toml files that still contain them.
+func TestDecodeStrict_ToleratesLegacyRemovedSections(t *testing.T) {
+	raw := []byte(`
+no_icons = true
+
+[docker]
+default_platform = "linux/amd64"
+label_template = "org.example.team=core"
+
+[preflight]
+catalog_path = "/tmp/catalog.md"
+default_set = ["cadence@workbench"]
+
+[update]
+roster = ["brew"]
+log_dir = "/tmp/update-logs"
+`)
+	cfg, err := DecodeStrict(raw)
+	if err != nil {
+		t.Fatalf("DecodeStrict with legacy removed sections returned error: %v", err)
+	}
+	if !cfg.NoIcons {
+		t.Error("NoIcons = false, want true")
 	}
 }

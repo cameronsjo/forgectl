@@ -716,3 +716,16 @@ func renderStatusBench(out io.Writer, b bench.Report, marks theme.Marks) {
 			termsafe.SafeLineMax(c.Name, statusNameMaxRunes), termsafe.SafeLineMax(c.Reason, statusReasonMaxRunes))
 	}
 }
+
+// benchGlyph maps a component State onto the launch_doctor glyph vocabulary:
+// ✓ healthy, ! needs attention (degraded or not-yet-configured), ✗ down.
+func benchGlyph(s bench.State, marks theme.Marks) string {
+	switch s {
+	case bench.StateOK:
+		return marks.OK
+	case bench.StateUnavailable:
+		return marks.Fail
+	default: // degraded, not-configured
+		return marks.Warn
+	}
+}

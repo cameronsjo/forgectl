@@ -129,14 +129,11 @@ type Config struct {
 	Net       NetConfig       `toml:"net"`
 	Proxy     ProxyConfig     `toml:"proxy"`
 	Bench     BenchConfig     `toml:"bench"`
-	Docker    DockerConfig    `toml:"docker"`
 	Clean     CleanConfig     `toml:"clean"`
 	Sessions  SessionsConfig  `toml:"sessions"`
 	Projects  ProjectsConfig  `toml:"projects"`
 	Review    ReviewConfig    `toml:"review"`
 	Docs      DocsConfig      `toml:"docs"`
-	Preflight PreflightConfig `toml:"preflight"`
-	Update    UpdateConfig    `toml:"update"`
 	Pr        PrConfig        `toml:"pr"`
 	Github    GithubConfig    `toml:"github"`
 	Theme     ThemeConfig     `toml:"theme"`
@@ -657,19 +654,6 @@ var ErrProxyProfileNotEncodable = errors.New(
 // gets an error rather than a truncated config file.
 func (ProxyProfile) MarshalTOML() ([]byte, error) { return nil, ErrProxyProfileNotEncodable }
 
-// DockerConfig is the [docker] section: build-time defaults for `forgectl
-// docker build`. A zero value means "section absent" — internal/docker's
-// Client falls back to no --platform flag and no extra label.
-type DockerConfig struct {
-	DefaultPlatform string `toml:"default_platform"`
-	LabelTemplate   string `toml:"label_template"` // "key=value" appended to every build
-}
-
-// IsZero reports whether the [docker] section was absent or empty.
-func (dc DockerConfig) IsZero() bool {
-	return dc.DefaultPlatform == "" && dc.LabelTemplate == ""
-}
-
 // CleanConfig is the [clean] section: the default root and --type filter
 // `forgectl clean` uses when the corresponding flag is omitted. A zero value
 // means "section absent" — internal/clean's Client falls back to its own
@@ -1105,40 +1089,6 @@ func (dc DocsConfig) ExpandHome(home string) (DocsConfig, error) {
 		out.RootKinds[expanded] = value
 	}
 	return out, nil
-}
-
-// PreflightConfig is the [preflight] section: `forgectl preflight`'s
-// deterministic alignment inputs. A zero value means "section absent" —
-// internal/preflight's LocateCatalog falls back to installed_plugins.json
-// and then a cache-dir glob, and DefaultSet contributes nothing beyond the
-// catalog's own core tier.
-type PreflightConfig struct {
-	CatalogPath string   `toml:"catalog_path"` // override auto-locate; direct path to the generated catalog.md
-	DefaultSet  []string `toml:"default_set"`  // extra "plugin@marketplace" entries always folded into the core-tier target, independent of catalog tier
-}
-
-// IsZero reports whether the [preflight] section was absent or empty.
-func (pc PreflightConfig) IsZero() bool {
-	return pc.CatalogPath == "" && len(pc.DefaultSet) == 0
-}
-
-// UpdateConfig is the [update] section: `forgectl update`'s persisted
-// defaults. A zero value means "section absent" — internal/update's Client
-// runs its full built-in roster (DefaultSteps) and internal/cli falls back
-// to its own default log directory.
-type UpdateConfig struct {
-	// Roster names the steps to run when --only is omitted (matched against
-	// the roster's Step.Name values). Empty means every roster step — the
-	// same "unrestricted" meaning --only's absence has on the CLI.
-	Roster []string `toml:"roster"`
-	// LogDir overrides the default directory for the timestamped
-	// transcript log. Empty falls back to UpdateLogDir().
-	LogDir string `toml:"log_dir"`
-}
-
-// IsZero reports whether the [update] section was absent or empty.
-func (uc UpdateConfig) IsZero() bool {
-	return len(uc.Roster) == 0 && uc.LogDir == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
