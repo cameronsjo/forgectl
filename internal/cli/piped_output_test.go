@@ -19,7 +19,6 @@ var pipedVerbs = [][]string{
 	{"launch", "which"},
 	{"launch", "doctor"},
 	{"bench", "status"},
-	{"tmux", "cheat"},
 	{"theme", "show"},
 	{"theme", "preview"},
 	// Two verbs are deliberately absent, both caught by the per-verb positive

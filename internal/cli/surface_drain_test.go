@@ -693,57 +693,11 @@ func TestDrainStartRefusesASecondDrain(t *testing.T) {
 	}
 }
 
-func TestDrainStartReportsAChildThatNeverRan(t *testing.T) {
-	files := drainCmdEnv(t)
-	lock, err := files.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	line, err := drain.EncodeEvent(drain.Event{Seq: 1, Kind: drain.EventStop, TS: drainT0, Error: "the herdr session resolves to \"x\""})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := files.AppendEvent(lock, line); err != nil {
-		t.Fatal(err)
-	}
-	if err := lock.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var gotArgs, gotEnv []string
-	stubSpawn(t, func(args, env []string) (int, error) { gotArgs, gotEnv = args, env; return 99999, nil })
-	_, err = runQueueCmd(t, newSurfaceDrainStartCmd(module.Deps{}))
-	if err == nil || ExitCode(err) != exitFailed || !strings.Contains(err.Error(), "did not report running") || !strings.Contains(err.Error(), "herdr session resolves") {
-		t.Fatalf("start: err %v (exit %d), want exit 1 with the last event", err, ExitCode(err))
-	}
-	if strings.Join(gotArgs[:4], " ") != "surface _drain --session "+drainTestSession {
-		t.Errorf("child argv %v", gotArgs)
-	}
-	if gotEnv[len(gotEnv)-1] != "HERDR_SESSION="+drainTestSession {
-		t.Errorf("child env does not pin HERDR_SESSION last: %v", gotEnv[len(gotEnv)-1])
-	}
-}
-
-func TestDrainStartWaitsForRunning(t *testing.T) {
-	files := drainCmdEnv(t)
-	stubSpawn(t, func([]string, []string) (int, error) {
-		lock, err := files.Lock()
-		if err != nil {
-			return 0, err
-		}
-		defer lock.Close() //nolint:errcheck // test
-		data, err := drain.EncodeStatus(drain.Status{Status: drain.StatusRunning, PID: 31337, ProcessStart: 5, HerdrSession: drainTestSession})
-		if err != nil {
-			return 0, err
-		}
-		return 31337, files.WriteStatus(lock, data)
-	})
-	out, err := runQueueCmd(t, newSurfaceDrainStartCmd(module.Deps{}), "--json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var res drainStartResult
-	if err := json.Unmarshal([]byte(out), &res); err != nil || res.PID != 31337 || res.Status != drain.StatusRunning || res.HerdrSession != drainTestSession {
-		t.Fatalf("start --json: %q, %v", out, err)
+func TestDrainStartRefusesLegacyHerdrBackend(t *testing.T) {
+	_ = drainCmdEnv(t)
+	_, err := runQueueCmd(t, newSurfaceDrainStartCmd(module.Deps{}))
+	if !errors.Is(err, errLegacyBackend) || ExitCode(err) != exitUsage {
+		t.Fatalf("start: err %v (exit %d), want errLegacyBackend (exit %d)", err, ExitCode(err), exitUsage)
 	}
 }
 

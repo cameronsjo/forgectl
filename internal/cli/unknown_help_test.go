@@ -42,7 +42,7 @@ func TestExecCommand_UnknownCommandWithHelpFails(t *testing.T) {
 		{"top-level short flag", []string{"nosuchcmd", "-h"}, `"nosuchcmd" for "forgectl"`},
 		{"flag before the verb", []string{"--help", "nosuchcmd"}, `"nosuchcmd" for "forgectl"`},
 		{"subcommand", []string{"desk", "nosuchsub", "--help"}, `"nosuchsub" for "forgectl desk"`},
-		{"subcommand of another group", []string{"tmux", "frobnicate", "--help"}, `"frobnicate" for "forgectl tmux"`},
+		{"subcommand of another group", []string{"workflow", "frobnicate", "--help"}, `"frobnicate" for "forgectl workflow"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stderr, err := runUnknownHelpArgs(t, tt.args...)
