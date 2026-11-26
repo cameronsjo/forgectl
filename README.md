@@ -55,7 +55,6 @@ deep-dive get a link here.
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
 | `attention` | Per-machine attention queue: what the desk, its asks and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
-| `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | [workflow](docs/commands/workflow.md) |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -344,6 +343,8 @@ forgectl desk show 17-fix --events       # one run as a flow, with its event tim
 forgectl desk status --json              # the queue as JSON
 forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
 forgectl desk layout --below             # herdr: the desk in a full-width row under every pane in the tab
+# FORGECTL_DESK_ASKS_HOST=<ssh host> sends ask, asks, respond and watch --responses to that host over ssh
+#   (FORGECTL_DESK_ASKS_REMOTE_BIN names the binary there; --dir, DESK_DIR or CLAUDE_DESK_DIR keep asks local)
 
 # attention — one queue of what waits on you: desk items, desk asks, the sweep (Unix only)
 forgectl attention list --json           # rows by delay cost; skipped counts malformed entries
@@ -351,42 +352,6 @@ forgectl attention list --json           # rows by delay cost; skipped counts ma
 # sweep — the chief-of-staff ledger: workers, PRs, what waits on you; feeds `attention list` (Unix only)
 forgectl sweep --json                    # needs [sweep] owner, since, briefs, reviewers (or flags); exit 2 names a missing key
 forgectl sweep --owner LOGIN --since 2026-10-14 --briefs /abs/dir   # flags override the [sweep] table
-
-# tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
-# one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
-#   security add-generic-password -s vikunja-readonly -a "$USER" -w
-forgectl tasks ls                        # list open tasks
-forgectl tasks ls --json                 # the same, machine-readable
-forgectl tasks show 42                   # one task, its detail and its relations
-forgectl tasks ready                     # open tasks with no active "blocked" relation, by position
-forgectl tasks ls --keychain-service X   # read the token from a different keychain item
-# done — mark one task done and append a closed-by line (who, when, the evidence) to its description
-# operator setup, once: store a WRITE token under its own entry, apart from the read one (prompts for the value)
-#   security add-generic-password -s vikunja-write -a "$USER" -w
-forgectl tasks done 42 --evidence "merged owner/repo#12"  # 42 is the numeric id, without #; --evidence is required: one line, 300 characters at most
-forgectl tasks done 42 --evidence "…" --closer NAME       # who is closing it; self-declared, not verified (default: cli)
-forgectl tasks done 42 --evidence "…" --json              # {"id","project_id","title","done","already_done","evidence_recorded"} on stdout
-forgectl tasks done 42 --evidence "…" --write-keychain-service X   # read the write token from a different keychain item
-#   done reads only the write entry: it never falls back to the read one, and it refuses --keychain-service.
-#   It reads the task, sends one update, and reads the task again. An already-done task is reported and nothing is written.
-#   It never reads or writes the cache.
-#   exit codes: 0 done (closed by this call, or already done) · 2 unreachable · 3 the server rejected the credential ·
-#   4 the host is refused · 1 anything else
-#   --json failure: one {"error","code","path"} object on stderr. code is not_found, repeating_task, trailer_too_long,
-#   not_confirmed (the update may have been applied: read the task before retrying), write_refused, unauthorized (exit 3),
-#   credential_missing, usage_error, or failed (see docs/json-contract.md)
-#   close record: every call that sends an update writes one JSON line to stderr and appends the same line to
-#   tasks-closes.jsonl in the config dir, whatever log_level is. It names the keychain entry, never the token.
-#   hosts: a keychain token is sent only to the default host, or to one listed in config.toml. Any other --host is
-#   refused with exit 4 before the keychain is read, on ls, show, ready, done, and mcp over stdio:
-#     [tasks]
-#     allowed_hosts = ["<hostname>"]   # plain hostnames only: no port, user, path, or IP address
-#   a refused host also appends one line to tasks-closes.jsonl ("event":"host_refused", with the verb, the host when it
-#   is a plain hostname, and the keychain entry's name), so the refusal outlives the terminal that showed it.
-#   an unknown verb (forgectl tasks nosuchverb) exits 1
-forgectl tasks mcp --http :3000 --ping   # container healthcheck: initialize, have the server read the board once, end the session
-#   exit codes: 0 healthy · 2 the listener did not answer · 3 the server is up and the board refused its credential ·
-#   1 anything else, including a server whose read of the board failed for another reason. It prints only "ok".
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
@@ -564,7 +529,7 @@ configuration even though VS Code settings are not quarantined wholesale.
 
 ## Configuration
 
-Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`, `[tasks]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
+Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
 
 ## License
 

@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The first 2026-10-20 amendment adds an optional operator file and tool list that can only trim a worker. The second denies `forgectl tasks done` to every claude worker.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that. The first 2026-10-20 amendment adds an optional operator file and tool list that can only trim a worker. The second denied `forgectl tasks done` to every claude worker; it was withdrawn on 2026-11-25 when that command was removed.)
 
 Date: 2026-10-05
 
@@ -134,6 +134,8 @@ This does not restore the 2026-10-05 isolation. A worker still loads the operato
 `[launch.worker] tools` is the same kind of trim: a built-in tool allowlist passed as `--tools`. It only removes tools, and forgectl checks only that each entry is shaped like a tool name, since Claude Code drops unknown names without an error.
 
 ## Amendment 2026-10-20: one deny rule for board closes
+
+*2026-11-25: withdrawn. The `forgectl tasks` command was removed (#1511), so the deny rule went with it; workers carry no built-in deny rule again, and `[launch.worker]` can still add one.*
 
 Every claude worker's `--settings` now carries one deny rule, `Bash(forgectl tasks done:*)`, in every permission mode. A board close cannot be undone, and the operator or the coordinator closes a task once its work lands. The `FORGECTL_DRAIN_WORKER` refusal (2026-10-09 amendment) already stops `tasks done` in a worker, but a worker can unset the variable. A deny rule holds over the operator's own allow rules, so it backs that refusal up. Before this, chief-of-staff's own `launch-workers.sh` added the rule, and drain workers went without it.
 

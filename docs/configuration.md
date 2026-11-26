@@ -82,7 +82,6 @@ Several command groups own their own config section, documented alongside that c
   "owner/repo" = ["docs/**"]
   ```
 
-- `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
 
 ## Worker profiles
 

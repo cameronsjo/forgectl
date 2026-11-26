@@ -143,6 +143,11 @@ $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
 pending/, running/, done/ and skipped/ subdirectories are touched, plus asks/
 for the asks log.
 
+With $FORGECTL_DESK_ASKS_HOST set to an ssh host (and no --dir, $DESK_DIR or
+$CLAUDE_DESK_DIR), ask, asks, respond and watch --responses run on that host
+over ssh, so one always-on machine holds every machine's asks. Scripts, the
+dashboard, ui and serve stay on this machine. See docs/commands/desk.md.
+
 Dashboard keys (? lists them; in the run view, ? lists its own):
 ` + tui.DeskKeysHelp(deskHelpWidth) + `
 

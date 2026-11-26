@@ -36,18 +36,14 @@ Every verb SHALL map its outcome to one table: 0 ok (including already done and 
 - **THEN** it exits 2, including when `--help` is also passed
 
 ### Requirement: Codes outside the table
-Beyond the table, a verb SHALL exit only with: 7 for a `tasks` cache older than 72h; 75 when `desk watch` hits its deadline or `surface send` queues a message; 130 when interrupted or a pick is cancelled; 141 when stdout closes; or a child's code from a pass-through verb (`launch`, `surface _exec`, `docs read`, `k8s`, `desk watch`). Its own errors MUST NOT use 126, 127 or 128 and above, apart from 130 and 141.
-
-#### Scenario: Stale task cache
-- **WHEN** `forgectl tasks ls` would serve a cache older than 72h without `--allow-stale`
-- **THEN** it exits 7
+Beyond the table, a verb SHALL exit only with: 75 when `desk watch` hits its deadline or `surface send` queues a message; 130 when interrupted or a pick is cancelled; 141 when stdout closes; or a child's code from a pass-through verb (`launch`, `surface _exec`, `docs read`, `k8s`, `desk watch`). Its own errors MUST NOT use 126, 127 or 128 and above, apart from 130 and 141.
 
 #### Scenario: Pass-through child code
 - **WHEN** `forgectl k8s logs` runs and kubectl exits 3
 - **THEN** forgectl exits 3
 
 ### Requirement: Usage exceptions keep exit 1
-Where exit 2 already means something else in a verb, usage errors MUST exit 1 instead: every `tasks` subverb, `env check`, `k8s`, `resume snapshot` and `surface event`. `resume snapshot` and `surface event` are Claude Code hook verbs and MUST NOT exit 2 for a bad flag, an unresolvable `$HOME`, or an unparseable config.
+Where exit 2 already means something else in a verb, usage errors MUST exit 1 instead: `env check`, `k8s`, `resume snapshot` and `surface event`. `resume snapshot` and `surface event` are Claude Code hook verbs and MUST NOT exit 2 for a bad flag, an unresolvable `$HOME`, or an unparseable config.
 
 #### Scenario: Bad flag on a hook verb
 - **WHEN** `forgectl resume snapshot --bogus` is run
@@ -127,7 +123,7 @@ Payload SHALL go to stdout and diagnostics to stderr. Styled output MUST carry n
 
 #### Scenario: Unknown reference
 - **WHEN** `forgectl --skill nope.md` is run
-- **THEN** the exit status is 2, stdout is empty, and the error names `board-tasks.md` and `desk.md`
+- **THEN** the exit status is 2, stdout is empty, and the error names `desk.md`
 
 ### Requirement: The binary installs its own agent skill
 `forgectl --skill --install <dir>` SHALL write SKILL.md and `references/` into an existing absolute directory. It MUST exit 2 for a relative, missing or empty directory, and for `--install` without `--skill`.
@@ -146,7 +142,3 @@ When `--json` is passed and the verb or subverb named does not exist, stderr MUS
 #### Scenario: Unknown top-level verb
 - **WHEN** `forgectl zzbogus --json` is run
 - **THEN** stderr is one object with `code` `unknown_command` naming `zzbogus`, and the exit status is 2
-
-#### Scenario: Unknown subverb under tasks
-- **WHEN** `forgectl tasks zzbogus --json` is run
-- **THEN** stderr is one object with `code` `unknown_command`, and the exit status is 1, as without `--json`
