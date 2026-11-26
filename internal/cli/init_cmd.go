@@ -303,7 +303,6 @@ const deskScaffold = `
 const attentionScaffold = `
 # ── attention: the per-machine attention queue (forgectl attention) ────────
 [attention]
-# ttl_hours = 24        # keep a record no visible herdr pane vouches for this long (1-720)
 # worker_prefix = "cos-" # sessions whose names start with this are workers
 `
 

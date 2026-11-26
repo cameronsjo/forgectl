@@ -111,7 +111,6 @@ const logKeepDays = 7
 //	[tasks]              # forgectl tasks — where a keychain credential may be sent
 //	allowed_hosts = []               # hosts allowed besides the built-in default; plain hostnames only
 //	[attention]          # forgectl attention — the per-machine attention queue
-//	ttl_hours = 24                   # keep a record no visible herdr pane vouches for this long (1-720)
 //	worker_prefix = "cos-"           # sessions whose name starts with this are workers
 //	[sweep]              # forgectl sweep — the chief-of-staff ledger; nothing is defaulted
 //	owner = "your-login"             # GitHub account whose repos the sweep covers
