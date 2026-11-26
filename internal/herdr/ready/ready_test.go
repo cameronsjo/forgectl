@@ -216,6 +216,31 @@ func TestEvaluate_LabeledRuleOverDialogIsBlocked(t *testing.T) {
 	}
 }
 
+// TestEvaluate_MenuRowInTheBoxIsBlocked: a dialog drawn as a closed titled
+// rule, a numbered option row on the `❯` line, then a bottom rule has the
+// input box's shape. Its option row has a plain space after `❯`, as dialogs
+// and transcript rows do; the input box has a no-break space. So it is not
+// the box, and the numbered menu blocks.
+func TestEvaluate_MenuRowInTheBoxIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-named-session")
+	box := claudeBoxStart(t, s.Text)
+	i := strings.Index(s.Text[box:], "\n❯\n")
+	if i < 0 {
+		t.Fatal("fixture has no empty input box")
+	}
+	at := box + i
+	s.Text = s.Text[:at] + "\n❯ 1. Yes\n  2. No" + s.Text[at+len("\n❯"):]
+	s.Text = strings.Replace(s.Text, " cos-pr-misc ─\n", " Run this command? ─\n", 1)
+	if !strings.Contains(s.Text, " Run this command? ─\n❯ 1. Yes\n  2. No\n─") {
+		t.Fatal("splice did not draw the menu in the box")
+	}
+	v := tab.Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "selection menu" {
+		t.Fatalf("verdict %+v, want blocked by the selection menu", v)
+	}
+}
+
 // claudeBoxStart returns the offset of the rule line above Claude's input box.
 func claudeBoxStart(t *testing.T, text string) int {
 	t.Helper()
