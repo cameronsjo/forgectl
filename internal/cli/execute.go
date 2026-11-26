@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -85,9 +84,17 @@ var (
 	captureEnvSnapshot    = config.CaptureEnvSnapshot
 	prepareLegacyBoundary = config.PrepareLegacyMigrationBoundary
 	setupLogger           = config.SetupLogger
-	buildRoot             = newRoot
+	buildRoot             = defaultBuildRoot
+	buildRootArgs         []string
 	osArgs                = os.Args
 )
+
+func defaultBuildRoot(deps module.Deps) *cobra.Command {
+	if buildRootArgs != nil {
+		return newRootForArgs(deps, buildRootArgs)
+	}
+	return newRoot(deps)
+}
 
 // processArgs returns the arguments after the program name, tolerating an argv
 // with no program name at all. Go's runtime normally guarantees os.Args[0], but
@@ -187,12 +194,9 @@ func execute(ctx context.Context) error {
 	// a tmux session jumper, not a command palette).
 	tmuxClient := tmux.New(exec.OSRunner{})
 	args := normalizeArgs(processArgs())
-	var root *cobra.Command
-	if reflect.ValueOf(buildRoot).Pointer() == reflect.ValueOf(newRoot).Pointer() {
-		root = newRootForArgs(deps, args)
-	} else {
-		root = buildRoot(deps)
-	}
+	buildRootArgs = args
+	root := buildRoot(deps)
+	buildRootArgs = nil
 	// The gate's exempt-verb lookup gets the built root. Only
 	// preFangFailure's --json lookup uses the default-config tree: a module
 	// built over a config that failed to decode can stand in a stub without
@@ -234,9 +238,7 @@ func execute(ctx context.Context) error {
 		if termIsDumb() {
 			return preFangFailure(builtRoot, args, WithExitCode(errHubDumbTerminal, classExit(classUsage)))
 		}
-		if reflect.ValueOf(buildRoot).Pointer() == reflect.ValueOf(newRoot).Pointer() {
-			root = newRoot(deps)
-		}
+		root = buildRoot(deps)
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
 		opts := hubRunOptions(ctx, deps, root, tmuxClient)
 		opts.NoIcons = noIcons
