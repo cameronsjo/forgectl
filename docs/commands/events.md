@@ -3,14 +3,14 @@
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
 ```sh
-forgectl events watch --session "$ID" owner/repo#12      # this session hears about #12
+forgectl events watch --session "$ID" "owner/repo#12"      # this session hears about #12
 forgectl events unwatch --session "$ID"                  # stop watching everything
 forgectl events poll --interval 90s                      # read watched PRs until interrupted
 forgectl events feed --session "$ID" --since 40 --json   # {"events": [...], "last": N, "skipped": N}
-forgectl events state owner/repo#12 --json               # the last snapshot; exit 3 when there is none
+forgectl events state "owner/repo#12" --json               # the last snapshot; exit 3 when there is none
 ```
 
-`forgectl events` turns changes on watched pull requests into typed events, so a Claude Code session hears about them without polling. Unix only.
+`forgectl events` turns changes on watched pull requests into typed events, so a Claude Code session hears about them without polling. Unix and github.com only: `events poll` refuses to run when `[github].host` names another host.
 
 ## Who reads it
 

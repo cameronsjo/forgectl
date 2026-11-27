@@ -189,6 +189,16 @@ per event, or with --json one object per poll: {"read", "skipped", "events"}.`,
 			if interval < eventsMinInterval {
 				return eventsUsage("events poll: --interval must be at least %s", eventsMinInterval)
 			}
+			host, err := githubauth.ResolveHost(deps.Cfg.Github.Host)
+			if err != nil {
+				return err
+			}
+			if host != githubauth.DefaultHost {
+				// Refs carry no host: a watched owner/repo#N names a github.com PR.
+				// Polling another host could store a same-numbered PR from there
+				// under that ref.
+				return eventsUsage("events poll: only github.com is supported; [github].host is set to another host")
+			}
 			st, err := eventsStore()
 			if err != nil {
 				return err
@@ -206,6 +216,9 @@ per event, or with --json one object per poll: {"read", "skipped", "events"}.`,
 				}
 				if err := printPoll(cmd.OutOrStdout(), res, asJSON); err != nil {
 					return err
+				}
+				if !asJSON && res.Skipped > 0 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "events poll: could not read %d watched PR(s) from GitHub\n", res.Skipped) //nolint:errcheck // a diagnostic
 				}
 				if once {
 					return nil

@@ -18,6 +18,7 @@ func (s *Store) Watched() (Watching, error)  { return nil, privdir.ErrUnsupporte
 func (s *Store) State(Ref) (PRState, bool, error) {
 	return PRState{}, false, privdir.ErrUnsupported
 }
+func (s *Store) serialPoll(func() error) error                { return privdir.ErrUnsupported }
 func (s *Store) Record(time.Time, []PRState) ([]Event, error) { return nil, privdir.ErrUnsupported }
 func (s *Store) Feed(string, int64) ([]Event, int64, int, error) {
 	return nil, 0, 0, privdir.ErrUnsupported

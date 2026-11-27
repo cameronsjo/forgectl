@@ -22,6 +22,7 @@ import (
 const (
 	leafName  = "events"
 	lockName  = "lock"
+	pollLock  = "poll.lock"
 	watchName = "watch.json"
 	stateName = "state.json"
 	logName   = "log.jsonl"

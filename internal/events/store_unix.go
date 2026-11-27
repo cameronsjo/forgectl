@@ -66,6 +66,27 @@ func (s *Store) locked(write bool, fn func(dir int) error) error {
 	return fn(dir)
 }
 
+// serialPoll runs fn holding the poll lock, so two polls never overlap:
+// one that fetched an older head cannot record after one that fetched a
+// newer head. It is a separate file from the store lock, so readers and
+// watchers are not held up while a poll waits on GitHub.
+func (s *Store) serialPoll(fn func() error) error {
+	dir, _, err := s.open(true)
+	if err != nil {
+		return fmt.Errorf("events store: %w", err)
+	}
+	defer unix.Close(dir) //nolint:errcheck // a directory descriptor; nothing to flush
+	lock, err := privdir.OpenFile(dir, pollLock, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("events store: %w", err)
+	}
+	defer lock.Close() //nolint:errcheck // the lock file holds no data
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("events store: poll lock: %w", err)
+	}
+	return fn()
+}
+
 // readJSON fills v from name; a missing file leaves v as it is.
 func readJSON(dir int, name string, v any) error {
 	f, err := privdir.OpenFile(dir, name, os.O_RDONLY, 0o600)
@@ -119,7 +140,11 @@ func writeJSON(dir int, name string, v any) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(dir, name, append(b, '\n'))
+	b = append(b, '\n')
+	if len(b) > maxJSONBytes {
+		return fmt.Errorf("%s would be larger than %d bytes", name, maxJSONBytes)
+	}
+	return writeAtomic(dir, name, b)
 }
 
 // appendEvents adds one line per event to name, then cuts the file to its

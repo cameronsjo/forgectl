@@ -29,7 +29,7 @@ const (
 	maxReviewLine = 300
 )
 
-var loginRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}$`)
+var loginRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // prQuery reads one PR by number: its state, head, the head's check rollup,
 // its labels, the viewer's own last 20 reviews (only the viewer's markers
@@ -44,7 +44,7 @@ const prQuery = `query($owner: String!, $name: String!, $number: Int!, $author: 
       state
       isDraft
       headRefOid
-      labels(first: 30) { nodes { name } }
+      labels(first: 100) { nodes { name } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       reviews(last: 20, author: $author) { nodes { body author { login } } }
     }

@@ -351,9 +351,9 @@ forgectl desk layout --below             # herdr: the desk in a full-width row u
 forgectl attention list --json           # rows by delay cost; skipped counts malformed entries
 
 # events — typed events for the PRs sessions watch; c3 hands a session its feed (Unix only)
-forgectl events watch --session "$ID" owner/repo#12   # this session hears about #12
+forgectl events watch --session "$ID" "owner/repo#12"   # this session hears about #12
 forgectl events poll --interval 90s      # read watched PRs, record pushes, checks, reviews, merges
-forgectl events state owner/repo#12 --json  # the last snapshot the merge gate reads
+forgectl events state "owner/repo#12" --json  # the last snapshot the merge gate reads
 
 # sweep — the chief-of-staff ledger: workers, PRs, what waits on you; feeds `attention list` (Unix only)
 forgectl sweep --json                    # needs [sweep] owner, since, briefs, reviewers (or flags); exit 2 names a missing key

@@ -15,11 +15,22 @@ type PollResult struct {
 	Events  []Event `json:"events"`
 }
 
-// Poll reads every watched PR once and records what changed. The reads run
-// with no lock held, so a slow GitHub never blocks a session's watch or a
-// reader; Record takes the lock once, at the end. A PR that cannot be read
+// Poll reads every watched PR once and records what changed. Polls run one
+// at a time under their own lock, so an older read never lands after a newer
+// one. The store lock is not held during the reads, so a slow GitHub never
+// blocks a session's watch or a reader; Record takes it once, at the end. A PR that cannot be read
 // is skipped and keeps its last snapshot.
 func Poll(ctx context.Context, st *Store, f Fetcher, now func() time.Time) (PollResult, error) {
+	var res PollResult
+	err := st.serialPoll(func() error {
+		var err error
+		res, err = poll(ctx, st, f, now)
+		return err
+	})
+	return res, err
+}
+
+func poll(ctx context.Context, st *Store, f Fetcher, now func() time.Time) (PollResult, error) {
 	w, err := st.Watched()
 	if err != nil {
 		return PollResult{}, err
@@ -40,6 +51,9 @@ func Poll(ctx context.Context, st *Store, f Fetcher, now func() time.Time) (Poll
 	}
 	if len(snaps) == 0 {
 		return res, nil
+	}
+	if ctx.Err() != nil {
+		return res, ctx.Err()
 	}
 	evs, err := st.Record(now(), snaps)
 	res.Events = evs

@@ -234,3 +234,48 @@ func TestParsePR(t *testing.T) {
 		t.Fatal("a PR answer for another number was accepted")
 	}
 }
+
+func TestLoginAcceptsManagedUsers(t *testing.T) {
+	for _, l := range []string{"me", "mona-cat_octo"} {
+		if !loginRe.MatchString(l) {
+			t.Errorf("%q rejected", l)
+		}
+	}
+	for _, l := range []string{"", "a b", "x\"y"} {
+		if loginRe.MatchString(l) {
+			t.Errorf("%q accepted", l)
+		}
+	}
+}
+
+func TestPollsDoNotOverlap(t *testing.T) {
+	st := NewStore(t.TempDir())
+	if err := st.Watch("s", []Ref{{Repo: "o/r", Number: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- st.serialPoll(func() error { close(inside); <-release; return nil })
+	}()
+	<-inside
+	second := make(chan struct{})
+	go func() {
+		_ = st.serialPoll(func() error { close(second); return nil })
+	}()
+	select {
+	case <-second:
+		t.Fatal("a second poll ran while the first held the poll lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-second:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second poll never ran")
+	}
+}

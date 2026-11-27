@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Watch lists
-`events watch --session ID <pr>...` SHALL add each PR to the session's watch list and `events unwatch --session ID [<pr>...]` SHALL remove the named PRs, or every PR when none is named. A PR SHALL be named as `owner/repo#N` or a `https://github.com/owner/repo/pull/N` URL. A session id MUST be 1 to 128 letters, digits, `.`, `_` or `-`, not starting with `.`. A watch that would put a session past 50 PRs MUST be refused with nothing changed.
+`events watch --session ID <pr>...` SHALL add each PR to the session's watch list and `events unwatch --session ID [<pr>...]` SHALL remove the named PRs, or every PR when none is named. A PR SHALL be named as `owner/repo#N` or a `https://github.com/owner/repo/pull/N` URL. A session id MUST be 1 to 128 letters, digits, `.`, `_` or `-`, starting with a letter or digit (so it never reads as a flag or a hidden file). A watch that would put a session past 50 PRs MUST be refused with nothing changed.
 
 #### Scenario: Path in a session id
 - **WHEN** an agent passes `--session ../x`
