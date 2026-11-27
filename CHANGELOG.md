@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.72.0](https://github.com/cameronsjo/forgectl/compare/v0.71.1...v0.72.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **attention:** attention put, attention rm, the q and a rows, sources.spool and [attention] ttl_hours are removed; use forgectl desk ask
+* remove the forgectl tasks command group, the [tasks] config section and the container image
+
+### Features
+
+* **attention:** show desk asks and retire the session spool ([#1516](https://github.com/cameronsjo/forgectl/issues/1516)) ([04567a3](https://github.com/cameronsjo/forgectl/commit/04567a358d96a5e9ac3d6f9d32f21a2df12bd7c6))
+* **desk:** hold asks on one remote host over ssh ([#1510](https://github.com/cameronsjo/forgectl/issues/1510)) ([3d75e5c](https://github.com/cameronsjo/forgectl/commit/3d75e5c7b124c602f48d3b70240e1a12d1847e5e))
+* **docs:** extract forgectl docs into standalone forgectl-docs plugin binary ([#1519](https://github.com/cameronsjo/forgectl/issues/1519)) ([ff60572](https://github.com/cameronsjo/forgectl/commit/ff605725682a84bdc801e0ee668f0fbdaf83f93a))
+* **launch:** add declarative role profiles ([launch.roles.&lt;name&gt;]) ([#1522](https://github.com/cameronsjo/forgectl/issues/1522)) ([04dcd3e](https://github.com/cameronsjo/forgectl/commit/04dcd3eabd5751a67efc9767b63952fa9923167d))
+* remove the forgectl tasks command group, the [tasks] config section and the container image ([a642b81](https://github.com/cameronsjo/forgectl/commit/a642b810ec8a28f7c9c8e99a713f3306f5b4da21))
+* **surface-watch:** add --stream typed NDJSON transition mode ([973f9e1](https://github.com/cameronsjo/forgectl/commit/973f9e1e41faaadfe1540a8dbc46c47839142d95))
+* **surface-watch:** add --stream typed NDJSON transition mode ([4915c9b](https://github.com/cameronsjo/forgectl/commit/4915c9b2fe71be8a2c6ed7254489eb111071685b))
+* **surface,attention:** standardize agent identity on hc terminal labels ([#1521](https://github.com/cameronsjo/forgectl/issues/1521)) ([1c40232](https://github.com/cameronsjo/forgectl/commit/1c4023237846547079918e8675bb9364ccd7a594))
+* **workerwatch:** infer status from OSC 2 title markers and wake on title events ([96dda5e](https://github.com/cameronsjo/forgectl/commit/96dda5eefa9e8fdc46ef2f05a5d214ae858e73e9))
+
+
+### Bug Fixes
+
+* **ready:** accept a session-name label in Claude's input-box rule ([#1525](https://github.com/cameronsjo/forgectl/issues/1525)) ([9bda02f](https://github.com/cameronsjo/forgectl/commit/9bda02f1abf2ae25a187fc4b4b9e193c30cf6f63))
+* **surface-watch:** use termsafe.JSONEncoder and check pw.Close in test ([08e65e3](https://github.com/cameronsjo/forgectl/commit/08e65e3d34cfdd3a0949810244c58bb5157dcc86))
+
+
+### Performance Improvements
+
+* **cli:** lazy single-module boot, skip idle desk watch fold, and parallelize sweep & attention list ([#1517](https://github.com/cameronsjo/forgectl/issues/1517)) ([a495d5f](https://github.com/cameronsjo/forgectl/commit/a495d5f893cff89545320067c8041a627ae49e60))
+
 ## [0.71.1](https://github.com/cameronsjo/forgectl/compare/v0.71.0...v0.71.1) (2026-11-24)
 
 
