@@ -55,6 +55,7 @@ deep-dive get a link here.
 | `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `sweep` | Chief-of-staff ledger: workers, open PRs and what waits on you, written where `attention list` reads it | [sweep](docs/commands/sweep.md) |
 | `attention` | Per-machine attention queue: what the desk, its asks and the sweep are waiting on you for, by delay cost | [attention](docs/commands/attention.md) |
+| `events` | Event log of the PRs your sessions watch: pushes, checks, reviews, merges as typed events, read by c3 and cadence-hooks | [events](docs/commands/events.md) |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | [workflow](docs/commands/workflow.md) |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -348,6 +349,11 @@ forgectl desk layout --below             # herdr: the desk in a full-width row u
 
 # attention — one queue of what waits on you: desk items, desk asks, the sweep (Unix only)
 forgectl attention list --json           # rows by delay cost; skipped counts malformed entries
+
+# events — typed events for the PRs sessions watch; c3 hands a session its feed (Unix only)
+forgectl events watch --session "$ID" owner/repo#12   # this session hears about #12
+forgectl events poll --interval 90s      # read watched PRs, record pushes, checks, reviews, merges
+forgectl events state owner/repo#12 --json  # the last snapshot the merge gate reads
 
 # sweep — the chief-of-staff ledger: workers, PRs, what waits on you; feeds `attention list` (Unix only)
 forgectl sweep --json                    # needs [sweep] owner, since, briefs, reviewers (or flags); exit 2 names a missing key

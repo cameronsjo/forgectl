@@ -22,6 +22,7 @@ import (
 // `history` to a leaf. A state report that matters to agents belongs in its
 // own leaf, where this walk enforces --json.
 var jsonContractExempt = map[string]string{
+	"events":                 "a bare `events` prints its help and reports no state; `events state --json` and `events feed --json` report it",
 	"attention":              "a bare `attention` prints its help and reports no state; it runs only so that an unknown verb is refused (`attention list --json` reports the queue)",
 	"desk":                   "a bare `desk` runs the interactive dashboard (`--frame` prints one frame for the eye); `desk status --json` reports the queue",
 	"desk layout":            "splits herdr panes and starts the desk in one; the exit code is the outcome and the printed pane ids are informational",
