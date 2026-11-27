@@ -406,10 +406,9 @@ func fixedResolver(bin ResolvedBinary) BinaryResolver {
 }
 
 // projectDir returns a temp dir with its symlinks resolved. Resolve() resolves
-// the cwd's symlinks but leaves a configured `match` lexical, so on macOS —
-// where t.TempDir() hands back a /var path symlinked to /private/var — a raw
-// temp dir as a match never matches the cwd built from it, and every profile
-// test would quietly assert against the defaults.
+// the cwd's symlinks, and match paths are resolved best-effort too, so a raw
+// temp dir match would now match on macOS as well — this helper keeps the
+// fixtures unambiguous and the assertions stable across platforms.
 func projectDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
