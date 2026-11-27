@@ -3,6 +3,7 @@ package launch
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -132,8 +133,10 @@ const (
 // ("~" or "~/...") but the home directory cannot be determined.
 var ErrHomeUnresolved = errors.New("launch: the home directory cannot be resolved")
 
-// Resolve picks the profile for cwd: it resolves symlinks best-effort, makes the
-// path absolute, then applies the pure resolution against the launch config.
+// Resolve picks the profile for cwd: it resolves symlinks best-effort in the
+// cwd and in each project match path, makes the cwd absolute, then applies the
+// pure resolution against the launch config. A match path that cannot be
+// resolved is matched lexically and warned about, never dropped silently.
 //
 // The home directory is looked up only when the config needs it (a project
 // match or an add_dir that starts with "~"). Where it is needed and cannot be
@@ -155,11 +158,20 @@ func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string,
 		return Profile{}, nil, err
 	}
 	norm := normalizeCWD(cwd)
-	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
+	// Resolve each match path's symlinks so a block written through a symlink
+	// still matches the physical cwd normalizeCWD produced. One match is chosen
+	// here and handed to resolveWithWin, so the profile and the returned block
+	// agree and the warning fires once.
+	win := matchProject(lc, norm, home, physicalMatch)
+	return resolveWithWin(lc, home, win), win, nil
 }
 
 // matchProject is the longest project match for an already normalized cwd.
-func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
+// With physical set, each match path's symlinks are resolved best-effort first
+// so a block written through a symlink still matches the physical cwd. A nil
+// physical keeps the comparison lexical — the pure resolve core the profile
+// tests exercise directly.
+func matchProject(lc config.LaunchConfig, cwd, home string, physical func(string) string) *config.LaunchProject {
 	best := -1
 	var win *config.LaunchProject
 	for i := range lc.Projects {
@@ -167,6 +179,9 @@ func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProjec
 			continue
 		}
 		m := filepath.Clean(expandTilde(lc.Projects[i].Match, home))
+		if physical != nil {
+			m = physical(m)
+		}
 		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
 			if len(m) > best {
 				best = len(m)
@@ -175,6 +190,22 @@ func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProjec
 		}
 	}
 	return win
+}
+
+// physicalMatch resolves a project match path's symlinks best-effort. A path
+// that cannot be resolved is returned unchanged and warned about: the block
+// still gets its lexical chance to match rather than silently falling through
+// to [launch.defaults]. The warning keeps launch working when a configured
+// directory is temporarily absent while still telling the operator why a
+// symlinked match did not take.
+func physicalMatch(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		slog.Warn("launch: project match path cannot be resolved; matching it lexically",
+			"path", termsafe.QuotePath(path), "error", err)
+		return path
+	}
+	return resolved
 }
 
 // normalizeCWD resolves cwd's symlinks best-effort and makes it absolute and
@@ -250,10 +281,19 @@ func projectsUseHome(ps []config.LaunchProject) bool {
 }
 
 // resolve is the pure resolution: fixed home, already-clean absolute cwd. It is
-// the risk-bearing core and is exercised directly by the tests.
+// the risk-bearing core and is exercised directly by the tests. It matches
+// lexically; resolveMatched is the production path, and resolves match-path
+// symlinks there so a match written through a symlink still applies.
 func resolve(lc config.LaunchConfig, cwd, home string) Profile {
+	return resolveWithWin(lc, home, matchProject(lc, cwd, home, nil))
+}
+
+// resolveWithWin is the pure merge of [launch.defaults] with an already-chosen
+// winning project block (or nil). Splitting the match out is what lets
+// resolveMatched hand in the same physical match it returns, so the profile and
+// the returned block never disagree about which project won.
+func resolveWithWin(lc config.LaunchConfig, home string, win *config.LaunchProject) Profile {
 	p := defaultsProfile(lc.Defaults, home)
-	win := matchProject(lc, cwd, home)
 
 	if win != nil {
 		if win.Harness != "" {
